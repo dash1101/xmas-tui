@@ -291,7 +291,7 @@ impl Lines {
         self.fresh(|r| r.pick(WISH).to_string())
     }
 
-    /// What a person says while you carry them around.
+    /// What a person says while being carried around.
     pub fn held(&mut self, kid: bool) -> String {
         self.fresh(|r| r.pick(if kid { KID_HELD } else { HELD }).to_string())
     }
@@ -351,7 +351,7 @@ impl Lines {
         lines
     }
 
-    /// The player says hi; (what you say, what they say back).
+    /// The player says hi; (the player's line, the reply).
     pub fn you_hi(&mut self, kid: bool) -> (String, String) {
         let a = self.fresh(|r| r.pick(YOU_HI).to_string());
         let b = self.fresh(|r| r.pick(if kid { KID_REPLY } else { THEY_REPLY }).to_string());

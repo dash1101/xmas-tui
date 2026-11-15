@@ -65,7 +65,7 @@ pub struct Scene {
     ctx: Ctx,
     /// Animals, people and berry bushes.
     critters: critters::Critters,
-    /// You (when enabled), the direction keys held, and what E would do.
+    /// The player (when enabled), the direction keys held, and what E would do.
     player: Option<player::Player>,
     mv: (f32, f32),
     focus: Option<Focus>,
@@ -309,7 +309,7 @@ impl Scene {
         avoid.extend(village.snowmen.iter().map(|s| (s.cx - 9, s.cx + 9)));
         avoid.extend(village.lamps.iter().map(|l| (l.x - 1, l.x + 2)));
         let critters = critters::Critters::new(&ctx, seed, cfg.critters, cfg.bushes, &avoid);
-        // you start out a little left of the big tree, in the snow
+        // the player starts out a little left of the big tree, in the snow
         let player = cfg.player.then(|| {
             let px = cam + wf * 0.40;
             let lo = (ctx.ground_row[(px as usize).min(ww - 1)] + 4).min(hi - 2) as f32;
@@ -469,7 +469,7 @@ impl Scene {
         self.player.as_ref().map(|p| p.x)
     }
 
-    /// Previews: you stand about idly (no [E] prompts).
+    /// Previews: the player stands about idly (no [E] prompts).
     pub fn quiet_player(&mut self) {
         if let Some(p) = &mut self.player {
             p.active_at = f32::NEG_INFINITY;
@@ -494,7 +494,7 @@ impl Scene {
             let (bx, base, bw) = self.critters.bush_rect(b);
             return Some(Focus::Bush(b, bx + bw / 2, base - 3));
         }
-        // in front first, then right where you stand, then just behind
+        // in front first, then right underfoot, then just behind
         let (x0, y0) = (px.round() as i32, py.round() as i32);
         let d = p.dir as i32;
         for k in [1, 2, 0, 3, 4, -1, 5, 6, -2] {
@@ -520,7 +520,7 @@ impl Scene {
     }
 
     /// E / Space / Enter: say hello, pet or feed, pick berries, or poke
-    /// whatever's in front of you.
+    /// whatever's in front of the player.
     pub fn interact(&mut self) {
         let t = self.now();
         let Some(p) = self.player.as_mut() else { return };
@@ -554,8 +554,8 @@ impl Scene {
         }
     }
 
-    /// F: ask whoever's nearby to walk with you (animals want a berry), or
-    /// say goodbye to everyone following you.
+    /// F: ask whoever's nearby to come along (animals want a berry), or
+    /// say goodbye to everyone following.
     pub fn invite(&mut self) {
         let t = self.now();
         let Some(p) = self.player.as_mut() else { return };
@@ -818,7 +818,7 @@ impl Scene {
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
             p.update(dt, t, self.mv, lo, self.ww as f32, h, &mut self.director);
-            // the camera keeps you comfortably in view while you walk
+            // the camera keeps the player comfortably in view while walking
             if p.moving {
                 let (w, c) = (self.w as f32, p.centre());
                 let (l, r) = (w * 0.3, w * 0.7);
@@ -924,10 +924,10 @@ impl Scene {
         f.ox = cam;
         self.director.draw_front(f, t, glow);
         self.critters.draw_top(f, t, glow);
-        // what E would do, while you're out walking
+        // what E would do, while the player is out walking
         if let (Some(p), Some(fc)) = (&self.player, self.focus) {
             if t - p.active_at < 20.0 {
-                // over the person / bush; for village things, over your head
+                // over the person / bush; for village things, over the player's head
                 let (x, y) = match fc {
                     Focus::Spot(..) => (p.centre().round() as i32, p.y.round() as i32 - 5),
                     _ => fc.mark(),
@@ -1098,7 +1098,7 @@ mod tests {
         let t = s.now();
         let px = s.player.as_ref().unwrap().centre();
         let py = s.player.as_ref().unwrap().y;
-        // two people standing just in front of you
+        // two people standing just in front of the player
         let mut ids = vec![];
         for dx in [3.0, 7.0] {
             s.critters.spawn_demo(events::Kind::Walker, px + dx, t);
@@ -1153,7 +1153,7 @@ mod tests {
         s.interact();
         let got = s.player.as_ref().unwrap().berries;
         assert!(got > 0, "no berries picked");
-        // a deer comes by: a berry from your hand and it tags along
+        // a deer comes by: a berry from the player's hand and it tags along
         let px = s.player.as_ref().unwrap().centre();
         s.critters.spawn_demo(events::Kind::Deer, px + 4.0, t);
         let id = s.critters.last_id();

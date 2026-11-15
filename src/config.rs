@@ -183,7 +183,7 @@ impl Default for SoundCfg {
     }
 }
 
-/// Snow that settles on top of your windows, and lights around them
+/// Snow that settles on top of open windows, and lights around them
 /// (KDE Plasma Wayland and Windows).
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -195,7 +195,7 @@ pub struct WindowsCfg {
     /// Falling-snow density in front of windows.
     pub density: f32,
     /// Draw the falling flakes in front of windows. Off: piles still grow
-    /// (from the sky, unseen) but nothing drifts over your work.
+    /// (from the sky, unseen) but nothing drifts over the work underneath.
     pub front: bool,
     /// Let snow settle on the taskbar / panels too.
     pub docks: bool,
@@ -269,7 +269,7 @@ pub struct SceneCfg {
     pub critters: f32,
     /// Festive berry bushes the animals snack from.
     pub bushes: bool,
-    /// A little villager you walk around with WASD / the arrow keys.
+    /// A little villager to walk around with WASD / the arrow keys.
     pub player: bool,
 }
 

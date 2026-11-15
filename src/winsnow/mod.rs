@@ -160,7 +160,7 @@ pub struct Fx {
     /// Window corner radius, so light strings follow rounded corners.
     pub corner: f32,
     /// Floating panels: (min length, max length, visible thickness). The
-    /// panel's window is taller than the bar you see; snow should sit on
+    /// panel's window is taller than the visible bar; snow should sit on
     /// the bar, not on the invisible margin.
     pub docks: Vec<(f32, f32, f32)>,
     /// Light strings, cached per window layout.

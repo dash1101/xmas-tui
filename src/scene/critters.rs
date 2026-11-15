@@ -4,7 +4,7 @@
 //! have snowball fights, people say hi to the snowman. Animals startle when
 //! the cursor rushes at them and come over, curious, when it rests nearby.
 //!
-//! And you can pick anyone up: click-and-drag to carry them (they wiggle,
+//! And anyone can be picked up: click-and-drag to carry them (they wiggle,
 //! giggle or complain), let go to drop them back in the snow (people get a
 //! little dizzy). A click without dragging is a friendly poke / pet.
 
@@ -609,7 +609,7 @@ impl Critters {
                         let dx = tx - c.x;
                         if dx.abs() > 1.2 {
                             c.dir = dx.signum();
-                            // hurry to keep up (you walk at ~11 cells/s)
+                            // hurry to keep up (the player walks at ~11 cells/s)
                             let v = (dx.abs() * 2.5).clamp(c.speed, 13.0);
                             c.x += c.dir * v.min(dx.abs() / dt.max(1e-3)) * dt;
                             moving = true;
@@ -1022,7 +1022,7 @@ impl Critters {
                 d.sound(s, cx, 0.8);
             }
         } else if *berries > 0 {
-            // a berry from your hand: a friend for a while
+            // a berry from the player's hand: a friend for a while
             *berries -= 1;
             d.sound(Sfx::Munch, cx, 1.0);
             d.emote(cx, top, '♥', Rgb::hex(0xff6b8a), 4);
@@ -1071,7 +1071,7 @@ impl Critters {
             c.st = St::Follow { until, moving: false };
             true
         } else {
-            // nothing in your hands: a curious sniff, then off they go
+            // empty hands: a curious sniff, then off they go
             d.emote(cx, top, '?', Rgb::hex(0xffd36b), 1);
             if let Some(s) = c.sfx() {
                 d.sound(s, cx, 0.6);

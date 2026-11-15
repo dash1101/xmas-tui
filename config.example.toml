@@ -67,12 +67,12 @@ fire = 1.0
 chimes = 1.0
 aurora = 1.0
 
-[windows]             # snow & lights on your open windows (KDE Plasma Wayland, Windows)
+[windows]             # snow & lights on open windows (KDE Plasma Wayland, Windows)
 snow = true
 lights = true
 pile_rows = 1.5       # max pile height, in text rows
 density = 1.0         # falling snow in front of windows
-front = true          # false: flakes stay invisible (piles still grow) — nothing drifts over your work
+front = true          # false: flakes stay invisible (piles still grow) — nothing drifts over the work underneath
 docks = true          # snow settles on the taskbar / panels too
 settle = 1.0          # how fast piles build up
 light_style = "multi" # "multi", "warm", "icy" or "candy"

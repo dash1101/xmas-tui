@@ -1,4 +1,4 @@
-//! You: a little bundled-up villager you walk around with WASD / the arrow
+//! The player: a little bundled-up villager walked around with WASD / the arrow
 //! keys. They crunch through the snow, leave footprints, and can say hello
 //! to people, pet and feed the animals, pick berries, knock on doors and
 //! poke at things (E / Space / Enter), or ask someone to walk along (F).
@@ -108,7 +108,7 @@ impl Player {
             let ax = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
             f.put_g(ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
         }
-        // a soft lantern-ish glow so you can always find yourself
+        // a soft lantern-ish glow so the villager is always easy to spot
         f.light_cell(x0 + 1, top + 2, Rgb::hex(0xffc878) * (1.6 * glow));
     }
 

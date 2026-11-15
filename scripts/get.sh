@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Install (or reinstall) the latest xmas-tui release as your Linux desktop
+# Install (or reinstall) the latest xmas-tui release as the Linux desktop
 # wallpaper — no Rust toolchain needed:
 #
 #   curl -fsSL https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.sh | bash -s -- --remove
 #
 # Puts everything in ~/.local/share/xmas-tui (the app updates itself there),
-# your settings in ~/.config/xmas-tui/config.toml, and runs it from a
+# the settings in ~/.config/xmas-tui/config.toml, and runs it from a
 # systemd user service that restarts it whenever it exits.
 # Needs: kitty ≥ 0.36 (for `kitten panel`) and a compositor with the
 # layer-shell protocol (KDE Plasma 6, Sway, Hyprland, … — not GNOME).
@@ -22,7 +22,7 @@ if [[ "${1:-}" == "--remove" ]]; then
   rm -f "$UNIT_DIR/xmas-tui.service"
   systemctl --user daemon-reload || true
   rm -rf "$DEST"
-  echo "removed xmas-tui (your settings in $CONF were kept)"
+  echo "removed xmas-tui (settings in $CONF were kept)"
   exit 0
 fi
 
@@ -59,4 +59,4 @@ sed "s|@DIR@|$DEST|g" "$TMP/xmas-tui.service" > "$UNIT_DIR/xmas-tui.service"
 systemctl --user daemon-reload
 systemctl --user enable xmas-tui.service >/dev/null 2>&1
 systemctl --user restart xmas-tui.service
-echo "done: xmas-tui $TAG is your wallpaper (settings: $CONF; it checks for updates itself)"
+echo "done: xmas-tui $TAG is now the wallpaper (settings: $CONF; it checks for updates itself)"

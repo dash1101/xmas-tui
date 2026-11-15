@@ -5,7 +5,7 @@
 //! The owner is a never-shown top-level tool window rather than a
 //! message-only one: only top-level windows get Explorer's "TaskbarCreated"
 //! broadcast (to re-add the icon after Explorer restarts) and can be made
-//! foreground, which TrackPopupMenu needs to close when you click away.
+//! foreground, which TrackPopupMenu needs to close on a click elsewhere.
 
 use super::{flag, open_settings, quit_wallpaper, toggle_flag, SOUND, TITLE, WINDOW_SNOW};
 use crate::platform;
@@ -127,7 +127,7 @@ fn show_menu(hwnd: HWND) {
         SetMenuDefaultItem(m, ID_SETTINGS as u32, 0);
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
-        // the documented dance so the menu closes when you click elsewhere
+        // the documented dance so the menu closes on a click elsewhere
         SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, std::ptr::null());
         PostMessageW(hwnd, WM_NULL, 0, 0);

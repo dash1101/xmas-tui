@@ -1,27 +1,27 @@
-xmas-tui — a cozy, glowing Christmas scene as your live desktop wallpaper
+xmas-tui — a cozy, glowing Christmas scene as a live desktop wallpaper
 =========================================================================
 
 START IT
-  Double-click xmas-tui.exe. It tucks itself behind your desktop icons on
-  your main monitor and becomes the wallpaper. Nothing gets installed.
+  Double-click xmas-tui.exe. It tucks itself behind the desktop icons on
+  the main monitor and becomes the wallpaper. Nothing gets installed.
 
   Windows will probably warn "Windows protected your PC", because the
   program isn't signed. Click "More info", then "Run anyway".
 
 SETTINGS
-  Click the ⚙ in the top-right corner of your desktop. From there you can:
+  Click the ⚙ in the top-right corner of the desktop. Settings include:
     - adjust snow, wind, glow, how often surprises happen, Santa's sleigh,
       the clock and the widgets
-    - turn on "Start with Windows" so it runs every time you log in
+    - turn on "Start with Windows" so it runs at every log-in
     - "✕ quit wallpaper" to stop it
 
   Weather city: clicking the city field opens the settings file in Notepad.
-  Change   city = "..."   to your city, save, and the wallpaper picks it
+  Change   city = "..."   to a city name, save, and the wallpaper picks it
   up within a couple of seconds.
 
 PLAY WITH IT
   - Drag any widget to move it.
-  - Your cursor leaves a sparkly trail and pushes the falling snow around.
+  - The cursor leaves a sparkly trail and pushes the falling snow around.
     Sweep through the snowy ground to kick snow up.
   - Click things on the bare desktop:
       presents, trees, the star on top, the snowman (try a few times),
@@ -33,11 +33,11 @@ PLAY WITH IT
 
 WALK AROUND THE VILLAGE
   Click the bare desktop (so it has keyboard focus), then:
-    WASD / arrow keys   walk your little villager; the view follows you
+    WASD / arrow keys   walk the little villager; the view follows
     E, Space or Enter   say hello, pet an animal, pick berries, poke things
-    F                   ask someone to walk with you (animals want a berry);
-                        F with nobody in front of you says goodbye to all
-  Stand still near someone with your companions and they start chatting.
+    F                   invite someone along (animals want a berry);
+                        F with nobody nearby says goodbye to everyone
+  Stop near someone with companions in tow and they start chatting.
 
 UPDATES
   When a new version is out, a small banner at the top asks whether to
