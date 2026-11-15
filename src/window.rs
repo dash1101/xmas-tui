@@ -93,6 +93,10 @@ struct Runner {
     last_geom_check: Instant,
     #[cfg(windows)]
     last_pause_check: Instant,
+    /// When we attached (the layout is logged again a few seconds later,
+    /// once everything has settled).
+    #[cfg(windows)]
+    logged_at: Option<Instant>,
     /// Window snow & lights overlay (Windows desktop mode, or `--windowed`
     /// with XMAS_WINFX=1 for testing). Dropped = stopped.
     #[cfg(windows)]
@@ -292,6 +296,13 @@ impl Runner {
             self.lost_desktop();
             return;
         }
+        if self.attached && crate::winsys::keep_layered(hwnd) {
+            eprintln!("xmas-tui: the window had lost its layered style; restored");
+        }
+        if self.logged_at.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+            self.logged_at = None;
+            eprintln!("xmas-tui: 5 s after attaching (paused={}):\n{}", self.paused, crate::winsys::describe(hwnd));
+        }
         let mon = el.primary_monitor().or_else(|| el.available_monitors().next());
         let rect = mon.map(|m| (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32));
         let geom = (rect, crate::winsys::parent_origin(hwnd));
@@ -392,6 +403,8 @@ impl Runner {
                     if !self.attached {
                         eprintln!("xmas-tui: couldn't find the desktop window; running as a normal window");
                     }
+                    eprintln!("xmas-tui: monitor {:?}, window {}x{}\n{}", mon_rect, s.width, s.height, crate::winsys::describe(hwnd));
+                    self.logged_at = Some(Instant::now());
                     self.geom = (mon_rect, crate::winsys::parent_origin(hwnd));
                 }
             }
@@ -668,6 +681,8 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         last_geom_check: Instant::now(),
         #[cfg(windows)]
         last_pause_check: Instant::now(),
+        #[cfg(windows)]
+        logged_at: None,
         #[cfg(windows)]
         winfx: None,
     };

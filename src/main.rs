@@ -240,6 +240,13 @@ fn main() {
     let native = args.windowed || (cfg!(windows) && !args.terminal);
     if native {
         let desktop = cfg!(windows) && !args.windowed;
+        #[cfg(windows)]
+        {
+            redirect_stderr_to_log(if desktop { "wallpaper.log" } else { "window.log" });
+            let (major, build) = winsys::windows_version();
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            eprintln!("--- xmas-tui {} starting ({}; Windows {major} build {build}; unix time {secs})", env!("CARGO_PKG_VERSION"), if desktop { "wallpaper" } else { "window" });
+        }
         if desktop && !platform::single_instance() {
             return; // already running
         }
@@ -329,6 +336,30 @@ fn redirect_stderr_to_log() {
     if let Ok(f) = file {
         unsafe {
             libc::dup2(f.as_raw_fd(), 2);
+        }
+    }
+}
+
+/// Windows (a GUI app: no console, so stderr goes nowhere): send it to
+/// %LOCALAPPDATA%\xmas-tui\<name>, so what went wrong (the desktop attach,
+/// a panic) can be read afterwards.
+#[cfg(windows)]
+fn redirect_stderr_to_log(name: &str) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
+    let dir = std::path::PathBuf::from(base).join("xmas-tui");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(name);
+    // keep the log small: start fresh once it passes 1 MB
+    let big = std::fs::metadata(&path).map(|m| m.len() > 1 << 20).unwrap_or(false);
+    let file = std::fs::OpenOptions::new().create(true).append(!big).write(true).truncate(big).open(&path);
+    if let Ok(f) = file {
+        unsafe {
+            // (the handle stays open for the life of the process)
+            SetStdHandle(STD_ERROR_HANDLE, f.into_raw_handle() as _);
         }
     }
 }

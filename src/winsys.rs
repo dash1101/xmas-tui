@@ -9,7 +9,7 @@
 #![cfg(windows)]
 
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE};
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, RedrawWindow, ScreenToClient, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW};
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, DESKTOP_SWITCHDESKTOP};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use windows_sys::Win32::UI::Shell::{SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE};
@@ -50,6 +50,121 @@ unsafe fn progman_worker(progman: HWND) -> HWND {
         child = FindWindowExW(progman, child, class.as_ptr(), std::ptr::null());
     }
     best
+}
+
+/// (major version, build number), e.g. (10, 26100) for Windows 11 24H2.
+/// (GetVersionEx tells the truth: the exe's manifest lists Windows 10.)
+pub fn windows_version() -> (u32, u32) {
+    use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
+    unsafe {
+        let mut v: OSVERSIONINFOW = std::mem::zeroed();
+        v.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        if GetVersionExW(&mut v) != 0 {
+            (v.dwMajorVersion, v.dwBuildNumber)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+/// One line about a window, for the log.
+fn describe_window(h: HWND) -> String {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(h, &mut r);
+        let st = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32;
+        let mut lay = String::new();
+        if ex & WS_EX_LAYERED != 0 {
+            let (mut key, mut alpha, mut flags) = (0u32, 0u8, 0u32);
+            lay = if GetLayeredWindowAttributes(h, &mut key, &mut alpha, &mut flags) != 0 { format!(" layered(alpha {alpha}, flags {flags})") } else { " layered(no attributes)".into() };
+        }
+        format!(
+            "{:#x} {} vis={} style={st:#x} ex={ex:#x}{lay} rect=({},{})-({},{})",
+            h as usize,
+            class_of(h),
+            IsWindowVisible(h),
+            r.left,
+            r.top,
+            r.right,
+            r.bottom
+        )
+    }
+}
+
+/// The desktop's window layout and where `ours` sits in it, for the log
+/// (what to look at when the wallpaper doesn't show up on someone's PC).
+pub fn describe(ours: HWND) -> String {
+    let mut out = String::new();
+    unsafe {
+        let progman = FindWindowW(wide("Progman").as_ptr(), std::ptr::null());
+        if progman.is_null() {
+            return "no Progman window".into();
+        }
+        out += &format!("Progman {}\n", describe_window(progman));
+        let mut c = GetWindow(progman, GW_CHILD);
+        while !c.is_null() {
+            let me = if c == ours { "  <- us" } else { "" };
+            out += &format!("  child {}{me}\n", describe_window(c));
+            c = GetWindow(c, GW_HWNDNEXT);
+        }
+        // top-level WorkerWs (the classic layout's wallpaper host is one)
+        let class = wide("WorkerW");
+        let mut w = FindWindowExW(std::ptr::null_mut(), std::ptr::null_mut(), class.as_ptr(), std::ptr::null());
+        let mut n = 0;
+        while !w.is_null() && n < 12 {
+            let icons = !FindWindowExW(w, std::ptr::null_mut(), wide("SHELLDLL_DefView").as_ptr(), std::ptr::null()).is_null();
+            out += &format!("  top-level {}{}\n", describe_window(w), if icons { " (has the icons)" } else { "" });
+            let mut k = GetWindow(w, GW_CHILD);
+            while !k.is_null() {
+                let me = if k == ours { "  <- us" } else { "" };
+                out += &format!("    child {}{me}\n", describe_window(k));
+                k = GetWindow(k, GW_HWNDNEXT);
+            }
+            w = FindWindowExW(std::ptr::null_mut(), w, class.as_ptr(), std::ptr::null());
+            n += 1;
+        }
+        if !ours.is_null() {
+            let parent = GetAncestor(ours, GA_PARENT);
+            out += &format!("  us {} parent={:#x} ({})", describe_window(ours), parent as usize, class_of(parent));
+        }
+    }
+    out
+}
+
+/// Make `hwnd` a layered window with constant alpha, from scratch (the
+/// style bit cleared and set again, then the attributes). On the raised
+/// desktop this must happen once the window is Progman's child: layering set
+/// while it was still top-level doesn't carry over the re-parenting, and DWM
+/// then composites the child as empty, so the wallpaper (or black) shows
+/// through. Verified on Windows 11 26H2 (build 26300).
+unsafe fn relayer(hwnd: HWND) {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+/// Attached to the raised desktop (a child of Progman)?
+fn on_raised_desktop(hwnd: HWND) -> bool {
+    unsafe {
+        let parent = GetAncestor(hwnd, GA_PARENT);
+        !parent.is_null() && class_of(parent) == "Progman" && GetWindowLongPtrW(parent, GWL_EXSTYLE) as u32 & WS_EX_NOREDIRECTIONBITMAP != 0
+    }
+}
+
+/// Keep a raised-desktop child visible: if something cleared its layered
+/// style (it would vanish again), put it back. Cheap; polled about once a
+/// second. Returns true if it had to.
+pub fn keep_layered(hwnd: HWND) -> bool {
+    unsafe {
+        if !on_raised_desktop(hwnd) || GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED != 0 {
+            return false;
+        }
+        relayer(hwnd);
+        true
+    }
 }
 
 /// Place a child at screen rect (x, y, w, h), converted to `parent`'s
@@ -102,6 +217,7 @@ pub fn attach_to_desktop(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
         }
         if !worker.is_null() {
             // classic
+            eprintln!("xmas-tui: desktop attach: classic (child of top-level WorkerW {:#x}; Progman raised={raised})", worker as usize);
             SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             SetParent(hwnd, worker);
             place(hwnd, worker, None, x, y, w, h);
@@ -112,17 +228,18 @@ pub fn attach_to_desktop(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
         let pworker = progman_worker(progman);
         let defview = FindWindowExW(progman, std::ptr::null_mut(), wide("SHELLDLL_DefView").as_ptr(), std::ptr::null());
         if !raised && pworker.is_null() {
+            eprintln!("xmas-tui: desktop attach: no wallpaper WorkerW found (Progman raised={raised})");
             return false;
         }
-        // layered with constant alpha *before* re-parenting, or DWM never
-        // shows a child of the redirection-less Progman
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
-        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        eprintln!("xmas-tui: desktop attach: raised desktop (layered child of Progman; raised={raised}, icons {:#x}, WorkerW {:#x})", defview as usize, pworker as usize);
+        // a child of the redirection-less Progman only shows if it's a
+        // layered window — and the layering has to be (re)done once it *is*
+        // the child (see relayer)
         SetWindowLongPtrW(hwnd, GWL_STYLE, style);
         SetParent(hwnd, progman);
         // just below the icons (or on top, if there's no icon view at all)
         place(hwnd, progman, Some(if defview.is_null() { HWND_TOP } else { defview }), x, y, w, h);
+        relayer(hwnd);
         // and the wallpaper WorkerW must stay the bottom child, under us
         let first = GetWindow(progman, GW_CHILD);
         if !pworker.is_null() && !first.is_null() && GetWindow(first, GW_HWNDLAST) != pworker {
