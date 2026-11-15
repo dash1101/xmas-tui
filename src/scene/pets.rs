@@ -690,7 +690,12 @@ impl MyPet {
         }
     }
 
-    pub fn draw(&self, f: &mut Frame, t: f32, scale: i32) {
+    /// Drawn `scale` times bigger, where it is or through a zoomed `view`.
+    pub fn draw(&self, f: &mut Frame, t: f32, scale: i32, view: Option<super::View>) {
+        let (sx, sy) = match view {
+            Some(v) => (v.x(self.x), v.y(self.y + 1.0) - 1.0),
+            None => (self.x, self.y),
+        };
         let tricking = match self.busy {
             Some(Busy::Trick { which, until }) => Some((which, until)),
             _ => None,
@@ -716,17 +721,27 @@ impl MyPet {
             Some((1, until)) => if ((until - t) * 4.0) as i32 % 2 == 0 { 1.0 } else { -1.0 },
             _ => self.dir,
         };
-        let feet = (self.y * 2.0).round() as i32 + 1;
-        draw(f, self.kind, self.body, self.marks, self.x, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
+        let feet = (sy * 2.0).round() as i32 + 1;
+        draw(f, self.kind, self.body, self.marks, sx, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
         if self.napping && (t * 0.8) as i32 % 2 == 0 {
-            f.put_g(self.x.round() as i32 + 2 * scale, (feet - 7 * scale) / 2, crate::frame::Glyph::new('z', Rgb::hex(0xc8d0e0)).lit(0.0));
+            f.put_g(sx.round() as i32 + 2 * scale, (feet - 7 * scale) / 2, crate::frame::Glyph::new('z', Rgb::hex(0xc8d0e0)).lit(0.0));
         }
         // not named yet: a little "?" asking for one
         if self.name.is_empty() && (t * 1.5) as i32 % 2 == 0 {
-            f.put_g(self.x.round() as i32, (feet - 6 * scale) / 2, crate::frame::Glyph::new('?', Rgb::hex(0xffd36b)).lit(0.0));
+            f.put_g(sx.round() as i32, (feet - 6 * scale) / 2, crate::frame::Glyph::new('?', Rgb::hex(0xffd36b)).lit(0.0));
         }
         if let Some(toy) = &self.toy {
-            draw_toy(f, toy, scale);
+            match view {
+                Some(v) => {
+                    let mut t2 = *toy;
+                    t2.x = v.x(toy.x);
+                    t2.y = v.y(toy.y + 1.0) - 1.0;
+                    t2.h = toy.h * v.z;
+                    t2.trail = toy.trail.map(|x| v.x(x));
+                    draw_toy(f, &t2, scale);
+                }
+                None => draw_toy(f, toy, scale),
+            }
         }
     }
 

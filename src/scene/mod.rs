@@ -157,6 +157,8 @@ pub struct Scene {
     you_name: String,
     /// The animal the villager's pet is after.
     pet_chasing: Option<u64>,
+    /// Drawing for a zoomed view: people are left for `draw_people`.
+    zoomed: std::cell::Cell<bool>,
     /// What the villager has in hand (Q to change): given to whoever E
     /// is aimed at, or used.
     held: Option<Held>,
@@ -593,6 +595,7 @@ impl Scene {
             pet_change: None,
             you_name: cfg.name.clone(),
             pet_chasing: None,
+            zoomed: std::cell::Cell::new(false),
             held: None,
             rng,
             lines: lines::Lines::new(seed),
@@ -1894,6 +1897,12 @@ impl Scene {
                 return Some(Focus::Shop(s.centre(), s.base - 8));
             }
         }
+        // facing the pet, close by: the pet (before people, bushes, doors and
+        // things — it's always about, so turning to it is how to say hello)
+        let k = sprite_k(self.h);
+        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, k) && (pet.x - px) * p.dir > 0.0) {
+            return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
+        }
         if let Some(id) = self.critters.nearest(px, py, 7.0) {
             let (bx, by, bw, _) = self.critters.bbox_of(id, t)?;
             return Some(Focus::Critter(id, bx + bw / 2, by - 1));
@@ -1921,7 +1930,7 @@ impl Scene {
         }
         // nothing else in reach: the pet, at their heels
         if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, sprite_k(self.h))) {
-            return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3));
+            return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
         }
         None
     }
@@ -1961,7 +1970,10 @@ impl Scene {
                 return;
             }
             let pet_near = self.my_pet.as_ref().is_some_and(|pet| (!pet.staying || inn.home) && pet.near(p.centre(), p.y, 2.0));
+            let pet_faced = pet_near && self.my_pet.as_ref().is_some_and(|pet| (pet.x - p.centre()) * p.dir > 0.0);
             match inn.nearest(p.centre()) {
+                // facing the pet: the pet comes first
+                _ if pet_faced => self.pet_menu(0),
                 Some((what, ..)) => {
                     let o = inn.poke(what, p, t);
                     self.indoors(o);
@@ -2700,7 +2712,12 @@ impl Scene {
         }
         let (sx, x) = (x, x + self.cam_i());
         if self.my_pet.as_ref().is_some_and(|pet| !pet.staying && pet.hit(x, y, sprite_k(self.h))) {
-            self.pet_act(story::PetAct::Fuss);
+            let t = self.now();
+            if let Some(pet) = &mut self.my_pet {
+                pet.wake(t);
+                pet.happy_until = t + 1.5;
+            }
+            self.pet_menu(0);
             return;
         }
         if let Some(owner) = self.critters.pet_at(x, y) {
@@ -3410,6 +3427,9 @@ impl Scene {
     /// Returns (z, x0, y0): screen cell (x, y) shows (x0 + x/z, y0 + y/z).
     pub fn render(&self, f: &mut Frame, spare: &mut Frame, app_t: f32, zoom: f32, focus: Option<(f32, f32)>) -> (f32, f32, f32) {
         let z = zoom.clamp(1.0, 4.0) * self.view_zoom();
+        // out in the village, zoomed in: people are drawn after the zoom
+        let outdoors = self.inside.is_none() || self.look.is_some();
+        self.zoomed.set(z > 1.001 && outdoors);
         self.draw_world(f, app_t);
         let mut xf = (1.0, 0.0, 0.0);
         if z > 1.001 {
@@ -3417,9 +3437,30 @@ impl Scene {
             let (bw, bh) = self.view_bounds();
             let (x0, y0) = f.zoom(z, fx, fy, (bw, bh), spare);
             xf = (z, x0, y0);
+            if self.zoomed.get() {
+                self.draw_people(f, View { z, x0, y0, cam: self.cam_i() as f32, oy: self.oy_i() as f32 });
+            }
         }
+        self.zoomed.set(false);
         self.draw_overlay(f);
         xf
+    }
+
+    /// Zoomed in: people, animals and pets drawn straight into the zoomed
+    /// frame at the bigger size (crisp pixel art, not magnified glyphs).
+    fn draw_people(&self, f: &mut Frame, v: View) {
+        let t = self.now();
+        let glow = self.cfg.glow;
+        (f.ox, f.oy) = (0, 0);
+        f.day = self.daylight.sun;
+        self.critters.draw(f, t, glow, true, Some(v));
+        if let (Some(p), None) = (&self.player, &self.inside) {
+            if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying) {
+                pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
+            }
+            p.draw(f, t, glow, Some(v));
+        }
+        f.day = 0.0;
     }
 
     /// The panels over the scene (the dialogue box, pockets, the window
@@ -3470,12 +3511,18 @@ impl Scene {
         f.day = 0.0;
         f.day_warm = 0.0;
         if let (Some(inn), Some(p), None) = (&self.inside, &self.player, &self.look) {
-            let prompt = (t - p.active_at < 20.0 && self.convo.is_none()).then(|| inn.nearest(p.centre()).map(|(_, x, y)| (x, y))).flatten();
+            let pet_faced = self.my_pet.as_ref().filter(|pet| (!pet.staying || inn.home) && pet.near(p.centre(), p.y, 2.0) && (pet.x - p.centre()) * p.dir > 0.0);
+            let prompt = (t - p.active_at < 20.0 && self.convo.is_none())
+                .then(|| match pet_faced {
+                    Some(pet) => Some((pet.x.round() as i32, pet.y.round() as i32 - 7)),
+                    None => inn.nearest(p.centre()).map(|(_, x, y)| (x, y)),
+                })
+                .flatten();
             inn.draw(f, t, glow, p, prompt);
             f.ox = 0;
             f.oy = 0;
             if let Some(pet) = self.my_pet.as_ref().filter(|pet| (!pet.staying || inn.home) && !inn.is_climbing()) {
-                pet.draw(f, t, 2);
+                pet.draw(f, t, 2, None);
             }
             return;
         }
@@ -3551,12 +3598,15 @@ impl Scene {
         if let Some(s) = &self.shop {
             s.draw(f, t, glow);
         }
-        self.critters.draw(f, t, glow);
-        if let (Some(p), None) = (&self.player, &self.inside) {
+        // (zoomed in, the people come after the zoom, drawn at the bigger
+        // size: see `draw_people`)
+        let people = !self.zoomed.get();
+        self.critters.draw(f, t, glow, people, None);
+        if let (Some(p), None, true) = (&self.player, &self.inside, people) {
             if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying) {
-                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)));
+                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
-            p.draw(f, t, glow);
+            p.draw(f, t, glow, None);
         }
         let ny_left = newyear::to_midnight(&crate::clock::now()).unwrap_or(1e9);
         let ny_year = crate::clock::now().year() + (ny_left > 0.0) as i32;
@@ -3608,6 +3658,29 @@ impl Scene {
 pub enum Held {
     Berries,
     Item(shop::Item),
+}
+
+/// A zoomed view, for drawing people and animals straight into it at the
+/// bigger size (crisp, not magnified): screen cell = ((world column - cam -
+/// x0) * z, (row + oy - y0) * z).
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    pub z: f32,
+    pub x0: f32,
+    pub y0: f32,
+    pub cam: f32,
+    pub oy: f32,
+}
+
+impl View {
+    /// World column → screen column.
+    pub fn x(&self, wx: f32) -> f32 {
+        (wx - self.cam - self.x0) * self.z
+    }
+    /// World row (as a coordinate: a row's top edge) → screen row.
+    pub fn y(&self, wy: f32) -> f32 {
+        (wy + self.oy - self.y0) * self.z
+    }
 }
 
 /// How much bigger people and animals are drawn on a screen `h` rows tall
@@ -4454,5 +4527,62 @@ mod tests {
         s.enter(home);
         assert_eq!(s.view_zoom(), 2.0);
         assert_eq!(s.view_bounds(), (300.0, 75.0));
+    }
+
+    /// The pet answers E when the villager turns to face it, even with
+    /// the big tree and presents in reach, and a click on it opens its
+    /// menu (as at a 90-row screen with a cat).
+    #[test]
+    fn the_pet_answers_e_and_clicks() {
+        let mut cfg = SceneCfg::default();
+        cfg.pet.kind = "cat".into();
+        cfg.pet.name = "Kitters".into();
+        let mut s = Scene::new(682, 90, 7, &cfg);
+        // stand by the big tree, where there's always something to poke
+        let tree = s.trees.iter().find(|t| t.is_big()).map(|t| t.cx as f32).unwrap();
+        {
+            let p = s.player.as_mut().unwrap();
+            p.x = tree - 6.0;
+        }
+        for _ in 0..60 {
+            s.update(DT, 0.0);
+        }
+        let (px, petx) = (s.player.as_ref().unwrap().centre(), s.my_pet.as_ref().unwrap().x);
+        // turn round to face the cat
+        s.player.as_mut().unwrap().dir = (petx - px).signum();
+        s.focus = s.find_focus();
+        assert!(matches!(s.focus, Some(Focus::Pet(..))), "{:?}", s.focus);
+        s.interact();
+        assert!(s.convo.as_ref().is_some_and(|c| c.id == PET_ID), "E didn't open the pet's box");
+        s.convo = None;
+        // a click on it (screen coordinates: the camera's subtracted)
+        let pet = s.my_pet.as_ref().unwrap();
+        let (cx, cy) = ((pet.x - s.cam).round() as i32, pet.y.round() as i32 - 1);
+        s.click(cx, cy, 0.0);
+        assert!(s.convo.as_ref().is_some_and(|c| c.id == PET_ID && !c.opts.is_empty()), "a click didn't open the pet's menu");
+    }
+
+    /// At 150 rows nothing in the village draws negative (black) pixels
+    /// (the snow flecks down tall roofs did), and zoomed in, people are
+    /// drawn crisp into the zoomed frame.
+    #[test]
+    fn tall_screens_and_zoom_draw_cleanly() {
+        let mut cfg = SceneCfg::default();
+        cfg.snow = 0.0;
+        cfg.events = 0.0;
+        let mut s = Scene::new(600, 150, 7, &cfg);
+        for _ in 0..30 {
+            s.update(DT, 0.0);
+        }
+        let mut f = Frame::new(600, 150);
+        s.draw(&mut f, 0.0);
+        let low = f.px.iter().map(|c| c.r.min(c.g).min(c.b)).fold(f32::MAX, f32::min);
+        assert!(low > -0.01, "a negative pixel: {low}");
+        // zoomed: the villager is drawn after the zoom (sprite pixels)
+        let mut f = Frame::new(600, 150);
+        let mut spare = Frame::new(1, 1);
+        let (z, ..) = s.render(&mut f, &mut spare, 0.0, 1.5, None);
+        assert!((z - 1.5).abs() < 1e-3);
+        assert!(f.soft.iter().any(|&v| v != 0), "nobody drawn into the zoomed view");
     }
 }

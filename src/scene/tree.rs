@@ -335,7 +335,7 @@ impl Tree {
         for &(x, y, ch, col, ph) in &self.garland {
             let s = 0.55 + 0.45 * (t * 2.2 + x as f32 * 0.55 + ph).sin();
             let spark = if h01(hash3(x, y, (t * 8.0) as i32)) > 0.985 { 1.8 } else { 1.0 };
-            f.put_g(x, y, Glyph { ch, fg: col * (s * spark), bg: bg_at(x, y), alpha: 1.0, lit: 0.6 });
+            f.put_g(x, y, Glyph { ch, fg: col * (s * spark), bg: bg_at(x, y), alpha: 1.0, lit: 0.6, ui: false });
             if spark > 1.0 {
                 f.light_cell(x, y, col * 0.8);
             }
@@ -348,7 +348,7 @@ impl Tree {
                 if p < 0.04 { (1.0 - (p / 0.04 - 0.5).abs() * 2.0).max(0.0) } else { 0.0 }
             };
             let fg = o.color.lerp(Rgb::WHITE, glint * 0.8) * (1.0 + glint * 0.6);
-            f.put_g(o.x, o.y, Glyph { ch: o.ch, fg, bg: bg_at(o.x, o.y), alpha: 1.0, lit: 0.7 });
+            f.put_g(o.x, o.y, Glyph { ch: o.ch, fg, bg: bg_at(o.x, o.y), alpha: 1.0, lit: 0.7, ui: false });
             if glint > 0.0 {
                 f.light_cell(o.x, o.y, Rgb::WHITE * (glint * 1.5 * glow));
             }
@@ -390,7 +390,7 @@ impl Tree {
                 lv = if left < 1.0 && h01(hash3(b.idx as i32, (t * 20.0) as i32, 3)) > left { lv } else { 0.0 };
             }
             let fg = color.lerp(Rgb::WHITE, (lv - 0.75).max(0.0) * 0.9) * (0.35 + 0.95 * lv);
-            f.put_g(b.x, b.y, Glyph { ch: bulb_ch, fg, bg: bg_at(b.x, b.y), alpha: 1.0, lit: 0.3 });
+            f.put_g(b.x, b.y, Glyph { ch: bulb_ch, fg, bg: bg_at(b.x, b.y), alpha: 1.0, lit: 0.3, ui: false });
             let e = if self.big { 2.4 } else { 1.8 };
             f.light_cell(b.x, b.y, color * (lv * e * glow));
         }

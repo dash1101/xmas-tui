@@ -203,7 +203,14 @@ impl Player {
         }
     }
 
-    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32) {
+    /// Drawn where they stand, or through a zoomed `view` (straight into
+    /// the zoomed frame, at the bigger size).
+    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, view: Option<super::View>) {
+        // (centre column, feet row, scale) on screen
+        let (sc, sy, sk) = match view {
+            Some(v) => (v.x(self.centre()), v.y(self.y + 1.0) - 1.0, self.k * v.z),
+            None => (self.centre(), self.y, self.k),
+        };
         let step = (self.phase as i32) % 2 == 0;
         let kick = (t * 7.0) as i32 % 2 == 0;
         let up = self.held.is_some() || self.fall.is_some();
@@ -221,10 +228,10 @@ impl Player {
         };
         let wave = !self.moving && !up && !scooping && !throwing && (t * 0.5).sin() > 0.97;
         // on a screen tall enough: the pixel-art villager, as indoors
-        if self.k >= 1.75 && !up && !scooping {
+        if sk >= 1.75 && !up && !scooping {
             let b = super::interior::Big {
-                x: self.centre(),
-                feet: self.y.round() as i32,
+                x: sc,
+                feet: sy.round() as i32,
                 dir: self.dir,
                 step: self.moving && step,
                 hat: Some(HAT),
@@ -237,7 +244,7 @@ impl Player {
                 outdoor: true,
             };
             b.draw(f, t);
-            let (hx, hy) = (self.centre().round() as i32 + if self.dir > 0.0 { 3 } else { -4 }, self.y.round() as i32 * 2 - 5);
+            let (hx, hy) = (sc.round() as i32 + if self.dir > 0.0 { 3 } else { -4 }, sy.round() as i32 * 2 - 5);
             let thing = if self.snowball && !throwing {
                 Some(Rgb::hex(0xf2f6ff))
             } else if self.lantern {
@@ -250,8 +257,8 @@ impl Player {
                     f.px_sprite(hx + dx, hy + dy, c);
                 }
             }
-            let bx = self.centre();
-            let by = self.y * 2.0 - 8.0;
+            let bx = sc;
+            let by = sy * 2.0 - 8.0;
             if self.lantern {
                 let fl = 0.85 + 0.15 * (t * 9.0).sin();
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
@@ -275,11 +282,11 @@ impl Player {
             }
             return;
         }
-        let top = self.y.round() as i32 - 3;
-        let x0 = self.x.round() as i32;
+        let top = sy.round() as i32 - 3;
+        let x0 = (sc - 1.0).round() as i32;
         // drawn bigger on a taller screen: each cell scaled about the feet
-        let k = self.k;
-        let (axi, ayi, ax, ay) = (x0 + 1, top + 4, self.x + 1.0, self.y + 1.0);
+        let k = sk;
+        let (axi, ayi, ax, ay) = (x0 + 1, top + 4, sc, sy + 1.0);
         let place = move |cx: i32, cy: i32| (ax + (cx - axi) as f32 * k, ay + (cy - ayi) as f32 * k);
         let put = |f: &mut Frame, cx: i32, cy: i32, g: Glyph| {
             if k <= 1.0 {
@@ -334,7 +341,7 @@ impl Player {
         }
         // dizzy stars
         if t < self.dizzy_until {
-            let cx = self.centre();
+            let cx = sc;
             for k in 0..3 {
                 let a = t * 5.0 + k as f32 * 2.09;
                 let (sx, sy) = (cx + a.cos() * 1.6, top as f32 - 1.0 + a.sin() * 0.4);
@@ -366,8 +373,10 @@ impl Player {
     pub fn draw_prompt(f: &mut Frame, x: i32, y: i32, key: char, t: f32) {
         let bob = if (t * 2.0) as i32 % 2 == 0 { 0 } else { -1 };
         let bg = Bg::Mix(Rgb::hex(0x1a1a24), 0.75);
+        let was = std::mem::replace(&mut f.ui, true);
         f.put_g(x - 1, y + bob, Glyph::new('[', Rgb::hex(0xc8c0b0)).bg(bg).lit(0.0));
         f.put_g(x, y + bob, Glyph::new(key, Rgb::hex(0xffe08a)).bg(bg).lit(0.0));
         f.put_g(x + 1, y + bob, Glyph::new(']', Rgb::hex(0xc8c0b0)).bg(bg).lit(0.0));
+        f.ui = was;
     }
 }

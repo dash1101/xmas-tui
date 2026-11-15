@@ -1170,6 +1170,8 @@ impl Director {
         // speech bubbles: only once they've started (lines of a conversation
         // are queued ahead of time), oldest first; one that would overlap a
         // bubble already placed is lifted above it, its tail stretched down
+        // (text over the scene: keeps its size when the view zooms)
+        f.ui = true;
         let mut order: Vec<&Bubble> = self.bubbles.iter().filter(|b| t >= b.born && b.x >= f.ox && b.x < f.ox + f.w as i32).collect();
         order.sort_by(|a, b| a.born.partial_cmp(&b.born).unwrap_or(std::cmp::Ordering::Equal));
         let mut placed: Vec<(i32, i32, i32)> = vec![]; // (x0, x1, y0)
@@ -1208,6 +1210,7 @@ impl Director {
             }
             f.put_g(b.x, b.y.max(y0 + 3), Glyph::new('╵', tail).lit(0.0));
         }
+        f.ui = false;
     }
 }
 

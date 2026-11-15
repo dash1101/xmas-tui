@@ -2128,29 +2128,45 @@ impl Critters {
 
     /// Bushes and characters, back to front (the held one is drawn later,
     /// on top of everything, by `draw_top`).
-    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32) {
+    /// Bushes, people and animals, back to front. Through a zoomed `view`
+    /// (drawn straight into the zoomed frame at the bigger size), or with
+    /// `people` false just the bushes (the people come after the zoom).
+    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, people: bool, view: Option<super::View>) {
         enum Item<'a> {
             B(&'a Bush),
             C(&'a Critter),
         }
-        let mut items: Vec<(f32, Item)> = self.bushes.iter().map(|b| (b.base as f32, Item::B(b))).collect();
-        items.extend(self.list.iter().filter(|c| !c.held() && !matches!(c.st, St::Fall { .. })).map(|c| (c.y, Item::C(c))));
+        let mut items: Vec<(f32, Item)> = vec![];
+        if view.is_none() {
+            items.extend(self.bushes.iter().map(|b| (b.base as f32, Item::B(b))));
+        }
+        if people {
+            items.extend(self.list.iter().filter(|c| !c.held() && !matches!(c.st, St::Fall { .. })).map(|c| (c.y, Item::C(c))));
+        }
         items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         for (_, it) in items {
             match it {
                 Item::B(b) => draw_bush(f, b, t, glow),
-                Item::C(c) => draw_critter(f, c, t, glow, self.k),
+                Item::C(c) => draw_critter(f, c, t, glow, self.k, view),
             }
         }
+        if !people {
+            return;
+        }
         // pets (pixel art, under the glyphs): the lead first, then the pet
-        let pk = pet_scale(self.k);
+        let (z, mx, my) = match view {
+            Some(v) => (v.z, Box::new(move |x: f32| v.x(x)) as Box<dyn Fn(f32) -> f32>, Box::new(move |y: f32| v.y(y)) as Box<dyn Fn(f32) -> f32>),
+            None => (1.0, Box::new(|x: f32| x) as Box<dyn Fn(f32) -> f32>, Box::new(|y: f32| y) as Box<dyn Fn(f32) -> f32>),
+        };
+        let (k, pk) = (self.k * z, pet_scale(self.k * z));
         for c in &self.list {
             let Some(p) = &c.pet else { continue };
-            let feet = (p.y * 2.0).round() as i32 + 1;
+            // (feet: the pixel row the paws stand on)
+            let feet = (my(p.y + 1.0) * 2.0).round() as i32 - 1;
             if p.kind == PetKind::Dog && !c.held() {
                 // from the hand to the collar, sagging a little
-                let (hx, hy) = (c.centre() + c.dir * 0.2 * self.k, (c.y + 1.0) * 2.0 - 4.0 * self.k);
-                let (kx, ky) = (p.x + 0.5 + p.dir * 1.5 * pk as f32, feet as f32 - 3.0 * pk as f32);
+                let (hx, hy) = (mx(c.centre()) + c.dir * 0.2 * k, my(c.y + 1.0) * 2.0 - 4.0 * k);
+                let (kx, ky) = (mx(p.x) + 0.5 + p.dir * 1.5 * pk as f32, feet as f32 - 3.0 * pk as f32);
                 let n = ((hx - kx).abs().max((hy - ky).abs()) as i32).max(1);
                 for k in 0..=n {
                     let u = k as f32 / n as f32;
@@ -2159,14 +2175,14 @@ impl Critters {
                 }
             }
             let pose = if t < p.happy_until { Pose::Up } else if p.walking { Pose::Walk } else { Pose::Sit };
-            pets::draw(f, p.kind, p.body, p.marks, p.x + 0.5, feet, p.dir, pose, t + c.id as f32, pk, Some(Rgb::hex(0xc8202a)));
+            pets::draw(f, p.kind, p.body, p.marks, mx(p.x) + 0.5, feet, p.dir, pose, t + c.id as f32, pk, Some(Rgb::hex(0xc8202a)));
         }
     }
 
     /// Whoever is being carried or falling, snowballs and birds.
     pub fn draw_top(&self, f: &mut Frame, t: f32, glow: f32) {
         for c in self.list.iter().filter(|c| c.held() || matches!(c.st, St::Fall { .. })) {
-            draw_critter(f, c, t, glow, self.k);
+            draw_critter(f, c, t, glow, self.k, None);
         }
         for b in &self.balls {
             f.put_g(b.x.round() as i32, b.y.round() as i32, Glyph::new('●', Rgb::hex(0xf2f6ff)).lit(0.3));
@@ -2224,7 +2240,12 @@ pub fn pet_scale(k: f32) -> i32 {
     (k.round() as i32).max(1)
 }
 
-fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
+fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Option<super::View>) {
+    // through a zoomed view: where they are on screen, and how big
+    let (cx_, cy_, k) = match view {
+        Some(v) => (v.x(c.centre()), v.y(c.y + 1.0) - 1.0, k * v.z),
+        None => (c.centre(), c.y, k),
+    };
     // people, on a screen tall enough: the same pixel-art folk as indoors
     if k >= 1.75 && c.person() && !c.held() && !matches!(c.st, St::Fall { .. }) {
         let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
@@ -2233,8 +2254,8 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
         let wave = matches!(c.st, St::Greet { .. } | St::Throw { .. } | St::Petting { .. });
         let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { 1 } else { 0 };
         let b = super::interior::Big {
-            x: c.centre(),
-            feet: c.y.round() as i32 - bob,
+            x: cx_,
+            feet: cy_.round() as i32 - bob,
             dir: c.dir,
             step: moving && (c.age * rate) as i32 % 2 == 0,
             hat: Some(if kid { c.hat } else { pal::CANDY_RED }),
@@ -2249,7 +2270,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
         b.draw(f, t);
         if c.kind == Kind::Walker {
             // the lantern in hand
-            let (lx, ly) = (c.centre().round() as i32 + if c.dir > 0.0 { 3 } else { -4 }, c.y.round() as i32 * 2 - 5);
+            let (lx, ly) = (cx_.round() as i32 + if c.dir > 0.0 { 3 } else { -4 }, cy_.round() as i32 * 2 - 5);
             let fl = 0.85 + 0.15 * (t * 9.0 + c.x).sin();
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 f.px_sprite(lx + dx, ly + dy, Rgb::hex(0xffd27a) * (1.2 * fl));
@@ -2261,12 +2282,18 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
     let rows = c.sprite(t);
     let hop = if c.kind == Kind::Rabbit && matches!(c.st, St::Walk | St::Flee { .. }) && (c.age * 3.0).fract() < 0.5 { -1 } else { 0 };
     let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { -1 } else { 0 };
-    let top = c.y.round() as i32 - rows.len() as i32 + 1 + hop + bob;
     let n = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as i32;
-    let x0 = c.x.round() as i32;
+    // the sprite's left column and feet row (on screen, through a view)
+    let (cxl, cy) = match view {
+        Some(_) => (cx_ - (c.centre() - c.x), cy_),
+        None => (c.x, c.y),
+    };
+    let top = cy.round() as i32 - rows.len() as i32 + 1 + hop + bob;
+    let x0 = cxl.round() as i32;
     // drawn bigger on a taller screen: each cell scaled about the feet
-    let (axi, ayi) = (x0, c.y.round() as i32 + 1);
-    let (ax, ay) = (c.x + n as f32 * (1.0 - k) / 2.0, c.y + 1.0);
+    let (axi, ayi) = (x0, cy.round() as i32 + 1);
+    let ctr = cxl + (c.centre() - c.x);
+    let (ax, ay) = (ctr - n as f32 * k / 2.0, cy + 1.0);
     let place = move |cx: i32, cy: i32| (ax + (cx - axi) as f32 * k, ay + (cy - ayi) as f32 * k);
     for (ry, row) in rows.iter().enumerate() {
         for (i, ch) in row.chars().enumerate() {
@@ -2306,7 +2333,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
     }
     // dizzy stars circling over their head
     if matches!(c.st, St::Dizzy { .. }) {
-        let cx = c.centre();
+        let cx = ctr;
         let top = place(x0, top).1;
         for k in 0..3 {
             let a = t * 5.0 + k as f32 * 2.09;

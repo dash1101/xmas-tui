@@ -279,6 +279,12 @@ impl Shop {
 
     /// The shop's menu, over the cabin.
     pub fn draw_menu(&self, f: &mut Frame, p: &Pockets) {
+        let was = std::mem::replace(&mut f.ui, true);
+        self.draw_menu_box(f, p);
+        f.ui = was;
+    }
+
+    fn draw_menu_box(&self, f: &mut Frame, p: &Pockets) {
         let w = 40;
         let x0 = self.centre() - w / 2;
         let y0 = self.base - 7 - (ITEMS.len() as i32 + 4);

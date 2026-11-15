@@ -2728,7 +2728,9 @@ impl Interior {
         // the room's name in the home
         if self.home {
             let name = format!(" {} ", self.kind().title());
+            f.ui = true;
             f.text(2, 1, &name, Rgb::hex(0xffd36b), crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.7), 0.0);
+            f.ui = false;
         }
         self.director.draw_px(f);
         self.director.draw_front(f, t, glow);

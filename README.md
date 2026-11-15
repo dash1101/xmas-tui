@@ -186,8 +186,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
     pans up into the room above (and back down the same way). E on the sofa sits down on it; E on the bed tucks the
     villager in (the room dims, the pet curls up at the foot of the bed) until a direction key gets them up. Each
     window looks out from its own height — the attic's up into the stars;
-  - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. The first E on it
-    asks for a name; after that it can be fussed over, played with (a ball or a stick for a dog, a ball of yarn or
+  - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. Turn to face it
+    and press E (it comes before anything else in reach), or click it, for its box. The first time it asks for a name; after that it can be fussed over, played with (a ball or a stick for a dog, a ball of yarn or
     the scarf for a cat, a carrot for a bunny, tricks, "chase me!"), renamed, given a new look, or asked to stay
     home. How a game goes varies: a dog might bring the ball straight back, take a victory lap first, or come back
     with a stick; a cat bats the yarn about, unravels it, or curls up round it. Left standing about a while, the pet
@@ -431,7 +431,8 @@ window, which shows the live sound levels too) can be dragged anywhere by its ti
   (dog, cat, bunny or none, its colour and its name).
 - **Display:** clock, widgets (including the map), weather city and units, widget layout, **resolution** (0.5× to
   2× in 0.05 steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on
-  the villager; Ctrl +/-), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
+  the villager; Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger
+  size, speech bubbles kept readable), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
   rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the keyboard, and **back
   to wallpaper** returns it; F11 does both). In the kitty wallpaper a new resolution applies live; if kitty can't
   change its font, a banner asks before restarting. Then updates and run at startup. A window also works from the

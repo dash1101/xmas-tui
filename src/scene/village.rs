@@ -207,8 +207,11 @@ impl House {
                 let e = first.entry(x).or_insert(y);
                 let depth = y - *e;
                 let shingle = if (y + (x / 2) % 2) % 2 == 0 { 1.0 } else { 0.85 };
+                // snow along the ridge, and flecks of it down the roof (dimmer
+                // lower down, never below a soft grey: tall roofs used to
+                // go negative here, black specks)
                 let col = if depth < 2 || h01(hash2(x, y ^ self.seed as i32)) > 0.93 {
-                    pal::SNOW * (0.82 - depth as f32 * 0.06)
+                    pal::SNOW * (0.82 - depth.min(6) as f32 * 0.06)
                 } else {
                     self.roof * shingle
                 };
