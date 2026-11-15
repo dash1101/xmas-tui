@@ -24,6 +24,11 @@ struct Flyer {
     dir: f32,
     speed: f32,
     age: f32,
+    /// Clicked: landing lights blazing (plane), a hoot (owl), the flock
+    /// scattering — until then.
+    poke: f32,
+    /// How far the flock has scattered (0 = a tidy V).
+    spread: f32,
 }
 
 struct Lantern {
@@ -85,6 +90,9 @@ impl SkyLife {
     }
 
     pub fn rebase(&mut self, s: f32) {
+        for f in [self.plane.as_mut(), self.owl.as_mut(), self.flock.as_mut().map(|f| &mut f.0)].into_iter().flatten() {
+            f.poke -= s;
+        }
         self.next_plane -= s;
         self.next_flock -= s;
         self.next_owl -= s;
@@ -110,7 +118,7 @@ impl SkyLife {
         if self.plane.is_none() && t > self.next_plane {
             let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
             let y = self.rng.range(self.horizon * 0.06, self.horizon * 0.22) / 2.0;
-            self.plane = Some(Flyer { x: if dir > 0.0 { -6.0 } else { w + 6.0 }, y, dir, speed: self.rng.range(5.0, 8.0), age: 0.0 });
+            self.plane = Some(Flyer { x: if dir > 0.0 { -6.0 } else { w + 6.0 }, y, dir, speed: self.rng.range(5.0, 8.0), age: 0.0, poke: -1.0, spread: 0.0 });
             self.next_plane = t + self.rng.range(90.0, 240.0);
         }
         // birds by day, an owl by night
@@ -118,17 +126,24 @@ impl SkyLife {
             let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
             let y = self.rng.range(self.horizon * 0.2, self.horizon * 0.6) / 2.0;
             let n = self.rng.int(5, 12) as usize;
-            self.flock = Some((Flyer { x: if dir > 0.0 { -20.0 } else { w + 20.0 }, y, dir, speed: self.rng.range(9.0, 14.0), age: 0.0 }, n));
+            self.flock = Some((Flyer { x: if dir > 0.0 { -20.0 } else { w + 20.0 }, y, dir, speed: self.rng.range(9.0, 14.0), age: 0.0, poke: -1.0, spread: 0.0 }, n));
             self.next_flock = t + self.rng.range(60.0, 180.0);
         }
         if self.owl.is_none() && sun < 0.2 && t > self.next_owl {
             let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
-            self.owl = Some(Flyer { x: if dir > 0.0 { -4.0 } else { w + 4.0 }, y: moon_y + self.rng.range(-1.5, 1.5), dir, speed: self.rng.range(10.0, 14.0), age: 0.0 });
+            self.owl = Some(Flyer { x: if dir > 0.0 { -4.0 } else { w + 4.0 }, y: moon_y + self.rng.range(-1.5, 1.5), dir, speed: self.rng.range(10.0, 14.0), age: 0.0, poke: -1.0, spread: 0.0 });
             self.next_owl = t + self.rng.range(150.0, 360.0);
         }
         for f in [self.plane.as_mut(), self.owl.as_mut(), self.flock.as_mut().map(|f| &mut f.0)].into_iter().flatten() {
-            f.x += f.dir * f.speed * dt;
+            // a startled flock (or owl) puts on a burst of speed
+            let hurry = if t < f.poke { 1.6 } else { 1.0 };
+            f.x += f.dir * f.speed * hurry * dt;
             f.age += dt;
+            if t < f.poke {
+                f.spread = (f.spread + dt * 2.5).min(3.0);
+            } else {
+                f.spread = (f.spread - dt * 0.4).max(0.0);
+            }
         }
         let gone = |f: &Flyer, pad: f32| f.x < -pad - 2.0 || f.x > w + pad + 2.0;
         if self.plane.as_ref().is_some_and(|p| gone(p, 8.0)) {
@@ -155,6 +170,38 @@ impl SkyLife {
             l.x += (l.vx + wind * 0.03 + (l.age * 0.7 + l.phase).sin() * 0.3) * dt;
         }
         self.lanterns.retain(|l| l.age < l.life && l.y > -60.0);
+    }
+
+    /// What's flying at (x, y) on the sky's own columns (screen column
+    /// plus the sky's drift), if anything: 0 the plane, 1 the owl, 2 the
+    /// flock.
+    pub fn flyer_at(&self, x: i32, y: i32) -> Option<u8> {
+        let (x, y) = (x as f32, y as f32);
+        if self.plane.as_ref().is_some_and(|p| (p.x - x).abs() <= 3.5 && (p.y.round() - y).abs() <= 1.0) {
+            return Some(0);
+        }
+        if self.owl.as_ref().is_some_and(|o| (o.x - x).abs() <= 2.5 && (o.y.round() - y).abs() <= 1.0) {
+            return Some(1);
+        }
+        if let Some((fl, n)) = &self.flock {
+            let ranks = (*n as f32 / 2.0).ceil() + 1.0;
+            let (x0, x1) = if fl.dir > 0.0 { (fl.x - ranks * 2.2 - 1.0, fl.x + 1.0) } else { (fl.x - 1.0, fl.x + ranks * 2.2 + 1.0) };
+            if x >= x0 && x <= x1 && (y - fl.y).abs() <= ranks * 0.55 + 1.5 {
+                return Some(2);
+            }
+        }
+        None
+    }
+
+    /// Click on a flyer: (its column and row, for the sound and sparkle).
+    pub fn poke(&mut self, which: u8, t: f32) -> Option<(f32, f32)> {
+        let f = match which {
+            0 => self.plane.as_mut(),
+            1 => self.owl.as_mut(),
+            _ => self.flock.as_mut().map(|f| &mut f.0),
+        }?;
+        f.poke = t + if which == 0 { 2.5 } else { 1.5 };
+        Some((f.x, f.y))
     }
 
     /// Clouds, on the pixel layer (screen space, drifted by `off`).
@@ -203,6 +250,15 @@ impl SkyLife {
                 f.put_g(x - p.dir as i32, y, Glyph::new('✦', Rgb::WHITE).lit(0.0));
                 f.light_cell(x, y, Rgb::WHITE * (2.0 * glow));
             }
+            // clicked: landing lights on, blinking a greeting
+            if t < p.poke {
+                let on = ((p.poke - t) * 4.0) as i32 % 2 == 0;
+                if on {
+                    f.put_g(x + p.dir as i32, y, Glyph::new('◆', Rgb::hex(0xfff6dc)).lit(0.0));
+                    f.light_cell(x + p.dir as i32, y, Rgb::hex(0xfff6dc) * (4.0 * glow));
+                    f.light_cell(x + 2 * p.dir as i32, y, Rgb::hex(0xfff6dc) * (1.5 * glow));
+                }
+            }
         }
         if let Some((fl, n)) = &self.flock {
             let ink = Rgb::hex(0x2a2a3a).lerp(Rgb::hex(0x404858), 1.0 - sun);
@@ -210,8 +266,10 @@ impl SkyLife {
                 // a V: the leader in front, the rest trailing back on both arms
                 let rank = (k + 1) / 2;
                 let side = if k % 2 == 0 { -1.0 } else { 1.0 };
-                let x = fl.x - fl.dir * rank as f32 * 2.2;
-                let y = fl.y + side * rank as f32 * 0.55 + (fl.age * 3.0 + k as f32).sin() * 0.15;
+                // (scattered when startled: each bird off on its own line)
+                let sc = fl.spread * (((k * 37) % 11) as f32 / 11.0 - 0.5);
+                let x = fl.x - fl.dir * rank as f32 * (2.2 + fl.spread * 0.6) + sc * 3.0;
+                let y = fl.y + side * rank as f32 * 0.55 + (fl.age * 3.0 + k as f32).sin() * 0.15 + sc * 2.5 - fl.spread * 0.3;
                 let flap = ((fl.age * 6.0 + k as f32 * 0.7) as i32) % 2 == 0;
                 if k == 0 || side != 0.0 {
                     f.put_g(x.round() as i32, y.round() as i32, Glyph::new(if flap { 'v' } else { '‿' }, ink).lit(0.0));
@@ -220,7 +278,8 @@ impl SkyLife {
         }
         if let Some(o) = &self.owl {
             let (x, y) = (o.x.round() as i32, o.y.round() as i32);
-            let flap = ((o.age * 5.0) as i32) % 3 == 0;
+            // (flapping hard when startled)
+            let flap = ((o.age * if t < o.poke { 12.0 } else { 5.0 }) as i32) % 3 == 0;
             let wing = if flap { '⌄' } else { '⌃' };
             let body = Rgb::hex(0x1a1410);
             f.put_g(x - 1, y, Glyph::new(wing, body).lit(0.0));

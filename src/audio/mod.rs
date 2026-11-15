@@ -69,9 +69,13 @@ pub enum Sfx {
     Snowball,
     Rustle,
     Bird,
+    // clicked on: a car's horn, a plane's rumble, the owl
+    Honk,
+    Plane,
+    Hoot,
 }
 
-pub const ALL_SFX: [Sfx; 32] = [
+pub const ALL_SFX: [Sfx; 35] = [
     Sfx::Present,
     Sfx::Snowman,
     Sfx::ShootingStar,
@@ -104,6 +108,9 @@ pub const ALL_SFX: [Sfx; 32] = [
     Sfx::Snowball,
     Sfx::Rustle,
     Sfx::Bird,
+    Sfx::Honk,
+    Sfx::Plane,
+    Sfx::Hoot,
 ];
 
 impl Sfx {
@@ -123,13 +130,14 @@ impl Sfx {
             Sfx::LightShow | Sfx::Sparkle | Sfx::Starburst | Sfx::Magic => "sparkles",
             Sfx::Click | Sfx::Lamp => "switches",
             Sfx::Fanfare => "fanfare",
-            Sfx::TrainWhistle => "train",
+            Sfx::TrainWhistle | Sfx::Honk | Sfx::Plane => "train",
             Sfx::Cursor => "cursor",
             Sfx::Chime => "",
             Sfx::Deer | Sfx::Fox | Sfx::Rabbit | Sfx::Munch => "animals",
             Sfx::Pet | Sfx::Greet | Sfx::Laugh => "people",
             Sfx::Pickup | Sfx::Drop | Sfx::Snowball => "handling",
             Sfx::Rustle | Sfx::Bird => "bushes",
+            Sfx::Hoot => "animals",
         }
     }
 }

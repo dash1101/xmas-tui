@@ -71,6 +71,10 @@ pub struct App {
     resizing: bool,
     /// The right-click menu, while it's open.
     menu: Option<crate::ctxmenu::CtxMenu>,
+    /// A left press on the scene: where and when (app time). Held still
+    /// long enough, it opens the right-click menu (for where right-click
+    /// isn't ours — the Windows desktop — or a touchpad).
+    press: Option<(i32, i32, f32)>,
     /// Where the current widget press started (a press that doesn't move
     /// on the map is a click: look there).
     press_at: (i32, i32),
@@ -93,6 +97,20 @@ pub struct App {
     fx: Option<std::sync::Arc<std::sync::Mutex<crate::winsnow::FxCfg>>>,
     /// The sound thread (None until `start_audio`, e.g. in tools).
     audio: Option<Audio>,
+    /// Sharing sound levels with a settings window: when it was last
+    /// checked whether one wants them, whether it does, when last written.
+    meters_check: f32,
+    meters_wanted: bool,
+    meters_sent: f32,
+    /// This is a popped-out window (it lets the wallpaper know it's open).
+    popout: bool,
+    popout_touched: f32,
+    /// The wallpaper: a popped-out window is open (so it rests, quietly).
+    hushed: bool,
+    hush_check: Option<Instant>,
+    /// Running as a normal window; the window should toggle full screen.
+    pub windowed: bool,
+    pub fullscreen_toggle: bool,
     /// Quiet because another app is playing media; and since when the
     /// media state last disagreed with that (hysteresis).
     media_quiet: bool,
@@ -150,6 +168,15 @@ impl App {
             sync: config::FileSync::new(path, &cfg, Duration::from_secs(1)),
             fps_override: FPS_OVERRIDE.get().copied(),
             applied: cfg.clone(),
+            meters_check: -10.0,
+            meters_wanted: false,
+            meters_sent: -10.0,
+            popout: std::env::var_os("XMAS_POPOUT").is_some(),
+            popout_touched: -10.0,
+            hushed: false,
+            hush_check: None,
+            windowed: false,
+            fullscreen_toggle: false,
             cfg,
             seed,
             frame,
@@ -167,6 +194,7 @@ impl App {
             quit: false,
             resizing: false,
             menu: None,
+            press: None,
             press_at: (0, 0),
             held: [f32::NEG_INFINITY; 4],
             exact_keys: false,
@@ -257,6 +285,9 @@ impl App {
                 let in_panel = self.settings.rect.map(|r| r.contains(x, y)).unwrap_or(false);
                 if let Some(a) = self.settings.banner_click(x, y).filter(|_| !self.settings.open) {
                     self.acts.push(a);
+                } else if self.settings.open && in_panel && self.settings.on_title(x, y) {
+                    // pick the panel up by its title bar
+                    self.settings.start_drag(x, y);
                 } else if self.settings.open && in_panel {
                     match self.settings.click(x, y) {
                         Some(Act::EditCity) => self.acts.push(Act::EditCity),
@@ -283,12 +314,27 @@ impl App {
                     self.drag = Some((i, x - r.x, y - r.y));
                     self.press_at = (x, y);
                     self.widgets.dragging = Some(i);
-                } else if !self.scene.grab(x, y) {
-                    // nobody to pick up here: an ordinary click on the scene
-                    self.scene.click(x, y, t);
+                } else {
+                    self.press = Some((x, y, self.t()));
+                    if !self.scene.grab(x, y) {
+                        // nobody to pick up here: an ordinary click on the scene
+                        self.scene.click(x, y, t);
+                    }
                 }
             }
             MouseIn::Drag => {
+                // moved off: not a long press after all
+                if self.press.is_some_and(|(px, py, _)| (px - x).abs() > 1 || (py - y).abs() > 1) {
+                    self.press = None;
+                }
+                if self.settings.drag.is_some() {
+                    self.settings.drag_to(x, y);
+                    return;
+                }
+                if self.scene.convo_dragging() {
+                    self.scene.convo_drag_to(x, y);
+                    return;
+                }
                 if self.scene.holding() {
                     self.scene.drag(x, y);
                     return;
@@ -301,6 +347,20 @@ impl App {
                 if let Some((i, ox, oy)) = self.drag {
                     self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
                 }
+            }
+            MouseIn::Up(Btn::Left) if self.press.take().is_some() && self.menu.is_some() => {
+                // the end of a long press: the menu it opened stays up
+                if self.scene.holding() {
+                    self.scene.let_go();
+                }
+            }
+            MouseIn::Up(Btn::Left) if self.settings.drag.is_some() => {
+                self.settings.drag_to(x, y);
+                self.settings.drag = None;
+            }
+            MouseIn::Up(Btn::Left) if self.scene.convo_dragging() => {
+                self.scene.convo_drag_to(x, y);
+                self.scene.convo_drop();
             }
             MouseIn::Up(Btn::Left) if self.scene.holding() => {
                 self.scene.drag(x, y);
@@ -340,8 +400,7 @@ impl App {
                 if self.settings.open {
                     self.settings.open = false;
                 } else if self.menu.take().is_none() {
-                    let (title, items) = self.scene.menu_at(x, y);
-                    self.menu = Some(crate::ctxmenu::CtxMenu::new(x, y, title, items, self.w as i32, self.h as i32));
+                    self.open_menu(x, y);
                 }
             }
             MouseIn::Scroll(up) => {
@@ -482,6 +541,10 @@ impl App {
         }
         if self.drag.is_some() || self.scene.holding() {
             "grabbing"
+        } else if self.settings.drag.is_some() {
+            "grabbing"
+        } else if self.settings.open && self.settings.on_title(hx, hy) {
+            "grab"
         } else if self.settings.open && self.settings.rect.map(|r| r.contains(hx, hy)).unwrap_or(false) {
             match self.settings.click(hx, hy) {
                 Some(Act::EditCity) if self.keyboard => "text",
@@ -491,6 +554,10 @@ impl App {
         } else if settings::gear_rect(self.w as i32).contains(hx, hy) {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
+            "grab"
+        } else if self.scene.convo_dragging() {
+            "grabbing"
+        } else if !self.settings.open && self.scene.convo_grip(hx, hy) {
             "grab"
         } else if !self.settings.open && self.scene.grabbable(hx, hy) {
             "grab"
@@ -502,8 +569,72 @@ impl App {
     }
 
     /// Advance one frame and return the composed cells.
+    /// Open the village in a window of its own (or full screen), like a
+    /// game. The wallpaper rests (and goes quiet) while it's open.
+    fn pop_out(&mut self, fullscreen: bool) {
+        self.commit_city();
+        self.settings.open = false;
+        let Ok(exe) = std::env::current_exe() else { return };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(if fullscreen { "--fullscreen" } else { "--windowed" }).arg("--config").arg(self.sync.path()).env("XMAS_POPOUT", "1");
+        // not tied to the wallpaper's terminal
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+        if cmd.spawn().is_err() {
+            self.ui_sounds.push(crate::audio::SoundEvent { sfx: Sfx::Click, pan: 0.5, gain: 0.3 });
+        }
+    }
+
+    /// Running as a normal window (not the wallpaper).
+    pub fn set_windowed(&mut self, on: bool) {
+        self.windowed = on;
+        self.settings.windowed = on;
+    }
+
+    /// The wallpaper side: is a popped-out window open? (Checked about once
+    /// a second; while it is, the wallpaper rests and its sound is off.)
+    pub fn popped_out(&mut self) -> bool {
+        if self.popout {
+            return false;
+        }
+        let now = Instant::now();
+        if self.hush_check.is_none_or(|c| now.duration_since(c).as_secs_f32() > 1.0) {
+            self.hush_check = Some(now);
+            let open = crate::platform::fresh(&crate::platform::popout_path(), 3.0);
+            if open != self.hushed {
+                self.hushed = open;
+                // sound off (or back) right away: a resting wallpaper doesn't step
+                if let Some(a) = &self.audio {
+                    let mut want = self.cfg.sound.clone();
+                    if open || self.media_quiet {
+                        want.enabled = false;
+                    }
+                    if a.config(&want) {
+                        self.sound_sent = want;
+                    }
+                }
+            }
+        }
+        self.hushed
+    }
+
+    /// Open the right-click menu at (x, y).
+    fn open_menu(&mut self, x: i32, y: i32) {
+        self.commit_city();
+        let (title, items) = self.scene.menu_at(x, y);
+        self.menu = Some(crate::ctxmenu::CtxMenu::new(x, y, title, items, self.w as i32, self.h as i32));
+    }
+
     pub fn step(&mut self) -> &[Cell] {
         let t = self.t();
+        // a press held still for a moment: the right-click menu
+        if let Some((px, py, at)) = self.press {
+            if t - at > 0.6 && self.menu.is_none() && !self.settings.open {
+                if self.scene.holding() {
+                    self.scene.let_go();
+                }
+                self.open_menu(px, py);
+            }
+        }
         let old = self.applied.clone();
         let mut reseed = false;
         for a in std::mem::take(&mut self.acts) {
@@ -532,6 +663,9 @@ impl App {
                     reseed = true;
                 }
                 Act::Quit => self.quit = true,
+                Act::PopOut => self.pop_out(false),
+                Act::FullScreen if self.windowed => self.fullscreen_toggle = true,
+                Act::FullScreen => self.pop_out(true),
                 Act::Tab(i) => self.settings.tab = i as usize,
                 Act::CheckUpdate => crate::update::check_now(),
                 Act::InstallUpdate => crate::update::install_now(),
@@ -650,7 +784,7 @@ impl App {
             }
             self.settings.media_quiet = self.media_quiet;
             let mut want = self.cfg.sound.clone();
-            if self.media_quiet {
+            if self.media_quiet || self.hushed {
                 want.enabled = false;
             }
             if want != self.sound_sent && a.config(&want) {
@@ -663,6 +797,24 @@ impl App {
         self.widgets.draw(&mut self.frame, t);
         self.settings.draw_gear(&mut self.frame, t);
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
+        // a popped-out window tells the wallpaper it's open
+        if self.popout && t - self.popout_touched > 1.0 {
+            self.popout_touched = t;
+            let _ = std::fs::write(crate::platform::popout_path(), b"1");
+        }
+        // the tray's settings window (another process) shows the levels too
+        if self.audio.is_some() {
+            if t - self.meters_check > 1.0 {
+                self.meters_check = t;
+                self.meters_wanted = crate::platform::fresh(&crate::platform::meters_want_path(), 3.0);
+            }
+            if self.meters_wanted && t - self.meters_sent > 0.08 {
+                self.meters_sent = t;
+                if let Some(m) = self.audio.as_ref().and_then(|a| a.meters.lock().ok().map(|m| *m)) {
+                    crate::platform::write_meters(&m);
+                }
+            }
+        }
         self.settings.draw_banner(&mut self.frame, t);
         self.settings.draw(&mut self.frame, &self.cfg, t);
         if let Some(m) = &self.menu {
@@ -714,6 +866,59 @@ mod tests {
         }
         // landed: nobody is hovering in the sky where we let go
         assert!(!app.scene.grabbable(x + 6, 8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A left press held still opens the right-click menu (which stays up
+    /// after letting go); a quick click doesn't; dragging the settings panel
+    /// by its title bar moves it.
+    #[test]
+    fn long_press_opens_the_menu_and_the_panel_moves() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-press-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.scene.critters = 0.0;
+        cfg.widgets.music = false;
+        cfg.widgets.weather = false;
+        cfg.widgets.system = false;
+        cfg.widgets.map = false;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        let pause = |app: &mut App, ms: u64| {
+            for _ in 0..ms / 10 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                app.step();
+            }
+        };
+        app.step();
+        // a quick click on the snow: no menu
+        app.mouse(MouseIn::Down(Btn::Left), 20, 55);
+        pause(&mut app, 100);
+        app.mouse(MouseIn::Up(Btn::Left), 20, 55);
+        pause(&mut app, 700);
+        assert!(app.menu.is_none());
+        // held still: the menu
+        app.mouse(MouseIn::Down(Btn::Left), 20, 55);
+        pause(&mut app, 800);
+        assert!(app.menu.is_some(), "long press didn't open the menu");
+        app.mouse(MouseIn::Up(Btn::Left), 20, 55);
+        pause(&mut app, 100);
+        assert!(app.menu.is_some(), "menu closed on letting go");
+        app.mouse(MouseIn::Down(Btn::Right), 20, 55);
+        assert!(app.menu.is_none());
+        // the settings button opens the panel; its title bar moves it
+        let g = settings::gear_rect(300);
+        app.mouse(MouseIn::Down(Btn::Left), g.x + 3, g.y);
+        app.mouse(MouseIn::Up(Btn::Left), g.x + 3, g.y);
+        app.step();
+        assert!(app.settings.open);
+        let r = app.settings.rect.unwrap();
+        app.mouse(MouseIn::Down(Btn::Left), r.x + 4, r.y);
+        app.mouse(MouseIn::Drag, r.x - 20, r.y + 5);
+        app.mouse(MouseIn::Up(Btn::Left), r.x - 20, r.y + 5);
+        app.step();
+        let r2 = app.settings.rect.unwrap();
+        assert_eq!((r2.x, r2.y), (r.x - 24, r.y + 5));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -133,12 +133,54 @@ pub struct Scene {
     convo: Option<story::Convo>,
     story_talk: dialogue::Talk,
     convo_hover: Option<usize>,
+    /// Where the box was last dragged to (kept for the next one), and the
+    /// grab offset while it's being dragged.
+    convo_pos: Option<(i32, i32)>,
+    convo_drag: Option<(i32, i32)>,
+    /// What the villager's been up to lately, for people who saw it.
+    deeds: Vec<(Deed, f32, f32)>,
     rng: Rng,
     lines: lines::Lines,
     /// Seconds since this scene was created (sum of frame `dt`s).
     clock: f64,
     /// Total rebased away; scene time handed out is `clock - epoch`.
     epoch: f64,
+}
+
+/// Something clickable that's moving about or far off.
+#[derive(Clone, Copy, Debug)]
+enum Thing {
+    Sleigh,
+    Star(usize),
+    Flyer(u8),
+    Cabin(usize),
+    Train,
+    Car(usize),
+}
+
+/// Something the villager did that people nearby might mention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Deed {
+    Fed(&'static str),
+    Pet(&'static str),
+    Threw,
+    Hit(u64),
+    Gift(u64),
+    Carried(u64),
+    DropIn,
+    Visit,
+    SantaChat(u64),
+}
+
+/// "a rabbit" → what people call it.
+fn animal_word(label: &str) -> &'static str {
+    if label.contains("rabbit") {
+        "bunny"
+    } else if label.contains("deer") {
+        "deer"
+    } else {
+        "fox"
+    }
 }
 
 /// The special nights (and day) of the season.
@@ -508,6 +550,9 @@ impl Scene {
             convo: None,
             story_talk: dialogue::Talk::new(seed ^ 0x570),
             convo_hover: None,
+            convo_pos: None,
+            convo_drag: None,
+            deeds: vec![],
             rng,
             lines: lines::Lines::new(seed),
             clock: 0.0,
@@ -645,6 +690,7 @@ impl Scene {
                 if let Some(p) = &mut self.player {
                     p.drop_in(x, row, t, &mut self.director);
                 }
+                self.deed(Deed::DropIn, x);
                 self.look_at(x);
                 self.sky_up_target = 0.0;
             }
@@ -767,7 +813,9 @@ impl Scene {
         let ctx = self.talk_ctx(t);
         let name = self.critters.label(id);
         let kid = self.critters.is_kid(id);
-        let c = story::Convo::open(id, &name, kid, first, &ctx, &mut self.story_talk, cx, self.rng.next_u32());
+        let aware = self.aware_of(id, cx, kid);
+        let mut c = story::Convo::open(id, &name, kid, first, &ctx, &mut self.story_talk, cx, self.rng.next_u32(), aware);
+        c.pos = self.convo_pos;
         self.director.say(cx.round() as i32, cy as i32 - 4, &c.line, t, 3.0, 40);
         if let Some(p) = &self.player {
             let hi = if first { "hello there!" } else { "hi again!" };
@@ -816,6 +864,11 @@ impl Scene {
                     self.cheer(2);
                 }
             }
+            story::Act::HelpBuild => {
+                if self.builds.help(id, &mut self.director) {
+                    self.cheer(1);
+                }
+            }
             story::Act::Go(_) => {}
         }
         if ended && steps >= 2 {
@@ -824,7 +877,8 @@ impl Scene {
         }
     }
 
-    /// A click on the dialogue box (true if it was on it).
+    /// A click on the dialogue box (true if it was on it): on an answer
+    /// picks it; anywhere else on the box picks the box up to move it.
     pub fn convo_click(&mut self, x: i32, y: i32) -> bool {
         let (w, h) = (self.w as i32, self.h as i32);
         let Some(c) = &self.convo else { return false };
@@ -833,8 +887,104 @@ impl Scene {
         }
         if let Some(n) = c.option_at(x, y, w, h) {
             self.answer(n);
+        } else {
+            let (x0, y0) = c.origin(w, h);
+            self.convo_drag = Some((x - x0, y - y0));
         }
         true
+    }
+
+    pub fn convo_dragging(&self) -> bool {
+        self.convo_drag.is_some() && self.convo.is_some()
+    }
+
+    /// Moving the dialogue box (it stays put for the next conversation too).
+    pub fn convo_drag_to(&mut self, x: i32, y: i32) {
+        let (Some((ox, oy)), Some(c)) = (self.convo_drag, &mut self.convo) else { return };
+        let (w, h) = (self.w as i32, self.h as i32);
+        c.pos = Some((x - ox, y - oy));
+        // stored clamped, so it never drifts off screen
+        let at = c.origin(w, h);
+        c.pos = Some(at);
+        self.convo_pos = Some(at);
+    }
+
+    pub fn convo_drop(&mut self) {
+        self.convo_drag = None;
+    }
+
+    /// Whether (x, y) is on the dialogue box but not on an answer (it can be
+    /// picked up there).
+    pub fn convo_grip(&self, x: i32, y: i32) -> bool {
+        let (w, h) = (self.w as i32, self.h as i32);
+        self.convo.as_ref().is_some_and(|c| c.contains(x, y, w, h) && c.option_at(x, y, w, h).is_none())
+    }
+
+    /// Note something the villager did at column `x` (people nearby saw).
+    fn deed(&mut self, d: Deed, x: f32) {
+        let t = self.now();
+        self.deeds.retain(|e| t - e.2 < 120.0);
+        self.deeds.push((d, x, t));
+        if self.deeds.len() > 24 {
+            self.deeds.remove(0);
+        }
+    }
+
+    /// What someone at column `x` knows about that's worth mentioning:
+    /// things that happened to them first, then what they're busy with,
+    /// then what they saw the villager do (most recent first).
+    fn aware_of(&self, id: u64, x: f32, kid: bool) -> Vec<story::Aware> {
+        use story::Aware as A;
+        let t = self.now();
+        let recent: Vec<Deed> = self.deeds.iter().rev().filter(|e| t - e.2 < 90.0).map(|e| e.0).collect();
+        let seen: Vec<Deed> = self.deeds.iter().rev().filter(|e| t - e.2 < 90.0 && (e.1 - x).abs() < 50.0).map(|e| e.0).collect();
+        let mut v = vec![];
+        let add = |a: A, v: &mut Vec<A>| {
+            if !v.contains(&a) {
+                v.push(a);
+            }
+        };
+        for d in &recent {
+            match *d {
+                Deed::Carried(who) if who == id => add(A::WasCarried, &mut v),
+                Deed::Hit(who) if who == id => add(A::GotHit, &mut v),
+                Deed::Gift(who) if who == id => add(A::GotGift, &mut v),
+                Deed::SantaChat(who) if who == id => add(A::TalkedToSanta, &mut v),
+                _ => {}
+            }
+        }
+        if kid {
+            if let Some(igloo) = self.builds.working(id) {
+                add(A::Building { igloo }, &mut v);
+            }
+            if self.critters.in_fight(id) {
+                add(A::Fighting, &mut v);
+            }
+            if let Some(igloo) = self.builds.made_by(id, x) {
+                add(A::Built { igloo }, &mut v);
+            }
+        }
+        for d in &seen {
+            let a = match *d {
+                Deed::Fed(w) => A::SawFeed(w),
+                Deed::Pet(w) => A::SawPet(w),
+                Deed::Threw => A::SawSnowball,
+                Deed::Hit(who) if who != id => A::SawSnowball,
+                Deed::Gift(who) if who != id => A::SawGift,
+                Deed::Carried(who) if who != id => A::SawCarry,
+                Deed::DropIn => A::SawDropIn,
+                Deed::Visit => A::SawVisit,
+                _ => continue,
+            };
+            add(a, &mut v);
+        }
+        if !v.iter().any(|a| matches!(a, A::Building { .. } | A::Built { .. })) {
+            if let Some(igloo) = self.builds.near(x) {
+                add(A::SeeBuild { igloo }, &mut v);
+            }
+        }
+        v.truncate(3);
+        v
     }
 
     /// The pointer's over the dialogue box (which answer, for the highlight).
@@ -922,6 +1072,7 @@ impl Scene {
                     self.critters.gift(id, item.name(), t, &mut self.director);
                     self.pockets.gifts += 1;
                     self.cheer(1);
+                    self.deed(Deed::Gift(id), px);
                 }
                 None => {
                     self.pockets.take(item);
@@ -935,6 +1086,8 @@ impl Scene {
                     self.critters.befriend(id, t, &mut self.director);
                     self.pockets.fed += 1;
                     self.cheer(1);
+                    let word = animal_word(&self.critters.label(id));
+                    self.deed(Deed::Fed(word), px);
                 }
                 None => {
                     self.director.say(px.round() as i32, py as i32 - 4, "this is for a deer or a rabbit", t, 2.4, 6);
@@ -992,6 +1145,7 @@ impl Scene {
             self.last_sleigh -= s;
             self.high.rebase(s);
             self.skylife.rebase(s);
+            self.land.rebase(s);
             if let Some(inn) = &mut self.inside {
                 inn.rebase(s);
             }
@@ -1292,6 +1446,11 @@ impl Scene {
                 if fed {
                     self.pockets.fed += 1;
                 }
+                if self.critters.is_animal(id) {
+                    let word = animal_word(&self.critters.label(id));
+                    let x = self.critters.centre_of(id).unwrap_or(px);
+                    self.deed(if fed { Deed::Fed(word) } else { Deed::Pet(word) }, x);
+                }
                 self.cheer(if fed { 2 } else { earned });
             }
             Some(Focus::Shop(..)) => {
@@ -1355,6 +1514,7 @@ impl Scene {
             p.dir = 1.0;
             self.director.sound(Sfx::Click, p.centre(), 0.9);
         }
+        self.deed(Deed::Visit, inn.outside.0);
     }
 
     /// Previews: chatting with someone (`kid`), a couple of answers in.
@@ -1365,8 +1525,9 @@ impl Scene {
         self.critters.spawn_demo(kind, px + 6.0, t);
         let Some(id) = self.critters.people().iter().filter(|p| (p.1 - px - 6.0).abs() < 3.0).map(|p| p.0).next() else { return };
         let _ = py;
+        // something for them to have noticed
+        self.deed(Deed::Fed("bunny"), px + 2.0);
         self.start_convo(id);
-        self.answer(2);
     }
 
     /// Previews: standing at the cocoa cabin, menu and pockets open.
@@ -1501,7 +1662,22 @@ impl Scene {
             p.release();
             return;
         }
+        let carried = self.critters.held_info().filter(|&(id, moved)| moved && self.critters.is_person(id)).map(|(id, _)| id);
         self.critters.release(t, &mut self.director, &mut self.lines);
+        if let Some(id) = carried {
+            let x = self.critters.centre_of(id).unwrap_or(0.0);
+            self.deed(Deed::Carried(id), x);
+        }
+    }
+
+    /// Let go of whoever's held without dropping or poking them.
+    pub fn let_go(&mut self) {
+        let t = self.now();
+        if let Some(p) = self.player.as_mut().filter(|p| p.held.is_some()) {
+            p.release();
+            return;
+        }
+        self.critters.let_go(t);
     }
 
     pub fn holding(&self) -> bool {
@@ -1526,6 +1702,7 @@ impl Scene {
             let (x, y, dir) = (p.centre(), p.y, p.dir);
             self.critters.throw(x, y, dir, &mut self.director);
             self.pockets.thrown += 1;
+            self.deed(Deed::Threw, x as f32);
         } else {
             p.scoop_until = t + 0.6;
             p.snowball = true;
@@ -1561,6 +1738,79 @@ impl Scene {
             || self.village.houses.iter().any(|h| h.contains(x, y))
             || self.land.on_powerline(x, y)
             || self.on_moon(sx, y)
+            || self.sky_thing_at(sx, y, x).is_some()
+    }
+
+    /// Something in the sky or on the move at screen column `sx` / world
+    /// column `x`, row `y`: Santa's sleigh, a shooting star, the plane, the
+    /// owl, a flock, a mountain cabin, a train or a car.
+    fn sky_thing_at(&self, sx: i32, y: i32, x: i32) -> Option<Thing> {
+        let t = self.now();
+        if self.sleigh.hit(sx, y, t) {
+            return Some(Thing::Sleigh);
+        }
+        if let Some(i) = self.director.star_at(sx, y) {
+            return Some(Thing::Star(i));
+        }
+        if let Some(k) = self.skylife.flyer_at(sx + self.sky_off(), y) {
+            return Some(Thing::Flyer(k));
+        }
+        if let Some(i) = self.land.cabin_at(sx, y, self.cam) {
+            return Some(Thing::Cabin(i));
+        }
+        if self.director.train_at(x, y) {
+            return Some(Thing::Train);
+        }
+        self.director.car_at(x, y, &self.ctx).map(Thing::Car)
+    }
+
+    /// Click on a moving / far-off thing. True if there was one.
+    fn poke_sky_thing(&mut self, sx: i32, y: i32, x: i32) -> bool {
+        let Some(thing) = self.sky_thing_at(sx, y, x) else { return false };
+        let t = self.now();
+        let cam = self.cam;
+        match thing {
+            Thing::Sleigh => self.santa_clicked(t),
+            Thing::Star(i) => {
+                // caught one: a burst of sparkles, and a wish
+                let wx = sx as f32 + cam;
+                self.director.catch_star(i, wx);
+                let msg = self.lines.wish();
+                self.director.say(wx.round() as i32, y - 1, &format!("caught a falling star! {msg}"), t + 0.2, 3.0, 6);
+                self.director.happenings.push((dialogue::Ev::ShootingStar, Some(wx)));
+                self.cheer(1);
+            }
+            Thing::Flyer(k) => {
+                let off = self.sky_off() as f32;
+                if let Some((fx, fy)) = self.skylife.poke(k, t) {
+                    let wx = fx - off + cam;
+                    match k {
+                        0 => self.director.sound(Sfx::Plane, wx, 0.9),
+                        1 => {
+                            self.director.sound(Sfx::Hoot, wx, 0.9);
+                            self.director.say(wx.round() as i32, fy as i32 - 1, "hoo? hoo-hoo!", t, 1.8, 6);
+                        }
+                        _ => {
+                            self.director.sound(Sfx::Bird, wx, 0.9);
+                            self.director.emote(wx, fy - 1.0, '♪', Rgb::hex(0xd8e0f0), 3);
+                        }
+                    }
+                }
+            }
+            Thing::Cabin(i) => {
+                if let Some((cx, cy)) = self.land.light_cabin(i, cam, t) {
+                    let wx = cx + cam;
+                    self.director.sound(Sfx::Chime, wx, 0.35);
+                    self.director.emote(wx, cy - 1.0, '✦', Rgb::hex(0xffb050), 3);
+                }
+            }
+            Thing::Train => {
+                self.director.toot(x as f32, y as f32, t);
+                self.last_train = t;
+            }
+            Thing::Car(i) => self.director.honk(i, t),
+        }
+        true
     }
 
     /// What's going on right now, as far as conversation goes.
@@ -1769,8 +2019,7 @@ impl Scene {
             self.zap(x, y);
             return;
         }
-        if self.sleigh.hit(sx, y, t) {
-            self.santa_clicked(t);
+        if self.poke_sky_thing(sx, y, x) {
             return;
         }
         let sky_off = self.sky_off() as f32;
@@ -1837,6 +2086,7 @@ impl Scene {
         self.sleigh.halt(t0 + 9.2);
         self.pockets.santa += 1;
         self.cheer(2);
+        self.deed(Deed::SantaChat(folk[0].0), px);
     }
 
     /// Keyboard easter eggs (only reachable when the wallpaper has focus).
@@ -2016,6 +2266,10 @@ impl Scene {
             }
         }
         let hits = self.critters.take_your_hits();
+        for id in self.critters.take_your_hit_ids() {
+            let x = self.critters.centre_of(id).unwrap_or(0.0);
+            self.deed(Deed::Hit(id), x);
+        }
         self.cheer(hits);
         // watching a light show by the big tree
         let showing = self.director.show.active(t);
@@ -2473,6 +2727,95 @@ mod tests {
 
     fn scene() -> Scene {
         Scene::new(160, 40, 7, &SceneCfg::default())
+    }
+
+    /// Cars honk, trains whistle and the plane rumbles when clicked.
+    #[test]
+    fn traffic_and_the_plane_answer_clicks() {
+        let mut s = Scene::new(300, 75, 3, &SceneCfg::default());
+        let (mut car, mut train, mut plane) = (false, false, false);
+        for step in 0..(240.0 / DT) as usize {
+            s.update(DT, 0.0);
+            if step % 15 != 0 {
+                continue;
+            }
+            let _ = s.take_sounds();
+            let cam = s.cam_i();
+            let off = s.sky_off();
+            // look for one of each on screen and click it
+            'scan: for y in 0..s.h as i32 {
+                for sx in 0..s.w as i32 {
+                    let thing = s.sky_thing_at(sx, y, sx + cam);
+                    let want = match thing {
+                        Some(Thing::Car(_)) => !car,
+                        Some(Thing::Train) => !train,
+                        Some(Thing::Flyer(0)) => !plane,
+                        _ => false,
+                    };
+                    if want {
+                        s.click(sx, y, 0.0);
+                        let heard: Vec<Sfx> = s.take_sounds().into_iter().map(|e| e.sfx).collect();
+                        match thing {
+                            Some(Thing::Car(_)) => car = heard.contains(&Sfx::Honk),
+                            Some(Thing::Train) => train = heard.contains(&Sfx::TrainWhistle),
+                            _ => plane = heard.contains(&Sfx::Plane),
+                        }
+                        break 'scan;
+                    }
+                }
+            }
+            let _ = off;
+            if car && train && plane {
+                break;
+            }
+        }
+        // a mountain cabin lights up
+        let _ = s.take_sounds();
+        let cam = s.cam;
+        let (i, sx, sy) = (0..s.land.cabins.len())
+            .map(|i| (i, s.land.cabins[i].0 - cam * land::PARALLAX, s.land.cabins[i].1 / 2.0))
+            .find(|c| c.1 >= 0.0 && c.1 < s.w as f32)
+            .expect("no cabin in view");
+        assert!(matches!(s.sky_thing_at(sx as i32, sy as i32, sx as i32 + s.cam_i()), Some(Thing::Cabin(j)) if j == i));
+        s.click(sx as i32, sy as i32, 0.0);
+        assert!(s.take_sounds().iter().any(|e| e.sfx == Sfx::Chime), "cabin didn't answer");
+        // a shooting star can be caught
+        s.director.shooting_star(100.0, 20.0);
+        s.update(DT, 0.0);
+        let star = (0..30).flat_map(|y| (0..s.w as i32).map(move |x| (x, y))).find(|&(x, y)| s.director.star_at(x, y).is_some()).expect("no star found");
+        s.click(star.0, star.1, 0.0);
+        assert!(s.take_sounds().iter().any(|e| e.sfx == Sfx::Starburst), "star not caught");
+        assert!(car, "no car honked");
+        assert!(train, "no train whistled");
+        assert!(plane, "the plane didn't answer");
+    }
+
+    /// People mention what they just saw the villager do, and the
+    /// dialogue box can be dragged somewhere else (and stays there).
+    #[test]
+    fn people_notice_what_the_villager_did() {
+        let mut s = scene();
+        s.update(DT, 0.0);
+        let px = s.player.as_ref().unwrap().centre();
+        s.deed(Deed::Fed("bunny"), px + 3.0);
+        s.critters.spawn_demo(events::Kind::Walker, px + 5.0, s.now());
+        let id = s.critters.people().iter().min_by(|a, b| (a.1 - px - 5.0).abs().total_cmp(&(b.1 - px - 5.0).abs())).unwrap().0;
+        s.start_convo(id);
+        let c = s.convo.as_ref().unwrap();
+        assert!(c.line.contains("bunny"), "opener: {}", c.line);
+        let labels: Vec<&str> = c.opts.iter().map(|o| o.label.as_str()).collect();
+        assert!(labels.iter().any(|l| l.contains("feed")), "{labels:?}");
+        // drag it by its title bar
+        let (w, h) = (s.w as i32, s.h as i32);
+        let (x0, y0) = c.origin(w, h);
+        assert!(s.convo_click(x0 + 3, y0));
+        s.convo_drag_to(x0 - 10, y0 - 8);
+        s.convo_drop();
+        assert_eq!(s.convo.as_ref().unwrap().origin(w, h), (x0 - 13, y0 - 8));
+        // …and the next conversation opens where it was left
+        s.close_panels();
+        s.start_convo(id);
+        assert_eq!(s.convo.as_ref().unwrap().origin(w, h), (x0 - 13, y0 - 8));
     }
 
     /// Kids out and about now and then have a snowball fight (and it ends).

@@ -24,6 +24,8 @@ pub struct Opts {
     pub desktop: bool,
     /// Target number of text rows (sets the cell size).
     pub rows: u32,
+    /// Start full screen (like a game) instead of in a window.
+    pub fullscreen: bool,
 }
 
 struct Gfx {
@@ -131,10 +133,18 @@ impl Runner {
             None => {
                 let desktop = self.opts.desktop;
                 let mut app = App::new(self.cfg.clone(), self.seed, &self.path, cols, rows, desktop, !desktop, true);
+                app.set_windowed(!desktop);
                 app.start_audio();
                 self.app = Some(app);
             }
         }
+    }
+
+    /// Full screen on / off (a normal window).
+    fn toggle_fullscreen(&mut self) {
+        let Some(g) = self.gfx.as_ref() else { return };
+        let on = g.window.fullscreen().is_some();
+        g.window.set_fullscreen(if on { None } else { Some(winit::window::Fullscreen::Borderless(None)) });
     }
 
     /// Physical pixel (window-relative) → cell.
@@ -357,6 +367,9 @@ impl Runner {
             }
         } else {
             attrs = attrs.with_inner_size(PhysicalSize::new(1600u32, 900u32));
+            if self.opts.fullscreen {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(mon.clone())));
+            }
         }
         let window = match el.create_window(attrs) {
             Ok(w) => Rc::new(w),
@@ -534,6 +547,11 @@ impl ApplicationHandler for Runner {
                 self.ctrl = m.state().control_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // F11: full screen on and off (a normal window only)
+                if event.logical_key == Key::Named(NamedKey::F11) && event.state == ElementState::Pressed && !event.repeat && !self.opts.desktop {
+                    self.toggle_fullscreen();
+                    return;
+                }
                 let Some(app) = self.app.as_mut() else { return };
                 let keys: Vec<KeyIn> = match &event.logical_key {
                     Key::Named(NamedKey::Enter) => vec![KeyIn::Enter],
@@ -566,6 +584,10 @@ impl ApplicationHandler for Runner {
             return;
         }
         let now = Instant::now();
+        // the settings' full-screen button
+        if self.app.as_mut().is_some_and(|a| std::mem::take(&mut a.fullscreen_toggle)) {
+            self.toggle_fullscreen();
+        }
         // render scale changed in settings: lay the grid out again
         if let Some(size) = self.app.as_ref().filter(|a| (a.cfg.scale - self.scale).abs() > 1e-3).and(self.gfx.as_ref().map(|g| PhysicalSize::new(g.size.0, g.size.1))) {
             self.layout(size);
@@ -587,7 +609,9 @@ impl ApplicationHandler for Runner {
                 self.last_pause_check = now;
                 let was = self.paused;
                 let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
-                self.paused = crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND);
+                // (also while the village is popped out into a window of its own)
+                let popped = self.app.as_mut().is_some_and(|a| a.popped_out());
+                self.paused = popped || crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND);
                 if was && !self.paused {
                     // back: draw right away rather than at the end of a 500 ms rest
                     self.next = self.next.min(now);

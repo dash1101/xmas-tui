@@ -28,7 +28,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   each other; kids who build snowmen and igloos (and pile inside) and start snowball fights; deer, foxes and
   rabbits too.
 - **Talk like a story game**: a dialogue box with choices. Every grown-up has a job and a mood, every kid a wish,
-  and the talk follows whatever's going on in the village.
+  and the talk follows whatever's going on, including what they just saw the villager do.
+- **Play it like a game**: pop the village out into its own window, or go full screen.
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
@@ -100,10 +101,11 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
 | **Esc** | close a menu or conversation, or step back outside |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
-| **right-click** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
+| **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager too) | carry them about, then drop them in the snow |
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
-| **⚙** | settings |
+| **⚙ settings** (top right) | the settings panel; drag its title bar to move it |
+| **F11** | full screen on and off, when running in a window |
 
 ## 🌟 What's in the scene
 - A big tiered tree with light strings that cycle through twinkle, chase, wave, breathe and sparkle patterns,
@@ -134,7 +136,11 @@ Click the bare desktop first so the wallpaper has keyboard focus.
     the first answer) picks what to say back. Grown-ups talk about how they are, their job, tips for a newcomer
     and what's going on (the snow, the train, the light show…), and can be asked to walk along; kids talk about
     what they're up to, what they want for Christmas and Santa, and are always up for a snowball fight. A cocoa
-    in the pockets can be handed over to someone who'd like one. Walking away or Esc ends it;
+    in the pockets can be handed over to someone who'd like one. People notice what's around them, too: kids
+    building a snowman ask for a hand (and get one), kids mid-snowball-fight can be joined, and anyone nearby
+    mentions what they just saw the villager do: feeding or petting an animal, throwing snowballs, handing out
+    presents, carrying someone about, dropping in from the sky, coming out of a house. The box can be dragged
+    anywhere and stays there. Walking away or Esc ends it;
   - **animals:** a pat, or (with berries in hand) a snack, after which they tag along for a while;
   - **berry bushes:** pick a few berries (they grow back);
   - **front doors:** step inside: a cozy room with a fire, a tree, someone home and a cat on the rug (the church
@@ -149,14 +155,15 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   show by the big tree, finding constellations. It buys things at the **Cocoa & Gifts** cabin: hot cocoa (cozy
   glow), gingerbread and candy canes (to give away), carrots (a deer or rabbit becomes a friend) and a lantern.
   **I** shows the pockets; **1**–**5** use what's in them.
-- **Right-click** shows what can be done with whatever's under the pointer, and the villager walks over to do it:
+- **Right-click** (or **press and hold** the left button for a moment, which works everywhere, including the Windows
+  desktop) shows what can be done with whatever's under the pointer, and the villager walks over to do it:
   - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
   - **the villager:** the stats card and Christmas list, or the pockets;
   - **people:** say hello, invite along or say goodbye, give a gingerbread or candy cane, throw a snowball;
   - **animals:** pet, feed a berry, give a carrot;
   - **houses and the church:** visit, or switch the lights / ring the bells;
   - **the cocoa cabin, the station, the sky:** shop, ask about the next train, wish on a star.
-  The settings are always at the bottom of the menu (and on ⚙).
+  The settings are always at the bottom of the menu (and on the **⚙ settings** button).
 - **The Christmas list** (on the stats card) has ten little goals: hellos, chats, feeding animals, visiting homes,
   giving a gift, landing snowballs, watching a light show, finding constellations, walking the village end to end,
   and waving down Santa's sleigh.
@@ -165,7 +172,7 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 
 **Mouse**
 - **Drag any widget** to move it. Positions are saved, and can be locked or reset in settings.
-- **⚙ (top-right corner) or right-click anywhere** opens settings. Click ◂ ▸ or scroll on a row
+- **The ⚙ settings button (top right)** opens settings; drag the panel's title bar to put it anywhere. Click ◂ ▸ or scroll on a row
   to adjust a value. Click the city field and type a new city. Every change is saved straight to the config.
 - **The cursor** leaves a twinkling trail with a soft glow and pushes falling snow aside. Sweep it
   through the snowfield to kick snow up.
@@ -177,7 +184,11 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   - **Lamps** sputter. The **station** says when the next train is due.
   - The **moon** summons Santa. **Click the sleigh** as it flies past: Santa pulls up for a word with whoever's
     below, or just gives a hearty "ho ho ho".
-  - **Empty sky** launches a shooting star, and **snow** puffs up.
+  - **Empty sky** launches a shooting star, and **snow** puffs up. **Click a shooting star** to catch it (and make a
+    wish).
+  - **Cars** honk and flash their high beams; **trains** whistle and blaze with light; the **airplane** blinks its
+    landing lights; the **owl** hoots; a **flock** of birds scatters; the little **cabins up on the mountains** turn
+    their lamps up.
   - Up in the high sky: **constellations** light up and name themselves, the **balloon** fires its burner, and
     the **North Star** grants a wish.
 
@@ -293,8 +304,8 @@ The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) 
 `xmas-tui.exe`; its README explains how to use it.
 - **How it runs:** it draws the same grid itself, with fonts bundled inside the `.exe`, and attaches behind the
   desktop icons on the main monitor. It pauses during fullscreen games.
-- **Controls:** ⚙ (top-right corner) opens settings, which include **Run at startup** and **Quit**. (Right-click on
-  the desktop belongs to Windows, so the right-click menus are a Linux / `--windowed` thing.)
+- **Controls:** the **⚙ settings** button (top right) opens settings, which include **Run at startup** and **Quit**.
+  Right-click on the desktop belongs to Windows, so **press and hold** the left button instead: the same menus open.
   Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
   scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
 - **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons
@@ -357,12 +368,16 @@ The Scene tab sets how many visitors come by ("Animals & people") and turns the 
 ## ⚙️ Settings
 <img src="docs/settings.png" align="right" width="360" alt="The settings panel, Scene tab: snowfall, wind, glow, surprises, visitors, sleigh and frame rate">
 
-The settings panel (⚙ or right-click, or the tray icon's standalone window) has five tabs:
+The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
+window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has five tabs:
 - **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
   rate, aurora, bushes, and the villager.
 - **Display:** clock, widgets (including the map), weather city and units, widget layout, **render scale**
-  (0.5× to 2×: bigger makes everything chunkier), updates, run at startup.
+  (0.5× to 2×: bigger makes everything chunkier), **pop out** (the village in a window of its own, to play it like
+  a game) and **full screen** (F11 toggles it in a window); the wallpaper rests and goes quiet while either is
+  open. Then updates and run at startup. Both also work from the command line: `xmas-tui --windowed` and
+  `xmas-tui --fullscreen`.
 - **Sound:** master, music, effects and ambience volumes, music style, a per-layer ambience mix, and **Quiet while
   other media plays**. When on, the sound fades out as soon as a browser video or music player starts, and comes
   back a few seconds after it stops.

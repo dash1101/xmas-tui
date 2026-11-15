@@ -50,6 +50,10 @@ pub struct Panel {
     flakes: Vec<Flake>,
     rng: Rng,
     acts: Vec<Act>,
+    /// Asking the running wallpaper for its sound levels: when last asked,
+    /// and when last read.
+    meters_asked: f32,
+    meters_read: f32,
     pub w: usize,
     pub h: usize,
     /// Set when the window should close.
@@ -70,6 +74,7 @@ impl Panel {
         let mut settings = Settings::default();
         settings.open = true;
         settings.extras = true;
+        settings.standalone = true;
         settings.keyboard = true;
         settings.autostart = platform::autostart_get();
         settings.window_fx = window_fx_supported();
@@ -81,6 +86,8 @@ impl Panel {
             flakes: vec![],
             rng: Rng::new(random_seed() as u64),
             acts: vec![],
+            meters_asked: -10.0,
+            meters_read: -10.0,
             w: 1,
             h: 1,
             close: false,
@@ -181,6 +188,20 @@ impl Panel {
 
     /// Apply queued actions, sync with the config file, draw a frame.
     pub fn step(&mut self, t: f32, dt: f32) -> &[Cell] {
+        // the Sound tab's live meters come from the running wallpaper: keep
+        // telling it they're wanted, and read what it shares
+        if self.settings.tab == 2 {
+            if t - self.meters_asked > 1.0 {
+                self.meters_asked = t;
+                let _ = std::fs::write(crate::platform::meters_want_path(), b"1");
+            }
+            if t - self.meters_read > 0.05 {
+                self.meters_read = t;
+                self.settings.meters = crate::platform::read_meters::<{ crate::audio::METERS }>();
+            }
+        } else {
+            self.settings.meters = None;
+        }
         for a in std::mem::take(&mut self.acts) {
             match a {
                 Act::Close => {

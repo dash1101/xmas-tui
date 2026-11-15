@@ -48,6 +48,8 @@ struct Args {
     tab: usize,
     demo: bool,
     windowed: bool,
+    /// A normal window, full screen (like a game).
+    fullscreen: bool,
     terminal: bool,
     settings_window: bool,
     rows: u32,
@@ -89,6 +91,7 @@ fn parse_args() -> Args {
         tab: 0,
         demo: false,
         windowed: false,
+        fullscreen: false,
         terminal: false,
         settings_window: false,
         rows: 68,
@@ -143,6 +146,10 @@ fn parse_args() -> Args {
             "--pan" => a.pan = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--wallpaper" => a.wallpaper = true,
             "--windowed" => a.windowed = true,
+            "--fullscreen" => {
+                a.windowed = true;
+                a.fullscreen = true;
+            }
             "--terminal" => a.terminal = true,
             "--settings-window" => a.settings_window = true,
             "--rows" => a.rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(68),
@@ -160,6 +167,7 @@ fn parse_args() -> Args {
                      USAGE: xmas-tui [--config PATH] [--fps N]           (Linux: run inside a terminal; Windows: desktop wallpaper)\n\
                      \x20      xmas-tui --wallpaper                       (terminal mode, keys don't quit — used by the kitty launcher)\n\
                      \x20      xmas-tui --windowed [--rows N]             (a normal window, any OS)\n\
+                     \x20      xmas-tui --fullscreen [--rows N]           (full screen, F11 toggles)\n\
                      \x20      xmas-tui --settings-window [--export DIR]  (just the settings panel; what the tray icon opens)\n\
                      \x20      xmas-tui --export DIR [--size 568x75] [--frames N] [--at SECONDS] [--sleigh] [--settings] [--demo] [--pan CELLS] [--clean] [--raw]\n\
                      \x20      xmas-tui --bench FRAMES [--size WxH]\n\
@@ -238,7 +246,7 @@ fn main() {
         if desktop {
             tray::spawn(path.clone());
         }
-        let res = window::run(cfg, seed, path, window::Opts { desktop, rows: args.rows });
+        let res = window::run(cfg, seed, path, window::Opts { desktop, rows: args.rows, fullscreen: args.fullscreen });
         tray::shutdown();
         if let Err(e) = res {
             eprintln!("xmas-tui: {e}");
@@ -432,7 +440,8 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             break;
         }
         // tray "Pause effects": hold the last frame, hide window snow/lights
-        let paused = tray::paused();
+        // (the same while the village is popped out into a window)
+        let paused = tray::paused() || app.popped_out();
         if paused != was_paused {
             was_paused = paused;
             #[cfg(target_os = "linux")]

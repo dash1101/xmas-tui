@@ -26,6 +26,8 @@ struct Build {
     /// How far along (0..1).
     p: f32,
     kids: Vec<u64>,
+    /// Everyone who worked on it (kept after they wander off).
+    builders: Vec<u64>,
     inside: Vec<Hidden>,
     /// Igloo: heading in (until), and when they come back out.
     entering: Option<f32>,
@@ -97,6 +99,30 @@ impl Builds {
         (self.list.len(), self.list.iter().map(|b| b.inside.len()).sum())
     }
 
+    /// A kid busy building: is it an igloo?
+    pub fn working(&self, id: u64) -> Option<bool> {
+        self.list.iter().find(|b| b.done_at.is_none() && b.kids.contains(&id)).map(|b| b.what == What::Igloo)
+    }
+
+    /// Something finished that this kid helped build, near column `x`.
+    pub fn made_by(&self, id: u64, x: f32) -> Option<bool> {
+        self.list.iter().find(|b| b.p >= 1.0 && b.melt < 0.5 && b.builders.contains(&id) && (b.x - x).abs() < 40.0).map(|b| b.what == What::Igloo)
+    }
+
+    /// Something (mostly) built near column `x`.
+    pub fn near(&self, x: f32) -> Option<bool> {
+        self.list.iter().find(|b| b.p >= 0.5 && b.melt < 0.5 && (b.x - x).abs() < 30.0).map(|b| b.what == What::Igloo)
+    }
+
+    /// The villager lends a hand with what `id` is building.
+    pub fn help(&mut self, id: u64, d: &mut Director) -> bool {
+        let Some(b) = self.list.iter_mut().find(|b| b.done_at.is_none() && b.kids.contains(&id)) else { return false };
+        b.p = (b.p + 0.2).min(0.99);
+        d.snow_puff(b.x, b.base as f32);
+        d.sound(Sfx::Crunch, b.x, 0.6);
+        true
+    }
+
     /// Column spans already taken (so nothing gets built on top of it).
     pub fn spans(&self) -> Vec<(i32, i32)> {
         self.list.iter().map(|b| ((b.x - b.half()) as i32 - 3, (b.x + b.half()) as i32 + 3)).collect()
@@ -142,7 +168,7 @@ impl Builds {
                     if !free(x0, x1, base) || self.spans().iter().any(|&(a, b)| x1 > a && x0 < b) {
                         continue;
                     }
-                    let mut b = Build { what, x, base, u, p: 0.0, kids: vec![], inside: vec![], entering: None, out_at: 0.0, done_at: None, worked: t, melt: 0.0, next_line: t + 3.0 };
+                    let mut b = Build { what, x, base, u, p: 0.0, kids: vec![], builders: vec![], inside: vec![], entering: None, out_at: 0.0, done_at: None, worked: t, melt: 0.0, next_line: t + 3.0 };
                     let mut near = kids.clone();
                     near.sort_by(|a, b2| (a.1 - x).abs().total_cmp(&(b2.1 - x).abs()));
                     for (k, &(id, _)) in near.iter().take(3).enumerate() {
@@ -150,6 +176,7 @@ impl Builds {
                         let tx = x + side * (half + 2.0 + (k / 2) as f32 * 3.0);
                         c.work_at(id, tx, base as f32, x, t + 90.0);
                         b.kids.push(id);
+                        b.builders.push(id);
                     }
                     let (kx, ky) = c.position(b.kids[0]).unwrap_or((x, base as f32));
                     let line = if what == What::Snowman { "let's build a snowman!" } else { "let's make an igloo!" };

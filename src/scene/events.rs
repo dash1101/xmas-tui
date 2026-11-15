@@ -141,6 +141,8 @@ struct Car {
     speed: f32,
     color: Rgb,
     bus: bool,
+    /// Clicked: honking with its high beams on until then.
+    honk: f32,
 }
 
 impl Car {
@@ -188,6 +190,8 @@ pub struct Director {
     pub indoor: bool,
     /// Christmas Eve night: no trains, no traffic.
     pub quiet: bool,
+    /// A train was clicked: windows blazing, extra steam, until then.
+    train_glow: f32,
     /// A light show announced for later: (start, duration).
     show_at: Option<(f32, f32)>,
     /// The village should gather round the big tree until this time.
@@ -239,6 +243,7 @@ impl Director {
             cars_seeded: false,
             indoor: false,
             quiet: false,
+            train_glow: -1.0,
             show_at: None,
             gather: None,
             arrivals: vec![],
@@ -268,6 +273,10 @@ impl Director {
     /// Shift every stored timestamp by `-s` seconds (scene clock rebase).
     pub fn rebase(&mut self, s: f32) {
         self.next -= s;
+        self.train_glow -= s;
+        for c in &mut self.cars {
+            c.honk -= s;
+        }
         for e in [&mut self.gust, &mut self.flare, &mut self.show, &mut self.blizzard] {
             e.rebase(s);
         }
@@ -854,7 +863,69 @@ impl Director {
         let color = if bus { Rgb::hex(0xc8a02a) } else { Rgb::hex(*self.rng.pick(&colors)) };
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
         let speed = if bus { self.rng.range(7.0, 9.0) } else { self.rng.range(9.0, 16.0) };
-        self.cars.push(Car { x, dir, speed, color, bus });
+        self.cars.push(Car { x, dir, speed, color, bus, honk: -1.0 });
+    }
+
+    /// The car at (x, y) (world column, row), if any shows there.
+    pub fn car_at(&self, x: i32, y: i32, ctx: &Ctx) -> Option<usize> {
+        self.cars.iter().position(|c| {
+            let near = (c.dir > 0.0) != self.drive_left;
+            let road = ctx.track_row + if near { 2 } else { 1 };
+            let x0 = c.x as i32;
+            (y - road).abs() <= 1 && x >= x0 - 1 && x <= x0 + c.len() && road < ctx.h && x >= 0 && x < ctx.w && !ctx.occluded[(road * ctx.w + x) as usize]
+        })
+    }
+
+    /// A clicked car honks and flashes its high beams.
+    pub fn honk(&mut self, i: usize, t: f32) {
+        let Some(c) = self.cars.get_mut(i) else { return };
+        c.honk = t + 0.9;
+        let x = c.x;
+        self.sound(Sfx::Honk, x, 0.8);
+    }
+
+    /// Whether (x, y) is on a train.
+    pub fn train_at(&self, x: i32, y: i32) -> bool {
+        self.actors.iter().any(|a| a.kind == Kind::Train && (y - a.y).abs() <= 1 && x >= a.x as i32 - 1 && x <= a.x as i32 + TRAIN_LEN)
+    }
+
+    /// A clicked train: a whistle, a big puff of steam, every window aglow.
+    pub fn toot(&mut self, x: f32, y: f32, t: f32) {
+        self.train_glow = t + 2.5;
+        self.sound(Sfx::TrainWhistle, x, 0.9);
+        self.say(x.round() as i32, y as i32 - 2, "toot toot!", t, 1.8, 6);
+        for _ in 0..3 {
+            let dx = self.rng.range(-3.0, 3.0);
+            self.snow_puff(x + dx, y - 1.0);
+        }
+    }
+
+    /// The shooting star at (sx, y) on screen (column, row), if any.
+    pub fn star_at(&self, sx: i32, y: i32) -> Option<usize> {
+        self.streaks.iter().position(|s| {
+            if s.age < 0.0 || s.life > 10.0 {
+                return false; // (comets are the sky's own business)
+            }
+            let speed = (s.vx * s.vx + s.vy * s.vy).sqrt().max(0.01);
+            let (dx, dy) = (s.vx / speed, s.vy / speed);
+            // anywhere along the bright head of the trail
+            (0..10).any(|k| {
+                let d = k as f32 * 1.2;
+                ((s.x - dx * d) - sx as f32).abs() < 2.5 && ((s.y - dy * d) / 2.0 - y as f32).abs() < 1.5
+            })
+        })
+    }
+
+    /// Catch a shooting star: it bursts into sparkles (at world column
+    /// `wx`, which is where on screen it was plus the camera).
+    pub fn catch_star(&mut self, i: usize, wx: f32) {
+        if i >= self.streaks.len() {
+            return;
+        }
+        let s = self.streaks.remove(i);
+        let y = s.y / 2.0;
+        self.burst(wx, y, 18, &[Rgb::hex(0xfff6dc), Rgb::hex(0xffd36b), Rgb::hex(0xbfe4ff)], 5.0, 1.5);
+        self.sound(Sfx::Starburst, wx, 0.8);
     }
 
     /// Pixel-layer things: meteor/comet streaks and rocket trails.
@@ -941,9 +1012,14 @@ impl Director {
                     };
                     f.put_g(x, road, g.lit(0.5));
                     if k == n - 1 {
-                        // headlights reach ahead along the road
-                        f.light_cell(x + c.dir as i32, road, Rgb::hex(0xfff0c8) * 0.9);
-                        f.light_cell(x + 2 * c.dir as i32, road, Rgb::hex(0xfff0c8) * 0.35);
+                        // headlights reach ahead along the road (high beams
+                        // flashing when it honks)
+                        let hi = if t < c.honk && ((c.honk - t) * 8.0) as i32 % 2 == 0 { 3.5 } else { 1.0 };
+                        f.light_cell(x + c.dir as i32, road, Rgb::hex(0xfff0c8) * (0.9 * hi));
+                        f.light_cell(x + 2 * c.dir as i32, road, Rgb::hex(0xfff0c8) * (0.35 * hi));
+                        if hi > 1.0 {
+                            f.light_cell(x + 4 * c.dir as i32, road, Rgb::hex(0xfff0c8) * 0.8);
+                        }
                     } else if k == 0 {
                         f.light_cell(x, road, Rgb::hex(0xff2020) * 0.5);
                     }
@@ -984,16 +1060,18 @@ impl Director {
                 }
                 f.put_g(x, a.y, g);
                 if lit {
-                    f.light_cell(x, a.y, Rgb::hex(0xffc060) * 0.35);
+                    let k = if t < self.train_glow { 1.6 } else { 0.35 };
+                    f.light_cell(x, a.y, Rgb::hex(0xffc060) * k);
                 }
             }
             // steam
             let lx = if a.dir > 0.0 { a.x as i32 + 4 + cars * 6 } else { a.x as i32 + 1 };
-            for k in 0..4 {
-                let age = (t * 1.5 + k as f32 * 0.25).fract();
+            let (puffs, big) = if t < self.train_glow { (8, 1.8) } else { (4, 1.0) };
+            for k in 0..puffs {
+                let age = (t * 1.5 + k as f32 / puffs as f32).fract();
                 let sx = lx as f32 - a.dir * age * 6.0;
-                let sy = a.y as f32 * 2.0 - 1.0 - age * 7.0;
-                f.px_disc(sx, sy, 0.8 + age * 2.0, Rgb::hex(0x9aa0b4), (1.0 - age) * 0.35);
+                let sy = a.y as f32 * 2.0 - 1.0 - age * 7.0 * big;
+                f.px_disc(sx, sy, (0.8 + age * 2.0) * big, Rgb::hex(0x9aa0b4), (1.0 - age) * 0.35);
             }
         }
     }

@@ -244,6 +244,8 @@ pub struct Critters {
     follow_chat_at: f32,
     /// Snowball fights between the kids, and when the next may start.
     fights: Vec<Fight>,
+    /// Who the player's snowballs hit (for what they say about it).
+    your_hit_ids: Vec<u64>,
     next_fight: f32,
 }
 
@@ -301,6 +303,7 @@ impl Critters {
             still: 0.0,
             follow_chat_at: 0.0,
             fights: vec![],
+            your_hit_ids: vec![],
             next_fight: rng.range(40.0, 120.0),
         };
         if bushes && ctx.h >= 20 {
@@ -545,6 +548,15 @@ impl Critters {
 
     pub fn holding(&self) -> bool {
         self.held.is_some()
+    }
+
+    /// Put whoever's held straight back down where they were picked up
+    /// (a long press turned out to want the menu, not a carry).
+    pub fn let_go(&mut self, t: f32) {
+        let Some(id) = self.held.take() else { return };
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
+            c.st = St::Idle { until: t + 1.0 };
+        }
     }
 
     /// Let go: a click without dragging is a friendly poke; otherwise they
@@ -878,6 +890,7 @@ impl Critters {
             }
             // the player's snowball: everyone takes it a little differently
             self.your_hits += 1;
+            self.your_hit_ids.push(id);
             if self.list[i].animal() {
                 let away = (self.list[i].centre() - you.map(|p| p.0).unwrap_or(x)).signum();
                 let c = &mut self.list[i];
@@ -1363,6 +1376,21 @@ impl Critters {
         for k in 0..3 {
             self.revenge.push((id, t + 1.2 + k as f32 * 1.6));
         }
+    }
+
+    /// In a snowball fight right now.
+    pub fn in_fight(&self, id: u64) -> bool {
+        self.fights.iter().any(|f| f.sides.iter().flatten().any(|m| m.0 == id))
+    }
+
+    /// Who's being carried, and whether they've been moved yet.
+    pub fn held_info(&self) -> Option<(u64, bool)> {
+        self.held.map(|id| (id, self.moved))
+    }
+
+    /// Who the player's snowballs hit, since last asked.
+    pub fn take_your_hit_ids(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.your_hit_ids)
     }
 
     #[cfg(test)]

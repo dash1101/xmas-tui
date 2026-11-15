@@ -25,6 +25,8 @@ pub struct Land {
     /// Little cabins up on the mountains (far-layer pixel coords of their
     /// lit window).
     pub cabins: Vec<(f32, f32)>,
+    /// Clicked cabins: glowing brighter until then (one per cabin).
+    pub cabin_glow: Vec<f32>,
     far: Layer,
     cache: Layer,
     glints: Vec<(i32, i32, f32, f32)>,
@@ -54,7 +56,7 @@ impl Land {
         let h = ph / 2;
         let track_row = ((max_hill / 2.0).ceil() as i32 + 1).min(h as i32 - 2);
         let walk_row = ((h as f32 * 0.875).round() as i32).min(h as i32 - 3);
-        let mut l = Land { mountains, hills, ground, horizon, track_row, walk_row, poles: vec![], cabins: vec![], far: Layer::new(fw, ph), cache: Layer::new(pw, ph), glints: vec![] };
+        let mut l = Land { mountains, hills, ground, horizon, track_row, walk_row, poles: vec![], cabins: vec![], cabin_glow: vec![], far: Layer::new(fw, ph), cache: Layer::new(pw, ph), glints: vec![] };
         l.build(seed);
         l
     }
@@ -264,7 +266,32 @@ impl Land {
         let off = cam * PARALLAX;
         for (i, &(x, y)) in self.cabins.iter().enumerate() {
             let fl = 0.8 + 0.2 * crate::rng::noise1(t * 3.0 + i as f32 * 7.0, 91);
-            f.light_px(x - off + 0.5, y + 0.5, Rgb::hex(0xffb050) * (0.9 * fl * glow));
+            // clicked: the lamps turned right up for a while, easing back
+            let until = self.cabin_glow.get(i).copied().unwrap_or(-1.0);
+            let boost = 1.0 + 3.0 * ((until - t) / 3.0).clamp(0.0, 1.0);
+            f.light_px(x - off + 0.5, y + 0.5, Rgb::hex(0xffb050) * (0.9 * fl * glow * boost));
+        }
+    }
+
+    /// The cabin at screen column `sx`, row `y` (cells), if any.
+    pub fn cabin_at(&self, sx: i32, y: i32, cam: f32) -> Option<usize> {
+        let off = cam * PARALLAX;
+        self.cabins.iter().position(|&(x, py)| (x - off - sx as f32).abs() <= 3.0 && (py / 2.0 - y as f32).abs() <= 2.0)
+    }
+
+    /// Turn a cabin's lamps up; returns where it is on screen (column, row).
+    pub fn light_cabin(&mut self, i: usize, cam: f32, t: f32) -> Option<(f32, f32)> {
+        let &(x, y) = self.cabins.get(i)?;
+        if self.cabin_glow.len() < self.cabins.len() {
+            self.cabin_glow.resize(self.cabins.len(), -1.0);
+        }
+        self.cabin_glow[i] = t + 8.0;
+        Some((x - cam * PARALLAX, y / 2.0))
+    }
+
+    pub fn rebase(&mut self, s: f32) {
+        for g in &mut self.cabin_glow {
+            *g -= s;
         }
     }
 

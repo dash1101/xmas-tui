@@ -29,7 +29,127 @@ pub enum Node {
     Santa,
     SantaLeave,
     SantaStay,
+    /// Talking about something they noticed or are doing: (which, line).
+    Aware(usize, usize),
     Bye,
+}
+
+/// Something going on that a villager is aware of, to talk about.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Aware {
+    /// A kid in the middle of building a snowman (or an igloo).
+    Building { igloo: bool },
+    /// A kid who helped build the snowman (igloo) standing nearby.
+    Built { igloo: bool },
+    /// Someone else's snowman (igloo) nearby.
+    SeeBuild { igloo: bool },
+    /// A kid in the middle of a snowball fight.
+    Fighting,
+    /// Saw the villager feed / pet an animal ("bunny", "deer", "fox").
+    SawFeed(&'static str),
+    SawPet(&'static str),
+    /// Saw the villager throwing snowballs; was hit by one.
+    SawSnowball,
+    GotHit,
+    /// Saw the villager give someone a present; was given one.
+    SawGift,
+    GotGift,
+    /// Was carried about by the villager; saw someone else carried.
+    WasCarried,
+    SawCarry,
+    /// Saw the villager come down out of the sky.
+    SawDropIn,
+    /// Saw the villager come out of a house.
+    SawVisit,
+    /// Talked with Santa from the ground just now.
+    TalkedToSanta,
+}
+
+impl Aware {
+    /// What they open with (if it's on their mind), and the things that can
+    /// be said about it: (what the villager says, the reply, what it does).
+    fn lines(self, kid: bool, pick: usize) -> (Option<String>, Vec<(String, String, Option<Act>)>) {
+        let l = |a: &str, b: &str| (a.to_string(), b.to_string(), None);
+        let act = |a: &str, b: &str, x: Act| (a.to_string(), b.to_string(), Some(x));
+        let names = ["Sir Snowsalot", "Frosty Junior", "Mister Carrots", "Big Steve", "Captain Chilly"];
+        match self {
+            Aware::Building { igloo: false } => (
+                Some("we're building a snowman!! wanna help?".into()),
+                vec![
+                    l("that's a great start on the snowman!", "it's gonna be the BIGGEST one ever"),
+                    act("need a hand with it?", "YES! you pack, I'll roll!", Act::HelpBuild),
+                    l("what will you call him?", &format!("{}!", names[pick % names.len()])),
+                ],
+            ),
+            Aware::Building { igloo: true } => (
+                Some("we're making an igloo! it's gonna be HUGE".into()),
+                vec![
+                    l("how's the igloo coming along?", "slowly. the blocks keep falling over"),
+                    act("can I help build it?", "grab some blocks! pack 'em tight!", Act::HelpBuild),
+                    l("will I fit inside?", "hmm… if you squeeze. maybe. no."),
+                ],
+            ),
+            Aware::Built { igloo: false } => (
+                Some("did you see our snowman?! we MADE it!".into()),
+                vec![l("your snowman's brilliant!", "thanks!! the hat was MY idea"), l("does he have a name?", &format!("{}! say hi to him!", names[pick % names.len()]))],
+            ),
+            Aware::Built { igloo: true } => (
+                Some("we built an IGLOO! did you see?".into()),
+                vec![l("how is it inside the igloo?", "SO cozy. members only though"), l("can I join the igloo club?", "you have to know the secret knock")],
+            ),
+            Aware::SeeBuild { igloo } => {
+                let thing = if igloo { "igloo" } else { "snowman" };
+                if kid {
+                    (None, vec![l(&format!("did you build that {thing}?"), "no, but I helped! a bit. I watched")])
+                } else {
+                    (None, vec![l(&format!("who built that {thing}?"), "the kids! took them all afternoon. isn't it grand?")])
+                }
+            }
+            Aware::Fighting => (
+                Some("can't talk — SNOWBALL FIGHT!!".into()),
+                vec![l("who's winning?", "US! obviously!"), act("can I join in?", "you're on OUR team! …just kidding — INCOMING!", Act::Snowball)],
+            ),
+            Aware::SawFeed(a) => (
+                Some(if kid { format!("you fed the {a}!! that was SO cool") } else { format!("that {a} has taken a shine to you, I saw") }),
+                vec![if kid { l(&format!("did you see the {a} eat?"), "from your HAND! can I try next time?") } else { l(&format!("did you see me feed that {a}?"), "I did! it looked so pleased. you've a way with animals") }],
+            ),
+            Aware::SawPet(a) => (
+                None,
+                vec![if kid { l(&format!("did you see me pet the {a}?"), "it let you!! they never let me") } else { l(&format!("that {a} was friendly, wasn't it?"), "they're tame as anything round here, if you're gentle") }],
+            ),
+            Aware::SawSnowball => (
+                None,
+                vec![if kid { l("nice throw, huh?", "it was okay. I could do better") } else { l("sorry if that snowball came close", "ha! I've thrown a few in my time") }],
+            ),
+            Aware::GotHit => (
+                Some(if kid { "hey! you got me with that snowball!".into() } else { "you got me with a snowball, you rascal!".into() }),
+                if kid {
+                    vec![l("sorry! couldn't resist", "the next one's coming YOUR way"), act("rematch?", "oh it is SO on", Act::Snowball)]
+                } else {
+                    vec![l("sorry! couldn't resist", "ha! I'd have done the same at your age")]
+                },
+            ),
+            Aware::SawGift => (None, vec![l("did you see me hand out a present?", if kid { "can I have one?? please?" } else { "I did — that was lovely of you" })]),
+            Aware::GotGift => (
+                Some(if kid { "thank you for the present!! I'm saving it". into() } else { "thank you again for the gift — so thoughtful".into() }),
+                vec![l("I hope you like it!", if kid { "I LOVE it. I'm not sharing it" } else { "it's perfect. I'll treasure it" })],
+            ),
+            Aware::WasCarried => (
+                Some(if kid { "do the flying thing again!!".into() } else { "you carried me halfway across the village!".into() }),
+                vec![l("sorry about carrying you around", if kid { "again! again! AGAIN!" } else { "my feet never touched the ground. I'm still dizzy" })],
+            ),
+            Aware::SawCarry => (None, vec![l("did you see me carrying someone?", if kid { "can you carry ME next?!" } else { "I did! they looked a little dizzy afterwards" })]),
+            Aware::SawDropIn => (
+                Some(if kid { "did you just fall out of the SKY?!".into() } else { "did you just… come down from the sky?".into() }),
+                vec![l("I came down from the sky, you know", if kid { "teach me! teach me!" } else { "I saw! I nearly dropped my cocoa" })],
+            ),
+            Aware::SawVisit => (None, vec![l("I was just visiting next door", if kid { "did they give you cookies?" } else { "they make the best mince pies, don't they?" })]),
+            Aware::TalkedToSanta => (
+                Some(if kid { "I talked to SANTA!! did you see?!".into() } else { "I just spoke to Santa! can you believe it?".into() }),
+                vec![l("you talked to Santa!", if kid { "he said I'm on the nice list!! I think" } else { "he remembered my name. after all these years" })],
+            ),
+        }
+    }
 }
 
 /// What a choice leads to.
@@ -42,11 +162,17 @@ pub enum Act {
     Snowball,
     /// Hand them a cocoa from the pockets.
     GiveCocoa,
+    /// Lend a hand with what they're building.
+    HelpBuild,
 }
 
 pub struct Opt {
     pub label: String,
     pub act: Act,
+    /// What they say back (for answers that aren't a plain step).
+    reply: Option<String>,
+    /// Marks the answer as taken (for awareness lines).
+    tag: Option<u8>,
 }
 
 pub struct Convo {
@@ -64,6 +190,10 @@ pub struct Convo {
     /// Who they are (stable per person).
     seed: u32,
     topic: Option<usize>,
+    /// What they're aware of (most on their mind first).
+    aware: Vec<Aware>,
+    /// Where the box was dragged to (top-left), if it was.
+    pub pos: Option<(i32, i32)>,
     rng: Rng,
 }
 
@@ -111,7 +241,8 @@ const KID_BYE: &[&str] = &["bye!!", "see ya!", "BYE! merry Christmas!", "bye bye
 
 impl Convo {
     /// Start a conversation with `name` (`first`: never met before).
-    pub fn open(id: u64, name: &str, kid: bool, first: bool, ctx: &TalkCtx, talk: &mut Talk, x: f32, seed: u32) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(id: u64, name: &str, kid: bool, first: bool, ctx: &TalkCtx, talk: &mut Talk, x: f32, seed: u32, aware: Vec<Aware>) -> Self {
         let mut c = Convo {
             id,
             name: name.to_string(),
@@ -123,20 +254,25 @@ impl Convo {
             asked: vec![],
             seed: hash(id as u32 ^ 0x5707),
             topic: None,
+            aware,
+            pos: None,
             rng: Rng::new((seed ^ id as u32) as u64 ^ 0x5a1),
         };
         // something topical to talk about, if there is anything going on
         let topic = talk.chat_topic(ctx, x, kid);
         c.topic = talk.chat_line(topic, 0, ctx.days).map(|_| topic);
-        c.line = if first {
-            if kid {
-                c.rng.pick(KID_HI).replace("{name}", name)
-            } else {
-                talk.intro(ctx, x, name, false)
+        // whatever's most on their mind comes first
+        let pick = c.pick_for(7, 97);
+        let opener = c.aware.iter().find_map(|a| a.lines(kid, pick).0);
+        c.line = match (first, opener) {
+            (true, Some(o)) => format!("{} {o}", if kid { format!("hi!! I'm {name}!") } else { format!("hello! I'm {name}.") }),
+            (false, Some(o)) => o,
+            (true, None) if kid => c.rng.pick(KID_HI).replace("{name}", name),
+            (true, None) => talk.intro(ctx, x, name, false),
+            (false, None) => {
+                let hi = if kid { "oh hi again!!" } else { "oh, hello again!" };
+                format!("{hi} {}", talk.remark(ctx, x, kid))
             }
-        } else {
-            let hi = if kid { "oh hi again!!" } else { "oh, hello again!" };
-            format!("{hi} {}", talk.remark(ctx, x, kid))
         };
         c.opts = c.options(Node::Hello, ctx, talk, false);
         c
@@ -148,7 +284,31 @@ impl Convo {
 
     /// The things that can be said back after `node`.
     fn options(&mut self, node: Node, ctx: &TalkCtx, talk: &Talk, cocoa: bool) -> Vec<Opt> {
-        let o = |label: &str, act: Act| Opt { label: label.to_string(), act };
+        let o = |label: &str, act: Act| Opt { label: label.to_string(), act, reply: None, tag: None };
+        let pick = self.pick_for(7, 97);
+        // what's going on around them: the first unasked line about each
+        let kid = self.kid;
+        let aware_opts = |asked: &[u8], aware: &[Aware], only: Option<usize>| -> Vec<Opt> {
+            let mut v = vec![];
+            for (i, a) in aware.iter().enumerate().take(3) {
+                if only.is_some_and(|k| k != i) {
+                    continue;
+                }
+                let (_, lines) = a.lines(kid, pick);
+                for (j, (label, reply, act)) in lines.into_iter().enumerate() {
+                    let tag = (100 + i * 10 + j) as u8;
+                    if asked.contains(&tag) {
+                        continue;
+                    }
+                    let act = act.unwrap_or(Act::Go(Node::Aware(i, j)));
+                    v.push(Opt { label, act, reply: Some(reply), tag: Some(tag) });
+                    if only.is_none() {
+                        break;
+                    }
+                }
+            }
+            v
+        };
         let bye = if self.kid { o("see you later!", Act::Go(Node::Bye)) } else { o("goodbye!", Act::Go(Node::Bye)) };
         let topic = self.topic.and_then(|t| talk.chat_line(t, 0, ctx.days).map(|(mine, _)| (t, mine)));
         match node {
@@ -180,6 +340,11 @@ impl Convo {
                 if let (Some((t, mine)), false) = (topic, self.asked.contains(&4)) {
                     v.insert(1.min(v.len()), o(&mine, Act::Go(Node::Topic(t, 0))));
                 }
+                // things they've noticed go first
+                let mut aw = aware_opts(&self.asked, &self.aware, None);
+                aw.truncate(2);
+                aw.extend(v);
+                let mut v = aw;
                 v.truncate(4);
                 v.push(bye);
                 v
@@ -212,6 +377,14 @@ impl Convo {
             Node::WishGood | Node::WishHope => vec![o("ha! good luck", Act::Go(Node::Again)), bye],
             Node::Santa => vec![o("what will you leave out for him?", Act::Go(Node::SantaLeave)), o("will you stay up to see him?", Act::Go(Node::SantaStay)), bye],
             Node::SantaLeave | Node::SantaStay => vec![o("he'll love that", Act::Go(Node::Again)), bye],
+            Node::Aware(i, _) => {
+                // more to say about the same thing, then back to anything else
+                let mut v = aware_opts(&self.asked, &self.aware, Some(i));
+                v.truncate(3);
+                v.push(o(if self.kid { "cool! what else?" } else { "anyway…" }, Act::Go(Node::Again)));
+                v.push(bye);
+                v
+            }
             Node::Bye => vec![],
         }
     }
@@ -252,6 +425,7 @@ impl Convo {
             }
             Node::SantaLeave => "cookies for him and carrots for the reindeer!".into(),
             Node::SantaStay => "I'm gonna try! I always fall asleep though".into(),
+            Node::Aware(..) => "mm-hm!".into(),
             Node::Bye => self.rng.pick(if self.kid { KID_BYE } else { BYES }).to_string(),
         }
     }
@@ -263,7 +437,10 @@ impl Convo {
             return None;
         }
         let opt = self.opts.get(n.checked_sub(1)?)?;
-        let (mine, act) = (opt.label.clone(), opt.act);
+        let (mine, act, reply, otag) = (opt.label.clone(), opt.act, opt.reply.clone(), opt.tag);
+        if let Some(tag) = otag {
+            self.asked.push(tag);
+        }
         self.steps += 1;
         let node = match act {
             Act::Go(node) => node,
@@ -276,6 +453,11 @@ impl Convo {
                 Node::Bye
             }
             Act::GiveCocoa => Node::Again,
+            // after helping, there may be more to say about it
+            Act::HelpBuild => match otag {
+                Some(tag) => Node::Aware(((tag - 100) / 10) as usize, 0),
+                None => Node::Again,
+            },
         };
         // remember which branches have been taken
         let tag = match node {
@@ -290,11 +472,13 @@ impl Convo {
                 self.asked.push(tag);
             }
         }
-        let theirs = match act {
-            Act::Invite => "I'd love to! lead the way".to_string(),
-            Act::Snowball => "you're ON! ready… THREE!".to_string(),
-            Act::GiveCocoa => "oh, how kind! thank you!".to_string(),
-            Act::Go(_) => self.say(node, ctx, talk),
+        let theirs = match (reply, act) {
+            (Some(r), _) => r,
+            (None, Act::Invite) => "I'd love to! lead the way".to_string(),
+            (None, Act::Snowball) => "you're ON! ready… THREE!".to_string(),
+            (None, Act::GiveCocoa) => "oh, how kind! thank you!".to_string(),
+            (None, Act::HelpBuild) => "thanks!!".to_string(),
+            (None, Act::Go(_)) => self.say(node, ctx, talk),
         };
         self.line = theirs.clone();
         self.opts = self.options(node, ctx, talk, cocoa);
@@ -310,8 +494,10 @@ impl Convo {
         let bw = (w - 4).clamp(24, 66);
         let said = wrap(&self.line, (bw - 4) as usize);
         let bh = 2 + said.len() as i32 + if self.opts.is_empty() { 0 } else { 1 + self.opts.len() as i32 };
-        let x0 = (w - bw) / 2;
-        let y0 = (h - bh - 1).max(0);
+        let (x0, y0) = match self.pos {
+            Some((x, y)) => (x.clamp(0, (w - bw).max(0)), y.clamp(0, (h - bh).max(0))),
+            None => ((w - bw) / 2, (h - bh - 1).max(0)),
+        };
         (x0, y0, bw, bh, said)
     }
 
@@ -321,6 +507,12 @@ impl Convo {
         let first = y0 + 1 + said.len() as i32 + 1;
         let i = y - first;
         (x > x0 && x < x0 + bw - 1 && i >= 0 && (i as usize) < self.opts.len()).then_some(i as usize + 1)
+    }
+
+    /// The box's top-left corner on screen.
+    pub fn origin(&self, w: i32, h: i32) -> (i32, i32) {
+        let (x0, y0, ..) = self.layout(w, h);
+        (x0, y0)
     }
 
     pub fn contains(&self, x: i32, y: i32, w: i32, h: i32) -> bool {
@@ -349,6 +541,8 @@ impl Convo {
         }
         let title = format!(" {} ", self.name);
         f.text(x0 + 2, y0, &title, pal::UI_TITLE, bg, 0.0);
+        // a grip: the box can be dragged anywhere
+        f.text(x0 + bw - 5, y0, " ⠿ ", pal::UI_DIM, bg, 0.0);
         for (i, l) in said.iter().enumerate() {
             f.text(x0 + 2, y0 + 1 + i as i32, l, Rgb::hex(0xf4ecd8), bg, 0.0);
         }
@@ -362,7 +556,7 @@ impl Convo {
             f.text(x0 + 5, y, &label, fg, bg, 0.0);
         }
         if !self.opts.is_empty() {
-            let foot = " 1-5 or click to answer · Esc to leave ";
+            let foot = " 1-5 or click to answer · drag to move · Esc to leave ";
             f.text(x0 + bw - 2 - foot.chars().count() as i32, y0 + bh - 1, foot, pal::UI_DIM, bg, 0.0);
         }
     }
@@ -399,7 +593,8 @@ mod tests {
         for kid in [false, true] {
             for seed in 0..30u32 {
                 let mut talk = Talk::new(seed);
-                let mut c = Convo::open(seed as u64 + 1, "Martha", kid, seed % 2 == 0, &ctx, &mut talk, 0.0, seed);
+                let aware = [vec![], vec![Aware::Building { igloo: seed % 3 == 0 }, Aware::SawFeed("bunny")], vec![Aware::GotHit, Aware::Fighting], vec![Aware::WasCarried, Aware::SawDropIn, Aware::Built { igloo: false }]][seed as usize % 4].clone();
+                let mut c = Convo::open(seed as u64 + 1, "Martha", kid, seed % 2 == 0, &ctx, &mut talk, 0.0, seed, aware);
                 assert!(!c.line.is_empty());
                 let mut rng = Rng::new(seed as u64);
                 for step in 0..12 {
@@ -427,7 +622,7 @@ mod tests {
         let ctx = TalkCtx::default();
         let mut talk = Talk::new(1);
         let job = |talk: &mut Talk| {
-            let mut c = Convo::open(42, "Henry", false, false, &ctx, talk, 0.0, 7);
+            let mut c = Convo::open(42, "Henry", false, false, &ctx, talk, 0.0, 7, vec![]);
             let k = c.opts.iter().position(|o| o.act == Act::Go(Node::Job)).unwrap() + 1;
             c.choose(k, 0.0, &ctx, talk, false).unwrap().1
         };

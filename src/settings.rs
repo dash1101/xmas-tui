@@ -75,6 +75,9 @@ pub enum Act {
     EditCity,
     Close,
     ResetLayout,
+    /// Open the village in its own window / full screen (as a game).
+    PopOut,
+    FullScreen,
     Shuffle,
     Quit,
     Autostart,
@@ -112,6 +115,14 @@ pub struct Settings {
     pub tab: usize,
     /// Sound is currently faded out for other media.
     pub media_quiet: bool,
+    /// Where the panel was dragged to (top-left), and the grab offset while
+    /// it's being dragged by its title bar.
+    pub pos: Option<(i32, i32)>,
+    pub drag: Option<(i32, i32)>,
+    /// Running as a normal window (popped out), not the wallpaper.
+    pub windowed: bool,
+    /// The settings window (no village of its own to pop out).
+    pub standalone: bool,
 }
 
 pub const TABS: [&str; 5] = ["Scene", "Display", "Sound", "Effects", "Windows"];
@@ -267,15 +278,34 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             }
             true
         }
-        Act::Shuffle | Act::EditCity | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate => false,
+        Act::Shuffle | Act::EditCity | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
     }
 }
 
+/// The settings button: always there, top right.
 pub fn gear_rect(w: i32) -> Rect {
-    Rect { x: w - 4, y: 0, w: 3, h: 1 }
+    Rect { x: w - 14, y: 0, w: 13, h: 1 }
 }
 
 impl Settings {
+    /// On the title bar (where the panel can be picked up), not its ✕.
+    pub fn on_title(&self, x: i32, y: i32) -> bool {
+        self.rect.is_some_and(|r| y == r.y && x >= r.x && x < r.x + r.w - 5)
+    }
+
+    /// Start moving the panel (grabbed at (x, y) on its title bar).
+    pub fn start_drag(&mut self, x: i32, y: i32) {
+        if let Some(r) = self.rect {
+            self.drag = Some((x - r.x, y - r.y));
+        }
+    }
+
+    pub fn drag_to(&mut self, x: i32, y: i32) {
+        if let Some((ox, oy)) = self.drag {
+            self.pos = Some((x - ox, y - oy));
+        }
+    }
+
     pub fn click(&self, x: i32, y: i32) -> Option<Act> {
         self.regions.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
     }
@@ -320,14 +350,16 @@ impl Settings {
         self.banner.iter().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
     }
 
+    /// The settings button (always showing, so the panel's always one
+    /// click away — right-click isn't available everywhere).
     pub fn draw_gear(&self, f: &mut Frame, t: f32) {
         let r = gear_rect(f.w as i32);
         let hot = r.contains(self.hover.0, self.hover.1) || self.open;
-        let c = if hot { Rgb::hex(0xffd36b) * (1.1 + 0.1 * (t * 5.0).sin()) } else { pal::UI_DIM * 0.9 };
-        f.put_g(r.x + 1, r.y, Glyph::new('⚙', c).bg(Bg::Mix(pal::UI_PANEL, if hot { 0.7 } else { 0.0 })).lit(0.0));
-        if hot && !self.open {
-            f.text(r.x - 9, r.y, " settings", pal::UI_TEXT, Bg::Mix(pal::UI_PANEL, 0.8), 0.0);
-        }
+        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
+        let (gc, tc) = if hot { (Rgb::hex(0xffd36b) * (1.1 + 0.1 * (t * 5.0).sin()), pal::UI_TITLE) } else { (Rgb::hex(0xffd36b) * 0.8, pal::UI_TEXT * 0.85) };
+        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
+        f.put_g(r.x + 1, r.y, Glyph::new('⚙', gc).bg(bg).lit(0.0));
+        f.text(r.x + 2, r.y, " settings ", tc, bg, 0.0);
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
@@ -337,8 +369,14 @@ impl Settings {
             return;
         }
         let (w, h) = (PANEL_W, PANEL_H);
-        let x = (f.w as i32 - w) / 2;
-        let y = ((f.h as i32 - h) / 2).max(0);
+        // centred, unless it's been dragged somewhere (kept on screen)
+        let (x, y) = match self.pos {
+            Some((px, py)) => (px.clamp(0, (f.w as i32 - w).max(0)), py.clamp(0, (f.h as i32 - h).max(0))),
+            None => ((f.w as i32 - w) / 2, ((f.h as i32 - h) / 2).max(0)),
+        };
+        if self.pos.is_some() {
+            self.pos = Some((x, y));
+        }
         let rect = Rect { x, y, w, h };
         self.rect = Some(rect);
         // frame
@@ -358,6 +396,10 @@ impl Settings {
             }
         }
         f.text(x + 2, y, " ⚙ settings ", pal::UI_TITLE, BG, 0.0);
+        if !self.extras {
+            // a grip: drag the title bar to move the panel
+            f.text(x + w - 9, y, " ⠿ ", pal::UI_DIM, BG, 0.0);
+        }
         let close = Rect { x: x + w - 5, y, w: 3, h: 1 };
         let hot = close.contains(self.hover.0, self.hover.1);
         f.text(close.x, y, " ✕ ", if hot { pal::CANDY_RED * 1.3 } else { pal::UI_TEXT }, BG, 0.0);
@@ -402,11 +444,11 @@ impl Settings {
 
         let tips = [
             "drag any widget to move it  ·  scroll on a value to adjust",
-            if self.extras && !self.keyboard {
-                "⚙ (top-right) opens/closes this  ·  pick up the critters!"
+            if self.extras {
+                "pick up animals & people  ·  hold a click for a right-click menu"
             } else {
                 // (≤ 62 cells: the inner width from lx to the right border)
-                "right-click to open/close  ·  pick up animals & people!"
+                "drag the title bar to move this  ·  hold a click = right-click"
             },
         ];
         for (k, tip) in tips.iter().enumerate() {
@@ -508,8 +550,19 @@ impl Settings {
         let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
         yy += 2;
-        let sc = format!("{:.2}×  (how big everything looks)", cfg.scale);
+        let sc = format!("{:.2}×", cfg.scale);
         self.stepper(f, lx, vx, yy, "Render scale", F::Scale, &sc);
+        // play it like a game: in a window of its own, or full screen
+        if !self.standalone {
+            let bx = vx + 12;
+            if self.windowed {
+                self.button(f, bx, yy, "▣ full screen (F11)", Act::FullScreen);
+            } else {
+                let nx = bx + "▸ pop out".chars().count() as i32 + 3;
+                self.button(f, bx, yy, "▸ pop out", Act::PopOut);
+                self.button(f, nx, yy, "▣ full screen", Act::FullScreen);
+            }
+        }
         yy += 2;
         self.section(f, lx, yy, "UPDATES");
         yy += 1;

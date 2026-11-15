@@ -229,6 +229,37 @@ pub fn spawn(sfx: Sfx, pan: f32, gain: f32, rng: &mut Rng, out: &mut Vec<Voice>)
                 );
             }
         }
+        Sfx::Honk => {
+            // a friendly little two-note "beep beep" from down the road
+            for k in 0..2 {
+                let mut v = Voice::new(Bus::Sfx);
+                for (f, a) in [(392.0, 0.10), (494.0, 0.08)] {
+                    v = v.part(f, a, 0.0).part(f * 2.0, a * 0.35, 0.0).part(f * 3.0, a * 0.15, 0.0);
+                }
+                out.push(v.attack(0.01).hold(0.12, 0.06).pan(p).at(k as f32 * 0.22).gain(1.4).send(0.4).done());
+            }
+        }
+        Sfx::Plane => {
+            // a distant jet: a soft low roar swelling and fading
+            out.push(
+                Voice::new(Bus::Sfx)
+                    .noise(NoiseLayer::new(seed(), Mode::Bp, 420.0, 0.7, 0.6, 0.0))
+                    .part(85.0, 0.05, 0.0)
+                    .attack(1.2)
+                    .hold(0.6, 1.8)
+                    .pan(p)
+                    .gain(0.7)
+                    .send(0.7)
+                    .done(),
+            );
+        }
+        Sfx::Hoot => {
+            // "hoo… hoo-hoo"
+            for (k, at) in [0.0, 0.55, 0.78].iter().enumerate() {
+                let f = if k == 0 { 360.0 } else { 330.0 };
+                out.push(vocal(f, (300.0, 700.0), 0.22, 0.97).pan(p).gain(0.4).at(*at).send(0.8).done());
+            }
+        }
         Sfx::Cursor => {
             let sk = seed();
             let f = 3000.0 + (sk % 2600) as f32;
