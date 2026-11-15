@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎄 xmas-tui
+# <img src="assets/icon/xmas-tui-128.png" width="48" height="48" alt="" align="top"> xmas-tui
 
 **A cozy, glowing Christmas village that lives on the desktop.**
 
@@ -11,7 +11,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 [![Latest release](https://img.shields.io/github/v/release/dash1101/xmas-tui?color=c8202a&label=release)](https://github.com/dash1101/xmas-tui/releases/latest)
 [![CI](https://github.com/dash1101/xmas-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/dash1101/xmas-tui/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f9a52)](LICENSE)
-![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-3a5ad8)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-3a5ad8)
 
 ![The village at night: a giant decorated tree, snow-covered houses, a church, a snowman, Santa's sleigh crossing the aurora, the clock and a weather widget](docs/hero.png)
 
@@ -88,6 +88,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo); then `systemctl --user enable --now xmas-tui`. Updated through the package manager. |
+| **Android** 7+ | `xmas-tui-android.apk` | A live wallpaper: a cut-down village that lives its own life on the home screen. See [Android](#-android-live-wallpaper). |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
 have a one-line installer straight from the repo. On **Linux** (no sudo):
@@ -350,6 +351,35 @@ Debugging: running with `XMAS_SNOW_DEBUG=1` writes `snow-debug.txt` and `snow-ca
 `$XDG_RUNTIME_DIR/xmas-tui/` (KDE) or `%TEMP%\xmas-tui\` (Windows; a directory path as the value is used instead).
 On Windows the status line also has per-phase timings. `XMAS_WINFX=1 xmas-tui --windowed` starts the Windows overlay
 next to a normal window, for testing (e.g. under Wine).
+
+## 📱 Android live wallpaper
+
+<img src="docs/android.png" align="right" width="320" alt="The phone wallpaper at night and at dusk: cottages, the big tree, villagers in bobble hats, and a snowy shelf at the bottom with snow piled on it">
+
+A cut-down village for the phone's home screen, made to be watched rather than played:
+- **The village lives its own life.** Folk wander, stop to chat in speech bubbles, pop into each other's
+  houses and gather by the tree. The villager (green bobble hat) is out among them: greeting everyone by name,
+  playing with their pet, feeding the deer. Deer and rabbits wander through, kids end a chat with a snowball,
+  and someone always spots the shooting stars.
+- **A snowy dock.** A shelf sits under the launcher's dock, and the snow lands on it and piles up, with icicles
+  underneath. Its position, height, width, style (frosted glass, wood, candy cane or stone) and how high the snow
+  piles are all in the settings, so it can be lined up with any launcher.
+- **Taps** (on empty home-screen space): someone waves and says hi, the tree blazes, a house switches its
+  lights, the sky gets a shooting star, and a tap on the dock knocks its snow off.
+- **Day and night** follow the phone's clock (or stay at a chosen time), and the village pans gently as the home
+  screens are swiped.
+- **Settings** (the app's own screen, or the gear in the wallpaper picker): the frame rate (24 fps by default; it
+  only runs while the home screen is showing), snowfall, detail, the villager's name, the pet (cat, dog, bunny or
+  none) and its name, speech bubbles, time of day, and the dock.
+
+**Install:** download `xmas-tui-android.apk` from the [latest release](https://github.com/dash1101/xmas-tui/releases/latest)
+on the phone, open it (allowing installs from the browser or file manager when asked), then open **xmas-tui
+village** and tap **Set as live wallpaper**. Android 7 or newer.
+
+**Build:** `android/build.sh` (a JDK 17 and the Android SDK; no Gradle). The village itself is plain Java in
+`android/src/.../core`, and `android/preview/Preview.java` renders it to PNGs on the desktop.
+
+<br clear="right">
 
 ## 🪟 Windows
 The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) and a portable zip with a standalone

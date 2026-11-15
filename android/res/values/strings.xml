@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">xmas-tui village</string>
+    <string name="settings_title">xmas-tui village</string>
+    <string name="description">A snowy Christmas village living on the home screen: folk go about their evening, a villager greets everyone by name, and snow piles up on the dock.</string>
+    <string name="author">xmas-tui</string>
+</resources>
