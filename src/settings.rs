@@ -23,6 +23,7 @@ pub enum F {
     Traffic,
     TimeOfDay,
     Scale,
+    Zoom,
     Fps,
     Events,
     Aurora,
@@ -78,11 +79,17 @@ pub enum Act {
     Toggle(F),
     EditCity,
     EditPetName,
+    EditName,
     Close,
     ResetLayout,
     /// Open the village in its own window / full screen (as a game).
     PopOut,
     FullScreen,
+    /// The wallpaper went full screen: back behind the desktop.
+    BackToWallpaper,
+    /// A new resolution needs the wallpaper to restart: now, or not yet.
+    RestartNow,
+    RestartLater,
     Shuffle,
     Quit,
     Autostart,
@@ -100,6 +107,8 @@ pub struct Settings {
     pub editing: Option<String>,
     /// The field being edited is the pet's name.
     pub editing_pet: bool,
+    /// The field being edited is the villager's own name.
+    pub editing_name: bool,
     regions: Vec<(Rect, Act)>,
     banner: Vec<(Rect, Act)>,
     pub rect: Option<Rect>,
@@ -130,6 +139,14 @@ pub struct Settings {
     pub windowed: bool,
     /// The settings window (no village of its own to pop out).
     pub standalone: bool,
+    /// The wallpaper itself is showing full screen (not behind the icons).
+    pub wall_full: bool,
+    /// Ask whether to restart for a new resolution.
+    pub restart_ask: bool,
+    /// A brief note at the top (zoom / resolution changes): text, until.
+    pub toast: Option<(String, f32)>,
+    /// The controls card is showing.
+    pub help: bool,
 }
 
 pub const TABS: [&str; 5] = ["Scene", "Display", "Sound", "Effects", "Windows"];
@@ -171,6 +188,11 @@ fn step_list(list: &[f32], v: f32, dir: i32) -> f32 {
     // in the arrow's direction (and stay put past the ends), never backwards
     let next = if dir > 0 { list.iter().find(|&&x| x > v) } else { list.iter().rev().find(|&&x| x < v) };
     next.copied().unwrap_or(v)
+}
+
+/// Resolution as shown in settings: 1 / scale, to the nearest 0.05.
+pub fn resolution(scale: f32) -> f32 {
+    ((1.0 / scale.max(0.1)) * 20.0).round() / 20.0
 }
 
 /// Apply an action to the config. Returns true if anything changed.
@@ -220,7 +242,12 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                         cfg.scene.pet.coat = c[(i + dir as i32).rem_euclid(c.len() as i32) as usize].0.to_string();
                     }
                 }
-                F::Scale => cfg.scale = step_list(&[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], cfg.scale, dir as i32),
+                F::Scale => {
+                    // shown as resolution (1 / scale), in 0.05 steps
+                    let res = (resolution(cfg.scale) + 0.05 * dir).clamp(0.5, 2.0);
+                    cfg.scale = ((1.0 / res) * 10000.0).round() / 10000.0;
+                }
+                F::Zoom => step(&mut cfg.zoom, 0.05 * dir, 1.0, 3.0),
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -305,7 +332,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             }
             true
         }
-        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
+        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
     }
 }
 
@@ -313,6 +340,31 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
 pub fn gear_rect(w: i32) -> Rect {
     Rect { x: w - 14, y: 0, w: 13, h: 1 }
 }
+
+/// The controls button, just left of it.
+pub fn help_rect(w: i32) -> Rect {
+    Rect { x: w - 26, y: 0, w: 11, h: 1 }
+}
+
+/// The controls card: (keys, what they do).
+const CONTROLS: [(&str, &str); 16] = [
+    ("W A S D / arrows", "walk about"),
+    ("Shift (held)", "run"),
+    ("E / Space / Enter", "talk, use, sit, climb, pick up"),
+    ("F", "invite someone along / send them home"),
+    ("R", "scoop a snowball, then throw it"),
+    ("Q", "what's in hand: berries, a carrot, cocoa…"),
+    ("1 - 5", "use an item (or buy one at the cabin)"),
+    ("I", "your pockets and the Christmas list"),
+    ("Esc", "close what's open · else the settings"),
+    ("F11", "full screen / back to the wallpaper"),
+    ("Ctrl + / Ctrl -", "zoom in / out (Ctrl 0: back to 1×)"),
+    ("Ctrl Shift + / -", "resolution: finer / coarser detail"),
+    ("click", "people, animals, the sky, the train…"),
+    ("drag", "pick up people & animals; move widgets"),
+    ("wheel · Ctrl wheel", "look along the village · up into the sky"),
+    ("hold a click", "the right-click menu"),
+];
 
 impl Settings {
     /// On the title bar (where the panel can be picked up), not its ✕.
@@ -355,15 +407,25 @@ impl Settings {
     /// "A new version is out — install?" (when updates ask first).
     pub fn draw_banner(&mut self, f: &mut Frame, t: f32) {
         self.banner.clear();
-        let Some(v) = crate::update::offer() else { return };
-        let msg = format!(" ✦ xmas-tui {v} is out ");
-        let (install, later) = (" install ", " later ");
+        if let Some((text, until)) = self.toast.as_ref().filter(|(_, u)| t < *u) {
+            let k = ((until - t) / 0.4).clamp(0.0, 1.0);
+            let n = text.chars().count() as i32 + 4;
+            let (x, y) = ((f.w as i32 - n) / 2, 1);
+            f.text(x, y, &format!("  {text}  "), Rgb::hex(0xffd36b) * (0.4 + 0.8 * k), Bg::Mix(pal::UI_PANEL, 0.9 * k), 0.0);
+            return;
+        }
+        let (msg, install, later, yes, no) = if self.restart_ask {
+            (" ✦ the new resolution needs a restart ".to_string(), " restart now ", " later ", Act::RestartNow, Act::RestartLater)
+        } else {
+            let Some(v) = crate::update::offer() else { return };
+            (format!(" ✦ xmas-tui {v} is out "), " install ", " later ", Act::InstallUpdate, Act::DismissUpdate)
+        };
         let n = (msg.chars().count() + install.len() + later.len() + 2) as i32;
         let (x, y) = ((f.w as i32 - n) / 2, 1);
         let bg = Bg::Mix(pal::UI_PANEL, 0.88);
         let tw = 0.9 + 0.1 * (t * 2.0).sin();
         let mut cx = f.text(x, y, &msg, pal::UI_TEXT * tw, bg, 0.0);
-        for (label, act, col) in [(install, Act::InstallUpdate, Rgb::hex(0xffd36b)), (later, Act::DismissUpdate, pal::UI_DIM)] {
+        for (label, act, col) in [(install, yes, Rgb::hex(0xffd36b)), (later, no, pal::UI_DIM)] {
             let r = Rect { x: cx + 1, y, w: label.chars().count() as i32, h: 1 };
             let hot = r.contains(self.hover.0, self.hover.1);
             let b = Bg::Mix(if hot { Rgb::hex(0x34406a) } else { Rgb::hex(0x1a2242) }, 0.95);
@@ -377,9 +439,47 @@ impl Settings {
         self.banner.iter().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
     }
 
+    /// The controls card (? button, F1, or "?").
+    pub fn draw_help(&mut self, f: &mut Frame) {
+        if !self.help {
+            return;
+        }
+        let (w, h) = (70, CONTROLS.len() as i32 + 5);
+        let (x, y) = ((f.w as i32 - w) / 2, ((f.h as i32 - h) / 2).max(1));
+        for yy in y..y + h {
+            for xx in x..x + w {
+                let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + h - 1) {
+                    (true, _, true, _) => '╭',
+                    (_, true, true, _) => '╮',
+                    (true, _, _, true) => '╰',
+                    (_, true, _, true) => '╯',
+                    (_, _, true, _) | (_, _, _, true) => '─',
+                    (true, _, _, _) | (_, true, _, _) => '│',
+                    _ => ' ',
+                };
+                f.put_g(xx, yy, Glyph::new(ch, pal::UI_BORDER).bg(BG).lit(0.0));
+            }
+        }
+        f.text(x + 2, y, " ⌨ controls ", pal::UI_TITLE, BG, 0.0);
+        f.text(x + w - 5, y, " ✕ ", pal::UI_TEXT, BG, 0.0);
+        for (i, (k, what)) in CONTROLS.iter().enumerate() {
+            let yy = y + 2 + i as i32;
+            f.text(x + 3, yy, k, Rgb::hex(0xffd36b), BG, 0.0);
+            f.text(x + 24, yy, what, pal::UI_TEXT, BG, 0.0);
+        }
+        f.text(x + 3, y + h - 2, "click anywhere to close", pal::UI_DIM, BG, 0.0);
+    }
+
     /// The settings button (always showing, so the panel's always one
     /// click away — right-click isn't available everywhere).
     pub fn draw_gear(&self, f: &mut Frame, t: f32) {
+        // and the controls button beside it
+        let r = help_rect(f.w as i32);
+        let hot = r.contains(self.hover.0, self.hover.1) || self.help;
+        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
+        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
+        f.put_g(r.x + 1, r.y, Glyph::new('?', Rgb::hex(0x8ad0ff) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
+        f.text(r.x + 2, r.y, " controls", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         let r = gear_rect(f.w as i32);
         let hot = r.contains(self.hover.0, self.hover.1) || self.open;
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
@@ -532,6 +632,13 @@ impl Settings {
         let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
         let cx = self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes) + 3;
         self.check(f, cx, yy, "Villager (WASD)", Act::Toggle(F::Player), cfg.scene.player);
+        yy += 1;
+        f.text(lx, yy, "Your name", pal::UI_TEXT, BG, 0.0);
+        let (txt, editing) = match (&self.editing, self.editing_name) {
+            (Some(s), true) => (s.clone(), true),
+            _ => (if cfg.scene.name.is_empty() { "(click to set)".into() } else { cfg.scene.name.clone() }, false),
+        };
+        self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::EditName, t);
         yy += 2;
         // the villager's pet: kind, colour, name
         self.stepper(f, lx, vx, yy, "Pet", F::PetKind, &cfg.scene.pet.kind);
@@ -545,22 +652,11 @@ impl Settings {
         yy += 1;
         if cfg.scene.pet.kind != "none" {
             f.text(lx, yy, "Pet's name", pal::UI_TEXT, BG, 0.0);
-            let field = Rect { x: vx, y: yy, w: 18, h: 1 };
             let (txt, editing) = match (&self.editing, self.editing_pet) {
                 (Some(s), true) => (s.clone(), true),
                 _ => (if cfg.scene.pet.name.is_empty() { "(not named yet)".into() } else { cfg.scene.pet.name.clone() }, false),
             };
-            for i in 0..field.w {
-                let fg = if editing { pal::UI_TITLE } else { pal::UI_TEXT };
-                let bgc = if editing { Rgb::hex(0x24305a) } else { Rgb::hex(0x1a2242) };
-                let ch = txt.chars().nth(i as usize).unwrap_or(' ');
-                f.put_g(field.x + i, yy, Glyph::new(ch, fg).solid(bgc).lit(0.0));
-            }
-            if editing && (t * 2.0) as i32 % 2 == 0 {
-                let cx = field.x + txt.chars().count().min(field.w as usize - 1) as i32;
-                f.put_g(cx, yy, Glyph::new('▏', Rgb::hex(0xffd36b)).solid(Rgb::hex(0x1a2240)).lit(0.0));
-            }
-            self.regions.push((field, Act::EditPetName));
+            self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::EditPetName, t);
         }
         self.button(f, vx + 22, yy, "↻ shuffle scene", Act::Shuffle);
     }
@@ -582,7 +678,7 @@ impl Settings {
         yy += 1;
         f.text(lx, yy, "Weather city", pal::UI_TEXT, BG, 0.0);
         let field = Rect { x: vx, y: yy, w: 30, h: 1 };
-        let (txt, editing) = match (&self.editing, self.editing_pet) {
+        let (txt, editing) = match (&self.editing, self.editing_pet || self.editing_name) {
             (Some(s), false) => (s.clone(), true),
             _ => (if cfg.weather.city.is_empty() { "(click to set)".into() } else { cfg.weather.city.clone() }, false),
         };
@@ -611,17 +707,26 @@ impl Settings {
         let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
         yy += 2;
-        let sc = format!("{:.2}×", cfg.scale);
-        self.stepper(f, lx, vx, yy, "Render scale", F::Scale, &sc);
+        // resolution: finer detail at the same size; zoom: bigger
+        let res = format!("{:.2}× detail", resolution(cfg.scale));
+        self.stepper(f, lx, vx, yy, "Resolution", F::Scale, &res);
+        let zx = vx + 22;
+        f.text(zx, yy, "Zoom", pal::UI_TEXT, BG, 0.0);
+        self.arrow(f, zx + 5, yy, '◂', Act::Dec(F::Zoom));
+        let c = f.text(zx + 7, yy, &format!("{:.2}×", cfg.zoom), pal::UI_TITLE, BG, 0.0);
+        self.arrow(f, c + 1, yy, '▸', Act::Inc(F::Zoom));
+        yy += 1;
         // play it like a game: in a window of its own, or full screen
         if !self.standalone {
-            let bx = vx + 12;
+            let bx = vx;
             if self.windowed {
                 self.button(f, bx, yy, "▣ full screen (F11)", Act::FullScreen);
+            } else if self.wall_full {
+                self.button(f, bx, yy, "▢ back to wallpaper (F11)", Act::BackToWallpaper);
             } else {
                 let nx = bx + "▸ pop out".chars().count() as i32 + 3;
                 self.button(f, bx, yy, "▸ pop out", Act::PopOut);
-                self.button(f, nx, yy, "▣ full screen", Act::FullScreen);
+                self.button(f, nx, yy, "▣ full screen (F11)", Act::FullScreen);
             }
         }
         yy += 2;
@@ -776,6 +881,21 @@ impl Settings {
         self.stepper(f, lx, vx, yy, "On", F::WinLightCount, &n);
         yy += 1;
         self.slider(f, lx, vx, yy, "Brightness", F::WinLightGlow, wc.light_glow / 2.0, &format!("{:.1}×", wc.light_glow), t);
+    }
+
+    /// A one-line text field (a click edits it).
+    fn field(&mut self, f: &mut Frame, r: Rect, txt: &str, editing: bool, act: Act, t: f32) {
+        for i in 0..r.w {
+            let fg = if editing { pal::UI_TITLE } else { pal::UI_TEXT };
+            let bgc = if editing { Rgb::hex(0x24305a) } else { Rgb::hex(0x1a2242) };
+            let ch = txt.chars().nth(i as usize).unwrap_or(' ');
+            f.put_g(r.x + i, r.y, Glyph::new(ch, fg).solid(bgc).lit(0.0));
+        }
+        if editing && (t * 2.0) as i32 % 2 == 0 {
+            let cx = r.x + txt.chars().count().min(r.w as usize - 1) as i32;
+            f.put_g(cx, r.y, Glyph::new('▏', Rgb::hex(0xffd36b)).solid(Rgb::hex(0x1a2240)).lit(0.0));
+        }
+        self.regions.push((r, act));
     }
 
     fn section(&self, f: &mut Frame, x: i32, y: i32, s: &str) {

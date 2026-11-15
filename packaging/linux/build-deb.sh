@@ -20,9 +20,12 @@ Type=Application
 Name=xmas-tui settings
 Comment=Settings for the xmas-tui Christmas wallpaper
 Exec=xmas-tui --settings-window
-Icon=preferences-desktop-wallpaper
+Icon=xmas-tui
 Categories=Settings;DesktopSettings;
 D
+for n in 16 24 32 48 64 128 256 512; do
+  install -D -m 644 "$ROOT/assets/icon/xmas-tui-$n.png" "$PKG/usr/share/icons/hicolor/${n}x${n}/apps/xmas-tui.png"
+done
 chmod -R u+rwX,go+rX,go-w "$PKG"
 SIZE=$(du -sk "$PKG/usr" | cut -f1)
 cat > "$PKG/DEBIAN/control" <<C

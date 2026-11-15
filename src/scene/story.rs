@@ -218,7 +218,13 @@ pub enum Act {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PetAct {
     Fuss,
+    /// The play menu; throw a toy (pets::ToyKind as 0 yarn, 1 ball, 2
+    /// stick, 3 carrot); a trick; "chase me!"; a dangled scarf.
     Play,
+    Throw(u8),
+    Trick,
+    Zoomies,
+    Tease,
     Come,
     Stay,
     /// A page of names to choose from; a name (index into the names).
@@ -434,6 +440,24 @@ pub fn temper_of(id: u64, kid: bool) -> Temper {
         KID_TEMPERS[h % KID_TEMPERS.len()]
     } else {
         TEMPERS[h % TEMPERS.len()]
+    }
+}
+
+/// A hello with the villager's name in it (when they've picked one): on a
+/// first meeting, now and then word has got round; after that, people
+/// greet them by name.
+pub fn by_name(line: &str, you: &str, first: bool, kid: bool, roll: u32) -> String {
+    if you.is_empty() {
+        return line.to_string();
+    }
+    match (first, kid, roll % 3) {
+        (true, false, 0) => format!("{line} oh — you must be {you}! word gets round in a village this size"),
+        (true, true, 0) => format!("{line} wait, are you {you}? everyone's talking about you!"),
+        (true, ..) => line.to_string(),
+        (false, true, 0 | 1) => format!("{you}!! {line}"),
+        (false, false, 0) => format!("{you}! {line}"),
+        (false, false, 1) => format!("ah, {you}. {line}"),
+        _ => line.to_string(),
     }
 }
 

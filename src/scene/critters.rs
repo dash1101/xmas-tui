@@ -148,12 +148,14 @@ impl Critter {
             Kind::Train => vec![],
         }
     }
-    /// (x, top, w, h) of the sprite in cells.
-    fn bbox(&self, t: f32) -> (i32, i32, i32, i32) {
+    /// (x, top, w, h) of the sprite in cells, drawn `k` times bigger.
+    fn bbox(&self, t: f32, k: f32) -> (i32, i32, i32, i32) {
         let rows = self.sprite(t);
-        let w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(1) as i32;
-        let h = rows.len() as i32;
-        (self.x.round() as i32, self.y.round() as i32 - h + 1, w, h)
+        let w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(1) as f32;
+        let h = rows.len() as f32;
+        let (bw, bh) = ((w * k).round() as i32, (h * k).round() as i32);
+        let left = (self.x + w * (1.0 - k) / 2.0).round() as i32;
+        (left, self.y.round() as i32 - bh + 1, bw.max(1), bh.max(1))
     }
     fn centre(&self) -> f32 {
         let w = match self.kind {
@@ -227,6 +229,9 @@ struct Bird {
 }
 
 pub struct Critters {
+    /// How big everyone's drawn (1 at 75 rows; 2 at 150), and how far they
+    /// walk to match.
+    pub k: f32,
     list: Vec<Critter>,
     pub bushes: Vec<Bush>,
     prints: Vec<(i32, i32, f32)>,
@@ -300,6 +305,7 @@ impl Critters {
         let mut rng = Rng::new(seed as u64 ^ 0xc417);
         let lo: Vec<i32> = ctx.ground_row.iter().map(|g| (g + 4).min(ctx.h - 2)).collect();
         let mut c = Critters {
+            k: 1.0,
             list: vec![],
             bushes: vec![],
             prints: vec![],
@@ -560,7 +566,7 @@ impl Critters {
             if c.kind == Kind::Train {
                 continue;
             }
-            let (bx, by, bw, bh) = c.bbox(t);
+            let (bx, by, bw, bh) = c.bbox(t, self.k);
             // a little forgiveness around small sprites
             if x >= bx - 1 && x <= bx + bw && y >= by - 1 && y <= by + bh - 1 && best.map(|b| c.y > b.1).unwrap_or(true) {
                 best = Some((i, c.y));
@@ -683,7 +689,9 @@ impl Critters {
             let rng = &mut self.rng;
             let c = &mut self.list[i];
             c.age += dt;
+            let wk = self.k;
             let mv = |c: &mut Critter, k: f32| {
+                let k = k * wk;
                 let hop = if c.kind == Kind::Rabbit { ((c.age * 3.0).fract() < 0.5) as i32 as f32 * 1.6 } else { 1.0 };
                 c.x += c.dir * c.speed * k * dt * hop;
             };
@@ -836,8 +844,10 @@ impl Critters {
                     mv(c, 1.6);
                     if t > until || !ids.contains(&target) {
                         c.st = St::Idle { until: t + 1.5 };
-                        let msg = lines.fox_gives_up();
-                        d.bubble(c.centre() as i32, c.y as i32 - 3, &msg, t);
+                        if c.kind == Kind::Fox {
+                            let msg = lines.fox_gives_up();
+                            d.bubble(c.centre() as i32, c.y as i32 - 3, &msg, t);
+                        }
                     }
                 }
                 St::Munch { bush, until, bite } => {
@@ -898,12 +908,12 @@ impl Critters {
             let Some(p) = &mut c.pet else { continue };
             // a step behind (the dog a lead's length), and on the ground even
             // while their person is up in the air
-            let tx = cx - cdir * if p.kind == PetKind::Dog { 4.0 } else { 3.0 };
+            let tx = cx - cdir * if p.kind == PetKind::Dog { 4.0 } else { 3.0 } * self.k;
             let ty = if held { p.y.max(ground) } else { cy };
             let dx = tx - p.x;
             p.walking = dx.abs() > 0.6;
             if p.walking {
-                let v = (dx.abs() * 3.0).clamp(2.0, if held { 14.0 } else { 30.0 });
+                let v = (dx.abs() * 3.0).clamp(2.0, if held { 14.0 } else { 30.0 }) * self.k;
                 p.x += dx.signum() * (v * dt).min(dx.abs());
                 p.dir = dx.signum();
             } else {
@@ -1098,6 +1108,16 @@ impl Critters {
                     d.bubble(ax as i32, ay as i32 - 4, &m1, t);
                     d.bubble(bx as i32, by as i32 - 4, &m2, t + 1.3);
                     d.sound(Sfx::Greet, ax, 0.8);
+                    // two pets meeting: noses, then a happy bounce about
+                    if let (Some(pa), Some(pb)) = (self.list[i].pet.as_ref().map(|p| (p.x, p.y)), self.list[j].pet.as_ref().map(|p| (p.x, p.y))) {
+                        for k in [i, j] {
+                            if let Some(p) = &mut self.list[k].pet {
+                                p.happy_until = t + 2.8;
+                            }
+                        }
+                        d.emote((pa.0 + pb.0) / 2.0, pa.1.min(pb.1) - 2.0, '♥', Rgb::hex(0xff6b8a), 2);
+                        d.sound(Sfx::Bark, pa.0, 0.35);
+                    }
                 } else if ak == Kind::Kid && bk == Kind::Kid {
                     // snowball!
                     self.list[i].st = St::Throw { until: t + 0.8 };
@@ -1106,6 +1126,24 @@ impl Critters {
                     let flight = 0.55;
                     self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (by - ay) / flight - 15.0 * flight, target: self.list[j].id, age: 0.0, yours: false, land: by + 0.5 });
                     d.sound(Sfx::Snowball, ax, 0.5);
+                } else if ak == Kind::Rabbit && bk == Kind::Rabbit {
+                    // tag! one hops off, the other gives chase (and then the
+                    // other way round, next time they meet)
+                    self.list[j].st = St::Flee { until: t + 2.2 };
+                    self.list[j].dir = towards;
+                    let rid = self.list[j].id;
+                    self.list[i].st = St::Chase { target: rid, until: t + 2.0 };
+                    self.list[i].dir = towards;
+                    d.emote((ax + bx) / 2.0, ay.min(by) - 2.0, '♥', Rgb::hex(0xff9ab0), 1);
+                    d.sound(Sfx::Rabbit, ax, 0.4);
+                } else if ak == Kind::Deer && bk == Kind::Deer {
+                    // a nuzzle, nose to nose
+                    self.list[i].st = St::Idle { until: t + 3.0 };
+                    self.list[i].dir = towards;
+                    self.list[j].st = St::Idle { until: t + 3.0 };
+                    self.list[j].dir = -towards;
+                    d.emote((ax + bx) / 2.0, ay.min(by) - 3.0, '♥', Rgb::hex(0xff6b8a), 2);
+                    d.sound(Sfx::Deer, ax, 0.4);
                 } else if ak == Kind::Fox && bk == Kind::Rabbit {
                     // a playful chase (the fox never wins)
                     self.list[j].st = St::Flee { until: t + 3.5 };
@@ -1334,6 +1372,44 @@ impl Critters {
     }
 
     /// Their pet, if they have one: (kind, name).
+    /// An animal near (x, y) within `r` columns that's free to play or be
+    /// chased: (id, kind name, centre, row).
+    pub fn animal_near(&self, x: f32, y: f32, r: f32) -> Option<(u64, &'static str, f32, f32)> {
+        self.list
+            .iter()
+            .filter(|c| c.animal() && c.free() && (c.centre() - x).abs() <= r && (c.y - y).abs() <= 6.0)
+            .min_by(|a, b| (a.centre() - x).abs().partial_cmp(&(b.centre() - x).abs()).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|c| {
+                let k = match c.kind {
+                    Kind::Deer => "deer",
+                    Kind::Fox => "fox",
+                    _ => "rabbit",
+                };
+                (c.id, k, c.centre(), c.y)
+            })
+    }
+
+    /// Startled by something at column `from`: off they go, the other way.
+    pub fn startle(&mut self, id: u64, from: f32, t: f32, d: &mut Director) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && c.free()) {
+            c.dir = (c.centre() - from).signum();
+            c.st = St::Flee { until: t + 2.5 };
+            d.emote(c.centre(), c.y - 2.0, '!', Rgb::hex(0xffd36b), 1);
+        }
+    }
+
+    /// A villager's pet near (x, y): (owner id, its column, row, kind).
+    pub fn vpet_near(&self, x: f32, y: f32, r: f32) -> Option<(u64, f32, f32, PetKind)> {
+        self.list.iter().filter_map(|c| c.pet.as_ref().map(|p| (c.id, p.x, p.y, p.kind))).find(|&(_, px, py, _)| (px - x).abs() <= r && (py - y).abs() <= 3.0)
+    }
+
+    /// That villager's pet bounces about happily (playing with another).
+    pub fn vpet_play(&mut self, owner: u64, t: f32) {
+        if let Some(p) = self.list.iter_mut().find(|c| c.id == owner).and_then(|c| c.pet.as_mut()) {
+            p.happy_until = t + 3.0;
+        }
+    }
+
     pub fn pet_of(&self, id: u64) -> Option<(PetKind, &'static str)> {
         self.list.iter().find(|c| c.id == id).and_then(|c| c.pet.as_ref().map(|p| (p.kind, p.name)))
     }
@@ -1599,7 +1675,7 @@ impl Critters {
     }
 
     pub fn bbox_of(&self, id: u64, t: f32) -> Option<(i32, i32, i32, i32)> {
-        self.list.iter().find(|c| c.id == id).map(|c| c.bbox(t))
+        self.list.iter().find(|c| c.id == id).map(|c| c.bbox(t, self.k))
     }
 
     pub fn centre_of(&self, id: u64) -> Option<f32> {
@@ -1628,7 +1704,6 @@ impl Critters {
         self.list.iter().find(|c| c.id == id).map(|c| c.x)
     }
 
-    #[cfg(test)]
     pub fn pos_of(&self, id: u64) -> Option<(f32, f32)> {
         self.list.iter().find(|c| c.id == id).map(|c| (c.centre(), c.y))
     }
@@ -2064,17 +2139,18 @@ impl Critters {
         for (_, it) in items {
             match it {
                 Item::B(b) => draw_bush(f, b, t, glow),
-                Item::C(c) => draw_critter(f, c, t, glow),
+                Item::C(c) => draw_critter(f, c, t, glow, self.k),
             }
         }
         // pets (pixel art, under the glyphs): the lead first, then the pet
+        let pk = pet_scale(self.k);
         for c in &self.list {
             let Some(p) = &c.pet else { continue };
             let feet = (p.y * 2.0).round() as i32 + 1;
             if p.kind == PetKind::Dog && !c.held() {
                 // from the hand to the collar, sagging a little
-                let (hx, hy) = (c.centre() + c.dir * 0.2, c.y * 2.0 - 2.0);
-                let (kx, ky) = (p.x + 0.5 + p.dir * 1.5, feet as f32 - 3.0);
+                let (hx, hy) = (c.centre() + c.dir * 0.2 * self.k, (c.y + 1.0) * 2.0 - 4.0 * self.k);
+                let (kx, ky) = (p.x + 0.5 + p.dir * 1.5 * pk as f32, feet as f32 - 3.0 * pk as f32);
                 let n = ((hx - kx).abs().max((hy - ky).abs()) as i32).max(1);
                 for k in 0..=n {
                     let u = k as f32 / n as f32;
@@ -2083,14 +2159,14 @@ impl Critters {
                 }
             }
             let pose = if t < p.happy_until { Pose::Up } else if p.walking { Pose::Walk } else { Pose::Sit };
-            pets::draw(f, p.kind, p.body, p.marks, p.x + 0.5, feet, p.dir, pose, t + c.id as f32, 1, Some(Rgb::hex(0xc8202a)));
+            pets::draw(f, p.kind, p.body, p.marks, p.x + 0.5, feet, p.dir, pose, t + c.id as f32, pk, Some(Rgb::hex(0xc8202a)));
         }
     }
 
     /// Whoever is being carried or falling, snowballs and birds.
     pub fn draw_top(&self, f: &mut Frame, t: f32, glow: f32) {
         for c in self.list.iter().filter(|c| c.held() || matches!(c.st, St::Fall { .. })) {
-            draw_critter(f, c, t, glow);
+            draw_critter(f, c, t, glow, self.k);
         }
         for b in &self.balls {
             f.put_g(b.x.round() as i32, b.y.round() as i32, Glyph::new('●', Rgb::hex(0xf2f6ff)).lit(0.3));
@@ -2143,13 +2219,55 @@ fn draw_bush(f: &mut Frame, b: &Bush, t: f32, glow: f32) {
     }
 }
 
-fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32) {
+/// Pets' pixel scale for a village drawn `k` times bigger.
+pub fn pet_scale(k: f32) -> i32 {
+    (k.round() as i32).max(1)
+}
+
+fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32) {
+    // people, on a screen tall enough: the same pixel-art folk as indoors
+    if k >= 1.75 && c.person() && !c.held() && !matches!(c.st, St::Fall { .. }) {
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
+        let kid = c.kind == Kind::Kid;
+        let wave = matches!(c.st, St::Greet { .. } | St::Throw { .. } | St::Petting { .. });
+        let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { 1 } else { 0 };
+        let b = super::interior::Big {
+            x: c.centre(),
+            feet: c.y.round() as i32 - bob,
+            dir: c.dir,
+            step: moving && (c.age * rate) as i32 % 2 == 0,
+            hat: Some(if kid { c.hat } else { pal::CANDY_RED }),
+            hair: c.hat,
+            coat: c.color,
+            scarf: None,
+            sit: None,
+            kid,
+            arms_up: wave && (t * 3.0) as i32 % 2 == 0,
+            outdoor: true,
+        };
+        b.draw(f, t);
+        if c.kind == Kind::Walker {
+            // the lantern in hand
+            let (lx, ly) = (c.centre().round() as i32 + if c.dir > 0.0 { 3 } else { -4 }, c.y.round() as i32 * 2 - 5);
+            let fl = 0.85 + 0.15 * (t * 9.0 + c.x).sin();
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                f.px_sprite(lx + dx, ly + dy, Rgb::hex(0xffd27a) * (1.2 * fl));
+            }
+            f.light_px(lx as f32 + 1.0, ly as f32 + 1.0, Rgb::hex(0xffc060) * (4.5 * fl * glow));
+        }
+        return;
+    }
     let rows = c.sprite(t);
     let hop = if c.kind == Kind::Rabbit && matches!(c.st, St::Walk | St::Flee { .. }) && (c.age * 3.0).fract() < 0.5 { -1 } else { 0 };
     let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { -1 } else { 0 };
     let top = c.y.round() as i32 - rows.len() as i32 + 1 + hop + bob;
     let n = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as i32;
     let x0 = c.x.round() as i32;
+    // drawn bigger on a taller screen: each cell scaled about the feet
+    let (axi, ayi) = (x0, c.y.round() as i32 + 1);
+    let (ax, ay) = (c.x + n as f32 * (1.0 - k) / 2.0, c.y + 1.0);
+    let place = move |cx: i32, cy: i32| (ax + (cx - axi) as f32 * k, ay + (cy - ayi) as f32 * k);
     for (ry, row) in rows.iter().enumerate() {
         for (i, ch) in row.chars().enumerate() {
             if ch == ' ' {
@@ -2168,19 +2286,31 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32) {
                 (Kind::Walker | Kind::Kid, '╱' | '╲') => c.color * 0.9,
                 _ => c.color,
             };
-            f.put_g(cx, top + ry as i32, Glyph::new(ch, col).bg(Bg::Scene).lit(0.6));
+            let cy = top + ry as i32;
+            if k <= 1.0 {
+                f.put_g(cx, cy, Glyph::new(ch, col).bg(Bg::Scene).lit(0.6));
+            } else {
+                let (sx, sy) = place(cx, cy);
+                f.sprite_cell(sx, sy, k, Glyph::new(ch, col));
+            }
             if c.kind == Kind::Walker && ch == '◘' {
                 let fl = 0.85 + 0.15 * (t * 9.0 + c.x).sin();
-                f.light_cell(cx, top + ry as i32, Rgb::hex(0xffc060) * (4.5 * fl * glow));
+                if k <= 1.0 {
+                    f.light_cell(cx, cy, Rgb::hex(0xffc060) * (4.5 * fl * glow));
+                } else {
+                    let (sx, sy) = place(cx, cy);
+                    f.light_px(sx + 0.5 * k, (sy + 0.5 * k) * 2.0, Rgb::hex(0xffc060) * (4.5 * fl * glow));
+                }
             }
         }
     }
     // dizzy stars circling over their head
     if matches!(c.st, St::Dizzy { .. }) {
         let cx = c.centre();
+        let top = place(x0, top).1;
         for k in 0..3 {
             let a = t * 5.0 + k as f32 * 2.09;
-            let (x, y) = (cx + a.cos() * 1.6, top as f32 - 1.0 + a.sin() * 0.4);
+            let (x, y) = (cx + a.cos() * 1.6, top - 1.0 + a.sin() * 0.4);
             let tw = 0.6 + 0.4 * noise1(t * 3.0 + k as f32, 41);
             f.put_g(x.round() as i32, y.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a) * tw).lit(0.0));
         }

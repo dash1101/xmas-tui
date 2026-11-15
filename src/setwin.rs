@@ -738,8 +738,8 @@ mod tests {
             let px = crate::tray::icon_rgba(n);
             assert_eq!(px.len(), n * n * 4);
             let alpha = |x: usize, y: usize| px[(y * n + x) * 4 + 3];
-            assert_eq!(alpha(0, n - 1), 0, "corners transparent");
-            assert!(alpha(n / 2, n * 3 / 4) > 200, "solid trunk/tree in the middle");
+            assert!(alpha(0, n - 1) < 100, "rounded (see-through) corners");
+            assert!(alpha(n / 2, n * 3 / 4) > 200, "a solid tile under the tree");
         }
     }
 }

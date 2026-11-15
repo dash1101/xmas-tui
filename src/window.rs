@@ -73,11 +73,14 @@ struct Runner {
     polled: (bool, bool),
     /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
     #[cfg_attr(not(windows), allow(dead_code))]
-    keys: [bool; 13],
+    keys: [bool; 15],
     /// The render scale the layout was last made for.
     scale: f32,
     /// Ctrl is held (Ctrl+wheel looks up into the sky).
     ctrl: bool,
+    shift: bool,
+    /// Desktop mode: the wallpaper is showing full screen, in front.
+    wall_full: bool,
     paused: bool,
     /// Desktop mode: attach_to_desktop succeeded (false = we're the
     /// top-level fallback window).
@@ -141,6 +144,33 @@ impl Runner {
                 app.start_audio();
                 self.app = Some(app);
             }
+        }
+    }
+
+    /// Desktop mode: the wallpaper comes out in front, full screen, with
+    /// the keyboard (on), or goes back behind the icons (off).
+    #[cfg(windows)]
+    fn set_wall_full(&mut self, on: bool) {
+        let Some(g) = self.gfx.as_ref() else { return };
+        if !self.opts.desktop || on == self.wall_full {
+            return;
+        }
+        let hwnd = g.hwnd as windows_sys::Win32::Foundation::HWND;
+        let (x, y, w, h) = (g.origin.0, g.origin.1, g.size.0 as i32, g.size.1 as i32);
+        if on {
+            crate::winsys::bring_to_front(hwnd, x, y, w, h);
+        } else {
+            self.attached = crate::winsys::back_to_desktop(hwnd, x, y, w, h);
+        }
+        self.wall_full = on;
+        self.paused = false;
+        if let Some(app) = self.app.as_mut() {
+            app.set_keyboard(on);
+            app.release_all();
+        }
+        if let Some(g) = self.gfx.as_mut() {
+            g.force = true;
+            g.window.request_redraw();
         }
     }
 
@@ -256,7 +286,8 @@ impl Runner {
         let _ = was_r;
         // walking around: keys go to Explorer's desktop window, so read
         // them while it's focused and feed presses / releases through
-        let keys = crate::winsys::desktop_keys().unwrap_or([false; 13]);
+        let keys = crate::winsys::desktop_keys().unwrap_or([false; 15]);
+        app.set_shift(keys[13]);
         let names = [
             KeyIn::Left,
             KeyIn::Right,
@@ -271,10 +302,12 @@ impl Runner {
             KeyIn::Char('3'),
             KeyIn::Char('4'),
             KeyIn::Char('5'),
+            KeyIn::Char('\0'),
+            KeyIn::Char('q'),
         ];
         // polling sees every release
         app.set_exact_keys();
-        for i in 0..names.len() {
+        for i in (0..names.len()).filter(|&i| i != 13) {
             match (self.keys[i], keys[i]) {
                 (false, true) => app.key(names[i]),
                 (true, false) => app.key_up(names[i]),
@@ -356,7 +389,14 @@ impl Runner {
     /// Create the window (and in desktop mode attach it behind the icons).
     /// False if the window couldn't be created.
     fn create(&mut self, el: &ActiveEventLoop) -> bool {
-        let mut attrs = Window::default_attributes().with_title("xmas-tui");
+        let icon = winit::window::Icon::from_rgba(crate::icon::rgba(64), 64, 64).ok();
+        let mut attrs = Window::default_attributes().with_title("xmas-tui").with_window_icon(icon);
+        #[cfg(target_os = "linux")]
+        {
+            // the desktop finds the icon by this id (see icon::install_desktop_files)
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs = attrs.with_name("xmas-tui", "xmas-tui");
+        }
         let mut origin = (0, 0);
         let mon = el.primary_monitor().or_else(|| el.available_monitors().next());
         // the monitor we cover (physical px), for the window-snow overlay
@@ -558,14 +598,35 @@ impl ApplicationHandler for Runner {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.ctrl = m.state().control_key();
+                self.shift = m.state().shift_key();
+                if let Some(app) = self.app.as_mut() {
+                    app.set_shift(self.shift);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 // F11: full screen on and off (a normal window only)
-                if event.logical_key == Key::Named(NamedKey::F11) && event.state == ElementState::Pressed && !event.repeat && !self.opts.desktop {
-                    self.toggle_fullscreen();
+                if event.logical_key == Key::Named(NamedKey::F11) && event.state == ElementState::Pressed && !event.repeat {
+                    if !self.opts.desktop {
+                        self.toggle_fullscreen();
+                    } else if let Some(app) = self.app.as_mut() {
+                        app.toggle_wall_full();
+                    }
                     return;
                 }
                 let Some(app) = self.app.as_mut() else { return };
+                if event.logical_key == Key::Named(NamedKey::F1) && event.state == ElementState::Pressed && !event.repeat {
+                    app.toggle_help();
+                    return;
+                }
+                // Ctrl + = / - / 0: zoom (with Shift: resolution)
+                if self.ctrl {
+                    if let (Key::Character(s), ElementState::Pressed) = (&event.logical_key, event.state) {
+                        for c in s.chars() {
+                            app.ctrl_key(c, self.shift);
+                        }
+                    }
+                    return;
+                }
                 let keys: Vec<KeyIn> = match &event.logical_key {
                     Key::Named(NamedKey::Enter) => vec![KeyIn::Enter],
                     Key::Named(NamedKey::Backspace) => vec![KeyIn::Backspace],
@@ -601,6 +662,11 @@ impl ApplicationHandler for Runner {
         if self.app.as_mut().is_some_and(|a| std::mem::take(&mut a.fullscreen_toggle)) {
             self.toggle_fullscreen();
         }
+        // the wallpaper itself full screen (or back behind the icons)
+        #[cfg(windows)]
+        if let Some(on) = self.app.as_mut().and_then(|a| a.wall_full_req.take()) {
+            self.set_wall_full(on);
+        }
         // render scale changed in settings: lay the grid out again
         if let Some(size) = self.app.as_ref().filter(|a| (a.cfg.scale - self.scale).abs() > 1e-3).and(self.gfx.as_ref().map(|g| PhysicalSize::new(g.size.0, g.size.1))) {
             self.layout(size);
@@ -610,7 +676,7 @@ impl ApplicationHandler for Runner {
             if self.reattach.is_some() {
                 self.try_reattach(el, now);
             }
-            if self.gfx.is_some() && now - self.last_geom_check >= Duration::from_secs(1) {
+            if self.gfx.is_some() && !self.wall_full && now - self.last_geom_check >= Duration::from_secs(1) {
                 self.last_geom_check = now;
                 self.check_desktop(el);
             }
@@ -624,13 +690,13 @@ impl ApplicationHandler for Runner {
                 let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
                 // (also while the village is popped out into a window of its own)
                 let popped = self.app.as_mut().is_some_and(|a| a.popped_out());
-                self.paused = popped || crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND);
+                self.paused = !self.wall_full && (popped || crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND));
                 if was && !self.paused {
                     // back: draw right away rather than at the end of a 500 ms rest
                     self.next = self.next.min(now);
                 }
             }
-            if !self.paused {
+            if !self.paused && !self.wall_full {
                 self.poll_desktop_input();
             }
         }
@@ -647,7 +713,7 @@ impl ApplicationHandler for Runner {
         }
         // poll input a few times per frame in desktop mode for snappy clicks
         // (not while paused: then we only wake every 500 ms to re-check)
-        let wake = if self.opts.desktop && !self.paused { self.next.min(now + Duration::from_millis(8)) } else { self.next };
+        let wake = if self.opts.desktop && !self.paused && !self.wall_full { self.next.min(now + Duration::from_millis(8)) } else { self.next };
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
@@ -667,9 +733,11 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         pointer: "",
         #[cfg(windows)]
         polled: (false, false),
-        keys: [false; 13],
+        keys: [false; 15],
         scale: 1.0,
         ctrl: false,
+        shift: false,
+        wall_full: false,
         paused: false,
         #[cfg(windows)]
         attached: false,

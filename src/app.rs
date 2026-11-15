@@ -119,6 +119,19 @@ pub struct App {
     sound_sent: SoundCfg,
     /// Sounds from the UI itself (volume previews).
     ui_sounds: Vec<SoundEvent>,
+    /// A resolution change waiting to settle (scale, app time of the change).
+    scale_pending: Option<(f32, f32)>,
+    /// The zoomed view: (z, x0, y0) of the last frame (screen → drawing),
+    /// where it centres (eased), and a scratch frame for it.
+    zoom_xf: (f32, f32, f32),
+    zoom_focus: Option<(f32, f32)>,
+    spare: Frame,
+    /// The wallpaper is showing full screen; and a change the front-end
+    /// should make (Some(true): go full screen, Some(false): back).
+    pub wall_full: bool,
+    pub wall_full_req: Option<bool>,
+    /// Shift is held (the villager runs).
+    shift: bool,
 }
 
 pub fn random_seed() -> u32 {
@@ -126,27 +139,63 @@ pub fn random_seed() -> u32 {
     crate::rng::hash((n & 0xffff_ffff) as u32 ^ (n >> 32) as u32) | 1
 }
 
-/// The render scale changed: in the kitty wallpaper, ask kitty (through the
-/// control socket the launcher opened) for the matching font size. If that
-/// doesn't work and the systemd service is running us, exit: the service
-/// starts the wallpaper again, and the launcher reads the new scale.
-fn apply_scale(scale: f32) {
-    let Ok(sock) = std::env::var("XMAS_KITTY_SOCKET") else { return };
-    let base: f32 = std::env::var("XMAS_FONT_BASE").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+/// The kitty wallpaper's control socket. kitty adds "-<its pid>" to a
+/// socket path given as `listen_on` (older launchers did that), so look for
+/// one of those too.
+fn kitty_socket() -> Option<String> {
+    let sock = std::env::var("XMAS_KITTY_SOCKET").ok()?;
+    let path = sock.strip_prefix("unix:")?;
+    if std::path::Path::new(path).exists() {
+        return Some(sock);
+    }
+    let p = std::path::Path::new(path);
+    let (dir, name) = (p.parent()?, p.file_name()?.to_str()?.to_string() + "-");
+    std::fs::read_dir(dir).ok()?.flatten().find(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&name))).map(|e| format!("unix:{}", e.path().display()))
+}
+
+/// Ask the kitty wallpaper to do something through its control socket
+/// (in the background). `done` gets whether it worked.
+fn kitty_cmd(args: Vec<String>, done: impl FnOnce(bool) + Send + 'static) {
+    let Some(sock) = kitty_socket() else {
+        done(false);
+        return;
+    };
     let kitten = std::env::var("XMAS_KITTEN").unwrap_or_else(|_| "kitten".into());
-    let size = format!("{:.2}", base * scale.clamp(0.5, 2.0));
     std::thread::spawn(move || {
-        let ok = std::process::Command::new(kitten).args(["@", "--to", &sock, "set-font-size", &size]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        let ok = std::process::Command::new(kitten)
+            .args(["@", "--to", &sock])
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        done(ok);
+    });
+}
+
+/// The resolution changed: in the kitty wallpaper, ask kitty for the
+/// matching font size. If that doesn't work, a restart would (the launcher
+/// reads the new scale), so the app asks whether to.
+fn apply_scale(scale: f32) {
+    if std::env::var_os("XMAS_KITTY_SOCKET").is_none() {
+        return;
+    }
+    let base: f32 = std::env::var("XMAS_FONT_BASE").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+    let size = format!("{:.2}", base * scale.clamp(0.5, 2.0));
+    kitty_cmd(vec!["set-font-size".into(), size], |ok| {
         if !ok && std::env::var_os("INVOCATION_ID").is_some() {
-            // give the config a moment to be saved, then restart
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            RESTART_FOR_SCALE.store(true, std::sync::atomic::Ordering::SeqCst);
+            SCALE_NEEDS_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     });
 }
 
-/// Set when the wallpaper should restart to pick up a new render scale.
+/// Set (once asked, and the answer was yes) when the wallpaper should exit
+/// so its service starts it again with the new resolution.
 pub static RESTART_FOR_SCALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The font couldn't be changed live: ask about restarting.
+static SCALE_NEEDS_RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl App {
     pub fn new(cfg: Config, seed: u32, path: &Path, w: usize, h: usize, wallpaper: bool, keyboard: bool, extras: bool) -> Self {
@@ -205,6 +254,95 @@ impl App {
             media_quiet: false,
             media_flip: None,
             ui_sounds: vec![],
+            scale_pending: None,
+            zoom_xf: (1.0, 0.0, 0.0),
+            zoom_focus: None,
+            spare: Frame::new(1, 1),
+            wall_full: false,
+            wall_full_req: None,
+            shift: false,
+        }
+    }
+
+    /// Screen cell → the cell of the drawing it shows (they differ while
+    /// zoomed in, or indoors on a tall screen).
+    fn world_pt(&self, x: i32, y: i32) -> (i32, i32) {
+        let (z, x0, y0) = self.zoom_xf;
+        if z <= 1.001 {
+            return (x, y);
+        }
+        ((x0 + (x as f32 + 0.5) / z).floor() as i32, (y0 + (y as f32 + 0.5) / z).floor() as i32)
+    }
+
+    /// Whether typed keys reach us (the Windows wallpaper gets them only
+    /// while it's full screen).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_keyboard(&mut self, on: bool) {
+        self.keyboard = on;
+        self.settings.keyboard = on;
+    }
+
+    /// F1: the controls card.
+    pub fn toggle_help(&mut self) {
+        self.settings.help = !self.settings.help;
+    }
+
+    /// Shift held or not (the front-ends report it with each key).
+    pub fn set_shift(&mut self, on: bool) {
+        if on != self.shift {
+            self.shift = on;
+            self.scene.set_sprint(on);
+        }
+    }
+
+    /// Ctrl + a key: = / + zoom in, - zoom out, 0 back to 1x; with Shift,
+    /// the resolution instead (finer / coarser detail).
+    pub fn ctrl_key(&mut self, c: char, shift: bool) {
+        let t = self.t();
+        let (up, down) = (matches!(c, '=' | '+'), matches!(c, '-' | '_'));
+        if shift && (up || down) {
+            settings::apply(&mut self.cfg, if up { Act::Inc(F::Scale) } else { Act::Dec(F::Scale) });
+            self.settings.toast = Some((format!("resolution {:.2}× detail", settings::resolution(self.cfg.scale)), t + 1.4));
+        } else if up || down {
+            let z = ((self.cfg.zoom + if up { 0.1 } else { -0.1 }) * 20.0).round() / 20.0;
+            self.cfg.zoom = z.clamp(1.0, 3.0);
+            self.settings.toast = Some((format!("zoom {:.2}×", self.cfg.zoom), t + 1.4));
+        } else if c == '0' {
+            self.cfg.zoom = 1.0;
+            self.settings.toast = Some(("zoom 1.00×".into(), t + 1.4));
+        }
+    }
+
+    /// The wallpaper itself goes full screen (or back behind the desktop):
+    /// the same village, nothing restarts. F11 does it too.
+    pub fn toggle_wall_full(&mut self) {
+        if self.windowed {
+            self.fullscreen_toggle = true;
+            return;
+        }
+        if !self.wallpaper {
+            return;
+        }
+        self.set_wall_full(!self.wall_full);
+    }
+
+    fn set_wall_full(&mut self, on: bool) {
+        self.commit_city();
+        self.settings.open = false;
+        self.wall_full = on;
+        self.settings.wall_full = on;
+        self.wall_full_req = Some(on);
+        // the kitty wallpaper: move its panel up front (or back down)
+        if std::env::var_os("XMAS_KITTY_SOCKET").is_some() {
+            let args = if on {
+                "edge=center layer=top focus-policy=exclusive"
+            } else {
+                "edge=background layer=background focus-policy=on-demand"
+            };
+            let mut cmd: Vec<String> = ["resize-os-window", "--action=os-panel", "--incremental"].iter().map(|s| s.to_string()).collect();
+            cmd.extend(args.split(' ').map(String::from));
+            kitty_cmd(cmd, |_| {});
+            self.wall_full_req = None;
         }
     }
 
@@ -250,6 +388,13 @@ impl App {
     }
 
     fn commit_city(&mut self) {
+        if self.settings.editing_name {
+            self.settings.editing_name = false;
+            if let Some(text) = self.settings.editing.take() {
+                self.cfg.scene.name = text.trim().chars().take(16).collect();
+            }
+            return;
+        }
         if self.settings.editing_pet {
             self.settings.editing_pet = false;
             if let Some(text) = self.settings.editing.take() {
@@ -278,7 +423,8 @@ impl App {
                 if let Some(m) = &mut self.menu {
                     m.hover = m.hit(x, y);
                 }
-                self.scene.set_cursor(Some((x, y)));
+                let (wx, wy) = self.world_pt(x, y);
+                self.scene.set_cursor(Some((wx, wy)));
                 self.scene.convo_hover(x, y);
                 self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(x, y) };
             }
@@ -310,6 +456,11 @@ impl App {
                 } else if self.settings.open {
                     self.commit_city();
                     self.settings.open = false;
+                } else if self.settings.help {
+                    // any click closes the controls card
+                    self.settings.help = false;
+                } else if settings::help_rect(self.w as i32).contains(x, y) {
+                    self.settings.help = true;
                 } else if self.scene.convo_click(x, y) {
                     // answered in the dialogue box
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
@@ -326,9 +477,10 @@ impl App {
                     self.widgets.dragging = Some(i);
                 } else {
                     self.press = Some((x, y, self.t()));
-                    if !self.scene.grab(x, y) {
+                    let (wx, wy) = self.world_pt(x, y);
+                    if !self.scene.grab(wx, wy) {
                         // nobody to pick up here: an ordinary click on the scene
-                        self.scene.click(x, y, t);
+                        self.scene.click(wx, wy, t);
                     }
                 }
             }
@@ -346,10 +498,12 @@ impl App {
                     return;
                 }
                 if self.scene.holding() {
-                    self.scene.drag(x, y);
+                    let (wx, wy) = self.world_pt(x, y);
+                    self.scene.drag(wx, wy);
                     return;
                 }
-                self.scene.set_cursor(Some((x, y)));
+                let (wx, wy) = self.world_pt(x, y);
+                self.scene.set_cursor(Some((wx, wy)));
                 if self.resizing {
                     self.widgets.resize_map(x, y, self.w as i32, self.h as i32);
                     return;
@@ -373,7 +527,8 @@ impl App {
                 self.scene.convo_drop();
             }
             MouseIn::Up(Btn::Left) if self.scene.holding() => {
-                self.scene.drag(x, y);
+                let (wx, wy) = self.world_pt(x, y);
+                self.scene.drag(wx, wy);
                 self.scene.release();
             }
             MouseIn::Up(Btn::Left) if self.resizing => {
@@ -505,6 +660,7 @@ impl App {
                 KeyIn::Char('f' | 'F') => self.scene.invite(),
                 KeyIn::Char('r' | 'R') => self.scene.snowball(),
                 KeyIn::Char('i' | 'I') => self.scene.toggle_pockets(),
+                KeyIn::Char('q' | 'Q') => self.scene.cycle_held(),
                 KeyIn::Char(c @ '1'..='5') => self.scene.number(c as usize - '0' as usize),
                 _ => {}
             }
@@ -519,14 +675,17 @@ impl App {
                 KeyIn::Esc => self.settings.editing = None,
                 _ => {}
             }
+        } else if self.settings.help && k == KeyIn::Esc {
+            self.settings.help = false;
+        } else if k == KeyIn::Char('?') {
+            self.settings.help = !self.settings.help;
         } else if self.settings.open && k == KeyIn::Esc {
             self.settings.open = false;
         } else if k == KeyIn::Esc && self.menu.take().is_some() {
         } else if k == KeyIn::Esc && self.scene.close_panels() {
-        } else if k == KeyIn::Esc && self.scene.is_inside() {
-            self.scene.leave();
-        } else if !self.wallpaper && (k == KeyIn::Char('q') || k == KeyIn::Esc) {
-            self.quit = true;
+        } else if k == KeyIn::Esc {
+            // nothing else to close: the settings
+            self.settings.open = true;
         } else {
             let c = match k {
                 KeyIn::Char(c) => Some(c),
@@ -561,7 +720,7 @@ impl App {
                 Some(_) => "pointer",
                 None => "default",
             }
-        } else if settings::gear_rect(self.w as i32).contains(hx, hy) {
+        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
             "grab"
@@ -569,9 +728,9 @@ impl App {
             "grabbing"
         } else if !self.settings.open && self.scene.convo_grip(hx, hy) {
             "grab"
-        } else if !self.settings.open && self.scene.grabbable(hx, hy) {
+        } else if !self.settings.open && self.scene.grabbable(self.world_pt(hx, hy).0, self.world_pt(hx, hy).1) {
             "grab"
-        } else if !self.settings.open && self.scene.clickable(hx, hy) {
+        } else if !self.settings.open && self.scene.clickable(self.world_pt(hx, hy).0, self.world_pt(hx, hy).1) {
             "pointer"
         } else {
             "default"
@@ -630,7 +789,8 @@ impl App {
     /// Open the right-click menu at (x, y).
     fn open_menu(&mut self, x: i32, y: i32) {
         self.commit_city();
-        let (title, items) = self.scene.menu_at(x, y);
+        let (wx, wy) = self.world_pt(x, y);
+        let (title, items) = self.scene.menu_at(wx, wy);
         self.menu = Some(crate::ctxmenu::CtxMenu::new(x, y, title, items, self.w as i32, self.h as i32));
     }
 
@@ -667,8 +827,22 @@ impl App {
                         platform::open_in_editor(self.sync.path());
                     }
                 }
+                Act::EditName => {
+                    if self.keyboard {
+                        if !self.settings.editing_name || self.settings.editing.is_none() {
+                            self.commit_city();
+                            self.settings.editing_name = true;
+                            self.settings.editing = Some(self.cfg.scene.name.clone());
+                        }
+                    } else {
+                        if !self.sync.path().exists() {
+                            self.sync.save_now(&self.cfg);
+                        }
+                        platform::open_in_editor(self.sync.path());
+                    }
+                }
                 Act::EditCity => {
-                    if self.settings.editing_pet {
+                    if self.settings.editing_pet || self.settings.editing_name {
                         self.commit_city();
                     }
                     if self.keyboard {
@@ -692,7 +866,15 @@ impl App {
                 Act::Quit => self.quit = true,
                 Act::PopOut => self.pop_out(false),
                 Act::FullScreen if self.windowed => self.fullscreen_toggle = true,
+                Act::FullScreen if self.wallpaper => self.set_wall_full(true),
                 Act::FullScreen => self.pop_out(true),
+                Act::BackToWallpaper => self.set_wall_full(false),
+                Act::RestartNow => {
+                    self.settings.restart_ask = false;
+                    self.sync.save_now(&self.cfg);
+                    RESTART_FOR_SCALE.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Act::RestartLater => self.settings.restart_ask = false,
                 Act::Tab(i) => self.settings.tab = i as usize,
                 Act::CheckUpdate => crate::update::check_now(),
                 Act::InstallUpdate => crate::update::install_now(),
@@ -745,6 +927,7 @@ impl App {
                 c.talk_time = 0.0;
                 c.chattiness = 0.0;
                 c.pet = Default::default();
+                c.name.clear();
                 c
             };
             if reseed || live(&self.cfg.scene) != live(&old.scene) {
@@ -768,7 +951,8 @@ impl App {
                 self.widgets.apply(&self.cfg);
             }
             if (self.cfg.scale - old.scale).abs() > 1e-3 {
-                apply_scale(self.cfg.scale);
+                // wait for the arrows / keys to settle before resizing
+                self.scale_pending = Some((self.cfg.scale, t));
             }
             if self.cfg.updates != old.updates {
                 crate::update::configure(self.cfg.updates.check, self.cfg.updates.auto_install);
@@ -789,6 +973,16 @@ impl App {
         self.scene.set_live(self.cfg.scene.walk_speed, left);
         crate::scene::events::set_talk(self.cfg.scene.talk_time, self.cfg.scene.chattiness);
         self.scene.set_pet(&self.cfg.scene.pet);
+        self.scene.set_name(&self.cfg.scene.name);
+        if let Some((sc, at)) = self.scale_pending {
+            if t - at > 0.6 {
+                self.scale_pending = None;
+                apply_scale(sc);
+            }
+        }
+        if SCALE_NEEDS_RESTART.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.settings.restart_ask = true;
+        }
         {
             use chrono::Timelike;
             let now = crate::clock::now();
@@ -828,7 +1022,17 @@ impl App {
             }
         }
         self.frame.clear();
-        self.scene.draw(&mut self.frame, t);
+        // the zoomed view eases after the villager
+        let want = self.scene.zoom_focus();
+        let f = match self.zoom_focus {
+            Some((fx, fy)) if (fx - want.0).abs() < self.w as f32 * 0.5 => {
+                let k = 1.0 - (-dt * 5.0).exp();
+                (fx + (want.0 - fx) * k, fy + (want.1 - fy) * k)
+            }
+            _ => want,
+        };
+        self.zoom_focus = Some(f);
+        self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
         self.settings.draw_gear(&mut self.frame, t);
@@ -853,6 +1057,7 @@ impl App {
         }
         self.settings.draw_banner(&mut self.frame, t);
         self.settings.draw(&mut self.frame, &self.cfg, t);
+        self.settings.draw_help(&mut self.frame);
         if let Some(m) = &self.menu {
             m.draw(&mut self.frame);
         }
@@ -1019,6 +1224,51 @@ mod tests {
         app.key(KeyIn::Char('a'));
         pause(&mut app, 300);
         assert!((app.scene.player_x().unwrap() - x3).abs() < 0.01);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Zoom: Ctrl + / - steps it, clicks land on what's drawn under the
+    /// pointer; Ctrl Shift + steps the resolution by 0.05; Esc opens the
+    /// settings when nothing else is open, and the controls card comes and
+    /// goes with "?".
+    #[test]
+    fn zoom_resolution_and_keys() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-zoom-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.widgets.music = false;
+        cfg.widgets.weather = false;
+        cfg.widgets.system = false;
+        cfg.widgets.map = false;
+        cfg.clock.enabled = false;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.step();
+        assert_eq!(app.world_pt(100, 30), (100, 30));
+        app.ctrl_key('=', false);
+        app.ctrl_key('=', false);
+        assert!((app.cfg.zoom - 1.2).abs() < 1e-3, "{}", app.cfg.zoom);
+        app.step();
+        let (z, x0, y0) = app.zoom_xf;
+        assert!((z - 1.2).abs() < 1e-3);
+        let (wx, wy) = app.world_pt(150, 30);
+        assert_eq!((wx, wy), ((x0 + 150.5 / z) as i32, (y0 + 30.5 / z) as i32));
+        app.ctrl_key('0', false);
+        assert_eq!(app.cfg.zoom, 1.0);
+        // resolution: 0.05 steps (as 1 / scale)
+        app.ctrl_key('+', true);
+        assert!((settings::resolution(app.cfg.scale) - 1.05).abs() < 1e-3, "{}", app.cfg.scale);
+        settings::apply(&mut app.cfg, Act::Inc(F::Scale));
+        assert!((settings::resolution(app.cfg.scale) - 1.10).abs() < 1e-3);
+        // keys
+        app.key(KeyIn::Esc);
+        assert!(app.settings.open, "Esc didn't open the settings");
+        app.key(KeyIn::Esc);
+        assert!(!app.settings.open);
+        app.key(KeyIn::Char('?'));
+        assert!(app.settings.help);
+        app.key(KeyIn::Esc);
+        assert!(!app.settings.help && !app.settings.open, "Esc should close the card first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

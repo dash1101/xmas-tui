@@ -202,6 +202,9 @@ pub fn read_time(text: &str, min: f32) -> f32 {
 }
 
 pub struct Director {
+    /// Rows to lift speech bubbles and little emotes by, over people and
+    /// animals drawn bigger (0 at the usual size).
+    pub lift: i32,
     rng: Rng,
     next: f32,
     mult: f32,
@@ -257,6 +260,7 @@ pub const CENTER: f32 = f32::NAN;
 impl Director {
     pub fn new(seed: u32, mult: f32) -> Self {
         Director {
+            lift: 0,
             rng: Rng::new(seed as u64 ^ 0xd1ec),
             next: 6.0,
             mult,
@@ -363,6 +367,7 @@ impl Director {
     // spawning helpers (also used by clicks)
 
     pub fn bubble(&mut self, x: i32, y: i32, text: &str, t: f32) {
+        let y = y - self.lift;
         self.bubbles.retain(|b| (b.x - x).abs() > 4 || (b.y - y).abs() > 2);
         let life = read_time(text, 3.8);
         self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
@@ -378,7 +383,7 @@ impl Director {
                 b.matched = true;
                 let best = who
                     .iter()
-                    .filter(|(_, x, y)| (x.round() as i32 - b.x).abs() <= 1 && b.y >= *y as i32 - 6 && b.y <= *y as i32)
+                    .filter(|(_, x, y)| (x.round() as i32 - b.x).abs() <= 1 && b.y >= *y as i32 - 6 - self.lift && b.y <= *y as i32)
                     .min_by_key(|(_, x, _)| (x.round() as i32 - b.x).abs());
                 if let Some(&(id, _, y)) = best {
                     b.owner = id;
@@ -398,6 +403,7 @@ impl Director {
     /// (within `r` columns) that's showing then ends as this one appears,
     /// so the exchange reads one line at a time.
     pub fn say(&mut self, x: i32, y: i32, text: &str, t: f32, life: f32, r: i32) {
+        let y = y - self.lift;
         for b in &mut self.bubbles {
             if (b.x - x).abs() <= r && (b.y - y).abs() <= 3 && b.born < t {
                 b.life = b.life.min(t - b.born);
@@ -434,6 +440,7 @@ impl Director {
 
     /// A few glyphs (♥, ?, ✧, ♪ …) floating gently up from a spot.
     pub fn emote(&mut self, x: f32, y: f32, ch: char, color: Rgb, n: usize) {
+        let y = y - self.lift as f32 * 0.75;
         for i in 0..n {
             self.parts.push(Part {
                 x: x + self.rng.range(-1.2, 1.2),

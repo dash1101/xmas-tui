@@ -78,6 +78,9 @@ pub struct Frame {
     pub px: Vec<Rgb>,
     pub glyph: Vec<Option<Glyph>>,
     pub light: Vec<Rgb>,
+    /// Pixels of sprites drawn big (glyphs turned pixels): lit the way a
+    /// glyph is, not like the scenery (1), or as usual (0).
+    pub soft: Vec<u8>,
     near: Vec<Rgb>,
     tmp: Vec<Rgb>,
     half: Vec<Rgb>,
@@ -103,6 +106,7 @@ impl Frame {
             px: vec![],
             glyph: vec![],
             light: vec![],
+            soft: vec![],
             near: vec![],
             tmp: vec![],
             half: vec![],
@@ -124,6 +128,7 @@ impl Frame {
         let np = self.pw * self.ph;
         self.px = vec![Rgb::BLACK; np];
         self.light = vec![Rgb::BLACK; np];
+        self.soft = vec![0; np];
         self.near = vec![Rgb::BLACK; np];
         self.tmp = vec![Rgb::BLACK; np];
         let nh = self.pw.div_ceil(2) * self.ph.div_ceil(2);
@@ -136,6 +141,7 @@ impl Frame {
     pub fn clear(&mut self) {
         self.px.fill(Rgb::BLACK);
         self.light.fill(Rgb::BLACK);
+        self.soft.fill(0);
         self.glyph.fill(None);
     }
 
@@ -152,6 +158,18 @@ impl Frame {
         let y = y + 2 * self.oy;
         if self.px_in(x, y) {
             self.px[y as usize * self.pw + x as usize] = c;
+        }
+    }
+
+    /// A sprite's pixel: set, and lit the way a glyph is (see `soft`).
+    #[inline]
+    pub fn px_sprite(&mut self, x: i32, y: i32, c: Rgb) {
+        let x = x - self.ox;
+        let y = y + 2 * self.oy;
+        if self.px_in(x, y) {
+            let i = y as usize * self.pw + x as usize;
+            self.px[i] = c;
+            self.soft[i] = 1;
         }
     }
 
@@ -271,6 +289,194 @@ impl Frame {
         cx
     }
 
+    /// A glyph drawn into the pixel layer, filling the pixel rectangle at
+    /// (x, y) sized w x h (pixel coordinates; fractions are fine): sprites
+    /// that keep their size at any resolution, and the zoomed view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn big_glyph(&mut self, x: f32, y: f32, w: f32, h: f32, ch: char, col: Rgb, alpha: f32) {
+        if ch == ' ' || w <= 0.0 || h <= 0.0 || alpha <= 0.0 {
+            return;
+        }
+        let m = crate::raster::glyph_mask(ch);
+        let (sx, sy) = (m.w as f32 / w, m.h as f32 / h);
+        let (x0, x1) = (x.floor() as i32, (x + w).ceil() as i32);
+        let (y0, y1) = (y.floor() as i32, (y + h).ceil() as i32);
+        const N: usize = 4;
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let mut acc = 0.0;
+                for j in 0..N {
+                    let fy = (py as f32 + (j as f32 + 0.5) / N as f32 - y) * sy;
+                    if fy < 0.0 || fy >= m.h as f32 {
+                        continue;
+                    }
+                    let row = fy as usize * m.w;
+                    for i in 0..N {
+                        let fx = (px as f32 + (i as f32 + 0.5) / N as f32 - x) * sx;
+                        if fx >= 0.0 && fx < m.w as f32 {
+                            acc += m.a[row + fx as usize];
+                        }
+                    }
+                }
+                let cov = acc / (N * N) as f32;
+                if cov > 0.02 {
+                    self.px_blend(px, py, col, (cov * alpha).min(1.0));
+                    if cov * alpha > 0.4 {
+                        let (x, y) = (px - self.ox, py + 2 * self.oy);
+                        if self.px_in(x, y) {
+                            self.soft[y as usize * self.pw + x as usize] = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One cell of a glyph sprite drawn `k` times bigger, as pixels, its
+    /// top left at cell (x, y) (fractions fine). Daylight is applied the way
+    /// `grade_scene` does it for glyphs.
+    pub fn sprite_cell(&mut self, x: f32, y: f32, k: f32, g: Glyph) {
+        let col = g.fg * (1.0 + 0.7 * self.day.max(0.0));
+        self.big_glyph(x, y * 2.0, k, 2.0 * k, g.ch, col, g.alpha);
+    }
+
+    /// Magnify the view by `z` around the cell (fx, fy): the pixels and
+    /// light scale up, the scene's own glyphs are drawn into the pixels at
+    /// the bigger size, and panels and text (glyphs with a background of
+    /// their own) keep their size and move with the view. `spare` is a
+    /// scratch frame (any size). Returns the cell → source-cell transform
+    /// (x0, y0): source = (x0 + x / z, y0 + y / z). Only `bounds` (cells
+    /// from the top left) of the drawing is ever shown.
+    pub fn zoom(&mut self, z: f32, fx: f32, fy: f32, bounds: (f32, f32), spare: &mut Frame) -> (f32, f32) {
+        if z <= 1.001 {
+            return (0.0, 0.0);
+        }
+        if spare.w != self.w || spare.h != self.h {
+            spare.resize(self.w, self.h);
+        }
+        std::mem::swap(&mut self.px, &mut spare.px);
+        std::mem::swap(&mut self.light, &mut spare.light);
+        std::mem::swap(&mut self.glyph, &mut spare.glyph);
+        std::mem::swap(&mut self.soft, &mut spare.soft);
+        self.glyph.fill(None);
+        let (w, h) = (self.w as f32, self.h as f32);
+        let (vw, vh) = (w / z, h / z);
+        let (bw, bh) = (bounds.0.min(w), bounds.1.min(h));
+        let x0 = (fx - vw * 0.5).clamp(0.0, (bw - vw).max(0.0));
+        let y0 = (fy - vh * 0.55).clamp(0.0, (bh - vh).max(0.0));
+        let (pw, ph) = (self.pw, self.ph);
+        let cols: Vec<usize> = (0..pw).map(|x| ((x0 + (x as f32 + 0.5) / z) as usize).min(pw - 1)).collect();
+        let lk = 1.0 / (z * z);
+        for y in 0..ph {
+            let sy = ((2.0 * y0 + (y as f32 + 0.5) / z) as usize).min(ph - 1);
+            let (src, dst) = (&spare.px[sy * pw..(sy + 1) * pw], &mut self.px[y * pw..(y + 1) * pw]);
+            for (d, &c) in dst.iter_mut().zip(&cols) {
+                *d = src[c];
+            }
+            let (src, dst) = (&spare.light[sy * pw..(sy + 1) * pw], &mut self.light[y * pw..(y + 1) * pw]);
+            for (d, &c) in dst.iter_mut().zip(&cols) {
+                *d = src[c] * lk;
+            }
+            let (src, dst) = (&spare.soft[sy * pw..(sy + 1) * pw], &mut self.soft[y * pw..(y + 1) * pw]);
+            for (d, &c) in dst.iter_mut().zip(&cols) {
+                *d = src[c];
+            }
+        }
+        let (ox, oy) = (self.ox, self.oy);
+        (self.ox, self.oy) = (0, 0);
+        let (cw, chh) = (self.w as i32, self.h as i32);
+        let (cx0, cy0) = (x0.floor() as i32 - 1, y0.floor() as i32 - 1);
+        let (cx1, cy1) = ((x0 + vw).ceil() as i32 + 1, (y0 + vh).ceil() as i32 + 1);
+        let at = |x: i32, y: i32| -> Option<Glyph> {
+            if x >= 0 && y >= 0 && x < cw && y < chh {
+                spare.glyph[(y * cw + x) as usize]
+            } else {
+                None
+            }
+        };
+        let ui = |g: &Glyph| !matches!(g.bg, Bg::Scene);
+        // the scene's glyphs, bigger
+        for cy in cy0.max(0)..cy1.min(chh) {
+            for cx in cx0.max(0)..cx1.min(cw) {
+                if let Some(g) = at(cx, cy).filter(|g| !ui(g)) {
+                    let px = (cx as f32 - x0) * z;
+                    let py = (2.0 * (cy as f32 - y0)) * z;
+                    self.big_glyph(px, py, z, 2.0 * z, g.ch, g.fg, g.alpha);
+                }
+            }
+        }
+        // panels and text: each connected block keeps its shape, anchored
+        // by its bottom middle (speech bubbles hang over heads)
+        let mut seen = vec![false; (cw * chh) as usize];
+        let mut stack = vec![];
+        for cy in cy0.max(0)..cy1.min(chh) {
+            for cx in cx0.max(0)..cx1.min(cw) {
+                let i = (cy * cw + cx) as usize;
+                if seen[i] || !at(cx, cy).is_some_and(|g| ui(&g)) {
+                    continue;
+                }
+                let mut cells = vec![];
+                stack.push((cx, cy));
+                seen[i] = true;
+                while let Some((x, y)) = stack.pop() {
+                    cells.push((x, y));
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        if nx >= 0 && ny >= 0 && nx < cw && ny < chh {
+                            let j = (ny * cw + nx) as usize;
+                            if !seen[j] && at(nx, ny).is_some_and(|g| ui(&g)) {
+                                seen[j] = true;
+                                stack.push((nx, ny));
+                            }
+                        }
+                    }
+                }
+                let (bx0, bx1) = cells.iter().fold((i32::MAX, i32::MIN), |(a, b), &(x, _)| (a.min(x), b.max(x)));
+                let by1 = cells.iter().map(|c| c.1).max().unwrap_or(cy);
+                let mid = (bx0 + bx1) as f32 * 0.5;
+                let (ax, ay) = ((mid - x0) * z, (by1 as f32 + 1.0 - y0) * z);
+                for (x, y) in cells {
+                    let (dx, dy) = ((ax + (x as f32 - mid)).round() as i32, (ay - (by1 + 1 - y) as f32).round() as i32);
+                    if dx >= 0 && dy >= 0 && dx < cw && dy < chh {
+                        self.glyph[(dy * cw + dx) as usize] = at(x, y);
+                    }
+                }
+            }
+        }
+        (self.ox, self.oy) = (ox, oy);
+        (x0, y0)
+    }
+
+    /// Copy in a pixel image (and its light) `w` x `ph` pixels at the left,
+    /// `oy` rows down (what doesn't fit is left out).
+    pub fn paste(&mut self, px: &[Rgb], light: &[Rgb], glyph: &[Option<Glyph>], w: usize, ph: usize, oy: i32) {
+        let n = w.min(self.pw);
+        for cy in 0..ph / 2 {
+            let dy = cy as i32 + oy;
+            if dy < 0 || dy >= self.h as i32 || (cy + 1) * w > glyph.len() {
+                continue;
+            }
+            let (s, d) = (cy * w, dy as usize * self.w);
+            for x in 0..n.min(self.w) {
+                if let Some(g) = glyph[s + x] {
+                    self.glyph[d + x] = Some(g);
+                }
+            }
+        }
+        for y in 0..ph {
+            let dy = y as i32 + 2 * oy;
+            if dy < 0 || dy >= self.ph as i32 || (y + 1) * w > px.len() {
+                continue;
+            }
+            let (s, d) = (y * w, dy as usize * self.pw);
+            self.px[d..d + n].copy_from_slice(&px[s..s + n]);
+            if (y + 1) * w <= light.len() {
+                for (o, l) in self.light[d..d + n].iter_mut().zip(&light[s..s + n]) {
+                    *o += *l;
+                }
+            }
+        }
+    }
+
     // ---------------- light ----------------
 
     /// Add emitted light at a pixel-space position (bilinear splat).
@@ -348,7 +554,8 @@ impl Frame {
         for i in 0..pw * ph {
             let l = self.near[i] * gn + self.light[i] * gf;
             self.near[i] = l; // keep total light for glyph lighting
-            self.px[i] += l;
+            // (a big sprite's pixels take light like a glyph: lit 0.6)
+            self.px[i] += if self.soft[i] != 0 { l * 0.27 } else { l };
         }
 
         for cy in 0..self.h {
@@ -418,7 +625,8 @@ impl Layer {
     /// Composite the slice of a (wider) layer starting at column `x0` onto
     /// the frame — how scrolled scenery is drawn.
     pub fn composite_from(&self, f: &mut Frame, x0: i32) {
-        if self.h != f.ph {
+        // (a room is built smaller than the frame and magnified later)
+        if self.h > f.ph {
             return;
         }
         let w = self.w as i32;
@@ -493,5 +701,34 @@ fn box_blur(buf: &mut [Rgb], tmp: &mut [Rgb], w: usize, h: usize, r: usize) {
             acc[x] += add[x];
             acc[x] += sub[x] * -1.0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zoomed in, the scene's pixels get bigger but a speech bubble keeps
+    /// its letters side by side (and its size).
+    #[test]
+    fn zoom_keeps_text_in_one_piece() {
+        let mut f = Frame::new(80, 30);
+        let mut spare = Frame::new(1, 1);
+        for y in 0..60 {
+            for x in 0..80 {
+                f.px[y * 80 + x] = Rgb::hex(0x102030) * (1.0 + (x % 7) as f32 * 0.1);
+            }
+        }
+        let bg = Bg::Mix(Rgb::hex(0xffffff), 0.9);
+        f.text(30, 12, "hello", Rgb::BLACK, bg, 0.0);
+        f.put_g(40, 20, Glyph::new('●', Rgb::hex(0xffffff)));
+        f.zoom(2.0, 40.0, 15.0, (80.0, 30.0), &mut spare);
+        // "hello", still in one row, letters adjacent
+        let row: Vec<(usize, char)> = (0..30).flat_map(|y| (0..80).map(move |x| (x, y))).filter_map(|(x, y)| f.glyph[y * 80 + x].map(|g| (y * 80 + x, g.ch))).collect();
+        let s: String = row.iter().map(|r| r.1).collect();
+        assert_eq!(s, "hello", "{row:?}");
+        assert!(row.windows(2).all(|w| w[1].0 == w[0].0 + 1));
+        // the scene glyph became pixels (bigger), not a glyph
+        assert!(f.soft.iter().filter(|&&v| v != 0).count() >= 4, "the ● wasn't drawn big");
     }
 }

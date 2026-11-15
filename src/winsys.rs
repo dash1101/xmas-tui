@@ -11,7 +11,7 @@
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, RedrawWindow, ScreenToClient, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW};
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, DESKTOP_SWITCHDESKTOP};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, SetFocus, KEYEVENTF_KEYUP, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP};
 use windows_sys::Win32::UI::Shell::{SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -249,6 +249,35 @@ pub fn attach_to_desktop(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
     }
 }
 
+/// The wallpaper full screen: out from behind the icons, an ordinary
+/// window in front covering the monitor (x, y, w, h), with the keyboard.
+/// `attach_to_desktop` puts it back.
+pub fn bring_to_front(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
+    unsafe {
+        SetParent(hwnd, std::ptr::null_mut());
+        SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE) as isize);
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ((ex & !(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) | WS_EX_APPWINDOW) as isize);
+        SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        // a background process may not take the foreground; a tap of Alt
+        // lets it (the usual way round that rule)
+        keybd_event(VK_MENU as u8, 0, 0, 0);
+        keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
+}
+
+/// Back behind the icons after `bring_to_front` (the ex-style the attach
+/// expects: skip the taskbar).
+pub fn back_to_desktop(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ((ex & !WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW) as isize);
+    }
+    attach_to_desktop(hwnd, x, y, w, h)
+}
+
 /// Move/resize `hwnd` to the screen rect (x, y, w, h) again, e.g. after a
 /// resolution or monitor-layout change. Works both attached (child of
 /// Explorer's desktop: converted to the parent's client coordinates, which
@@ -362,7 +391,7 @@ pub fn poll() -> Polled {
 /// (the user clicked the bare desktop): [left, right, up, down, interact,
 /// invite, snowball, pockets, items 1-5]. None while any other window is focused, so typing elsewhere
 /// never moves anyone.
-pub fn desktop_keys() -> Option<[bool; 13]> {
+pub fn desktop_keys() -> Option<[bool; 15]> {
     unsafe {
         let fg = GetForegroundWindow();
         let cls = class_of(fg);
@@ -384,6 +413,8 @@ pub fn desktop_keys() -> Option<[bool; 13]> {
             down(b'3' as u16),
             down(b'4' as u16),
             down(b'5' as u16),
+            down(VK_SHIFT),
+            down(b'Q' as u16),
         ])
     }
 }

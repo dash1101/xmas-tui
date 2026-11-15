@@ -277,3 +277,33 @@ fn shape_coverage(c: char, w: f32, h: f32) -> Option<Cov> {
     };
     Some(f)
 }
+
+/// A glyph's shape as coverage (0..1) on a fixed grid: used to draw glyphs
+/// into the pixel layer at any size (sprites that scale with the scene,
+/// and the zoomed view).
+pub struct Mask {
+    pub w: usize,
+    pub h: usize,
+    pub a: Vec<f32>,
+}
+
+const MASK_W: usize = 16;
+const MASK_H: usize = 32;
+
+/// The (cached) coverage mask for a character.
+pub fn glyph_mask(c: char) -> std::sync::Arc<Mask> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = (Option<Raster>, HashMap<char, Arc<Mask>>);
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let m = CACHE.get_or_init(|| Mutex::new((None, HashMap::new())));
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mask) = g.1.get(&c) {
+        return mask.clone();
+    }
+    let r = g.0.get_or_insert_with(|| Raster::new(MASK_W, MASK_H));
+    let mut buf = vec![0u32; MASK_W * MASK_H];
+    r.draw_cell(&mut buf, MASK_W, 0, 0, &Cell { ch: c, fg: [255, 255, 255], bg: [0, 0, 0] });
+    let mask = Arc::new(Mask { w: MASK_W, h: MASK_H, a: buf.iter().map(|p| (p & 0xff) as f32 / 255.0).collect() });
+    g.1.insert(c, mask.clone());
+    mask
+}

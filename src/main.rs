@@ -9,6 +9,7 @@ mod config;
 mod ctxmenu;
 mod export;
 mod frame;
+mod icon;
 mod platform;
 mod raster;
 mod rng;
@@ -43,6 +44,12 @@ struct Args {
     sleigh: bool,
     bench: usize,
     fps: Option<f32>,
+    zoom: Option<f32>,
+    /// Previews: the controls card.
+    controls: bool,
+    /// Previews: poke something in the room (0 stairs, 1 bed, 2 sofa,
+    /// 3 oven) and let it play this many seconds.
+    poke: Option<(u8, f32)>,
     wallpaper: bool,
     settings: bool,
     tab: usize,
@@ -94,6 +101,9 @@ fn parse_args() -> Args {
         sleigh: false,
         bench: 0,
         fps: None,
+        zoom: None,
+        controls: false,
+        poke: None,
         wallpaper: false,
         settings: false,
         tab: 0,
@@ -150,6 +160,7 @@ fn parse_args() -> Args {
             "--look" => a.look = it.next().and_then(|v| v.parse().ok()),
             "--ui" => a.ui = it.next(),
             "--stats" => a.stats = true,
+            "--controls" => a.controls = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
                     let (x, y) = v.split_once(',')?;
@@ -171,6 +182,13 @@ fn parse_args() -> Args {
             "--rows" => a.rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(68),
             "--bench" => a.bench = it.next().and_then(|v| v.parse().ok()).unwrap_or(300),
             "--fps" => a.fps = it.next().and_then(|v| v.parse().ok()),
+            "--zoom" => a.zoom = it.next().and_then(|v| v.parse().ok()),
+            "--poke" => {
+                a.poke = it.next().and_then(|v| {
+                    let (k, secs) = v.split_once(',').unwrap_or((v.as_str(), "1"));
+                    Some((k.parse().ok()?, secs.parse().ok()?))
+                })
+            }
             "--size" => {
                 a.size = it.next().and_then(|v| {
                     let (w, h) = v.split_once('x')?;
@@ -219,6 +237,11 @@ fn main() {
     }
     let seed = if cfg.seed == 0 { app::random_seed() } else { cfg.seed as u32 };
     let path = config::resolve(args.config.as_deref());
+    // the icon and launchers the Linux desktop looks windows up by
+    #[cfg(target_os = "linux")]
+    if (args.wallpaper || args.windowed || args.settings_window) && args.export.is_none() {
+        std::thread::spawn(icon::install_desktop_files);
+    }
     if args.settings_window {
         let res = match &args.export {
             Some(dir) => setwin::export(cfg, &path, dir).map_err(|e| e.into()),
@@ -246,6 +269,9 @@ fn main() {
         let mut cfg = cfg.clone();
         if let Some(f) = args.fps {
             cfg.fps = config::clean_fps(f);
+        }
+        if let Some(z) = args.zoom {
+            cfg.zoom = z.clamp(1.0, 3.0);
         }
         match &args.export {
             Some(dir) => run_export(&cfg, seed, dir, &args),
@@ -454,11 +480,30 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                     app.mouse(ev, x, y);
                 }
                 Event::Key(k) => {
-                    if k.modifiers.contains(KeyModifiers::CONTROL) && k.kind == KeyEventKind::Press {
-                        if k.code == KeyCode::Char('c') && !wallpaper {
-                            break;
+                    if k.modifiers.contains(KeyModifiers::CONTROL) {
+                        if k.kind != KeyEventKind::Release {
+                            match k.code {
+                                KeyCode::Char('c') if !wallpaper => break,
+                                KeyCode::Char(c) => app.ctrl_key(c, k.modifiers.contains(KeyModifiers::SHIFT)),
+                                _ => {}
+                            }
                         }
                         continue;
+                    }
+                    if k.code == KeyCode::F(1) {
+                        if k.kind == KeyEventKind::Press {
+                            app.toggle_help();
+                        }
+                        continue;
+                    }
+                    if k.code == KeyCode::F(11) {
+                        if k.kind == KeyEventKind::Press {
+                            app.toggle_wall_full();
+                        }
+                        continue;
+                    }
+                    if k.kind != KeyEventKind::Release {
+                        app.set_shift(k.modifiers.contains(KeyModifiers::SHIFT));
                     }
                     let key = match k.code {
                         KeyCode::Char(c) => KeyIn::Char(c),
@@ -565,6 +610,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     let mut ex = export::Exporter::new();
     let mut settings = Settings::default();
     settings.open = args.settings;
+    settings.help = args.controls;
     settings.tab = args.tab;
     settings.window_fx = true;
     // previews: plausible levels for the meters
@@ -590,6 +636,13 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             scene.preview_room(args.room.unwrap_or(0), args.look);
         }
         for _ in 0..(4.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+    }
+    if let Some((k, secs)) = args.poke {
+        scene.preview_poke(k);
+        for _ in 0..(secs / dt) as usize {
             scene.update(dt, t);
             t += dt;
         }
@@ -629,15 +682,17 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         scene.quiet_player();
     }
     let mut out = std::io::BufWriter::with_capacity(1 << 22, std::io::stdout().lock());
+    let mut spare = Frame::new(1, 1);
     for i in 0..args.frames {
         scene.update(dt, t);
         frame.clear();
-        scene.draw(&mut frame, t);
+        scene.render(&mut frame, &mut spare, t, cfg.zoom, None);
         if !args.clean {
             widgets.map = Some(scene.minimap());
             widgets.draw(&mut frame, t);
             settings.draw_gear(&mut frame, t);
             settings.draw(&mut frame, cfg, t);
+            settings.draw_help(&mut frame);
         }
         if let Some(m) = &menu {
             m.draw(&mut frame);
@@ -672,11 +727,12 @@ fn run_bench(cfg: &config::Config, seed: u32, args: &Args) {
     let (mut t_sim, mut t_comp, mut changed) = (0.0f64, 0.0f64, 0usize);
     let mut term = Term::new();
     let (mut bytes, mut t_term) = (0usize, 0.0f64);
+    let mut spare = Frame::new(1, 1);
     for _ in 0..args.bench {
         let a = Instant::now();
         scene.update(dt, t);
         frame.clear();
-        scene.draw(&mut frame, t);
+        scene.render(&mut frame, &mut spare, t, cfg.zoom, None);
         widgets.draw(&mut frame, t);
         let b = Instant::now();
         frame.compose();

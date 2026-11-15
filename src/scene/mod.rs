@@ -153,6 +153,13 @@ pub struct Scene {
     my_pet: Option<pets::MyPet>,
     pet_cfg: crate::config::PetCfg,
     pet_change: Option<crate::config::PetCfg>,
+    /// The villager's name (empty: "neighbour").
+    you_name: String,
+    /// The animal the villager's pet is after.
+    pet_chasing: Option<u64>,
+    /// What the villager has in hand (Q to change): given to whoever E
+    /// is aimed at, or used.
+    held: Option<Held>,
     rng: Rng,
     lines: lines::Lines,
     /// Seconds since this scene was created (sum of frame `dt`s).
@@ -509,12 +516,15 @@ impl Scene {
         let mut avoid: Vec<(i32, i32)> = trees.iter().map(|t| (t.cx - t.hw_base as i32 - 4, t.cx + t.hw_base as i32 + 4)).collect();
         avoid.extend(village.snowmen.iter().map(|s| (s.cx - 9, s.cx + 9)));
         avoid.extend(village.lamps.iter().map(|l| (l.x - 1, l.x + 2)));
-        let critters = critters::Critters::new(&ctx, seed, cfg.critters, cfg.bushes, &avoid);
+        let mut critters = critters::Critters::new(&ctx, seed, cfg.critters, cfg.bushes, &avoid);
+        critters.k = sprite_k(h);
         // the player starts out a little left of the big tree, in the snow
         let player = cfg.player.then(|| {
             let px = cam + wf * 0.40;
             let lo = (ctx.ground_row[(px as usize).min(ww - 1)] + 4).min(hi - 2) as f32;
-            player::Player::new(px, ((lo + hf - 1.0) / 2.0).round())
+            let mut p = player::Player::new(px, ((lo + hf - 1.0) / 2.0).round());
+            p.k = sprite_k(h);
+            p
         });
         let mut s = Scene {
             w,
@@ -581,6 +591,9 @@ impl Scene {
             my_pet: None,
             pet_cfg: cfg.pet.clone(),
             pet_change: None,
+            you_name: cfg.name.clone(),
+            pet_chasing: None,
+            held: None,
             rng,
             lines: lines::Lines::new(seed),
             clock: 0.0,
@@ -598,6 +611,8 @@ impl Scene {
             let py = s.player.as_ref().map(|p| p.y).unwrap_or(0.0);
             s.my_pet = pets::MyPet::new(&cfg.pet, px - 5.0, py);
         }
+        // bubbles clear the heads of people drawn bigger
+        s.director.lift = ((sprite_k(h) - 1.0) * 4.0).round() as i32;
         s
     }
 
@@ -814,7 +829,7 @@ impl Scene {
                 p.dir = dx.signum();
             }
         }
-        let focus_on = |s: &mut Self, id: u64| s.focus = s.critters.position(id).map(|(x, y)| Focus::Critter(id, x as i32, y as i32 - 4));
+        let focus_on = |s: &mut Self, id: u64| s.focus = s.critters.position(id).map(|(x, y)| Focus::Critter(id, x as i32, y as i32 - 4 - s.director.lift));
         match g.then {
             Do::Talk(id) | Do::Pet(id) => {
                 focus_on(self, id);
@@ -896,6 +911,27 @@ impl Scene {
             return self.pet_menu_names(0, &format!("a little {kind} bounces up to you, tail going — they're yours! what will you call them?"));
         } else if page >= 10 {
             return self.pet_menu_names(page - 10, &format!("what shall we call your {kind}?"));
+        } else if page == 2 {
+            let v = match pet.kind {
+                pets::PetKind::Dog => vec![
+                    Opt::new("throw the ball", Act::Pet(P::Throw(1))),
+                    Opt::new("throw a stick", Act::Pet(P::Throw(2))),
+                    Opt::new(&format!("{name}, do a trick!"), Act::Pet(P::Trick)),
+                    Opt::new("chase me!", Act::Pet(P::Zoomies)),
+                ],
+                pets::PetKind::Cat => vec![
+                    Opt::new("toss a ball of yarn", Act::Pet(P::Throw(0))),
+                    Opt::new("dangle your scarf", Act::Pet(P::Tease)),
+                    Opt::new(&format!("a trick, {name}?"), Act::Pet(P::Trick)),
+                    Opt::new("chase me!", Act::Pet(P::Zoomies)),
+                ],
+                pets::PetKind::Bunny => vec![
+                    Opt::new("roll a carrot", Act::Pet(P::Throw(3))),
+                    Opt::new(&format!("{name}, do a trick!"), Act::Pet(P::Trick)),
+                    Opt::new("a little race!", Act::Pet(P::Zoomies)),
+                ],
+            };
+            (format!("{name} looks up at you, all ears. what'll it be?"), v)
         } else if page == 1 {
             let mut v = vec![];
             for (k, label) in ["a dog", "a cat", "a bunny"].iter().enumerate() {
@@ -935,6 +971,14 @@ impl Scene {
         self.open_pet_box("a name", line, v);
     }
 
+    /// A line about the pet, in the dialogue box (no answers to pick).
+    fn pet_say(&mut self, line: &str) {
+        let mut c = story::Convo::menu(PET_ID, "", line, vec![]);
+        c.pos = self.convo_pos;
+        c.ended_at = Some(self.now());
+        self.convo = Some(c);
+    }
+
     fn open_pet_box(&mut self, title: &str, line: &str, opts: Vec<story::Opt>) {
         let mut c = story::Convo::menu(PET_ID, title, line, opts);
         c.pos = self.convo_pos;
@@ -958,9 +1002,60 @@ impl Scene {
             pets::PetKind::Cat => Sfx::Meow,
             pets::PetKind::Bunny => Sfx::Pet,
         };
+        let k = if self.inside.is_some() { 2.0 } else { sprite_k(self.h) };
+        let you = self.player.as_ref().map(|p| (p.centre(), p.y, p.dir)).unwrap_or((pet.x, pet.y, 1.0));
         match a {
-            P::Fuss | P::Play => {
-                pet.happy_until = t + if a == P::Play { 5.0 } else { 3.0 };
+            P::Play => return self.pet_menu(2),
+            P::Throw(i) => {
+                let toy = [pets::ToyKind::Yarn, pets::ToyKind::Ball, pets::ToyKind::Stick, pets::ToyKind::Carrot][i as usize % 4];
+                pet.throw(toy, you.0, you.1, you.2, t, k);
+                let name = pet.name.clone();
+                self.convo = None;
+                let line = match toy {
+                    pets::ToyKind::Yarn => format!("you toss the yarn — {name}'s eyes go huge"),
+                    pets::ToyKind::Ball => format!("you throw the ball! {name} is already gone"),
+                    pets::ToyKind::Stick => format!("a good stick! {name} watches it fly, quivering"),
+                    pets::ToyKind::Carrot => format!("you roll a carrot across the floor. {name}'s nose twitches"),
+                };
+                self.pet_say(&line);
+                return;
+            }
+            P::Trick => {
+                let line = pet.trick(t);
+                self.convo = None;
+                self.pet_say(&line);
+                self.cheer(1);
+                return;
+            }
+            P::Zoomies => {
+                pet.zoomies(you.0, t);
+                let name = pet.name.clone();
+                self.convo = None;
+                let line = match kind {
+                    pets::PetKind::Dog => format!("{name} tears round and round you, ears flapping"),
+                    pets::PetKind::Cat => format!("{name} gets the zoomies — and then sits down like nothing happened"),
+                    pets::PetKind::Bunny => format!("{name} races you in a happy little loop. {name} wins"),
+                };
+                self.pet_say(&line);
+                return;
+            }
+            P::Tease => {
+                pet.wake(t);
+                pet.happy_until = t + 2.5;
+                let name = pet.name.clone();
+                let lines = [
+                    format!("{name} stalks the scarf end… wiggle… POUNCE!"),
+                    format!("{name} bats at the tassel with both paws, very serious about it"),
+                    format!("{name} catches the scarf and won't give it back. it's theirs now"),
+                ];
+                let line = lines[(t * 7.0) as usize % 3].clone();
+                self.convo = None;
+                self.pet_say(&line);
+                return;
+            }
+            P::Fuss => {
+                pet.happy_until = t + 3.0;
+                pet.wake(t);
                 let (x, y) = (pet.x, pet.y);
                 let name = pet.name.clone();
                 match self.inside.as_mut() {
@@ -973,18 +1068,11 @@ impl Scene {
                         self.director.sound(sound, x, 0.8);
                     }
                 }
-                let line = if a == P::Play {
-                    match kind {
-                        pets::PetKind::Dog => format!("{name} races off after an imaginary ball. and back! and off!"),
-                        pets::PetKind::Cat => format!("{name} pounces on your scarf tassel. victory"),
-                        pets::PetKind::Bunny => format!("{name} zooms in a circle and flops over, delighted"),
-                    }
-                } else {
-                    match kind {
-                        pets::PetKind::Dog => format!("who's a good dog? {name} is. {name} absolutely is"),
-                        pets::PetKind::Cat => format!("{name} purrs like a little engine"),
-                        pets::PetKind::Bunny => format!("{name}'s nose wiggles happily"),
-                    }
+                let pick = (t * 13.0) as usize % 3;
+                let line = match kind {
+                    pets::PetKind::Dog => [format!("who's a good dog? {name} is. {name} absolutely is"), format!("{name} leans their whole weight on your legs. bliss"), format!("{name} rolls over for belly rubs. obviously")][pick].clone(),
+                    pets::PetKind::Cat => [format!("{name} purrs like a little engine"), format!("{name} headbutts your hand. more, please"), format!("{name} allows exactly three strokes, then walks off. fair")][pick].clone(),
+                    pets::PetKind::Bunny => [format!("{name}'s nose wiggles happily"), format!("{name} flattens out like a pancake, very content"), format!("{name} grinds their teeth softly — that's a bunny purr")][pick].clone(),
                 };
                 say(self, &line);
             }
@@ -1044,6 +1132,12 @@ impl Scene {
                 self.pockets.add(item);
                 self.cheer(1);
             }
+            O::Gifts(item, n) => {
+                for _ in 0..n {
+                    self.pockets.add(item);
+                }
+                self.cheer(1);
+            }
             O::Cozy => self.pockets.cozy_until = self.pockets.cozy_until.max(t + 30.0),
             O::Cheer(n) => self.cheer(n),
         }
@@ -1070,6 +1164,7 @@ impl Scene {
         let task = if info.church || inn.task.is_some() { None } else { Some(tasks[(seed as usize) % tasks.len()]) };
         let h = story::HostCtx { theme: info.theme, family: info.family.clone(), pet: info.pet.clone(), years: info.years, church: info.church, piano: info.has_piano, oven: info.has_oven, task };
         let mut c = story::Convo::host(id, info.name, info.kid, info.temper, visits, &ctx, &mut self.story_talk, h, seed);
+        c.line = story::by_name(&c.line, &self.you_name, visits == 0, info.kid, seed);
         c.pos = self.convo_pos;
         inn.hold_talk(i, t);
         if let Some((hx, hy)) = inn.head_of(i) {
@@ -1096,10 +1191,12 @@ impl Scene {
         let visits = self.talks.get(&id).copied().unwrap_or(0);
         *self.talks.entry(id).or_insert(0) += 1;
         let mut c = story::Convo::open(id, &name, kid, visits, &ctx, &mut self.story_talk, cx, self.rng.next_u32(), aware);
+        c.line = story::by_name(&c.line, &self.you_name, visits == 0, kid, self.rng.next_u32());
         c.pos = self.convo_pos;
         self.director.say(cx.round() as i32, cy as i32 - 4, &c.line, t, 3.0, 40);
         if let Some(p) = &self.player {
-            let hi = if first { "hello there!" } else { "hi again!" };
+            let intro = format!("hello! I'm {}", self.you_name);
+            let hi = if first && !self.you_name.is_empty() { intro.as_str() } else if first { "hello there!" } else { "hi again!" };
             self.director.say(p.centre().round() as i32, p.y as i32 - 4, hi, t - 0.01, 1.2, 0);
         }
         self.critters.hold_talk(id, px, t);
@@ -1171,7 +1268,7 @@ impl Scene {
         match act {
             story::Act::Invite => {
                 if let Some((x, y)) = self.critters.position(id) {
-                    self.focus = Some(Focus::Critter(id, x as i32, y as i32 - 4));
+                    self.focus = Some(Focus::Critter(id, x as i32, y as i32 - 4 - self.director.lift));
                 }
                 if !self.critters.following(id) {
                     if let Some(p) = &mut self.player {
@@ -1350,6 +1447,37 @@ impl Scene {
         self.show_pockets = false;
         self.show_stats = false;
         had
+    }
+
+    /// Q: the next thing to hold out (berries, then whatever's in the
+    /// pockets, then empty hands).
+    pub fn cycle_held(&mut self) {
+        let t = self.now();
+        let Some(p) = self.player.as_ref() else { return };
+        let (px, py) = (p.centre(), p.y);
+        let mut all: Vec<Held> = vec![];
+        if p.berries > 0 {
+            all.push(Held::Berries);
+        }
+        all.extend(shop::ITEMS.iter().filter(|&&i| self.pockets.count(i) > 0).map(|&i| Held::Item(i)));
+        let next = match self.held.and_then(|h| all.iter().position(|&a| a == h)) {
+            Some(i) if i + 1 < all.len() => Some(all[i + 1]),
+            Some(_) => None,
+            None => all.first().copied(),
+        };
+        self.held = next;
+        let line = match next {
+            None if all.is_empty() => "nothing in my pockets yet".to_string(),
+            None => "hands in pockets".to_string(),
+            Some(Held::Berries) => format!("berries at the ready ({})", self.player.as_ref().map(|p| p.berries).unwrap_or(0)),
+            Some(Held::Item(i)) => format!("{} in hand ({})", i.name(), self.pockets.count(i)),
+        };
+        if self.inside.is_none() {
+            self.director.say(px.round() as i32, py as i32 - 4, &line, t, 1.6, 6);
+        } else if let Some(inn) = self.inside.as_mut() {
+            inn.director.say(px.round() as i32, py as i32 - 10, &line, t, 1.6, 40);
+        }
+        self.director.sound(Sfx::Rustle, px, 0.4);
     }
 
     /// 1-5: buy (at the open shop) or use an item.
@@ -1573,6 +1701,47 @@ impl Scene {
         self.view_cam().round() as i32
     }
 
+    /// How much the view is magnified on its own: rooms are drawn at
+    /// their designed size and scaled up to fill a taller screen.
+    pub fn view_zoom(&self) -> f32 {
+        if self.inside.is_some() && self.look.is_none() {
+            room_scale(self.h)
+        } else {
+            1.0
+        }
+    }
+
+    /// The part of the drawing there is to see (cells): a room only
+    /// fills its designed size.
+    pub fn view_bounds(&self) -> (f32, f32) {
+        match (&self.inside, &self.look) {
+            (Some(_), None) => {
+                let (w, h) = room_size(self.w, self.h);
+                (w as f32, h as f32)
+            }
+            _ => (self.w as f32, self.h as f32),
+        }
+    }
+
+    /// Where a zoomed view centres (cells, as drawn): on the villager when
+    /// they're about, else on the village.
+    pub fn zoom_focus(&self) -> (f32, f32) {
+        let (bw, bh) = self.view_bounds();
+        let Some(p) = &self.player else { return (bw * 0.5, bh * 0.72) };
+        if let (Some(inn), None) = (&self.inside, &self.look) {
+            return (p.centre(), p.y - 2.0 + inn.view_shift(self.now()));
+        }
+        if self.inside.is_some() {
+            return (bw * 0.5, bh * 0.6);
+        }
+        let x = p.centre() - self.cam_i() as f32;
+        let y = p.y - 2.0 + self.oy_i() as f32;
+        if x < 0.0 || x > bw || y < 0.0 || y > bh {
+            return (bw * 0.5, bh * 0.72);
+        }
+        (x, y)
+    }
+
     /// The camera when looking out of a window indoors: (world column at
     /// the left of the screen, rows lifted into the sky). Where the villager
     /// stands in the room, and leaning (A/D), shift the view a little.
@@ -1664,6 +1833,29 @@ impl Scene {
         }
     }
 
+    /// Shift held: the villager runs.
+    pub fn set_sprint(&mut self, on: bool) {
+        if let Some(p) = &mut self.player {
+            p.sprint = on;
+        }
+    }
+
+    /// The villager's name (empty: "neighbour"), for what people call them.
+    pub fn set_name(&mut self, name: &str) {
+        if self.you_name != name {
+            self.you_name = name.to_string();
+        }
+    }
+
+    /// What people call the villager.
+    pub fn your_name(&self) -> &str {
+        if self.you_name.is_empty() {
+            "neighbour"
+        } else {
+            &self.you_name
+        }
+    }
+
     /// The direction keys currently held: x and y each -1, 0 or 1.
     pub fn set_move(&mut self, mx: f32, my: f32) {
         self.mv = (mx, my);
@@ -1728,7 +1920,7 @@ impl Scene {
             }
         }
         // nothing else in reach: the pet, at their heels
-        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, 1.0)) {
+        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, sprite_k(self.h))) {
             return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3));
         }
         None
@@ -1759,7 +1951,7 @@ impl Scene {
             return;
         }
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
-            if !p.free(t) {
+            if !p.free(t) || inn.is_climbing() {
                 return;
             }
             p.active_at = t;
@@ -1786,10 +1978,42 @@ impl Scene {
         if let Some(Focus::Pet(..)) = self.focus {
             if self.convo.as_ref().is_some_and(|c| c.id == PET_ID && c.ended_at.is_none()) {
                 self.answer(1);
+            } else if let Some(Held::Item(item)) = self.held.filter(|h| matches!(h, Held::Item(shop::Item::Carrot | shop::Item::Gingerbread | shop::Item::CandyCane))) {
+                // a treat for the pet
+                self.pockets.take(item);
+                if self.pockets.count(item) == 0 {
+                    self.held = None;
+                }
+                if let Some(pet) = &mut self.my_pet {
+                    pet.wake(t);
+                    pet.happy_until = t + 3.0;
+                    let n = if pet.name.is_empty() { format!("your {}", pet.kind.name()) } else { pet.name.clone() };
+                    let line = match (pet.kind, item) {
+                        (pets::PetKind::Bunny, shop::Item::Carrot) => format!("{n} takes the carrot very seriously. *crunch crunch crunch*"),
+                        (_, shop::Item::Carrot) => format!("{n} sniffs the carrot, licks it… and eats it anyway"),
+                        (pets::PetKind::Cat, _) => format!("{n} inspects the treat, then nibbles a corner, very dignified"),
+                        _ => format!("{n} snaps it up and wags for more!"),
+                    };
+                    self.director.emote(pet.x, pet.y - 3.0, '♥', Rgb::hex(0xff6b8a), 2);
+                    self.director.sound(Sfx::Munch, pet.x, 0.6);
+                    self.pet_say(&line);
+                }
             } else {
                 self.pet_menu(0);
             }
             return;
+        }
+        // something in hand: given to whoever's in front, or used
+        if let Some(Held::Item(item)) = self.held {
+            let talking = self.convo.as_ref().is_some_and(|c| c.ended_at.is_none());
+            if !talking && matches!(self.focus, Some(Focus::Critter(..)) | None) {
+                let n = shop::ITEMS.iter().position(|&i| i == item).unwrap_or(0) + 1;
+                self.number(n);
+                if self.pockets.count(item) == 0 {
+                    self.held = None;
+                }
+                return;
+            }
         }
         let Some(p) = self.player.as_mut().filter(|p| p.free(t)) else { return };
         p.active_at = t;
@@ -1874,7 +2098,8 @@ impl Scene {
         let seed = self.seed_for(i);
         let Some(h) = self.village.houses.get(i) else { return };
         let Some(p) = self.player.as_mut() else { return };
-        let inn = interior::Interior::new(i, h.church, self.home == Some(i), h.wall, self.w, self.h, seed, (p.x, p.y), t);
+        let (rw, rh) = room_size(self.w, self.h);
+        let inn = interior::Interior::new(i, h.church, self.home == Some(i), h.wall, rw, rh, seed, (p.x, p.y), t);
         let (ex, ey) = inn.entrance();
         (p.x, p.y, p.dir) = (ex, ey, 1.0);
         let home = inn.home;
@@ -1883,7 +2108,7 @@ impl Scene {
                 (pet.x, pet.y) = (ex + 9.0, ey + 1.0);
             } else if home {
                 // waiting at home: comes running
-                (pet.x, pet.y) = (self.w as f32 * 0.4, ey + 2.0);
+                (pet.x, pet.y) = (rw as f32 * 0.4, ey + 2.0);
                 pet.happy_until = t + 3.0;
             }
         }
@@ -1977,7 +2202,7 @@ impl Scene {
         let t = self.now();
         if let Some(p) = &mut self.player {
             p.active_at = t;
-            p.x = self.w as f32 * 0.36;
+            p.x = room_size(self.w, self.h).0 as f32 * 0.36;
         }
     }
 
@@ -1994,6 +2219,35 @@ impl Scene {
         }
     }
 
+    /// Previews: press E on the room's stairs (or the bed: `what` 1, the
+    /// sofa: 2, the oven: 3) — the climb (etc.) then plays on.
+    pub fn preview_poke(&mut self, what: u8) {
+        // 4: throw the pet its toy; 5: a trick
+        if what >= 4 {
+            let toy = match self.my_pet.as_ref().map(|p| p.kind) {
+                Some(pets::PetKind::Cat) => 0,
+                Some(pets::PetKind::Bunny) => 3,
+                _ => 1,
+            };
+            self.pet_act(if what == 4 { story::PetAct::Throw(toy) } else { story::PetAct::Trick });
+            return;
+        }
+        let t = self.now();
+        let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) else { return };
+        let want = |k: &interior::Thing| match what {
+            1 => matches!(k, interior::Thing::Bed),
+            2 => matches!(k, interior::Thing::Seat(_)),
+            3 => matches!(k, interior::Thing::Oven),
+            _ => matches!(k, interior::Thing::Stairs(_)),
+        };
+        if let Some((k, x)) = inn.things_at().into_iter().find(|(k, _)| want(k)) {
+            p.x = x as f32 - 4.0;
+            let o = inn.poke(k, p, t);
+            self.indoors(o);
+        }
+    }
+
+    #[cfg(test)]
     pub fn is_inside(&self) -> bool {
         self.inside.is_some()
     }
@@ -2324,7 +2578,10 @@ impl Scene {
     fn poke(&mut self, x: i32, y: i32) -> bool {
         let t = self.now();
         if let Some((kx, ky)) = self.shop.as_ref().filter(|s| s.contains(x, y)).map(|s| (s.centre(), s.base - 4)) {
-            let line = *self.rng.pick(&["hot cocoa, gingerbread, candy canes!", "come by the counter for a cocoa!", "merry Christmas, neighbour!", "warm your hands by the window"]);
+            let merry = format!("merry Christmas, {}!", self.your_name());
+            let lines = ["hot cocoa, gingerbread, candy canes!", "come by the counter for a cocoa!", merry.as_str(), "warm your hands by the window"];
+            let line = lines[self.rng.next_u32() as usize % lines.len()].to_string();
+            let line = line.as_str();
             self.director.say(kx, ky, line, t, 2.6, 6);
             self.director.sound(Sfx::Greet, kx as f32, 0.6);
             return true;
@@ -2442,7 +2699,7 @@ impl Scene {
             return;
         }
         let (sx, x) = (x, x + self.cam_i());
-        if self.my_pet.as_ref().is_some_and(|pet| !pet.staying && pet.hit(x, y, 1.0)) {
+        if self.my_pet.as_ref().is_some_and(|pet| !pet.staying && pet.hit(x, y, sprite_k(self.h))) {
             self.pet_act(story::PetAct::Fuss);
             return;
         }
@@ -2649,19 +2906,102 @@ impl Scene {
                 self.cam_target = self.cam_target.clamp(0.0, (self.ww - self.w) as f32);
             }
         }
+        // the pet out and about: after an animal now and then (a dog chases,
+        // a cat stalks, a bunny hops along with rabbits), or playing with
+        // another pet
+        if let (Some(pet), Some(p), None) = (self.my_pet.as_mut(), self.player.as_ref(), &self.inside) {
+            if let Some(id) = self.pet_chasing {
+                match self.critters.pos_of(id) {
+                    Some((x, _)) if pet.busy.is_some() => pet.chasing(x),
+                    _ => self.pet_chasing = None,
+                }
+            }
+            if pet.idle() && !pet.napping && t > pet.social_at && !p.moving {
+                pet.social_at = t + 6.0;
+                if let Some((owner, vx, _, _)) = self.critters.vpet_near(pet.x, pet.y, 10.0) {
+                    pet.play_with(vx, t);
+                    self.critters.vpet_play(owner, t);
+                    pet.social_at = t + 40.0;
+                } else if let Some((id, what, ax, _)) = self.critters.animal_near(pet.x, pet.y, 16.0) {
+                    match (pet.kind, what) {
+                        (pets::PetKind::Bunny, "rabbit") => {
+                            pet.play_with(ax, t);
+                            pet.social_at = t + 40.0;
+                        }
+                        (pets::PetKind::Bunny, _) => {}
+                        _ => {
+                            pet.chase(ax, t);
+                            if pet.kind == pets::PetKind::Dog {
+                                self.critters.startle(id, pet.x, t, &mut self.director);
+                            }
+                            self.pet_chasing = Some(id);
+                            pet.social_at = t + 35.0;
+                        }
+                    }
+                }
+            }
+            // the cat's pounce at the end of the stalk startles its quarry
+            if let (Some(id), Some(pets::Busy::Chase { until, stalk: true, .. })) = (self.pet_chasing, pet.busy) {
+                if until - t < 0.9 {
+                    self.critters.startle(id, pet.x, t, &mut self.director);
+                    self.pet_chasing = None;
+                }
+            }
+        }
         // the pet keeps up (or pootles about at home)
         if let (Some(pet), Some(p)) = (self.my_pet.as_mut(), self.player.as_ref()) {
             match &self.inside {
                 None if !pet.staying => {
                     let g = &self.ctx.ground_row;
                     let lo = (g[(p.centre().max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
-                    pet.update(dt, t, p.centre(), p.y, p.dir, p.moving, lo, self.h as f32 - 1.0, 1.0);
+                    pet.update(dt, t, p.centre(), p.y, p.dir, p.moving, lo, self.h as f32 - 1.0, sprite_k(self.h));
+                }
+                Some(inn) if inn.is_climbing() => {
+                    // it comes along, and turns up beside them
+                    (pet.x, pet.y) = (p.centre() + 6.0 * -p.dir, p.y);
                 }
                 Some(inn) if !pet.staying || inn.home => {
                     let (lo, hi) = inn.walk_rows();
-                    pet.update(dt, t, p.centre(), p.y, p.dir, p.moving, lo, hi, 2.0);
+                    match inn.bed_foot().filter(|_| inn.is_lying()) {
+                        // curled up at the foot of the bed
+                        Some((bx, by)) => {
+                            pet.update(dt, t, bx, by, -1.0, false, lo.min(by), hi, 2.0);
+                            if (pet.x - bx).abs() < 3.0 {
+                                pet.napping = true;
+                            }
+                        }
+                        None => pet.update(dt, t, p.centre(), p.y, p.dir, p.moving, lo, hi, 2.0),
+                    }
                 }
                 _ => {}
+            }
+        }
+        // what's in hand (gone once it runs out)
+        let held = match self.held {
+            Some(Held::Berries) if self.player.as_ref().is_some_and(|p| p.berries == 0) => None,
+            Some(Held::Item(i)) if self.pockets.count(i) == 0 => None,
+            h => h,
+        };
+        self.held = held;
+        if let Some(p) = &mut self.player {
+            p.hold = match held {
+                Some(Held::Berries) => Some(('⁘', Rgb::hex(0xd8202a))),
+                Some(Held::Item(i)) if i != shop::Item::Lantern => Some(i.icon()),
+                _ => None,
+            };
+        }
+        // what the pet got up to: hearts, lines, barks
+        if let Some(pet) = &mut self.my_pet {
+            for ev in pet.take_events() {
+                let d = match self.inside.as_mut() {
+                    Some(inn) => &mut inn.director,
+                    None => &mut self.director,
+                };
+                match ev {
+                    pets::PetEv::Emote(ch, c, x, y) => d.emote(x, y, ch, c, 1),
+                    pets::PetEv::Say(line, x, y) => d.say(x.round() as i32, y.round() as i32, &line, t, 3.4, 40),
+                    pets::PetEv::Sound(s, x) => d.sound(s, x, 0.6),
+                }
             }
         }
         if walked_out {
@@ -3059,7 +3399,72 @@ impl Scene {
         self.director.sound(Sfx::Present, px as f32, 0.5);
     }
 
-    pub fn draw(&self, f: &mut Frame, _app_t: f32) {
+    #[cfg(test)]
+    pub fn draw(&self, f: &mut Frame, app_t: f32) {
+        self.draw_world(f, app_t);
+        self.draw_overlay(f);
+    }
+
+    /// Draw everything, the scene magnified by `zoom` (times a room's own
+    /// scale indoors) around `focus` (cells; `None`: the usual spot).
+    /// Returns (z, x0, y0): screen cell (x, y) shows (x0 + x/z, y0 + y/z).
+    pub fn render(&self, f: &mut Frame, spare: &mut Frame, app_t: f32, zoom: f32, focus: Option<(f32, f32)>) -> (f32, f32, f32) {
+        let z = zoom.clamp(1.0, 4.0) * self.view_zoom();
+        self.draw_world(f, app_t);
+        let mut xf = (1.0, 0.0, 0.0);
+        if z > 1.001 {
+            let (fx, fy) = focus.unwrap_or_else(|| self.zoom_focus());
+            let (bw, bh) = self.view_bounds();
+            let (x0, y0) = f.zoom(z, fx, fy, (bw, bh), spare);
+            xf = (z, x0, y0);
+        }
+        self.draw_overlay(f);
+        xf
+    }
+
+    /// The panels over the scene (the dialogue box, pockets, the window
+    /// frame when looking out): these never zoom.
+    pub fn draw_overlay(&self, f: &mut Frame) {
+        let t = self.now();
+        f.ox = 0;
+        f.oy = 0;
+        if self.inside.is_some() && self.look.is_none() {
+            if let Some(c) = &self.convo {
+                c.draw(f, self.convo_hover);
+            }
+            return;
+        }
+        // looking out of a window: the room around the view
+        if let (Some(inn), Some(look)) = (&self.inside, &self.look) {
+            inn.draw_window_frame(f, look, t, self.cfg.glow);
+        }
+        if let Some(c) = &self.convo {
+            c.draw(f, self.convo_hover);
+        }
+        if self.show_stats {
+            shop::draw_stats(f, &self.pockets);
+        } else if self.show_pockets {
+            shop::draw_pockets(f, &self.pockets);
+        }
+        // in hand (Q to change)
+        if let (Some(h), Some(p)) = (self.held, &self.player) {
+            if t - p.active_at < 20.0 {
+                let (ch, col, label) = match h {
+                    Held::Berries => ('⁘', Rgb::hex(0xd8202a), format!("berries ×{}", p.berries)),
+                    Held::Item(i) => (i.icon().0, i.icon().1, format!("{} ×{}", i.name(), self.pockets.count(i))),
+                };
+                let bg = crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.85);
+                let y = f.h as i32 - 2;
+                let x = f.text(2, y, " in hand ", crate::color::pal::UI_DIM, bg, 0.0);
+                f.put_g(x, y, crate::frame::Glyph::new(ch, col).bg(bg).lit(0.0));
+                let x = f.text(x + 1, y, &format!(" {label} "), crate::color::pal::UI_TEXT, bg, 0.0);
+                f.text(x, y, " Q ", Rgb::hex(0xffd36b), bg, 0.0);
+            }
+        }
+    }
+
+    /// The scene itself (what zooms).
+    pub fn draw_world(&self, f: &mut Frame, _app_t: f32) {
         let t = self.now();
         let glow = self.cfg.glow;
         f.day = 0.0;
@@ -3069,11 +3474,8 @@ impl Scene {
             inn.draw(f, t, glow, p, prompt);
             f.ox = 0;
             f.oy = 0;
-            if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying || inn.home) {
+            if let Some(pet) = self.my_pet.as_ref().filter(|pet| (!pet.staying || inn.home) && !inn.is_climbing()) {
                 pet.draw(f, t, 2);
-            }
-            if let Some(c) = &self.convo {
-                c.draw(f, self.convo_hover);
             }
             return;
         }
@@ -3152,7 +3554,7 @@ impl Scene {
         self.critters.draw(f, t, glow);
         if let (Some(p), None) = (&self.player, &self.inside) {
             if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying) {
-                pet.draw(f, t, 1);
+                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)));
             }
             p.draw(f, t, glow);
         }
@@ -3173,7 +3575,7 @@ impl Scene {
             if t - p.active_at < 20.0 {
                 // over the person / bush; for village things, over the player's head
                 let (x, y) = match fc {
-                    Focus::Spot(..) => (p.centre().round() as i32, p.y.round() as i32 - 5),
+                    Focus::Spot(..) => (p.centre().round() as i32, p.y.round() as i32 - 5 - self.director.lift),
                     _ => fc.mark(),
                 };
                 player::Player::draw_prompt(f, x, y, 'E', t);
@@ -3190,18 +3592,6 @@ impl Scene {
         if let Some(ny) = &self.newyear {
             ny.draw_sky(f, t, ny_left, ny_year);
         }
-        // looking out of a window: the room around the view
-        if let (Some(inn), Some(look)) = (&self.inside, &self.look) {
-            inn.draw_window_frame(f, look, t, glow);
-        }
-        if let Some(c) = &self.convo {
-            c.draw(f, self.convo_hover);
-        }
-        if self.show_stats {
-            shop::draw_stats(f, &self.pockets);
-        } else if self.show_pockets {
-            shop::draw_pockets(f, &self.pockets);
-        }
         // a soft lantern-like glow that follows the pointer while it moves
         if let Some((cx, cy)) = self.cursor {
             let k = (1.0 - (t - self.cursor_seen) / 2.5).clamp(0.0, 1.0);
@@ -3210,6 +3600,41 @@ impl Scene {
             }
         }
     }
+}
+
+/// What the villager can hold out: berries (for the animals) or something
+/// from the pockets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Held {
+    Berries,
+    Item(shop::Item),
+}
+
+/// How much bigger people and animals are drawn on a screen `h` rows tall
+/// (the scenery scales with the rows by itself): 1 up to ~94 rows, then in
+/// quarter steps (2 at 150 rows).
+pub fn sprite_k(h: usize) -> f32 {
+    let k = h as f32 / 75.0;
+    if k < 1.25 {
+        1.0
+    } else {
+        (k * 4.0).round() / 4.0
+    }
+}
+
+/// Rooms are designed for a screen this many rows tall.
+pub const ROOM_ROWS: f32 = 75.0;
+
+/// How many times bigger than designed a room is drawn on a screen `h`
+/// rows tall (in 0.05 steps; never smaller than designed).
+pub fn room_scale(h: usize) -> f32 {
+    ((h as f32 / ROOM_ROWS * 20.0).round() / 20.0).max(1.0)
+}
+
+/// The size a room is built at, for a `w` x `h` screen.
+pub fn room_size(w: usize, h: usize) -> (usize, usize) {
+    let k = room_scale(h);
+    (((w as f32 / k).round() as usize).max(1), ((h as f32 / k).round() as usize).max(1))
 }
 
 /// A spot along the railway, not hidden behind any house, for the station
@@ -3297,15 +3722,40 @@ mod tests {
         }
         s.set_move(0.0, 0.0);
         assert_eq!(s.inside.as_ref().unwrap().kind(), interior::RoomKind::Kitchen);
-        // up to the attic, look out of its window
-        let t = s.now();
+        // up the stairs (walked, the view following), then the ladder to
+        // the attic, and look out of its window
+        let mut t = s.now();
         {
             let (inn, p) = (s.inside.as_mut().unwrap(), s.player.as_mut().unwrap());
             inn.preview_room(0, p);
             let o = inn.poke(interior::Thing::Stairs(true), p, t);
             assert_eq!(o, interior::Outcome::None);
             assert_eq!(inn.kind(), interior::RoomKind::Bedroom);
+            assert!(inn.is_climbing());
+            // the view starts on the parlour (the bedroom a screen above)
+            // and pans up with the villager
+            let h = inn.walk_rows().1 + 1.0;
+            assert!((inn.view_shift(t) + h).abs() < 1.0, "{}", inn.view_shift(t));
+            let mut last = inn.view_shift(t);
+            let mut rows = vec![];
+            while inn.is_climbing() {
+                t += DT;
+                inn.update(DT, t, (1.0, 0.0), p);
+                let v = inn.view_shift(t);
+                assert!(v >= last - 1e-3, "the view went back down: {last} → {v}");
+                last = v;
+                rows.push(p.y);
+                assert!(t < 20.0, "never got to the top");
+            }
+            assert!(inn.view_shift(t).abs() < 1e-3);
+            assert!(rows.windows(2).any(|w| w[1] < w[0] - 0.1), "the villager never climbed");
+            let (lo, hi) = inn.walk_rows();
+            assert!(p.y >= lo && p.y <= hi, "landed off the floor: {} not in {lo}..{hi}", p.y);
             inn.poke(interior::Thing::Stairs(true), p, t);
+            while inn.is_climbing() {
+                t += DT;
+                inn.update(DT, t, (0.0, 0.0), p);
+            }
             assert_eq!(inn.kind(), interior::RoomKind::Attic);
             let o = inn.poke(interior::Thing::Window(0), p, t);
             assert!(matches!(o, interior::Outcome::Look(_)), "{o:?}");
@@ -3859,5 +4309,150 @@ mod tests {
         run(&mut s, 0.1);
         assert!(s.pockets.done & 1 == 1);
         assert!(s.pockets.cheer >= before + 5);
+    }
+
+    /// Rooms: E on the sofa sits the villager on its cushion; E on the bed
+    /// tucks them in (the room dims, the pet curls up at the foot of the
+    /// bed) until a direction key gets them up; the oven bakes a tray of
+    /// gingerbread that E puts in the pockets.
+    #[test]
+    fn the_sofa_the_bed_and_the_oven_do_what_they_say() {
+        let mut s = scene();
+        let home = s.home.expect("no home");
+        s.enter(home);
+        let run = |s: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                s.update(DT, 0.0);
+            }
+        };
+        run(&mut s, 0.5);
+        s.preview_poke(2);
+        run(&mut s, 0.5);
+        {
+            let (inn, p) = (s.inside.as_ref().unwrap(), s.player.as_ref().unwrap());
+            assert!(!p.moving);
+            assert!(inn.things_at().iter().any(|(k, x)| matches!(k, interior::Thing::Seat(_)) && (*x as f32 - p.centre()).abs() < 3.0), "not by a seat");
+        }
+        // upstairs to bed
+        let t = s.now();
+        {
+            let (inn, p) = (s.inside.as_mut().unwrap(), s.player.as_mut().unwrap());
+            inn.preview_room(2, p);
+        }
+        let _ = t;
+        s.preview_poke(1);
+        run(&mut s, 4.0);
+        assert!(s.inside.as_ref().unwrap().is_lying());
+        let (bx, _) = s.inside.as_ref().unwrap().bed_foot().unwrap();
+        let pet = s.my_pet.as_ref().unwrap();
+        assert!(pet.napping && (pet.x - bx).abs() < 4.0, "pet not asleep on the bed: {} vs {bx}", pet.x);
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.3);
+        s.set_move(0.0, 0.0);
+        assert!(!s.inside.as_ref().unwrap().is_lying(), "didn't get up");
+        // the kitchen: bake, wait, take
+        {
+            let (inn, p) = (s.inside.as_mut().unwrap(), s.player.as_mut().unwrap());
+            inn.preview_room(1, p);
+        }
+        let before = s.pockets.count(shop::Item::Gingerbread);
+        s.preview_poke(3);
+        run(&mut s, 9.0);
+        s.preview_poke(3);
+        assert_eq!(s.pockets.count(shop::Item::Gingerbread), before + 3, "the cookies never reached the pockets");
+    }
+
+    /// The pet: a thrown ball is fetched and brought back; tricks; and left
+    /// standing about a good while, it naps (and wakes when you move off).
+    #[test]
+    fn the_pet_fetches_does_tricks_and_naps() {
+        let mut s = scene();
+        let run = |s: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                s.update(DT, 0.0);
+            }
+        };
+        run(&mut s, 1.0);
+        s.pet_act(story::PetAct::Throw(1));
+        let x0 = s.my_pet.as_ref().unwrap().x;
+        run(&mut s, 0.6);
+        assert!(s.my_pet.as_ref().unwrap().toy.is_some(), "nothing thrown");
+        let mut went = 0.0f32;
+        for _ in 0..(12.0 / DT) as usize {
+            s.update(DT, 0.0);
+            went = went.max((s.my_pet.as_ref().unwrap().x - x0).abs());
+            if s.my_pet.as_ref().unwrap().busy.is_none() {
+                break;
+            }
+        }
+        let pet = s.my_pet.as_ref().unwrap();
+        assert!(went > 8.0, "the dog didn't run after it ({went})");
+        assert!(pet.busy.is_none() && pet.toy.is_none(), "never brought it back");
+        let p = s.player.as_ref().unwrap().centre();
+        assert!((pet.x - p).abs() < 8.0, "dropped it far away");
+        s.pet_act(story::PetAct::Trick);
+        assert!(s.convo.as_ref().is_some_and(|c| !c.line.is_empty()));
+        run(&mut s, 3.0);
+        assert!(s.my_pet.as_ref().unwrap().busy.is_none());
+        // a nap after a while standing still
+        s.critters = critters::Critters::new(&s.ctx, 1, 0.0, false, &[]);
+        run(&mut s, 34.0);
+        assert!(s.my_pet.as_ref().unwrap().napping, "no nap");
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.2);
+        assert!(!s.my_pet.as_ref().unwrap().napping, "slept through the walk");
+    }
+
+    /// Q: what's in hand cycles through what's in the pockets; E then gives
+    /// it to the pet as a treat; people greet the villager by name.
+    #[test]
+    fn something_in_hand_and_a_name() {
+        let mut s = scene();
+        s.update(DT, 0.0);
+        s.player.as_mut().unwrap().berries = 0;
+        s.pockets.add(shop::Item::Carrot);
+        s.pockets.add(shop::Item::Cocoa);
+        s.cycle_held();
+        assert_eq!(s.held, Some(Held::Item(shop::Item::Cocoa)));
+        s.cycle_held();
+        assert_eq!(s.held, Some(Held::Item(shop::Item::Carrot)));
+        s.cycle_held();
+        assert_eq!(s.held, None);
+        s.cycle_held();
+        s.cycle_held();
+        s.focus = Some(Focus::Pet(0, 0));
+        s.interact();
+        assert_eq!(s.pockets.count(shop::Item::Carrot), 0, "the pet didn't get the carrot");
+        s.update(DT, 0.0);
+        assert_eq!(s.held, None, "still holding a carrot that's gone");
+        assert_eq!(story::by_name("hello again!", "", false, false, 0), "hello again!");
+        assert!(story::by_name("hello again!", "Robin", false, false, 0).contains("Robin"));
+        assert!(story::by_name("hi!", "Robin", true, true, 0).contains("Robin"));
+    }
+
+    /// On a screen twice as tall, people and animals are drawn twice as big
+    /// (and walk twice as far), and rooms are built at their designed size
+    /// and magnified.
+    #[test]
+    fn a_taller_screen_draws_everyone_to_scale() {
+        assert_eq!(sprite_k(75), 1.0);
+        assert_eq!(sprite_k(150), 2.0);
+        assert_eq!(room_scale(150), 2.0);
+        assert_eq!(room_size(1136, 150), (568, 75));
+        let mut s = Scene::new(600, 150, 7, &SceneCfg::default());
+        assert_eq!(s.critters.k, 2.0);
+        assert_eq!(s.player.as_ref().unwrap().k, 2.0);
+        s.update(DT, 0.0);
+        let x0 = s.player_x().unwrap();
+        s.set_move(1.0, 0.0);
+        for _ in 0..30 {
+            s.update(DT, 0.0);
+        }
+        let far = s.player_x().unwrap() - x0;
+        assert!(far > 15.0, "walked only {far} columns in a second at 2x");
+        let home = s.home.unwrap();
+        s.enter(home);
+        assert_eq!(s.view_zoom(), 2.0);
+        assert_eq!(s.view_bounds(), (300.0, 75.0));
     }
 }

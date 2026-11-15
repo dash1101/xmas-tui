@@ -27,6 +27,13 @@ pub struct Player {
     pub moving: bool,
     /// Walking speed multiplier (the "Walk speed" setting).
     pub speed: f32,
+    /// Shift is held: running (twice as fast).
+    pub sprint: bool,
+    /// Something held out in the other hand (glyph, colour).
+    pub hold: Option<(char, Rgb)>,
+    /// How big the village is drawn (1 at 75 rows; 2 at 150): the villager
+    /// is drawn (and walks) to match.
+    pub k: f32,
     /// When the player last moved or did something (scene time).
     pub active_at: f32,
     phase: f32,
@@ -52,7 +59,12 @@ pub struct Player {
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, drop_to: None }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, drop_to: None }
+    }
+
+    /// How fast to go: the walk speed, doubled while running.
+    pub fn pace(&self) -> f32 {
+        self.speed.clamp(0.25, 6.0) * if self.sprint { 2.0 } else { 1.0 }
     }
 
     pub fn rebase(&mut self, s: f32) {
@@ -171,9 +183,9 @@ impl Player {
             if mx != 0.0 {
                 self.dir = mx.signum();
             }
-            let k = self.speed.clamp(0.25, 6.0);
-            self.x = (self.x + mx * SPEED_X * k * dt).clamp(1.0, w - 4.0);
-            self.y += my * SPEED_Y * k.sqrt() * dt;
+            let k = self.pace();
+            self.x = (self.x + mx * SPEED_X * k * self.k * dt).clamp(1.0, w - 4.0);
+            self.y += my * SPEED_Y * k.sqrt() * self.k * dt;
             self.phase += dt * k.sqrt() * if mx != 0.0 { 9.0 } else { 6.0 };
             self.step_cd -= dt;
             if self.step_cd <= 0.0 {
@@ -208,8 +220,83 @@ impl Player {
             [" ▲", " ●", "~█", if self.moving && step { " ╨" } else { " ║" }]
         };
         let wave = !self.moving && !up && !scooping && !throwing && (t * 0.5).sin() > 0.97;
+        // on a screen tall enough: the pixel-art villager, as indoors
+        if self.k >= 1.75 && !up && !scooping {
+            let b = super::interior::Big {
+                x: self.centre(),
+                feet: self.y.round() as i32,
+                dir: self.dir,
+                step: self.moving && step,
+                hat: Some(HAT),
+                hair: Rgb::hex(0x3a2a1a),
+                coat: COAT,
+                scarf: Some(SCARF),
+                sit: None,
+                kid: false,
+                arms_up: throwing || wave,
+                outdoor: true,
+            };
+            b.draw(f, t);
+            let (hx, hy) = (self.centre().round() as i32 + if self.dir > 0.0 { 3 } else { -4 }, self.y.round() as i32 * 2 - 5);
+            let thing = if self.snowball && !throwing {
+                Some(Rgb::hex(0xf2f6ff))
+            } else if self.lantern {
+                None
+            } else {
+                self.hold.map(|(_, c)| c)
+            };
+            if let Some(c) = thing {
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    f.px_sprite(hx + dx, hy + dy, c);
+                }
+            }
+            let bx = self.centre();
+            let by = self.y * 2.0 - 8.0;
+            if self.lantern {
+                let fl = 0.85 + 0.15 * (t * 9.0).sin();
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    f.px_sprite(hx + dx, hy + dy, Rgb::hex(0xffd27a) * (1.2 * fl));
+                }
+                f.light_px(hx as f32 + 1.0, hy as f32 + 1.0, Rgb::hex(0xffb050) * (7.0 * fl * glow));
+            }
+            if t < self.dizzy_until {
+                for k in 0..3 {
+                    let a = t * 5.0 + k as f32 * 2.09;
+                    let (sx, sy) = (bx + a.cos() * 3.0, (by - 10.0) / 2.0 + a.sin() * 0.6);
+                    f.put_g(sx.round() as i32, sy.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a)).lit(0.0));
+                }
+            }
+            if self.drop_to.is_some() {
+                f.light_px(bx, by, Rgb::hex(0x9fd8ff) * (5.0 * glow));
+            }
+            f.light_px(bx, by, Rgb::hex(0xffc878) * (1.6 * glow));
+            if self.cozy {
+                f.light_px(bx, by - 2.0, Rgb::hex(0xff9a7a) * (1.4 * glow));
+            }
+            return;
+        }
         let top = self.y.round() as i32 - 3;
         let x0 = self.x.round() as i32;
+        // drawn bigger on a taller screen: each cell scaled about the feet
+        let k = self.k;
+        let (axi, ayi, ax, ay) = (x0 + 1, top + 4, self.x + 1.0, self.y + 1.0);
+        let place = move |cx: i32, cy: i32| (ax + (cx - axi) as f32 * k, ay + (cy - ayi) as f32 * k);
+        let put = |f: &mut Frame, cx: i32, cy: i32, g: Glyph| {
+            if k <= 1.0 {
+                f.put_g(cx, cy, g);
+            } else {
+                let (sx, sy) = place(cx, cy);
+                f.sprite_cell(sx, sy, k, g);
+            }
+        };
+        let light = |f: &mut Frame, cx: i32, cy: i32, c: Rgb| {
+            if k <= 1.0 {
+                f.light_cell(cx, cy, c);
+            } else {
+                let (sx, sy) = place(cx, cy);
+                f.light_px(sx + 0.5 * k, (sy + 0.5 * k) * 2.0, c);
+            }
+        };
         for (ry, row) in rows.iter().enumerate() {
             for (i, ch) in row.chars().enumerate() {
                 if ch == ' ' {
@@ -229,16 +316,21 @@ impl Player {
                 // phasing in from the sky: shimmering, half there
                 let a = if self.drop_to.is_some() { 0.45 + 0.35 * (t * 14.0 + ry as f32).sin().abs() } else { 1.0 };
                 let col = if self.drop_to.is_some() { col.lerp(Rgb::hex(0xbfe4ff), 0.5) } else { col };
-                f.put_g(cx, top + ry as i32, Glyph::new(ch, col).bg(Bg::Scene).alpha(a).lit(0.6));
+                put(f, cx, top + ry as i32, Glyph::new(ch, col).bg(Bg::Scene).alpha(a).lit(0.6));
             }
         }
         // the pompom, and a wave now and then while standing about
         let ptop = if scooping { top } else { top - 1 };
-        f.put_g(x0 + if self.dir > 0.0 { 1 } else { 0 }, ptop, Glyph::new('•', Rgb::hex(0xf4f0ea)).lit(0.5));
+        put(f, x0 + if self.dir > 0.0 { 1 } else { 0 }, ptop, Glyph::new('•', Rgb::hex(0xf4f0ea)).lit(0.5));
         // a snowball in hand
         if self.snowball && !throwing && !scooping {
             let hx = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
-            f.put_g(hx, top + 2, Glyph::new('●', Rgb::hex(0xf2f6ff)).lit(0.4));
+            put(f, hx, top + 2, Glyph::new('●', Rgb::hex(0xf2f6ff)).lit(0.4));
+        }
+        // whatever's held out (berries, a carrot, a mug…)
+        if let Some((ch, col)) = self.hold.filter(|_| !throwing && !scooping && !up && !(self.snowball && !throwing)) {
+            let hx = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
+            put(f, hx, top + 2, Glyph::new(ch, col).lit(0.4));
         }
         // dizzy stars
         if t < self.dizzy_until {
@@ -246,27 +338,27 @@ impl Player {
             for k in 0..3 {
                 let a = t * 5.0 + k as f32 * 2.09;
                 let (sx, sy) = (cx + a.cos() * 1.6, top as f32 - 1.0 + a.sin() * 0.4);
-                f.put_g(sx.round() as i32, sy.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a)).lit(0.0));
+                put(f, sx.round() as i32, sy.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a)).lit(0.0));
             }
         }
         if wave {
             let ax = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
-            f.put_g(ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
+            put(f, ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
         }
         if self.drop_to.is_some() {
-            f.light_cell(x0 + 1, top + 1, Rgb::hex(0x9fd8ff) * (5.0 * glow));
+            light(f, x0 + 1, top + 1, Rgb::hex(0x9fd8ff) * (5.0 * glow));
         }
         // a soft glow so the villager is always easy to spot (much more
         // with a lantern; a little more, warm and rosy, after cocoa)
-        f.light_cell(x0 + 1, top + 2, Rgb::hex(0xffc878) * (1.6 * glow));
+        light(f, x0 + 1, top + 2, Rgb::hex(0xffc878) * (1.6 * glow));
         if self.lantern && !up {
             let lx = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
             let fl = 0.85 + 0.15 * (t * 9.0).sin();
-            f.put_g(lx, top + 2, Glyph::new('▣', Rgb::hex(0xffd27a) * (1.2 * fl)).lit(0.0));
-            f.light_cell(lx, top + 2, Rgb::hex(0xffb050) * (7.0 * fl * glow));
+            put(f, lx, top + 2, Glyph::new('▣', Rgb::hex(0xffd27a) * (1.2 * fl)).lit(0.0));
+            light(f, lx, top + 2, Rgb::hex(0xffb050) * (7.0 * fl * glow));
         }
         if self.cozy {
-            f.light_cell(x0 + 1, top + 1, Rgb::hex(0xff9a7a) * (1.4 * glow));
+            light(f, x0 + 1, top + 1, Rgb::hex(0xff9a7a) * (1.4 * glow));
         }
     }
 

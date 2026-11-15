@@ -34,8 +34,13 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   family that potters about, a cat or dog, chairs to sit in, an oven, books, music, little jobs to help with, and
   windows that look out on the real village.
 - **A home and a pet of the villager's own**: a house with a parlour, a kitchen, a bedroom upstairs and an attic with
-  a telescope, and a dog, cat or bunny (named, coloured, and remembered) that follows everywhere.
-- **Play it like a game**: pop the village out into its own window, or go full screen.
+  a telescope (walk up the stairs and the view follows), a sofa to sit on, a bed to sleep in and an oven that bakes
+  gingerbread for the pockets; and a dog, cat or bunny (named, coloured, and remembered) that follows everywhere,
+  fetches, does tricks, naps, and plays with other animals.
+- **Play it like a game**: pop the village out into its own window, or take the wallpaper itself full screen and
+  back (nothing restarts); zoom in on the villager with Ctrl +/-.
+- **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
+  animals keep their size on a finer grid.
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
@@ -64,6 +69,10 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 <tr>
 <td><img src="docs/talk.png" alt="Talking with a kid called Ned: a dialogue box with what he said and three numbered answers"><br><sub><b>Conversations</b>: pick what to say with 1-5 or a click.</sub></td>
 <td><img src="docs/snow-play.png" alt="Dusk: kids in a glowing igloo they just built, saying this is our house now"><br><sub><b>Kids at play</b>: snowmen, igloos (with them inside) and snowball fights.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/stairs.png" alt="Halfway up the stairs in the villager's home: the parlour below with its tree, the bedroom floor coming into view above"><br><sub><b>Upstairs</b>: the view follows the villager up into the bedroom.</sub></td>
+<td><img src="docs/hires.png" alt="At a higher resolution: villagers with bobble hats and lanterns by the big tree, the villager and their dog by the snowman"><br><sub><b>More resolution, same size</b>: everyone drawn to scale on a finer grid.</sub></td>
 </tr>
 <tr>
 <td><img src="docs/noon.png" alt="The village at noon under a blue sky"><br><sub><b>Noon</b>, with the time of day set to follow the real sun…</sub></td>
@@ -103,20 +112,24 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 
 | Input | What it does |
 |---|---|
-| **WASD** / **arrow keys** | walk the villager; the view follows |
+| **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
 | **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
+| **Q** | what's in hand: berries or something from the pockets (E then gives it, or uses it) |
 | **I** | show or hide the pockets |
 | **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
-| **Esc** | close a menu or conversation, step back from a window, or step back outside |
+| **Esc** | close a menu, conversation or window view; with nothing open, the settings |
+| **?** / **F1** | the controls card (also the **? controls** button, top right) |
 | **A** / **D** at a window | lean to look further along the street |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
 | **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager too) | carry them about, then drop them in the snow |
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
 | **⚙ settings** (top right) | the settings panel; drag its title bar to move it |
-| **F11** | full screen on and off, when running in a window |
+| **F11** | full screen and back: the wallpaper itself, or a popped-out window |
+| **Ctrl +** / **Ctrl -** / **Ctrl 0** | zoom in, out, back to 1× |
+| **Ctrl Shift +** / **Ctrl Shift -** | resolution: finer or coarser detail, everything the same size |
 
 ## 🌟 What's in the scene
 - A big tiered tree with light strings that cycle through twinkle, chase, wave, breathe and sparkle patterns,
@@ -162,18 +175,25 @@ Click the bare desktop first so the wallpaper has keyboard focus.
     - **talk** to anyone at home in the dialogue box: about their home, their family, how long they've lived there;
       they'll offer a seat or a fresh cookie, play the piano, or ask for a hand (put the star back on the tree, a log
       on the fire, find the cat, play a tune, hang the last stocking) — and are grateful when it's done;
-    - **sit** in the armchairs and on the sofas, **bake** (the oven dings when the cookies are done), **read** a
-      book, **play** the piano, gramophone or radio, **decorate** the tree, peek in a **stocking**, play with the
-      **pet** (the dog fetches, the cat chases string);
+    - **sit** in the armchairs and on the sofas, **bake** (the oven dings when the cookies are done; E again takes
+      the tray of gingerbread for the pockets), **read** a book, **play** the piano, gramophone or radio,
+      **decorate** the tree, peek in a **stocking**, play with the **pet** (the dog fetches, the cat chases string);
     - **look out of a window**: the real, live village outside, from where that window is (A/D to lean, E or Esc to
       step back). Walk out the door or press Esc to leave;
   - **the villager's own house** (the one with the flag by the door and lights up under the roof): a parlour with
     a sofa, a kitchen next door with an oven and a table, stairs up to a bedroom with a quilted bed, and a ladder up
-    to the attic with a round window and a telescope. Each window looks out from its own height — the attic's up
-    into the stars;
+    to the attic with a round window and a telescope. E at the stairs walks the villager up them while the view
+    pans up into the room above (and back down the same way). E on the sofa sits down on it; E on the bed tucks the
+    villager in (the room dims, the pet curls up at the foot of the bed) until a direction key gets them up. Each
+    window looks out from its own height — the attic's up into the stars;
   - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. The first E on it
-    asks for a name; after that it can be fussed over, played with, renamed, given a new look, or asked to stay home.
-    Its kind, colour and name live in the Scene tab (and are remembered);
+    asks for a name; after that it can be fussed over, played with (a ball or a stick for a dog, a ball of yarn or
+    the scarf for a cat, a carrot for a bunny, tricks, "chase me!"), renamed, given a new look, or asked to stay
+    home. How a game goes varies: a dog might bring the ball straight back, take a victory lap first, or come back
+    with a stick; a cat bats the yarn about, unravels it, or curls up round it. Left standing about a while, the pet
+    naps. Out in the village a dog chases rabbits and foxes, a cat stalks them, a bunny hops along with rabbits, and
+    pets meeting other people's pets have a happy bounce together. With a carrot or gingerbread in hand (**Q**), E
+    gives it a treat. Its kind, colour and name live in the Scene tab (and are remembered);
   - **the cocoa cabin:** opens its menu;
   - **presents, trees, lamps, houses, the station and the snowman:** the same as clicking them.
 - **F** invites the person in front to come along (animals need a berry). Companions follow the villager around.
@@ -183,7 +203,10 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - **Cheer (✦)** is earned by being neighbourly: first hellos, feeding animals, snowball fights, watching a light
   show by the big tree, finding constellations. It buys things at the **Cocoa & Gifts** cabin: hot cocoa (cozy
   glow), gingerbread and candy canes (to give away), carrots (a deer or rabbit becomes a friend) and a lantern.
-  **I** shows the pockets; **1**–**5** use what's in them.
+  **I** shows the pockets; **1**–**5** use what's in them. **Q** picks what's in hand (berries, or anything in the
+  pockets; it shows at the bottom left): E then gives it to whoever's in front, or uses it with nobody there.
+- **People know the villager's name** once one is set (Scene tab → Your name): they say it when they see the
+  villager again, and word gets round.
 - **Right-click** (or **press and hold** the left button for a moment, which works everywhere, including the Windows
   desktop) shows what can be done with whatever's under the pointer, and the villager walks over to do it:
   - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
@@ -404,13 +427,15 @@ window, which shows the live sound levels too) can be dragged anywhere by its ti
 - **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
   rate, **speech bubbles** (how long they stay up; longer lines always stay longer), **chattiness** (how often people
-  stop to talk and remark on things), aurora, bushes, the villager, and the villager's **pet** (dog, cat, bunny or
-  none, its colour and its name).
-- **Display:** clock, widgets (including the map), weather city and units, widget layout, **render scale**
-  (0.5× to 2×: bigger makes everything chunkier), **pop out** (the village in a window of its own, to play it like
-  a game) and **full screen** (F11 toggles it in a window); the wallpaper rests and goes quiet while either is
-  open. Then updates and run at startup. Both also work from the command line: `xmas-tui --windowed` and
-  `xmas-tui --fullscreen`.
+  stop to talk and remark on things), aurora, bushes, the villager and **their name**, and the villager's **pet**
+  (dog, cat, bunny or none, its colour and its name).
+- **Display:** clock, widgets (including the map), weather city and units, widget layout, **resolution** (0.5× to
+  2× in 0.05 steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on
+  the villager; Ctrl +/-), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
+  rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the keyboard, and **back
+  to wallpaper** returns it; F11 does both). In the kitty wallpaper a new resolution applies live; if kitty can't
+  change its font, a banner asks before restarting. Then updates and run at startup. A window also works from the
+  command line: `xmas-tui --windowed` and `xmas-tui --fullscreen`.
 - **Sound:** master, music, effects and ambience volumes, music style, a per-layer ambience mix, and **Quiet while
   other media plays**. When on, the sound fades out as soon as a browser video or music player starts, and comes
   back a few seconds after it stops.

@@ -25,6 +25,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 UninstallDisplayIcon={app}\xmas-tui.exe
+SetupIconFile=..\..\assets\icon\xmas-tui.ico
 LicenseFile={#Src}\LICENSE
 
 [Tasks]

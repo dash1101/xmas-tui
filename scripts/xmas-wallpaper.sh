@@ -41,9 +41,14 @@ BASE="${XMAS_FONT_SIZE:-10}"
 FONT="$(awk -v b="$BASE" -v s="${SCALE:-1}" 'BEGIN { s = (s < 0.5 ? 0.5 : (s > 2 ? 2 : s)); printf "%.2f", b * s }')"
 SOCK="${XDG_RUNTIME_DIR:-/tmp}/xmas-tui-kitty-$$"
 export XMAS_KITTY_SOCKET="unix:$SOCK" XMAS_FONT_BASE="$BASE" XMAS_KITTEN="$KITTEN"
+# --listen-on (not -o listen_on, which gets "-<pid>" appended) so the app
+# finds the socket; kitty's own shortcuts are cleared so Ctrl(+Shift) +/-
+# reach the app (zoom / resolution) instead of resizing the font directly
 ARGS=(panel --edge=background --class xmas-tui --focus-policy=on-demand
+      --listen-on "unix:$SOCK"
       -o "font_size=$FONT"
-      -o allow_remote_control=socket-only -o "listen_on=unix:$SOCK"
+      -o allow_remote_control=socket-only
+      -o clear_all_shortcuts=yes
       -o background=#03050f
       -o confirm_os_window_close=0
       -o cursor_shape=block -o cursor_blink_interval=0

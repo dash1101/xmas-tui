@@ -3,7 +3,9 @@
 
 fps = 30          # frames per second (lower = less CPU)
 seed = 0          # 0 = new random layout each launch; any other number = fixed layout
-scale = 1.0       # render scale, 0.5..2 (bigger = chunkier pixels, fewer cells)
+scale = 1.0       # cell size, 0.5..2: smaller = more cells, finer detail, everything the
+                  # same size (Settings shows it as resolution = 1 / scale)
+zoom = 1.0        # 1..3: magnify the view, centred on the villager (Ctrl +/-)
 
 [scene]
 aurora = true
@@ -20,6 +22,7 @@ time = "auto"         # time of day: "auto" (real sunrise & sunset at the weathe
 traffic = "auto"      # side of the road: "auto" (from the weather city), "right" or "left"
 talk_time = 1.0       # how long speech bubbles stay up (0.5..3; longer lines always stay longer)
 chattiness = 1.0      # how often people stop to talk and remark on things (0 = quiet .. 2)
+name = ""             # the villager's name (people use it); empty: "neighbour"
 
 [scene.pet]           # the villager's own pet (named in the village, or here)
 kind = "dog"          # "dog", "cat", "bunny" or "none"

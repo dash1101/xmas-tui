@@ -73,6 +73,8 @@ pub enum Outcome {
     Look(Look),
     /// Something for the pockets.
     Gift(Item),
+    /// Several of something (a tray of cookies).
+    Gifts(Item, u32),
     /// Warm and cozy (cocoa, the fire).
     Cozy,
     /// A little job done for the host, or something nice: cheer.
@@ -189,8 +191,52 @@ struct Seat {
     x: i32,
     /// Cell row a sitter's feet rest on.
     feet: i32,
+    /// Pixel row of the cushion (where a sitter's hips go).
+    top: i32,
     /// Who's in it: Some(None) the villager, Some(Some(i)) a resident.
     by: Option<Option<usize>>,
+}
+
+/// Walking between floors of the home.
+struct Climb {
+    start: f32,
+    dur: f32,
+    /// Where the new room sits, in rows from the old one (-h: above).
+    origin: f32,
+    /// The villager's way (centre column, feet row), in the old room's
+    /// rows, and the distance along it to each point.
+    path: Vec<(f32, f32)>,
+    lens: Vec<f32>,
+    /// The rows over which the view pans across.
+    cam: (f32, f32),
+    /// The room left behind, as it looked (pixels and light).
+    snap_px: Vec<Rgb>,
+    snap_light: Vec<Rgb>,
+    snap_glyph: Vec<Option<crate::frame::Glyph>>,
+}
+
+impl Climb {
+    /// (column, row, facing, progress 0..1) at time t.
+    fn at(&self, t: f32) -> (f32, f32, f32, f32) {
+        let u = ((t - self.start) / self.dur).clamp(0.0, 1.0);
+        let total = *self.lens.last().unwrap_or(&1.0);
+        let d = u * total;
+        let i = self.lens.iter().rposition(|&l| l <= d).unwrap_or(0).min(self.path.len() - 2);
+        let (a, b) = (self.path[i], self.path[i + 1]);
+        let seg = (self.lens[i + 1] - self.lens[i]).max(1e-3);
+        let k = ((d - self.lens[i]) / seg).clamp(0.0, 1.0);
+        let dir = if (b.0 - a.0).abs() > 0.5 { (b.0 - a.0).signum() } else { 1.0 };
+        (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k, dir, u)
+    }
+
+    /// How far the view has moved (rows; 0 → origin) with the villager at
+    /// row `y`.
+    fn view(&self, y: f32) -> f32 {
+        let (y0, y1) = self.cam;
+        let f = ((y - y0) / (y1 - y0)).clamp(0.0, 1.0);
+        let f = ((f - 0.1) / 0.8).clamp(0.0, 1.0);
+        self.origin * f * f * (3.0 - 2.0 * f)
+    }
 }
 
 /// The house cat or dog (or the villager's own pet at home).
@@ -325,6 +371,14 @@ pub struct Interior {
     greeted: bool,
     /// The villager is sitting in this seat.
     you_sit: Option<usize>,
+    /// Tucked up in bed (since when).
+    you_lie: Option<f32>,
+    /// The bed in this room: (left pixel column, floor row).
+    bed: Option<(i32, i32)>,
+    /// A tray of cookies out of the oven, waiting to be taken.
+    cookies_ready: bool,
+    /// Walking up (or down) the stairs between floors of the home.
+    climbing: Option<Climb>,
     /// A job someone asked for, and who.
     pub task: Option<(Task, usize)>,
     stocking_hung: bool,
@@ -455,6 +509,10 @@ impl Interior {
             nap_until: 0.0,
             greeted: false,
             you_sit: None,
+            you_lie: None,
+            bed: None,
+            cookies_ready: false,
+            climbing: None,
             task: None,
             stocking_hung: false,
             star_off: false,
@@ -516,6 +574,8 @@ impl Interior {
         self.bulbs.clear();
         self.lamps.clear();
         self.you_sit = None;
+        self.you_lie = None;
+        self.bed = None;
         let kind = self.kind();
         self.build_shell(kind);
         match kind {
@@ -1073,7 +1133,7 @@ impl Interior {
             }
         }
         let n = self.seats.len();
-        self.seats.push(Seat { x: ax + 7, feet: floor / 2 + 1, by: None });
+        self.seats.push(Seat { x: ax + 7, feet: floor / 2, top: floor - 6, by: None });
         self.things.push((Thing::Seat(n), ax + 7, (floor - 16) / 2 - 1));
         self.spots.push(((ax + 7) as f32, Doing::Sit(n)));
     }
@@ -1098,17 +1158,20 @@ impl Interior {
                 }
             }
         }
-        // a couple of cushions
-        for (k, col) in [(x0 + 5, 0xc8a040), (x0 + 23, 0xc8202a)] {
-            for y in floor - 11..floor - 6 {
-                for x in k..k + 5 {
-                    l.set(x, y, Rgb::hex(col));
+        // a cushion leaning on each arm: a small slanted pillow in a
+        // darker shade of the sofa, with a lighter stripe
+        for (k, lean) in [(x0 + 3, 1), (x0 + 26, -1)] {
+            for dy in 0..4 {
+                for dx in 0..3 {
+                    let x = k + dx + if lean > 0 { dy / 2 } else { -(dy / 2) };
+                    let stripe = dx == 1;
+                    l.set(x, floor - 10 + dy, c * if stripe { 0.95 } else { 0.62 } + Rgb::hex(0x1a1008) * 0.5);
                 }
             }
         }
         for sx in [x0 + 9, x0 + 23] {
             let n = self.seats.len();
-            self.seats.push(Seat { x: sx, feet: floor / 2 + 1, by: None });
+            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
             self.things.push((Thing::Seat(n), sx, (floor - 14) / 2 - 1));
             self.spots.push((sx as f32, Doing::Sit(n)));
         }
@@ -1359,7 +1422,7 @@ impl Interior {
             self.couch(fx(0.56));
             self.photo(fx(0.47), wtop, 0x3a5a7a);
             self.the_tree(fx(0.70));
-            self.stairs_up(fx(0.86));
+            self.stairs_up();
             self.things.push((Thing::Doorway(true), w - 6, floor / 2 - 12));
             self.doorway_right();
             return;
@@ -1447,31 +1510,88 @@ impl Interior {
         self.things.push((Thing::CookieJar, x, (y - 6) / 2 - 2));
     }
 
-    fn stairs_up(&mut self, sx: i32) {
+    /// The home's staircase: (foot column, top column, steps). It climbs
+    /// to the right from the parlour floor right up to the ceiling, where
+    /// the bedroom's stairwell opens straight above it.
+    fn stair_geom(&self) -> (i32, i32, i32) {
+        let n = (self.floor / 5).max(4);
+        let xb = (self.w as f32 * 0.78) as i32;
+        (xb, xb + 3 * n, n)
+    }
+
+    /// The ladder between the bedroom and the attic (its column).
+    fn ladder_x(&self) -> i32 {
+        (self.w as f32 * 0.10) as i32
+    }
+
+    fn stairs_up(&mut self) {
         let floor = self.floor;
+        let (xb, xt, n) = self.stair_geom();
         let l = &mut self.room;
-        // steps climbing to the right, a banister and the opening above
-        for k in 0..10 {
-            let (x0, y0) = (sx - 14 + k * 4, floor - 1 - k * 4);
-            for y in y0 - 3..=y0 {
-                for x in x0..x0 + 4 {
-                    l.set(x, y, Rgb::hex(0x6a4428) * (0.85 + 0.15 * (k % 2) as f32));
+        // under the stairs: a panelled wall
+        for k in 0..n {
+            let (x0, top) = (xb + 3 * k, floor - 5 * (k + 1));
+            for x in x0..x0 + 3 {
+                for y in top + 2..floor {
+                    let panel = (y - top) % 12 == 0 || (x - xb) % 15 == 0;
+                    l.set(x, y, Rgb::hex(0x4a3020) * if panel { 0.8 } else { 1.0 });
+                }
+                // the tread, lit on its edge
+                l.set(x, top, Rgb::hex(0x8a5a34));
+                l.set(x, top + 1, Rgb::hex(0x6a4428));
+            }
+            // a spindle every other step, up to the handrail
+            if k % 2 == 0 {
+                for y in top - 9..top {
+                    l.set(x0 + 1, y, Rgb::hex(0xe8e0d0));
                 }
             }
-            for y in y0..floor {
-                for x in x0..x0 + 4 {
-                    l.set(x, y, Rgb::hex(0x4a3020));
-                }
-            }
-            l.set(x0 + 1, y0 - 10, Rgb::hex(0x3a2214));
-            for y in y0 - 10..y0 - 3 {
-                l.set(x0 + 1, y, Rgb::hex(0xe8e0d0));
+        }
+        // the handrail
+        for k in 0..3 * n {
+            let y = floor - 14 - (k * 5) / 3;
+            l.set(xb + k, y, Rgb::hex(0x5a3420));
+            l.set(xb + k, y + 1, Rgb::hex(0x3a2214));
+        }
+        // the newel post at the foot
+        for y in floor - 16..floor {
+            l.set(xb - 1, y, Rgb::hex(0x5a3420));
+            l.set(xb, y, Rgb::hex(0x6a4428));
+        }
+        // the opening in the ceiling
+        for x in xt - 16..xt + 3 {
+            for y in 0..4 {
+                l.set(x, y, Rgb::hex(0x140e0a));
             }
         }
-        for k in 0..40 {
-            l.set(sx - 13 + k, floor - 11 - k, Rgb::hex(0x5a3420));
+        self.things.push((Thing::Stairs(true), xb + 6, (floor - 30) / 2));
+    }
+
+    /// The top of the stairs from below: a stairwell at the front of the
+    /// floor (the parlour's stairs come up into it), railed round.
+    fn stairwell(&mut self, x: i32) {
+        let (h2, floor) = (self.h * 2, self.floor);
+        let l = &mut self.room;
+        for xx in x - 12..x + 4 {
+            for y in h2 - 9..h2 {
+                let k = (y - (h2 - 9)) as f32 / 9.0;
+                l.set(xx, y, Rgb::hex(0x2a1c12) * (1.0 - 0.6 * k));
+            }
+            // the top steps going down, just visible
+            if (xx - x) % 3 == 0 {
+                l.set(xx, h2 - 9 + ((x - xx) / 3).clamp(0, 8), Rgb::hex(0x6a4428));
+            }
         }
-        self.things.push((Thing::Stairs(true), sx, (floor - 30) / 2));
+        for (px, side) in [(x - 13, 0), (x + 4, 1)] {
+            for y in h2 - 16..h2 {
+                l.set(px, y, Rgb::hex(0x5a3420) * if side == 0 { 1.0 } else { 0.85 });
+            }
+        }
+        for xx in x - 13..x + 5 {
+            l.set(xx, h2 - 16, Rgb::hex(0x5a3420));
+        }
+        let _ = floor;
+        self.things.push((Thing::Stairs(false), x - 4, self.h - 8));
     }
 
     fn doorway_right(&mut self) {
@@ -1540,7 +1660,7 @@ impl Interior {
                 }
             }
             let n = self.seats.len();
-            self.seats.push(Seat { x: sx, feet: floor / 2 + 1, by: None });
+            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
             self.things.push((Thing::Seat(n), sx, (floor - 16) / 2 - 1));
         }
     }
@@ -1550,23 +1670,12 @@ impl Interior {
         let fx = |f: f32| (w as f32 * f) as i32;
         let wtop = (floor as f32 * 0.16) as i32;
         let wh = (floor as f32 * 0.40) as i32;
-        // the stairs back down (an opening in the floor with a rail)
-        let l = &mut self.room;
-        let sx = fx(0.10);
-        for x in sx - 10..sx + 12 {
-            for y in floor..floor + 8 {
-                l.set(x, y, Rgb::hex(0x1a120c) * (1.0 - (y - floor) as f32 / 12.0));
-            }
-            if (x - sx) % 4 == 0 {
-                for y in floor - 9..floor {
-                    l.set(x, y, Rgb::hex(0xe8e0d0) * 0.9);
-                }
-            }
-            l.set(x, floor - 10, Rgb::hex(0x5a3420));
-        }
-        self.things.push((Thing::Stairs(false), sx, floor / 2 - 6));
+        // the stairs back down (the parlour's stairs come up here)
+        let xt = self.stair_geom().1;
+        self.stairwell(xt);
         // a ladder up to the attic hatch
-        let lx = fx(0.90);
+        let lx = self.ladder_x();
+        let l = &mut self.room;
         for y in 0..floor {
             l.set(lx - 4, y, Rgb::hex(0x6a4428));
             l.set(lx + 4, y, Rgb::hex(0x6a4428));
@@ -1610,6 +1719,7 @@ impl Interior {
             }
         }
         self.things.push((Thing::Bed, bx + 22, (floor - 12) / 2 - 1));
+        self.bed = Some((bx, floor));
         self.window_at(fx(0.62), wtop, 20, wh, false, Look { dx: -0.6, lift: 0.0, hole: Hole::Rect(0.24, 0.3, 0.76, 0.74), telescope: false });
         self.candles.push((fx(0.62) + 7, wtop + wh));
         self.shelf(fx(0.76), true);
@@ -1619,15 +1729,23 @@ impl Interior {
     fn build_attic(&mut self) {
         let (w, floor, h) = (self.w, self.floor, self.h);
         let fx = |f: f32| (w as f32 * f) as i32;
-        // the hatch and ladder down
+        // the hatch and the ladder down (above the bedroom's ladder)
+        let lx = self.ladder_x();
         let l = &mut self.room;
-        let lx = fx(0.14);
         for x in lx - 7..lx + 8 {
-            for y in floor..floor + 6 {
-                l.set(x, y, Rgb::hex(0x1a120c));
+            for y in h * 2 - 8..h * 2 {
+                l.set(x, y, Rgb::hex(0x1a120c) * (1.0 - 0.5 * (y - (h * 2 - 8)) as f32 / 8.0));
+            }
+            l.set(x, h * 2 - 9, Rgb::hex(0x5a3420));
+        }
+        for y in h * 2 - 8..h * 2 {
+            if y % 4 == 0 {
+                for x in lx - 4..lx + 5 {
+                    l.set(x, y, Rgb::hex(0x7a5030));
+                }
             }
         }
-        self.things.push((Thing::Stairs(false), lx, floor / 2 - 6));
+        self.things.push((Thing::Stairs(false), lx, h - 8));
         // a round window under the eaves
         let (cx, cy, r) = (fx(0.5), (floor as f32 * 0.42) as i32, (floor as f32 * 0.16) as i32);
         for y in cy - r - 2..=cy + r + 2 {
@@ -1740,7 +1858,42 @@ impl Interior {
                 self.director.say(17, self.floor / 2 - 6, "home sweet home ✦", t + 0.4, 2.6, 40);
             }
         }
-        let (mx, my) = if p.free(t) && t >= self.nap_until { mv } else { (0.0, 0.0) };
+        // on the stairs: the climb walks the villager (no keys)
+        if let Some(c) = &self.climbing {
+            let (x, y, dir, u) = c.at(t);
+            p.x = x - 1.0;
+            p.y = y - c.origin;
+            p.dir = dir;
+            p.moving = true;
+            p.active_at = t;
+            if u >= 1.0 {
+                self.climbing = None;
+                let title = self.kind().title();
+                self.director.say(p.centre().round() as i32, p.y as i32 - 9, title, t, 1.6, 40);
+            }
+            self.update_people(dt, t, p);
+            self.update_pet(dt, t, p.centre());
+            self.director.update(dt, t, &self.ctx);
+            return false;
+        }
+        // in bed: any direction key gets up again
+        if self.you_lie.is_some() {
+            if mv.0 != 0.0 || mv.1 != 0.0 {
+                self.you_lie = None;
+                self.nap_until = 0.0;
+                if let Some((bx, floor)) = self.bed {
+                    p.x = (bx + 20) as f32;
+                    p.y = (floor / 2 + 7) as f32;
+                }
+            } else {
+                p.moving = false;
+                if let Some((bx, floor)) = self.bed {
+                    p.x = (bx + 8) as f32;
+                    p.y = (floor / 2) as f32;
+                }
+            }
+        }
+        let (mx, my) = if p.free(t) && t >= self.nap_until && self.you_lie.is_none() { mv } else { (0.0, 0.0) };
         // sitting: any direction key gets up again
         if let Some(i) = self.you_sit {
             if mx != 0.0 || my != 0.0 {
@@ -1754,13 +1907,19 @@ impl Interior {
                 p.y = s.feet as f32;
             }
         }
+        if self.you_lie.is_some() {
+            self.update_people(dt, t, p);
+            self.update_pet(dt, t, p.centre());
+            self.director.update(dt, t, &self.ctx);
+            return false;
+        }
         p.moving = self.you_sit.is_none() && (mx != 0.0 || my != 0.0);
         if p.moving {
             p.active_at = t;
             if mx != 0.0 {
                 p.dir = mx.signum();
             }
-            let k = p.speed.clamp(0.25, 6.0);
+            let k = p.pace();
             p.x += mx * 11.0 * k * dt;
             let (lo, hi) = self.walk_rows();
             p.y = (p.y + my * 5.0 * k.sqrt() * dt).clamp(lo, hi);
@@ -1780,6 +1939,7 @@ impl Interior {
         if let Some(done) = self.baking {
             if t >= done {
                 self.baking = None;
+                self.cookies_ready = true;
                 if let Some((ox, oy)) = self.oven {
                     self.director.burst(ox as f32, (oy / 2) as f32, 14, &[Rgb::hex(0xffd36b), Rgb::hex(0xc8803a)], 3.0, 1.0);
                     self.director.say(ox, oy / 2 - 6, "ding! the cookies are ready", t, 2.6, 40);
@@ -1813,23 +1973,82 @@ impl Interior {
         }
     }
 
-    /// Up or down the stairs in the home.
-    fn climb(&mut self, up: bool, p: &mut Player) {
+    /// Up or down the stairs in the home: the villager walks up the steps
+    /// (or the ladder) and the view follows them into the room above or
+    /// below — the two rooms stacked, the one left behind as it looked.
+    fn climb(&mut self, up: bool, p: &mut Player, t: f32) {
         let next = match (self.kind(), up) {
-            (RoomKind::Parlour, true) => Some((2, 0.12)),
-            (RoomKind::Bedroom, false) => Some((0, 0.82)),
-            (RoomKind::Bedroom, true) => Some((3, 0.18)),
-            (RoomKind::Attic, false) => Some((2, 0.86)),
+            (RoomKind::Parlour, true) => Some(2),
+            (RoomKind::Bedroom, false) => Some(0),
+            (RoomKind::Bedroom, true) => Some(3),
+            (RoomKind::Attic, false) => Some(2),
             _ => None,
         };
-        let Some((room, at)) = next else { return };
+        let Some(room) = next else { return };
+        if self.climbing.is_some() {
+            return;
+        }
+        let from = self.kind();
+        let (h, floor) = (self.h as f32, self.floor as f32);
+        let lo = self.walk_rows().0;
+        let (xb, xt, _) = self.stair_geom();
+        let (xb, xt, xl) = (xb as f32, xt as f32, self.ladder_x() as f32);
+        let start = (p.centre(), p.y);
+        // (path in this room's rows; the new room sits `origin` rows away)
+        // (arriving up through the floor: a step in from the front edge,
+        // on the floor whatever the room's size)
+        let (a1, a2) = ((h - 6.0).max(lo) - h, (h - 8.0).max(lo + 1.0).min(h - 1.0) - h);
+        let (origin, path) = match (from, up) {
+            (RoomKind::Parlour, _) => (-h, vec![start, (xb - 2.0, lo), (xb + 1.0, floor / 2.0 - 2.0), (xt - 1.0, 0.0), (xt - 4.0, a1), (xt - 9.0, a2)]),
+            (RoomKind::Bedroom, false) => (h, vec![start, (xt - 4.0, h - 6.0), (xt - 1.0, h), (xb + 1.0, h + floor / 2.0 - 2.0), (xb - 3.0, h + lo + 1.0)]),
+            (RoomKind::Bedroom, true) => (-h, vec![start, (xl, lo), (xl, floor / 2.0), (xl, 0.0), (xl, a1), (xl + 6.0, a2)]),
+            _ => (h, vec![start, (xl, h - 6.0), (xl, h), (xl, h + floor / 2.0), (xl + 5.0, h + lo + 1.0)]),
+        };
+        // the room being left, as it looks right now
+        let mut snap = Frame::new(self.w.max(1) as usize, self.h.max(1) as usize);
+        self.draw_room(&mut snap, t, 1.0, None);
+        self.you_sit = None;
+        self.you_lie = None;
         self.room_i = room;
         self.build();
-        p.x = self.w as f32 * at;
-        p.y = (self.floor / 2 + 7) as f32;
-        self.director.sound(Sfx::Click, p.x, 0.5);
-        let title = self.kind().title();
-        self.director.say(p.centre().round() as i32, p.y as i32 - 9, title, 0.0, 1.6, 40);
+        let mut lens = vec![0.0];
+        for w in path.windows(2) {
+            let d = ((w[1].0 - w[0].0).powi(2) + (2.0 * (w[1].1 - w[0].1)).powi(2)).sqrt();
+            lens.push(lens.last().unwrap() + d);
+        }
+        let total = *lens.last().unwrap();
+        let pace = p.pace().max(0.5);
+        let dur = (total / (24.0 * pace.sqrt())).clamp(1.6, 4.5);
+        // the camera pans over the climb proper (after the walk to the foot)
+        let (y0, y1) = (path[1].1, path[path.len() - 1].1);
+        self.climbing = Some(Climb { start: t, dur, origin, path, lens, cam: (y0, y1), snap_px: snap.px, snap_light: snap.light, snap_glyph: snap.glyph });
+        self.director.sound(Sfx::Click, p.x, 0.4);
+    }
+
+    /// Mid-climb: how far the view has moved (rows, toward the new room's
+    /// `origin`), for drawing and for the zoomed view.
+    pub fn view_shift(&self, t: f32) -> f32 {
+        self.climbing.as_ref().map(|c| c.origin - c.view(c.at(t).1)).unwrap_or(0.0)
+    }
+
+    /// What's in the room to poke at.
+    pub fn things_at(&self) -> Vec<(Thing, i32)> {
+        self.things.iter().map(|t| (t.0, t.1)).collect()
+    }
+
+    /// Walking the stairs right now.
+    pub fn is_climbing(&self) -> bool {
+        self.climbing.is_some()
+    }
+
+    /// In bed.
+    pub fn is_lying(&self) -> bool {
+        self.you_lie.is_some()
+    }
+
+    /// The foot of the bed (column, row), for a pet to curl up at.
+    pub fn bed_foot(&self) -> Option<(f32, f32)> {
+        self.bed.map(|(bx, floor)| ((bx + 38) as f32, (floor / 2 + 1) as f32))
     }
 
     /// The household potters about: off to a favourite spot, a while there,
@@ -2066,7 +2285,7 @@ impl Interior {
             Thing::Doorway(right) => {
                 self.go_to(if right { 1 } else { 0 }, p, right);
             }
-            Thing::Stairs(up) => self.climb(up, p),
+            Thing::Stairs(up) => self.climb(up, p, t),
             Thing::Person(i) => return Outcome::Talk(i),
             Thing::Fire => {
                 if let Some((ox, oy, ow, _)) = self.hearth {
@@ -2182,6 +2401,13 @@ impl Interior {
                 say(d, &mut self.rng, CANDLES);
             }
             Thing::Oven => {
+                if self.cookies_ready {
+                    self.cookies_ready = false;
+                    d.sound(Sfx::Present, px as f32, 0.6);
+                    d.burst(px as f32, py as f32 + 6.0, 10, &[Rgb::hex(0xc8803a), Rgb::hex(0xffd36b)], 2.0, 1.5);
+                    d.say(px, py, "warm gingerbread! three for my pockets ✦", t, 2.8, 40);
+                    return Outcome::Gifts(Item::Gingerbread, 3);
+                }
                 if self.baking.is_some() {
                     d.say(px, py, "not yet… smells amazing though", t, 2.2, 40);
                 } else {
@@ -2211,7 +2437,13 @@ impl Interior {
                 d.say(px, py, "the stockings are all hung with care", t, 2.4, 40);
             }
             Thing::Bed => {
-                self.nap_until = t + 6.0;
+                if let Some((bx, floor)) = self.bed {
+                    // tucked in: head on the pillow (any direction key gets up)
+                    self.you_lie = Some(t);
+                    p.x = (bx + 8) as f32;
+                    p.y = (floor / 2) as f32;
+                    p.dir = 1.0;
+                }
                 d.say(px, py, "just a little nap… zzz", t, 2.4, 40);
                 return Outcome::Cozy;
             }
@@ -2226,6 +2458,23 @@ impl Interior {
     // ---------------------------------------------------------------- draw
 
     pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, p: &Player, prompt: Option<(i32, i32)>) {
+        if let Some(c) = &self.climbing {
+            // on the stairs: the room left behind and the one ahead, stacked,
+            // the view following the villager between them
+            let v = c.view(c.at(t).1);
+            f.ox = 0;
+            f.paste(&c.snap_px, &c.snap_light, &c.snap_glyph, self.w.max(1) as usize, (self.h * 2).max(1) as usize, (-v).round() as i32);
+            f.oy = (c.origin - v).round() as i32;
+            self.draw_room(f, t, glow, Some((p, None)));
+            f.oy = 0;
+            return;
+        }
+        self.draw_room(f, t, glow, Some((p, prompt)));
+    }
+
+    /// The room and everyone in it (`you`: the villager and where the [E]
+    /// prompt goes; None for a snapshot of the room without them).
+    fn draw_room(&self, f: &mut Frame, t: f32, glow: f32, you: Option<(&Player, Option<(i32, i32)>)>) {
         f.ox = 0;
         self.room.composite_from(f, 0);
         // snow falling past the windows (and a deep night sky)
@@ -2388,39 +2637,92 @@ impl Interior {
                 }
             }
         }
+        // a tray of cookies cooling on the oven
+        if let (true, Some((ox, oy))) = (self.cookies_ready, self.oven) {
+            // (the oven's centre column; its top is 11 px above `oy`)
+            let (x0, top) = (ox - 6, oy - 11);
+            for x in x0..x0 + 13 {
+                f.px_set(x, top - 1, Rgb::hex(0x9aa0a8));
+            }
+            for k in 0..4 {
+                let x = x0 + 1 + k * 3;
+                f.px_set(x, top - 2, Rgb::hex(0xc8803a));
+                f.px_set(x + 1, top - 2, Rgb::hex(0xa86a30));
+            }
+            if (t * 2.0) as i32 % 2 == 0 {
+                f.put_g(ox, top / 2 - 3, Glyph::new('~', Rgb::hex(0xe8e0d0)).alpha(0.6).lit(0.0));
+            }
+        }
         // people, back to front
-        let walking = p.moving && (p.phase() as i32) % 2 == 0;
+        let climbing = self.climbing.is_some();
+        let walking = you.is_some_and(|(p, _)| p.moving && if climbing { (t * 7.0) as i32 % 2 == 0 } else { (p.phase() as i32) % 2 == 0 });
         let mut people: Vec<(i32, Big)> = self
             .residents
             .iter()
             .map(|r| {
-                let sit = matches!(r.doing, Doing::Sit(_));
+                let sit = match r.doing {
+                    Doing::Sit(n) => self.seats.get(n).map(|s| s.top),
+                    _ => None,
+                };
                 let step = r.doing == Doing::Walk && (t * 6.0) as i32 % 2 == 0;
                 let warm = r.doing == Doing::Warm;
-                (r.feet, Big { x: r.x + 1.0, feet: if sit { r.feet } else { r.feet }, dir: r.dir, step, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit, kid: r.kid, arms_up: warm && (t * 2.0) as i32 % 2 == 0 })
+                (r.feet, Big { x: r.x + 1.0, feet: r.feet, dir: r.dir, step, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit, kid: r.kid, arms_up: warm && (t * 2.0) as i32 % 2 == 0, outdoor: false })
             })
             .collect();
-        let sit = self.you_sit.is_some();
-        people.push((p.y.round() as i32, Big { x: p.centre(), feet: p.y.round() as i32, dir: p.dir, step: walking, hat: Some(Rgb::hex(0x2fae5c)), hair: Rgb::hex(0x3a2a1a), coat: Rgb::hex(0xe0a030), scarf: Some(Rgb::hex(0xd8283a)), sit, kid: false, arms_up: false }));
+        if let (Some((p, _)), None) = (you, self.you_lie) {
+            let sit = self.you_sit.and_then(|i| self.seats.get(i)).map(|s| s.top);
+            people.push((p.y.round() as i32, Big { x: p.centre(), feet: p.y.round() as i32, dir: p.dir, step: walking, hat: Some(Rgb::hex(0x2fae5c)), hair: Rgb::hex(0x3a2a1a), coat: Rgb::hex(0xe0a030), scarf: Some(Rgb::hex(0xd8283a)), sit, kid: false, arms_up: false, outdoor: false }));
+        }
         people.sort_by_key(|(feet, _)| *feet);
         for (_, b) in &people {
             b.draw(f, t);
         }
-        f.light_px(p.centre(), p.y * 2.0 - 8.0, Rgb::hex(0xffc878) * (1.2 * glow));
-        // napping: the room dims
-        if t < self.nap_until {
-            let k = ((self.nap_until - t).min(1.0)).clamp(0.0, 1.0) * 0.55;
+        // tucked up in bed: head on the pillow, a bump under the quilt
+        if let (Some(since), Some((bx, floor)), Some(_)) = (self.you_lie, self.bed, you) {
+            let fl = floor;
+            for (x, y) in [(bx + 5, fl - 11), (bx + 6, fl - 11), (bx + 5, fl - 10), (bx + 6, fl - 10), (bx + 7, fl - 10), (bx + 6, fl - 12)] {
+                f.px_set(x, y, Rgb::hex(0x2fae5c));
+            }
+            f.px_set(bx + 4, fl - 12, Rgb::hex(0xf4f0ea));
+            for y in fl - 11..fl - 7 {
+                for x in bx + 8..bx + 11 {
+                    f.px_set(x, y, Rgb::hex(0xe8c39e));
+                }
+            }
+            f.px_set(bx + 9, fl - 10, Rgb::hex(0x6a4a3a));
+            f.px_set(bx + 11, fl - 8, Rgb::hex(0xd8283a));
+            for x in bx + 12..bx + 36 {
+                let c = [0xb8402a, 0x2a6a3a, 0xc8a040, 0x2a4a8a][(((x - bx) / 5) % 4) as usize];
+                let bump = if x > bx + 31 { 2 } else { 1 };
+                for k in 1..=bump {
+                    f.px_set(x, fl - 7 - k, Rgb::hex(c) * (0.95 + 0.05 * k as f32));
+                }
+            }
+            let k = ((t - since) / 2.0).clamp(0.0, 1.0);
+            for i in 0..3 {
+                let a = ((t * 0.6 + i as f32 / 3.0).fract()) * k;
+                if a > 0.05 {
+                    let ch = if i == 1 { 'Z' } else { 'z' };
+                    f.put_g(bx + 10 + (a * 4.0) as i32 + i, fl / 2 - 7 - (a * 5.0) as i32, Glyph::new(ch, Rgb::hex(0xc8d0e0)).alpha(1.0 - a * 0.7).lit(0.0));
+                }
+            }
+        }
+        if let Some((p, _)) = you {
+            f.light_px(p.centre(), p.y * 2.0 - 8.0, Rgb::hex(0xffc878) * (1.2 * glow));
+        }
+        // napping (in bed): the room dims
+        let lie = self.you_lie.map(|since| ((t - since) / 2.0).clamp(0.0, 1.0) * 0.5).unwrap_or(0.0);
+        let nap = if t < self.nap_until { ((self.nap_until - t).min(1.0)).clamp(0.0, 1.0) * 0.55 } else { 0.0 };
+        let k = lie.max(nap);
+        if k > 0.0 {
             for y in 0..self.h * 2 {
                 for x in 0..self.w {
                     let c = f.px_get(x, y);
                     f.px_set(x, y, c * (1.0 - k));
                 }
             }
-            if (t * 1.2) as i32 % 2 == 0 {
-                f.put_g(p.centre() as i32 + 2, p.y as i32 - 10, Glyph::new('z', Rgb::hex(0xc8d0e0)).lit(0.0));
-            }
         }
-        if let Some((x, y)) = prompt {
+        if let Some((_, Some((x, y)))) = you {
             Player::draw_prompt(f, x, y, 'E', t);
         }
         // the room's name in the home
@@ -2554,24 +2856,29 @@ pub struct HostInfo {
 
 /// A person drawn as pixel art at double the village scale: 8 px wide,
 /// 16 tall (12 for a kid), feet on cell row `feet`.
-struct Big {
-    x: f32,
-    feet: i32,
-    dir: f32,
-    step: bool,
+pub(crate) struct Big {
+    pub(crate) x: f32,
+    pub(crate) feet: i32,
+    pub(crate) dir: f32,
+    pub(crate) step: bool,
     /// A bobble hat (the player) or hair.
-    hat: Option<Rgb>,
-    hair: Rgb,
-    coat: Rgb,
-    scarf: Option<Rgb>,
-    sit: bool,
-    kid: bool,
+    pub(crate) hat: Option<Rgb>,
+    pub(crate) hair: Rgb,
+    pub(crate) coat: Rgb,
+    pub(crate) scarf: Option<Rgb>,
+    /// Sitting, on a cushion at this pixel row.
+    pub(crate) sit: Option<i32>,
+    pub(crate) kid: bool,
     /// Hands up to the fire.
-    arms_up: bool,
+    pub(crate) arms_up: bool,
+    /// Out in the village: daylight shades it, and lights touch it the way
+    /// they touch glyphs.
+    pub(crate) outdoor: bool,
 }
 
 impl Big {
-    fn draw(&self, f: &mut Frame, t: f32) {
+    /// A person in pixel art, 16 pixels tall, feet on row `feet`.
+    pub(crate) fn draw(&self, f: &mut Frame, t: f32) {
         let skin = Rgb::hex(0xe8c39e);
         let boots = Rgb::hex(0x2a2a34);
         let bottom = self.feet * 2 + 1;
@@ -2595,12 +2902,15 @@ impl Big {
             ]
         };
         let n = rows.len() as i32;
-        // sitting: the body drops a few pixels and the legs go forward
         let legs = n - 3;
-        let top = bottom - n + 1 + if self.sit { 3 } else { 0 };
+        // sitting: hips sunk into the cushion, the legs hanging down in front
+        let top = match self.sit {
+            Some(seat) => seat + 2 - (legs - 1),
+            None => bottom - n + 1,
+        };
         for (ry, row) in rows.iter().enumerate() {
             let ry = ry as i32;
-            if self.sit && ry >= legs {
+            if self.sit.is_some() && ry >= legs {
                 continue;
             }
             for (i, ch) in row.chars().enumerate() {
@@ -2624,19 +2934,22 @@ impl Big {
                 }
                 let x = if self.dir > 0.0 { cx + dx } else { cx - dx - 1 };
                 let col = if ch == 'r' && i < 2 && (t * 6.0) as i32 % 2 == 0 { col * 0.8 } else { col };
-                f.px_set(x, y, col);
+                if self.outdoor {
+                    f.px_sprite(x, y, col * (1.0 + 0.7 * f.day.max(0.0)));
+                } else {
+                    f.px_set(x, y, col);
+                }
             }
         }
-        if self.sit {
-            // knees forward, boots down
-            let ky = top + legs;
-            for k in 0..4 {
-                let x = if self.dir > 0.0 { cx + k } else { cx - k - 1 };
-                f.px_set(x, ky, self.coat * 0.7);
+        if self.sit.is_some() {
+            // two legs down from the seat's edge, boots on the floor
+            for y in top + legs..=bottom {
+                for dx in [-2, 1] {
+                    let x = if self.dir > 0.0 { cx + dx } else { cx - dx - 1 };
+                    f.px_set(x, y, if y >= bottom - 1 { boots } else { boots * 1.4 });
+                }
             }
-            let bx = if self.dir > 0.0 { cx + 3 } else { cx - 4 };
-            f.px_set(bx, ky + 1, boots);
-            f.px_set(bx, ky + 2, boots);
         }
     }
 }
+

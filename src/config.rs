@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub fps: f32,
-    /// Render scale: bigger cells (2.0) or smaller (0.5) — how large
-    /// everything looks.
+    /// Cell size: smaller cells (0.5) mean more of them — finer detail at
+    /// the same size (Settings shows it as resolution, 1 / scale).
     pub scale: f32,
+    /// Magnify the view (1 = the whole scene), centred on the villager.
+    pub zoom: f32,
     /// 0 = random seed each launch.
     pub seed: u64,
     pub scene: SceneCfg,
@@ -311,6 +313,8 @@ pub struct SceneCfg {
     pub chattiness: f32,
     /// The villager's own pet.
     pub pet: PetCfg,
+    /// The villager's name (empty: people call them "neighbour").
+    pub name: String,
 }
 
 /// The villager's pet: what it is, its colour and its name (empty: not
@@ -368,6 +372,7 @@ impl Default for Config {
         Config {
             fps: 30.0,
             scale: 1.0,
+            zoom: 1.0,
             seed: 0,
             scene: SceneCfg::default(),
             clock: ClockCfg::default(),
@@ -383,7 +388,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new() }
     }
 }
 
@@ -516,6 +521,7 @@ impl Config {
         let d = Config::default();
         self.fps = clean_fps(self.fps);
         fix(&mut self.scale, 0.5, 2.0, d.scale);
+        fix(&mut self.zoom, 1.0, 3.0, d.zoom);
         let (s, ds) = (&mut self.scene, &d.scene);
         fix(&mut s.snow, 0.0, 3.0, ds.snow);
         fix(&mut s.wind, 0.0, 3.0, ds.wind);
