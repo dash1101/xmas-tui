@@ -131,6 +131,11 @@ impl House {
     }
 
     /// (x, top_row, w, h) covering roof/steeple to the ground.
+    /// Column of the front door.
+    pub fn door(&self) -> i32 {
+        self.door
+    }
+
     pub fn bounds(&self) -> (i32, i32, i32, i32) {
         let extra = if self.church { 13 } else { 2 };
         let top = self.base - self.wall_h - self.roof_h - extra;

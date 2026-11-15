@@ -80,11 +80,37 @@ pub struct FxCfg {
     pub light_style: u8,
     pub light_windows: u32,
     pub light_glow: f32,
+    /// Max pile height on the taskbar / panels, in text rows.
+    pub dock_rows: f32,
+    pub fall: f32,
+    pub wind: f32,
+    /// Shake-off sensitivity (0: never).
+    pub shake: f32,
+    pub brush: bool,
+    /// Melting rate (0: piles stay).
+    pub melt: f32,
 }
 
 impl Default for FxCfg {
     fn default() -> Self {
-        FxCfg { snow: true, lights: true, cap_rows: 1.5, density: 1.0, front: true, docks: true, settle: 1.0, light_style: 0, light_windows: 6, light_glow: 1.0 }
+        FxCfg {
+            snow: true,
+            lights: true,
+            cap_rows: 1.5,
+            density: 1.0,
+            front: true,
+            docks: true,
+            settle: 1.0,
+            light_style: 0,
+            light_windows: 6,
+            light_glow: 1.0,
+            dock_rows: 1.5,
+            fall: 1.0,
+            wind: 1.0,
+            shake: 1.0,
+            brush: true,
+            melt: 0.0,
+        }
     }
 }
 
@@ -103,6 +129,12 @@ impl FxCfg {
             light_style: style,
             light_windows: w.light_windows,
             light_glow: w.light_glow,
+            dock_rows: w.dock_rows,
+            fall: w.fall,
+            wind: w.wind,
+            shake: w.shake,
+            brush: w.brush,
+            melt: w.melt,
         }
     }
 }
@@ -152,6 +184,7 @@ pub struct Fx {
     cursor_t: f32,
     cursor_v: (f32, f32),
     rng: Rng,
+    melt_acc: f32,
     pub hidden: bool,
     /// Pixel scale (1.0 = the 96-dpi design size).
     scale: f32,
@@ -186,6 +219,7 @@ impl Fx {
             parts: vec![],
             cursor: None,
             cursor_t: 0.0,
+            melt_acc: 0.0,
             cursor_v: (0.0, 0.0),
             rng: Rng::new(0x5a0b),
             hidden: false,
@@ -229,7 +263,14 @@ impl Fx {
     }
 
     fn cap(&self) -> f32 {
-        (self.cfg.cap_rows * 8.0).round() * self.step
+        (self.cfg.cap_rows.max(self.cfg.dock_rows) * 8.0).round() * self.step
+    }
+
+    /// Max pile height on window `id` (the taskbar has its own setting).
+    fn cap_for(&self, id: &str) -> f32 {
+        let dock = self.wins.iter().any(|w| w.id == id && w.kind == 1);
+        let rows = if dock { self.cfg.dock_rows } else { self.cfg.cap_rows };
+        (rows * 8.0).round() * self.step
     }
 
     fn reflake(&mut self) {
@@ -249,7 +290,7 @@ impl Fx {
         Flake {
             x: r.range(0.0, self.sw),
             y: if anywhere { r.range(-20.0 * k, self.sh) } else { r.range(-30.0 * k, -5.0 * k) },
-            vy: r.range(28.0 * k, 60.0 * k),
+            vy: r.range(28.0 * k, 60.0 * k) * self.cfg.fall.clamp(0.25, 3.0),
             sway: r.range(4.0 * k, 14.0 * k),
             phase: r.range(0.0, 6.28),
             ch: *r.pick(&['❄', '❅', '❆', '*', '•', '·', '*']),
@@ -331,8 +372,9 @@ impl Fx {
                 let speed = dist / dt;
                 // shaken or flung: snow flies off in the direction of travel
                 // (thresholds in 96-dpi px/s)
-                let (fling, k) = (1100.0 * self.scale, 2500.0 * self.scale);
-                if speed > fling {
+                let sens = self.cfg.shake;
+                let (fling, k) = (1100.0 * self.scale / sens.max(0.05), 2500.0 * self.scale);
+                if sens > 0.0 && speed > fling {
                     let frac = ((speed - fling) / k).clamp(0.2, 0.85);
                     for (i, c) in p.cols.iter_mut().enumerate() {
                         if *c > 0.0 {
@@ -395,6 +437,9 @@ impl Fx {
 
     /// Sweeping the cursor through a pile knocks the snow away.
     fn brush(&mut self) {
+        if !self.cfg.brush {
+            return;
+        }
         let Some((cx, cy)) = self.cursor else { return };
         let (vx, vy) = self.cursor_v;
         let k = self.scale;
@@ -451,7 +496,7 @@ impl Fx {
     }
 
     fn add(&mut self, id: &str, col: usize) {
-        let cap = self.cap();
+        let cap = self.cap_for(id);
         let Some(p) = self.piles.get_mut(id) else { return };
         let n = p.cols.len();
         // rounded ends: the outermost columns hold less
@@ -472,7 +517,20 @@ impl Fx {
 
     pub fn update(&mut self, dt: f32, t: f32) {
         let k = self.scale;
-        let wind = (noise1(t * 0.07, 33) - 0.5) * 30.0 * k;
+        let wind = (noise1(t * 0.07, 33) - 0.5) * 30.0 * k * self.cfg.wind;
+        // melting: now and then each pile loses a little off its highest point
+        if self.cfg.melt > 0.0 {
+            self.melt_acc += dt * self.cfg.melt * 0.35;
+            while self.melt_acc >= 1.0 {
+                self.melt_acc -= 1.0;
+                let step = self.step;
+                for p in self.piles.values_mut() {
+                    if let Some(top) = p.cols.iter_mut().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
+                        *top = (*top - step).max(0.0);
+                    }
+                }
+            }
+        }
         // falling flakes
         let mut flakes = std::mem::take(&mut self.flakes);
         if self.cfg.snow {

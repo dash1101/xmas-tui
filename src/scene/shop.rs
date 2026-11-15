@@ -1,0 +1,237 @@
+//! The Cocoa & Gifts cabin on the snowfield, the player's pockets, and the
+//! "cheer" that pays for things (earned by being neighbourly: first hellos,
+//! feeding animals, watching light shows, finding constellations…).
+
+use crate::color::{pal, Rgb};
+use crate::frame::{Bg, Frame, Glyph};
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Item {
+    Cocoa,
+    Gingerbread,
+    CandyCane,
+    Carrot,
+    Lantern,
+}
+
+pub const ITEMS: [Item; 5] = [Item::Cocoa, Item::Gingerbread, Item::CandyCane, Item::Carrot, Item::Lantern];
+
+impl Item {
+    pub fn name(self) -> &'static str {
+        match self {
+            Item::Cocoa => "hot cocoa",
+            Item::Gingerbread => "gingerbread",
+            Item::CandyCane => "candy cane",
+            Item::Carrot => "carrot",
+            Item::Lantern => "lantern",
+        }
+    }
+    pub fn price(self) -> u32 {
+        match self {
+            Item::Cocoa => 3,
+            Item::Gingerbread => 2,
+            Item::CandyCane => 2,
+            Item::Carrot => 3,
+            Item::Lantern => 6,
+        }
+    }
+    pub fn icon(self) -> (char, Rgb) {
+        match self {
+            Item::Cocoa => ('◘', Rgb::hex(0x8a5a3a)),
+            Item::Gingerbread => ('◆', Rgb::hex(0xc8803a)),
+            Item::CandyCane => ('ʃ', Rgb::hex(0xe8283c)),
+            Item::Carrot => ('▾', Rgb::hex(0xff8a2a)),
+            Item::Lantern => ('▣', Rgb::hex(0xffd27a)),
+        }
+    }
+    pub fn hint(self) -> &'static str {
+        match self {
+            Item::Cocoa => "drink: warm and cozy",
+            Item::Gingerbread => "give to someone (or eat)",
+            Item::CandyCane => "give to a kid (or eat)",
+            Item::Carrot => "give to a deer or rabbit",
+            Item::Lantern => "light the way (toggle)",
+        }
+    }
+}
+
+/// What the player carries.
+#[derive(Clone, Debug, Default)]
+pub struct Pockets {
+    pub cheer: u32,
+    pub items: [u32; 5],
+    pub lantern_on: bool,
+    /// Warm from cocoa until then (a cozier glow).
+    pub cozy_until: f32,
+    /// People already said hello to (cheer for a first hello only).
+    pub greeted: Vec<u64>,
+}
+
+impl Pockets {
+    pub fn new() -> Self {
+        Pockets { cheer: 5, ..Default::default() }
+    }
+    pub fn count(&self, it: Item) -> u32 {
+        self.items[ITEMS.iter().position(|&i| i == it).unwrap_or(0)]
+    }
+    pub fn add(&mut self, it: Item) {
+        let i = ITEMS.iter().position(|&i| i == it).unwrap_or(0);
+        self.items[i] += 1;
+    }
+    pub fn take(&mut self, it: Item) -> bool {
+        let i = ITEMS.iter().position(|&i| i == it).unwrap_or(0);
+        if self.items[i] > 0 {
+            self.items[i] -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// The cabin itself: `x` its left column, `base` its bottom row.
+pub struct Shop {
+    pub x: i32,
+    pub base: i32,
+    pub open: bool,
+}
+
+pub const SHOP_W: i32 = 16;
+
+impl Shop {
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + SHOP_W && y > self.base - 7 && y <= self.base
+    }
+
+    /// Centre column (where the shopkeeper stands).
+    pub fn centre(&self) -> i32 {
+        self.x + SHOP_W / 2
+    }
+
+    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32) {
+        let (x0, b) = (self.x, self.base);
+        let wood = Rgb::hex(0x6a3e22);
+        let dark = Rgb::hex(0x3a2214);
+        let snow = Rgb::hex(0xeef2fa);
+        // snowy roof
+        for i in 0..SHOP_W {
+            f.put_g(x0 + i, b - 6, Glyph::new('▄', snow * (0.9 + 0.1 * ((i * 7) % 3) as f32)).lit(0.6));
+        }
+        // striped awning
+        for i in 0..SHOP_W {
+            let c = if i % 2 == 0 { pal::CANDY_RED } else { Rgb::hex(0xf4efe6) };
+            f.put_g(x0 + i, b - 5, Glyph::new('▀', c).solid(wood).lit(0.6));
+        }
+        // the sign
+        let sign = " COCOA & GIFTS ";
+        for i in 0..SHOP_W {
+            f.put_g(x0 + i, b - 4, Glyph::new(' ', dark).solid(dark).lit(0.6));
+        }
+        let sx = x0 + (SHOP_W - sign.chars().count() as i32) / 2;
+        f.text(sx, b - 4, sign, Rgb::hex(0xffd36b), Bg::Solid(dark), 0.3);
+        // the window with the shopkeeper and a steaming mug
+        for i in 0..SHOP_W {
+            let edge = i == 0 || i == SHOP_W - 1;
+            for dy in [3, 2] {
+                let g = if edge { Glyph::new('▐', wood).solid(dark) } else { Glyph::new(' ', dark).solid(Rgb::hex(0x7a4a22) * 1.2) };
+                f.put_g(x0 + i, b - dy, g.lit(0.4));
+            }
+        }
+        let kx = self.centre();
+        f.put_g(kx, b - 3, Glyph::new('●', Rgb::hex(0xe8c39e)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        f.put_g(kx, b - 2, Glyph::new('█', Rgb::hex(0x2a6a3a)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        f.put_g(kx - 4, b - 2, Glyph::new('◘', Rgb::hex(0xf0e8d8)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        let steam = if (t * 2.0) as i32 % 2 == 0 { '∘' } else { '°' };
+        f.put_g(kx - 4, b - 3, Glyph::new(steam, Rgb::hex(0xd8dce8)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        f.put_g(kx + 4, b - 2, Glyph::new('◆', Rgb::hex(0xc8803a)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        // counter and legs
+        for i in 0..SHOP_W {
+            f.put_g(x0 + i, b - 1, Glyph::new('▀', Rgb::hex(0x8a5a32)).solid(dark).lit(0.6));
+            if i == 1 || i == SHOP_W - 2 {
+                f.put_g(x0 + i, b, Glyph::new('║', dark).lit(0.6));
+            }
+        }
+        let fl = 0.9 + 0.1 * (t * 7.0).sin();
+        f.light_cell(kx, b - 3, Rgb::hex(0xffb050) * (5.0 * fl * glow));
+    }
+
+    /// The shop's menu, over the cabin.
+    pub fn draw_menu(&self, f: &mut Frame, p: &Pockets) {
+        let w = 40;
+        let x0 = self.centre() - w / 2;
+        let y0 = self.base - 7 - (ITEMS.len() as i32 + 4);
+        let bg = Bg::Mix(pal::UI_PANEL, 0.94);
+        let border = Rgb::hex(0xffd36b) * 0.8;
+        let h = ITEMS.len() as i32 + 4;
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
+                    (true, _, true, _) => '╭',
+                    (_, true, true, _) => '╮',
+                    (true, _, _, true) => '╰',
+                    (_, true, _, true) => '╯',
+                    (_, _, true, _) | (_, _, _, true) => '─',
+                    (true, _, _, _) | (_, true, _, _) => '│',
+                    _ => ' ',
+                };
+                f.put_g(x, y, Glyph::new(ch, border).bg(bg).lit(0.0));
+            }
+        }
+        f.text(x0 + 2, y0, " Cocoa & Gifts ", pal::UI_TITLE, bg, 0.0);
+        let cheer = format!(" ✦ {} cheer ", p.cheer);
+        f.text(x0 + w - 2 - cheer.chars().count() as i32, y0, &cheer, Rgb::hex(0xffd36b), bg, 0.0);
+        for (i, it) in ITEMS.iter().enumerate() {
+            let y = y0 + 1 + i as i32;
+            let afford = p.cheer >= it.price();
+            let fg = if afford { pal::UI_TEXT } else { pal::UI_DIM };
+            let (ic, icc) = it.icon();
+            f.text(x0 + 2, y, &format!("{}", i + 1), Rgb::hex(0xffd36b), bg, 0.0);
+            f.put_g(x0 + 4, y, Glyph::new(ic, icc).bg(bg).lit(0.0));
+            f.text(x0 + 6, y, it.name(), fg, bg, 0.0);
+            let have = p.count(*it);
+            if have > 0 {
+                f.text(x0 + 19, y, &format!("×{have}"), pal::UI_DIM, bg, 0.0);
+            }
+            f.text(x0 + w - 8, y, &format!("{} ✦", it.price()), fg, bg, 0.0);
+        }
+        f.text(x0 + 2, y0 + h - 2, "1-5 buy · E or Esc to close", pal::UI_DIM, bg, 0.0);
+    }
+}
+
+/// The pockets panel (I), bottom-left of the screen.
+pub fn draw_pockets(f: &mut Frame, p: &Pockets) {
+    let w = 44;
+    let h = ITEMS.len() as i32 + 3;
+    let (x0, y0) = (3, f.h as i32 - h - 4);
+    let bg = Bg::Mix(pal::UI_PANEL, 0.9);
+    let border = pal::UI_BORDER;
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
+                (true, _, true, _) => '╭',
+                (_, true, true, _) => '╮',
+                (true, _, _, true) => '╰',
+                (_, true, _, true) => '╯',
+                (_, _, true, _) | (_, _, _, true) => '─',
+                (true, _, _, _) | (_, true, _, _) => '│',
+                _ => ' ',
+            };
+            f.put_g(x, y, Glyph::new(ch, border).bg(bg).lit(0.0));
+        }
+    }
+    f.text(x0 + 2, y0, " pockets ", pal::UI_TITLE, bg, 0.0);
+    let cheer = format!(" ✦ {} cheer ", p.cheer);
+    f.text(x0 + w - 2 - cheer.chars().count() as i32, y0, &cheer, Rgb::hex(0xffd36b), bg, 0.0);
+    for (i, it) in ITEMS.iter().enumerate() {
+        let y = y0 + 1 + i as i32;
+        let n = p.count(*it);
+        let fg = if n > 0 { pal::UI_TEXT } else { pal::UI_DIM };
+        let (ic, icc) = it.icon();
+        f.text(x0 + 2, y, &format!("{}", i + 1), Rgb::hex(0xffd36b), bg, 0.0);
+        f.put_g(x0 + 4, y, Glyph::new(ic, if n > 0 { icc } else { icc * 0.4 }).bg(bg).lit(0.0));
+        let label = if *it == Item::Lantern && p.lantern_on { format!("{} (lit)", it.name()) } else { it.name().to_string() };
+        f.text(x0 + 6, y, &format!("{label} ×{n}"), fg, bg, 0.0);
+        f.text(x0 + 21, y, it.hint(), pal::UI_DIM, bg, 0.0);
+    }
+    f.text(x0 + 2, y0 + h - 1, " 1-5 use · I close ", pal::UI_DIM, bg, 0.0);
+}

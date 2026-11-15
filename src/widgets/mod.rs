@@ -65,7 +65,9 @@ pub struct Widgets {
     weather: Option<Arc<Mutex<Weather>>>,
     weather_gen: Arc<AtomicU64>,
     /// Where each widget was drawn last frame (for hit-testing).
-    pub rects: [Option<Rect>; 4],
+    pub rects: [Option<Rect>; 5],
+    /// The village map's data for this frame (from the scene).
+    pub map: Option<crate::scene::MiniMap>,
     pub hover: Option<usize>,
     pub dragging: Option<usize>,
 }
@@ -80,7 +82,8 @@ impl Widgets {
             music_park: None,
             weather: None,
             weather_gen: Arc::new(AtomicU64::new(0)),
-            rects: [None; 4],
+            rects: [None; 5],
+            map: None,
             hover: None,
             dragging: None,
         };
@@ -138,40 +141,81 @@ impl Widgets {
             0 => self.cfg.clock.enabled,
             1 => self.cfg.widgets.system,
             2 => self.cfg.widgets.music,
-            _ => self.cfg.widgets.weather,
+            3 => self.cfg.widgets.weather,
+            _ => self.cfg.widgets.map && self.map.as_ref().map(|m| m.ww > m.vw + 1.0).unwrap_or(false),
         }
     }
 
-    pub fn size(i: usize) -> (i32, i32) {
+    /// The map's default size on a w-column screen.
+    fn map_default(w: i32) -> (i32, i32) {
+        ((w / 4).clamp(40, 160), 5)
+    }
+
+    pub fn size(&self, i: usize, w: i32) -> (i32, i32) {
         match i {
             0 => (66, 11),
             1 => (54, 9),
             2 => (60, 6),
-            _ => (60, 8),
+            3 => (60, 8),
+            _ => match self.cfg.layout.map_size {
+                Some([mw, mh]) => (mw.clamp(24, w.max(24)), mh.clamp(3, 20)),
+                None => Self::map_default(w),
+            },
         }
     }
 
-    fn default_pos(i: usize, w: i32) -> (i32, i32) {
+    fn default_pos(&self, i: usize, w: i32, h: i32) -> (i32, i32) {
         match i {
             0 => (3, 2),
             1 => (3, 14),
             2 => (w - 63, 2),
-            _ => (w - 63, 9),
+            3 => (w - 63, 9),
+            // bottom middle, just above the taskbar
+            _ => {
+                let (mw, mh) = self.size(4, w);
+                ((w - mw) / 2, h - mh - 3)
+            }
         }
     }
 
     /// Current rect for widget i on a w x h grid, clamped on-screen.
     pub fn rect(&self, i: usize, w: i32, h: i32) -> Rect {
-        let (sw, sh) = Self::size(i);
+        let (sw, sh) = self.size(i, w);
         let (x, y) = match self.cfg.layout.get(i) {
             Some([fx, fy]) => ((fx * w as f32).round() as i32, (fy * h as f32).round() as i32),
-            None => Self::default_pos(i, w),
+            None => self.default_pos(i, w, h),
         };
         Rect { x: x.clamp(0, (w - sw).max(0)), y: y.clamp(0, (h - sh).max(0)), w: sw, h: sh }
     }
 
+    /// Resize the map so its bottom-right corner is at (x, y).
+    pub fn resize_map(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let r = self.rect(4, w, h);
+        let nw = (x - r.x + 1).clamp(24, (w - r.x).max(24));
+        let nh = (y - r.y + 1).clamp(3, (h - r.y).clamp(3, 20));
+        self.cfg.layout.map_size = Some([nw, nh]);
+        // keep its top-left where it was
+        self.cfg.layout.map = Some([r.x as f32 / w as f32, r.y as f32 / h as f32]);
+    }
+
+    /// Is (x, y) the map's resize grip (its bottom-right corner)?
+    pub fn on_grip(&self, x: i32, y: i32) -> bool {
+        self.rects[4].map(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1).unwrap_or(false)
+    }
+
+    /// The world column under (x, y) on the map, if it's on the map.
+    pub fn map_world_x(&self, x: i32, y: i32) -> Option<f32> {
+        let r = self.rects[4]?;
+        let m = self.map.as_ref()?;
+        if !r.contains(x, y) {
+            return None;
+        }
+        let iw = (r.w - 2).max(2);
+        Some(((x - r.x - 1) as f32 / (iw - 1) as f32).clamp(0.0, 1.0) * m.ww)
+    }
+
     pub fn move_to(&mut self, i: usize, x: i32, y: i32, w: i32, h: i32) {
-        let (sw, sh) = Self::size(i);
+        let (sw, sh) = self.size(i, w);
         let x = x.clamp(0, (w - sw).max(0));
         let y = y.clamp(0, (h - sh).max(0));
         self.cfg.layout.set(i, Some([x as f32 / w as f32, y as f32 / h as f32]));
@@ -179,16 +223,16 @@ impl Widgets {
 
     /// Top-most widget under a cell.
     pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        (0..4).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
+        (0..5).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
     }
 
     pub fn draw(&mut self, f: &mut Frame, t: f32) {
-        self.rects = [None; 4];
+        self.rects = [None; 5];
         if f.w < 150 || f.h < 30 {
             return;
         }
         let (w, h) = (f.w as i32, f.h as i32);
-        for i in 0..4 {
+        for i in 0..5 {
             if !self.enabled(i) {
                 continue;
             }
@@ -206,9 +250,14 @@ impl Widgets {
                     let m = self.music.as_ref().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default();
                     draw_music(f, r.x, r.y, r.w, &m, t);
                 }
-                _ => {
+                3 => {
                     let wx = self.weather.as_ref().and_then(|w| w.lock().ok().map(|g| g.clone())).unwrap_or_default();
                     draw_weather(f, r.x, r.y, r.w, &wx, t);
+                }
+                _ => {
+                    if let Some(m) = &self.map {
+                        draw_map(f, r, m, t);
+                    }
                 }
             }
             let active = self.dragging == Some(i) || (self.dragging.is_none() && self.hover == Some(i));
@@ -277,6 +326,117 @@ impl Widgets {
 }
 
 /// Bright corner brackets around a widget that can be (or is being) dragged.
+/// The village map: mountains along the top, houses and trees along the
+/// bottom, a highlight for what's on screen, the villager (●) and where they
+/// started (⚑). The ◢ corner resizes it.
+fn draw_map(f: &mut Frame, r: Rect, m: &crate::scene::MiniMap, t: f32) {
+    let bg = Bg::Mix(pal::UI_PANEL, 0.78);
+    let border = pal::UI_BORDER * 0.8;
+    let (iw, ih) = ((r.w - 2).max(2), (r.h - 2).max(1));
+    let col = |x: f32| r.x + 1 + ((x / m.ww).clamp(0.0, 1.0) * (iw - 1) as f32).round() as i32;
+    // frame
+    for x in r.x..r.x + r.w {
+        let top = if x == r.x { '╭' } else if x == r.x + r.w - 1 { '╮' } else { '─' };
+        let bot = if x == r.x { '╰' } else if x == r.x + r.w - 1 { '◢' } else { '─' };
+        f.put_g(x, r.y, Glyph::new(top, border).bg(bg).lit(0.0));
+        f.put_g(x, r.y + r.h - 1, Glyph::new(bot, if bot == '◢' { Rgb::hex(0xffd36b) * 0.8 } else { border }).bg(bg).lit(0.0));
+    }
+    for y in r.y + 1..r.y + r.h - 1 {
+        f.put_g(r.x, y, Glyph::new('│', border).bg(bg).lit(0.0));
+        f.put_g(r.x + r.w - 1, y, Glyph::new('│', border).bg(bg).lit(0.0));
+        for x in r.x + 1..r.x + r.w - 1 {
+            f.put_g(x, y, Glyph::new(' ', border).bg(bg).lit(0.0));
+        }
+    }
+    f.text(r.x + 2, r.y, " map ", pal::UI_TITLE, bg, 0.0);
+    // how far from where the villager started
+    if let Some(p) = m.player {
+        let d = p - m.home;
+        let label = if d.abs() < 3.0 {
+            " ⚑ home ".to_string()
+        } else {
+            format!(" ⚑ {} {} ", (d.abs() / 2.0).round() as i32, if d > 0.0 { "steps ←" } else { "steps →" })
+        };
+        let n = label.chars().count() as i32;
+        if n + 9 < r.w {
+            f.text(r.x + r.w - 2 - n, r.y, &label, pal::UI_DIM, bg, 0.0);
+        }
+    }
+    // the part of the village on screen
+    let (v0, v1) = (col(m.cam), col(m.cam + m.vw));
+    let vbg = Bg::Mix(Rgb::hex(0x34407a), 0.85);
+    for y in r.y + 1..r.y + r.h - 1 {
+        for x in v0..=v1.min(r.x + r.w - 2) {
+            f.put_g(x, y, Glyph::new(' ', border).bg(vbg).lit(0.0));
+        }
+    }
+    let inview = |x: i32| x >= v0 && x <= v1;
+    let cbg = |x: i32| if inview(x) { vbg } else { bg };
+    let ground = r.y + r.h - 2;
+    // mountains: a sparkline across the rows above the ground
+    if ih >= 3 {
+        const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let rows = (ih - 2).min(4);
+        for cx in 0..iw {
+            let i = (cx as usize * (m.ridge.len().max(1) - 1)) / (iw as usize - 1).max(1);
+            let v = m.ridge.get(i).copied().unwrap_or(0.0) * rows as f32;
+            for k in 0..rows {
+                let fill = ((v - k as f32) * 8.0).round().clamp(0.0, 8.0) as usize;
+                if fill == 0 {
+                    continue;
+                }
+                let (x, y) = (r.x + 1 + cx, ground - 2 - k);
+                f.put_g(x, y, Glyph::new(BARS[fill], Rgb::hex(0x5a6696)).bg(cbg(x)).lit(0.0));
+            }
+        }
+    }
+    // the ground: snow, then trees and houses on it
+    for x in r.x + 1..r.x + r.w - 1 {
+        f.put_g(x, ground, Glyph::new('▁', Rgb::hex(0xc8d0e4) * 0.6).bg(cbg(x)).lit(0.0));
+    }
+    for &tx in &m.trains {
+        if ih >= 2 {
+            let x = col(tx);
+            for dx in -1..=1 {
+                f.put_g(x + dx, ground - 1, Glyph::new('▬', Rgb::hex(0xa83a3a)).bg(cbg(x + dx)).lit(0.0));
+            }
+        }
+    }
+    for &(tx, big) in &m.trees {
+        let x = col(tx);
+        if big {
+            f.put_g(x, ground, Glyph::new('▲', Rgb::hex(0x3fbf6a)).bg(cbg(x)).lit(0.0));
+            if ih >= 2 {
+                f.put_g(x, ground - 1, Glyph::new('★', Rgb::hex(0xffd65a)).bg(cbg(x)).lit(0.0));
+            }
+        } else {
+            f.put_g(x, ground, Glyph::new('▴', Rgb::hex(0x2f9a52)).bg(cbg(x)).lit(0.0));
+        }
+    }
+    for &(hx, church) in &m.houses {
+        let x = col(hx);
+        f.put_g(x, ground, Glyph::new('⌂', Rgb::hex(0xffc878)).bg(cbg(x)).lit(0.0));
+        if church && ih >= 2 {
+            f.put_g(x, ground - 1, Glyph::new('†', Rgb::hex(0xe8e0d0)).bg(cbg(x)).lit(0.0));
+        }
+    }
+    for &(cx, person) in &m.critters {
+        let x = col(cx);
+        if ih >= 2 {
+            let c = if person { Rgb::hex(0xe8c39e) } else { Rgb::hex(0xc0884a) };
+            f.put_g(x, ground - 1, Glyph::new('·', c).bg(cbg(x)).lit(0.0));
+        }
+    }
+    // home, then the villager (on top of everything)
+    let hx = col(m.home);
+    f.put_g(hx, ground - (ih >= 2) as i32, Glyph::new('⚑', Rgb::hex(0x7fd8ff)).bg(cbg(hx)).lit(0.0));
+    if let Some(p) = m.player {
+        let x = col(p);
+        let k = 0.85 + 0.15 * (t * 4.0).sin();
+        f.put_g(x, ground, Glyph::new('●', Rgb::hex(0xffd36b) * (1.2 * k)).bg(cbg(x)).lit(0.0));
+    }
+}
+
 fn draw_handles(f: &mut Frame, r: Rect, dragging: bool, t: f32) {
     let k = if dragging { 1.3 } else { 0.85 + 0.15 * (t * 4.0).sin() };
     let c = Rgb::hex(0xffd36b) * k;

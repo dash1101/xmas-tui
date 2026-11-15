@@ -50,6 +50,8 @@ pub fn supported() -> bool {
 pub enum Status {
     /// A build from source: no self-updates.
     Unsupported,
+    /// Installed system-wide (e.g. the .deb): the package manager updates it.
+    Managed,
     Idle,
     Checking,
     UpToDate,
@@ -144,6 +146,10 @@ pub fn running() -> bool {
 pub fn spawn(check: bool, auto: bool) {
     configure(check, auto);
     if !supported() || STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if !writable() {
+        with(|s| s.status = Status::Managed);
         return;
     }
     cleanup_old();
@@ -346,6 +352,16 @@ fn replace(exe: &Path, bin: &[u8]) -> Result<(), String> {
         return Err(format!("couldn't write {} ({e})", exe.display()));
     }
     Ok(())
+}
+
+/// Can this process replace its own executable? (Not when installed
+/// system-wide, e.g. /usr/bin from the .deb.)
+fn writable() -> bool {
+    let Ok(exe) = current_exe() else { return false };
+    let probe = exe.with_file_name(".xmas-tui.write-test");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 /// Remove what a previous update left behind.

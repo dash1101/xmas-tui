@@ -349,6 +349,49 @@ fn urlenc(s: &str) -> String {
         .collect()
 }
 
+/// The weather city's country (ISO code), once it's been looked up.
+fn country_cell() -> &'static std::sync::Mutex<String> {
+    static C: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
+fn set_country(cc: &str) {
+    if let Ok(mut c) = country_cell().lock() {
+        *c = cc.to_ascii_uppercase();
+    }
+}
+
+pub fn country() -> String {
+    country_cell().lock().map(|c| c.clone()).unwrap_or_default()
+}
+
+fn sun_cell() -> &'static std::sync::Mutex<Option<(f32, f32)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<(f32, f32)>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn set_sun(rise: f32, set: f32) {
+    if let Ok(mut c) = sun_cell().lock() {
+        *c = Some((rise, set));
+    }
+}
+
+/// Today's sunrise and sunset at the weather city (minutes after local
+/// midnight), once the weather has been fetched.
+pub fn sun_times() -> Option<(f32, f32)> {
+    sun_cell().lock().ok().and_then(|c| *c)
+}
+
+/// Countries that drive on the left.
+pub fn drives_left(cc: &str) -> bool {
+    const LEFT: &[&str] = &[
+        "GB", "IE", "IM", "JE", "GG", "MT", "CY", "JP", "AU", "NZ", "IN", "PK", "BD", "LK", "NP", "BT", "MV", "TH", "MY", "SG", "ID", "TL", "BN", "HK", "MO",
+        "ZA", "ZW", "ZM", "MW", "MZ", "BW", "NA", "LS", "SZ", "KE", "UG", "TZ", "MU", "SC", "JM", "TT", "BB", "BS", "GY", "SR", "AG", "DM", "GD", "KN", "LC",
+        "VC", "VG", "AI", "MS", "KY", "TC", "BM", "FK", "SH", "FJ", "PG", "SB", "WS", "TO", "KI", "NR", "TV", "CK", "NU",
+    ];
+    LEFT.contains(&cc)
+}
+
 fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> Weather {
     let mut w = Weather::default();
     let f = cfg.units.to_lowercase().starts_with('f');
@@ -363,6 +406,9 @@ fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> W
                 Ok(v) => {
                     if let Some(r) = v["results"].get(0) {
                         let name = r["name"].as_str().unwrap_or(&cfg.city).to_string();
+                        if let Some(cc) = r["country_code"].as_str() {
+                            set_country(cc);
+                        }
                         *coords = Some((r["latitude"].as_f64().unwrap_or(0.0), r["longitude"].as_f64().unwrap_or(0.0), name));
                     } else {
                         w.status = format!("city not found: {}", cfg.city);
@@ -383,7 +429,7 @@ fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> W
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={la:.3}&longitude={lo:.3}\
          &current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day\
-         &daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=4&timezone=auto{}",
+         &daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=4&timezone=auto{}",
         if f { "&temperature_unit=fahrenheit&wind_speed_unit=mph" } else { "" }
     );
     match http_json(&url) {
@@ -397,6 +443,16 @@ fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> W
             w.humidity = c["relative_humidity_2m"].as_f64().unwrap_or(0.0);
             w.is_day = c["is_day"].as_i64().unwrap_or(0) == 1;
             let d = &v["daily"];
+            // today's sunrise / sunset (local "YYYY-MM-DDTHH:MM"), for the
+            // scene's time of day
+            let mins = |s: &serde_json::Value| -> Option<f32> {
+                let t = s.as_str()?.split('T').nth(1)?;
+                let (h, m) = t.split_once(':')?;
+                Some(h.parse::<f32>().ok()? * 60.0 + m.get(..2)?.parse::<f32>().ok()?)
+            };
+            if let (Some(r), Some(s)) = (mins(&d["sunrise"][0]), mins(&d["sunset"][0])) {
+                set_sun(r, s);
+            }
             if let (Some(days), Some(codes), Some(mx), Some(mn)) = (
                 d["time"].as_array(),
                 d["weather_code"].as_array(),

@@ -141,9 +141,23 @@ impl Sky {
     }
 
     /// Pixel-layer sky (call first).
+    /// The colour at the very top of the sky (where the high sky above
+    /// fades into it).
+    pub fn top_color(&self) -> Rgb {
+        let n = self.base.len().min(64).max(1);
+        let mut c = Rgb::BLACK;
+        for p in &self.base[..n] {
+            c += *p;
+        }
+        c * (1.0 / n as f32)
+    }
+
     pub fn draw_px(&self, f: &mut Frame, t: f32, boost: f32) {
         if self.base.len() == f.px.len() {
-            f.px.copy_from_slice(&self.base);
+            // shifted down while looking up into the sky
+            let shift = (2 * f.oy).clamp(0, f.ph as i32) as usize * f.pw;
+            let n = f.px.len() - shift;
+            f.px[shift..].copy_from_slice(&self.base[..n]);
         }
         let horizon = self.horizon;
         if self.aurora {

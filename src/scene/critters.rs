@@ -35,6 +35,9 @@ enum St {
     Follow { until: f32, moving: bool },
     /// In a conversation; `resume`: go back to following afterwards.
     Talk { until: f32, resume: bool },
+    /// Gathering round the big tree for a light show: heading for (tx,
+    /// ty), then standing facing the tree at column `face`.
+    Gather { tx: f32, ty: f32, face: f32, until: f32, moving: bool },
 }
 
 struct Critter {
@@ -59,6 +62,8 @@ struct Critter {
     /// behind them to keep.
     group: u64,
     gap: f32,
+    /// Stepping round someone: which way (rows; 0 = not dodging).
+    dodge: f32,
 }
 
 impl Critter {
@@ -76,7 +81,7 @@ impl Critter {
     }
     /// Sprite rows (right-facing) for the current state.
     fn sprite(&self, t: f32) -> Vec<&'static str> {
-        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. });
+        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = match self.kind {
             Kind::Fox => 10.0,
             Kind::Kid => 9.0,
@@ -167,9 +172,17 @@ struct Snowball {
     y: f32,
     vx: f32,
     vy: f32,
+    /// Who it's aimed at: a critter id, `AT_YOU`, or 0 (just thrown).
     target: u64,
     age: f32,
+    /// Thrown by the player (the target reacts to the player).
+    yours: bool,
+    /// The row it comes down on if it misses.
+    land: f32,
 }
+
+/// A snowball aimed at the player.
+const AT_YOU: u64 = u64::MAX;
 
 struct Bird {
     x: f32,
@@ -198,6 +211,12 @@ pub struct Critters {
     lo: Vec<i32>,
     mult: f32,
     startle_cd: f32,
+    /// Someone hit by the player's snowball who'll throw one back: (id, when).
+    revenge: Vec<(u64, f32)>,
+    /// Snowballs that hit the player since the scene last asked.
+    hits_on_you: u32,
+    /// The player's snowballs that hit someone, since last asked.
+    your_hits: u32,
     /// The player character: (x, baseline row, facing, walking).
     player: Option<(f32, f32, f32, bool)>,
     /// How long the player has been standing still, and when followers
@@ -234,6 +253,9 @@ impl Critters {
             lo,
             mult,
             startle_cd: 0.0,
+            revenge: vec![],
+            hits_on_you: 0,
+            your_hits: 0,
             player: None,
             still: 0.0,
             follow_chat_at: 0.0,
@@ -348,6 +370,7 @@ impl Critters {
             chatter_at: 0.0,
             group: 0,
             gap: 0.0,
+            dodge: 0.0,
         });
         id
     }
@@ -393,6 +416,7 @@ impl Critters {
                 | St::Throw { until }
                 | St::Follow { until, .. }
                 | St::Talk { until, .. }
+                | St::Gather { until, .. }
                 | St::Chase { until, .. } => *until -= s,
                 St::Munch { until, bite, .. } => {
                     *until -= s;
@@ -413,6 +437,9 @@ impl Critters {
         }
         self.startle_cd -= s;
         self.follow_chat_at -= s;
+        for r in &mut self.revenge {
+            r.1 -= s;
+        }
     }
 
     // ------------------------------------------------------------ handling
@@ -610,7 +637,7 @@ impl Critters {
                         if dx.abs() > 1.2 {
                             c.dir = dx.signum();
                             // hurry to keep up (the player walks at ~11 cells/s)
-                            let v = (dx.abs() * 2.5).clamp(c.speed, 13.0);
+                            let v = (dx.abs() * 2.5).clamp(c.speed, 40.0);
                             c.x += c.dir * v.min(dx.abs() / dt.max(1e-3)) * dt;
                             moving = true;
                         } else {
@@ -623,6 +650,26 @@ impl Critters {
                         }
                     }
                     c.st = if t > until || player.is_none() { St::Walk } else { St::Follow { until, moving } };
+                }
+                St::Gather { tx, ty, face, until, .. } => {
+                    let dx = tx - c.x;
+                    let mut moving = false;
+                    if dx.abs() > 1.0 {
+                        c.dir = dx.signum();
+                        c.x += c.dir * (c.speed * 1.7).min(dx.abs() / dt.max(1e-3)) * dt;
+                        moving = true;
+                    } else {
+                        c.dir = (face - c.centre()).signum();
+                        if rng.chance(dt * 0.08) {
+                            d.emote(c.centre(), c.y - 4.0, if rng.chance(0.5) { '✦' } else { '♥' }, Rgb::hex(0xffd36b), 1);
+                        }
+                    }
+                    let dy = ty.clamp(lo, h) - c.y;
+                    if dy.abs() > 0.3 {
+                        c.y += dy.signum() * (dt * 2.5).min(dy.abs());
+                        moving = true;
+                    }
+                    c.st = if t > until { St::Walk } else { St::Gather { tx, ty, face, until, moving } };
                 }
                 St::Talk { until, resume } => {
                     if t > until {
@@ -710,6 +757,7 @@ impl Critters {
                 self.prints.push((c.centre() as i32, c.y as i32, t));
             }
         }
+        self.avoid(dt);
         let held = self.held;
         // gone: off the world, or passers-by wandered well out of view
         self.list.retain(|c| {
@@ -732,26 +780,98 @@ impl Critters {
             b.y += b.vy * dt;
         }
         let list = &self.list;
+        let you = self.player;
+        let mut on_you = 0;
+        let mut landed = vec![];
         self.balls.retain(|b| {
-            if let Some(c) = list.iter().find(|c| c.id == b.target) {
+            if b.target == AT_YOU {
+                if let Some((px, py, ..)) = you {
+                    if (b.x - (px + 1.0)).abs() < 1.5 && b.y >= py - 3.0 && b.y <= py + 0.5 {
+                        on_you += 1;
+                        landed.push((b.x, b.y));
+                        return false;
+                    }
+                }
+            } else if let Some(c) = list.iter().find(|c| c.id == b.target) {
                 if (b.x - c.centre()).abs() < 1.2 && b.y >= c.y - 3.0 {
-                    hits.push((b.x, b.y, c.id));
+                    hits.push((b.x, b.y, c.id, b.yours));
                     return false;
                 }
             }
+            // missed: it lands in the snow
+            if b.vy > 0.0 && b.age > 0.15 && b.y >= b.land {
+                landed.push((b.x, b.y));
+                return false;
+            }
             b.age < 3.0 && b.y < h + 2.0
         });
-        for (x, y, id) in hits {
+        for (x, y) in landed {
+            d.snow_puff(x, y);
+            d.sound(Sfx::Snowball, x, 0.5);
+        }
+        self.hits_on_you += on_you;
+        for (x, y, id, yours) in hits {
             d.snow_puff(x, y);
             d.sound(Sfx::Snowball, x, 0.9);
-            d.sound(Sfx::Laugh, x, 0.8);
-            if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
+            let Some(i) = self.list.iter().position(|c| c.id == id) else { continue };
+            let kid = self.list[i].kind == Kind::Kid;
+            if !yours {
+                d.sound(Sfx::Laugh, x, 0.8);
+                let c = &mut self.list[i];
                 c.st = St::Dizzy { until: t + 1.0 };
                 // half the time they throw one back
                 if self.rng.chance(0.5) {
                     c.social_at = t + 1.2;
                 }
+                continue;
             }
+            // the player's snowball: everyone takes it a little differently
+            self.your_hits += 1;
+            if self.list[i].animal() {
+                let away = (self.list[i].centre() - you.map(|p| p.0).unwrap_or(x)).signum();
+                let c = &mut self.list[i];
+                c.st = St::Flee { until: t + 2.0 };
+                c.dir = if away == 0.0 { 1.0 } else { away };
+                d.emote(c.centre(), c.y - 3.0, '!', Rgb::hex(0xffd36b), 1);
+                if let Some(s) = c.sfx() {
+                    d.sound(s, c.centre(), 0.8);
+                }
+                continue;
+            }
+            let msg = lines.hit(kid);
+            let back = self.rng.chance(if kid { 0.75 } else { 0.35 });
+            let c = &mut self.list[i];
+            c.st = St::Dizzy { until: t + 1.0 };
+            d.say(c.centre().round() as i32, c.y as i32 - 4, &msg, t + 0.3, 2.6, 6);
+            if kid {
+                d.sound(Sfx::Laugh, c.centre(), 0.9);
+            }
+            if back {
+                self.revenge.push((id, t + self.rng.range(1.4, 2.4)));
+            }
+        }
+        // ...and here it comes back at the player
+        if let Some((px, py, ..)) = you {
+            let due: Vec<u64> = self.revenge.iter().filter(|r| t >= r.1).map(|r| r.0).collect();
+            self.revenge.retain(|r| t < r.1);
+            for id in due {
+                let Some(c) = self.list.iter_mut().find(|c| c.id == id) else { continue };
+                if !c.free() && !matches!(c.st, St::Dizzy { .. } | St::Walk) {
+                    continue;
+                }
+                let (ax, ay) = (c.centre(), c.y);
+                let dist = px + 1.0 - ax;
+                if dist.abs() > 45.0 {
+                    continue; // you got away
+                }
+                c.dir = dist.signum();
+                c.st = St::Throw { until: t + 0.8 };
+                let flight = (dist.abs() / 30.0).clamp(0.35, 0.9);
+                self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (py - ay) / flight - 15.0 * flight, target: AT_YOU, age: 0.0, yours: false, land: py + 0.5 });
+                d.sound(Sfx::Snowball, ax, 0.5);
+            }
+        } else {
+            self.revenge.clear();
         }
         // birds flying off
         for b in &mut self.birds {
@@ -841,7 +961,7 @@ impl Critters {
                     self.list[i].dir = towards;
                     let dist = bx - ax;
                     let flight = 0.55;
-                    self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (by - ay) / flight - 15.0 * flight, target: self.list[j].id, age: 0.0 });
+                    self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (by - ay) / flight - 15.0 * flight, target: self.list[j].id, age: 0.0, yours: false, land: by + 0.5 });
                     d.sound(Sfx::Snowball, ax, 0.5);
                 } else if ak == Kind::Fox && bk == Kind::Rabbit {
                     // a playful chase (the fox never wins)
@@ -859,6 +979,91 @@ impl Critters {
                 cool(self, j, 18.0);
                 break;
             }
+        }
+    }
+
+    /// Nobody walks straight through anybody: someone heading into another
+    /// person or animal (or the player) on their row steps a row up or down
+    /// to go round them. (When they meet properly, `meetings` has them stop
+    /// and chat first; they step round once they set off again.)
+    fn avoid(&mut self, dt: f32) {
+        let h = (self.h - 1) as f32;
+        let you = self.player.map(|p| (u64::MAX, p.0 + 1.0, p.1, 0u64, false));
+        let walking = |c: &Critter| matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let others: Vec<(u64, f32, f32, u64, bool)> = self
+            .list
+            .iter()
+            .filter(|c| !c.held() && !matches!(c.st, St::Fall { .. }))
+            .map(|c| (c.id, c.centre(), c.y, c.group, walking(c)))
+            .chain(you)
+            .collect();
+        for i in 0..self.list.len() {
+            let c = &self.list[i];
+            if !walking(c) {
+                self.list[i].dodge = 0.0;
+                continue;
+            }
+            let (id, cx, cy, dir, group) = (c.id, c.centre(), c.y, c.dir, c.group);
+            let reach = if c.animal() { 6.0 } else { 4.0 };
+            // the nearest one in the way, on (about) the same row
+            let block = others
+                .iter()
+                .filter(|o| o.0 != id && o.0 != group && o.3 != id && !(group != 0 && o.3 == group))
+                .filter(|o| {
+                    let ahead = (o.1 - cx) * dir;
+                    ahead > 0.0 && ahead < reach && (o.2 - cy).abs() < 1.6
+                })
+                .min_by(|a, b| ((a.1 - cx) * dir).partial_cmp(&((b.1 - cx) * dir)).unwrap_or(std::cmp::Ordering::Equal));
+            let Some(&(oid, _, oy, _, other_walking)) = block else {
+                self.list[i].dodge = 0.0;
+                continue;
+            };
+            // one of a pair gives way (the later one); anyone stepping round
+            // someone standing still or the player does the stepping
+            if other_walking && oid != u64::MAX && oid > id {
+                continue;
+            }
+            let lo = self.lo_at(cx);
+            // pick a side once (away from them, where there's room) and keep
+            // to it until clear
+            let c = &mut self.list[i];
+            if c.dodge == 0.0 {
+                let away = if oy > cy { -1.0 } else if oy < cy { 1.0 } else { -1.0 };
+                let room = |d: f32| if d < 0.0 { cy - lo } else { h - cy };
+                c.dodge = if room(away) >= 1.6 - (oy - cy).abs() { away } else { -away };
+            }
+            let ny = c.y + c.dodge * 4.0 * dt;
+            if ny < lo || ny > h {
+                c.dodge = -c.dodge;
+            }
+            c.y = ny.clamp(lo, h);
+        }
+    }
+
+    /// A light show's about to start: the townsfolk nearby gather round the
+    /// tree at column `x` (in a loose crowd in front of it) until `until`.
+    pub fn gather(&mut self, x: f32, until: f32, t: f32, d: &mut Director, lines: &mut Lines) {
+        let h = (self.h - 1) as f32;
+        let mut k = 0;
+        let mut announced = false;
+        for i in 0..self.list.len() {
+            let c = &self.list[i];
+            if !c.person() || c.held() || !matches!(c.st, St::Walk | St::Idle { .. } | St::Greet { .. } | St::Talk { resume: false, .. }) || (c.centre() - x).abs() > self.view.1 * 1.5 {
+                continue;
+            }
+            // alternate sides, spreading out as more arrive
+            let side = if k % 2 == 0 { -1.0 } else { 1.0 };
+            let tx = x + side * (7.0 + (k / 2) as f32 * 4.5 + self.rng.range(0.0, 2.0));
+            let lo = self.lo_at(tx);
+            let ty = self.rng.range(lo + 1.0, h).round();
+            let (cx, cy) = (c.centre(), c.y);
+            self.list[i].st = St::Gather { tx, ty, face: x, until, moving: true };
+            self.list[i].leave_at = self.list[i].leave_at.max(until);
+            if !announced && (cx - self.view.0) > 0.0 && (cx - self.view.0) < self.view.1 {
+                announced = true;
+                d.say(cx.round() as i32, cy as i32 - 4, &lines.show_soon(), t, 3.0, 6);
+            }
+            k += 1;
         }
     }
 
@@ -942,6 +1147,16 @@ impl Critters {
 
     // ------------------------------------------------------------ the player
 
+    /// (id, centre column, baseline row) of everyone, for speech bubbles.
+    pub fn anchors(&self) -> Vec<(u64, f32, f32)> {
+        self.list.iter().map(|c| (c.id, c.centre(), c.y)).collect()
+    }
+
+    /// Where everyone is (x, is a person), for the map.
+    pub fn positions(&self) -> Vec<(f32, bool)> {
+        self.list.iter().map(|c| (c.centre(), c.person())).collect()
+    }
+
     pub fn set_player(&mut self, p: Option<(f32, f32, f32, bool)>) {
         self.player = p;
     }
@@ -987,8 +1202,62 @@ impl Critters {
     }
 
     #[cfg(test)]
+    pub fn pos_of(&self, id: u64) -> Option<(f32, f32)> {
+        self.list.iter().find(|c| c.id == id).map(|c| (c.centre(), c.y))
+    }
+
+    #[cfg(test)]
+    pub fn set_walking(&mut self, id: u64, dir: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
+            c.st = St::Walk;
+            c.dir = dir;
+            c.leave_at = 1e9;
+            c.social_at = 1e9; // no stopping to chat in this test
+        }
+    }
+
+    #[cfg(test)]
     pub fn last_id(&self) -> u64 {
         self.list.last().map(|c| c.id).unwrap_or(0)
+    }
+
+    pub fn is_person(&self, id: u64) -> bool {
+        self.list.iter().any(|c| c.id == id && c.person())
+    }
+
+    pub fn is_animal(&self, id: u64) -> bool {
+        self.list.iter().any(|c| c.id == id && c.animal())
+    }
+
+    /// A present from the player (gingerbread, a candy cane…).
+    pub fn gift(&mut self, id: u64, what: &str, t: f32, d: &mut Director) {
+        let Some(c) = self.list.iter_mut().find(|c| c.id == id) else { return };
+        let (cx, top) = (c.centre(), c.y - 4.0);
+        let kid = c.kind == Kind::Kid;
+        let line = if kid {
+            format!("a {what}?! for ME? thank you!!")
+        } else {
+            format!("oh, a {what}! how kind — thank you!")
+        };
+        c.st = St::Greet { until: t + 3.0 };
+        d.say(cx.round() as i32, top as i32, &line, t, 3.2, 6);
+        d.emote(cx, top + 1.0, '♥', Rgb::hex(0xff6b8a), 4);
+        d.sound(if kid { Sfx::Laugh } else { Sfx::Greet }, cx, 0.9);
+    }
+
+    /// A carrot for an animal: a friend for a good while.
+    pub fn befriend(&mut self, id: u64, t: f32, d: &mut Director) {
+        let Some(c) = self.list.iter_mut().find(|c| c.id == id) else { return };
+        let until = t + 90.0;
+        c.leave_at = c.leave_at.max(until);
+        c.st = St::Follow { until, moving: false };
+        d.emote(c.centre(), c.y - 3.0, '♥', Rgb::hex(0xff6b8a), 5);
+        d.sound(Sfx::Munch, c.centre(), 1.0);
+    }
+
+    /// The player's snowballs that hit someone since last asked.
+    pub fn take_your_hits(&mut self) -> u32 {
+        std::mem::take(&mut self.your_hits)
     }
 
     pub fn following(&self, id: u64) -> bool {
@@ -1098,6 +1367,28 @@ impl Critters {
             }
         }
         any
+    }
+
+    /// The player throws a snowball from (x, y) the way they face: at the
+    /// nearest person or animal over there, or into the snow.
+    pub fn throw(&mut self, x: f32, y: f32, dir: f32, d: &mut Director) {
+        let target = self
+            .list
+            .iter()
+            .filter(|c| !c.held() && !matches!(c.st, St::Fall { .. }) && (c.centre() - x) * dir > 1.5 && (c.centre() - x).abs() < 40.0 && (c.y - y).abs() < 7.0)
+            .min_by(|a, b| (a.centre() - x).abs().partial_cmp(&(b.centre() - x).abs()).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|c| (c.id, c.centre(), c.y));
+        let (id, tx, ty) = target.unwrap_or((0, x + dir * 16.0, y));
+        let (sx, sy) = (x + dir, y - 2.0);
+        let dist = tx - sx;
+        let flight = (dist.abs() / 30.0).clamp(0.35, 0.9);
+        self.balls.push(Snowball { x: sx, y: sy, vx: dist / flight, vy: (ty - 1.0 - sy) / flight - 15.0 * flight, target: id, age: 0.0, yours: true, land: ty + 0.5 });
+        d.sound(Sfx::Snowball, sx, 0.6);
+    }
+
+    /// Snowballs that hit the player since last asked.
+    pub fn take_hits_on_you(&mut self) -> u32 {
+        std::mem::take(&mut self.hits_on_you)
     }
 
     /// A bush within reach of (x, y).
@@ -1319,7 +1610,7 @@ mod tests {
 
     fn world() -> (Ctx, Director, Lines) {
         let (w, h) = (200, 40);
-        let ctx = Ctx { w, h, ground_row: vec![24; w as usize], track_row: 20, occluded: vec![false; (w * h) as usize], church: None, sky_rows: 10, cam: 0.0, vw: w };
+        let ctx = Ctx { w, h, ground_row: vec![24; w as usize], track_row: 20, occluded: vec![false; (w * h) as usize], church: None, sky_rows: 10, station: None, cam: 0.0, vw: w };
         (ctx, Director::new(3, 0.0), Lines::new(3))
     }
 

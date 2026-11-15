@@ -207,6 +207,18 @@ pub struct WindowsCfg {
     pub light_windows: u32,
     /// Bulb brightness multiplier.
     pub light_glow: f32,
+    /// Max pile height on the taskbar / panels, in text rows.
+    pub dock_rows: f32,
+    /// How fast the flakes fall (multiplier).
+    pub fall: f32,
+    /// How much the wind blows them about (multiplier).
+    pub wind: f32,
+    /// How easily shaking a window throws its snow off (0: never).
+    pub shake: f32,
+    /// Sweeping the cursor through a pile brushes it away.
+    pub brush: bool,
+    /// Piles slowly melt away (0: never; higher: faster).
+    pub melt: f32,
 }
 
 impl Default for WindowsCfg {
@@ -222,6 +234,12 @@ impl Default for WindowsCfg {
             light_style: "multi".into(),
             light_windows: 6,
             light_glow: 1.0,
+            dock_rows: 1.5,
+            fall: 1.0,
+            wind: 1.0,
+            shake: 1.0,
+            brush: true,
+            melt: 0.0,
         }
     }
 }
@@ -237,18 +255,22 @@ pub struct LayoutCfg {
     pub system: Option<[f32; 2]>,
     pub music: Option<[f32; 2]>,
     pub weather: Option<[f32; 2]>,
+    pub map: Option<[f32; 2]>,
+    /// The map widget's size in cells (it can be resized).
+    pub map_size: Option<[i32; 2]>,
 }
 
 impl LayoutCfg {
     pub fn get(&self, i: usize) -> Option<[f32; 2]> {
-        [self.clock, self.system, self.music, self.weather][i]
+        [self.clock, self.system, self.music, self.weather, self.map][i]
     }
     pub fn set(&mut self, i: usize, v: Option<[f32; 2]>) {
         match i {
             0 => self.clock = v,
             1 => self.system = v,
             2 => self.music = v,
-            _ => self.weather = v,
+            3 => self.weather = v,
+            _ => self.map = v,
         }
     }
 }
@@ -271,6 +293,14 @@ pub struct SceneCfg {
     pub bushes: bool,
     /// A little villager to walk around with WASD / the arrow keys.
     pub player: bool,
+    /// How fast the villager walks (multiplier).
+    pub walk_speed: f32,
+    /// Time of day: "auto" (real sunrise / sunset for the weather city),
+    /// or fixed: "night", "dawn", "morning", "noon", "afternoon", "dusk".
+    pub time: String,
+    /// Which side of the road the cars keep to: "auto" (from the weather
+    /// city's country), "right" or "left".
+    pub traffic: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -288,6 +318,8 @@ pub struct WidgetCfg {
     pub system: bool,
     pub music: bool,
     pub weather: bool,
+    /// A strip map of the village (where the villager is, and where they started).
+    pub map: bool,
     /// Mount point shown in the disk row.
     pub disk: String,
 }
@@ -323,7 +355,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into() }
     }
 }
 
@@ -335,7 +367,7 @@ impl Default for ClockCfg {
 
 impl Default for WidgetCfg {
     fn default() -> Self {
-        WidgetCfg { system: true, music: true, weather: true, disk: "/".into() }
+        WidgetCfg { system: true, music: true, weather: true, map: true, disk: "/".into() }
     }
 }
 
@@ -460,12 +492,24 @@ impl Config {
         fix(&mut s.wind, 0.0, 3.0, ds.wind);
         fix(&mut s.glow, 0.0, 2.0, ds.glow);
         fix(&mut s.events, 0.0, 3.0, ds.events);
+        fix(&mut s.walk_speed, 0.25, 3.0, ds.walk_speed);
+        if !crate::scene::daylight::MODES.contains(&s.time.as_str()) {
+            s.time = ds.time.clone();
+        }
+        if !["auto", "right", "left"].contains(&s.traffic.as_str()) {
+            s.traffic = ds.traffic.clone();
+        }
         fix(&mut s.sleigh_minutes, 0.0, 60.0, ds.sleigh_minutes);
         fix(&mut s.critters, 0.0, 3.0, ds.critters);
         let (w, dw) = (&mut self.windows, &d.windows);
         fix(&mut w.pile_rows, 0.0, 4.0, dw.pile_rows);
         fix(&mut w.density, 0.0, 3.0, dw.density);
         fix(&mut w.settle, 0.0, 4.0, dw.settle);
+        fix(&mut w.dock_rows, 0.0, 4.0, dw.dock_rows);
+        fix(&mut w.fall, 0.25, 3.0, dw.fall);
+        fix(&mut w.wind, 0.0, 3.0, dw.wind);
+        fix(&mut w.shake, 0.0, 3.0, dw.shake);
+        fix(&mut w.melt, 0.0, 3.0, dw.melt);
         fix(&mut w.light_glow, 0.0, 2.0, dw.light_glow);
         w.light_windows = w.light_windows.clamp(1, 20);
         if !LIGHT_STYLES.contains(&w.light_style.as_str()) {
@@ -491,7 +535,8 @@ impl Config {
         let coord = |v: Option<f64>, lim: f64| v.filter(|v| v.is_finite()).map(|v| v.clamp(-lim, lim));
         wx.latitude = coord(wx.latitude, 90.0);
         wx.longitude = coord(wx.longitude, 180.0);
-        for i in 0..4 {
+        self.layout.map_size = self.layout.map_size.map(|[w, h]| [w.clamp(24, 600), h.clamp(3, 20)]);
+        for i in 0..5 {
             let p = self.layout.get(i).filter(|p| p.iter().all(|v| v.is_finite())).map(|p| p.map(|v| v.clamp(0.0, 1.0)));
             self.layout.set(i, p);
         }

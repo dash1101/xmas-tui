@@ -35,6 +35,8 @@ pub enum MouseIn {
     Drag,
     Up(Btn),
     Scroll(bool),
+    /// Ctrl+wheel: look up into the sky (true) or back down.
+    ScrollSky(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -65,6 +67,11 @@ pub struct App {
     widgets: Widgets,
     settings: Settings,
     drag: Option<(usize, i32, i32)>,
+    /// Resizing the map by its corner grip.
+    resizing: bool,
+    /// Where the current widget press started (a press that doesn't move
+    /// on the map is a click: look there).
+    press_at: (i32, i32),
     start: Instant,
     last: Instant,
     acts: Vec<Act>,
@@ -108,7 +115,8 @@ impl App {
         let widgets = Widgets::new(&cfg);
         let mut settings = Settings::default();
         settings.extras = extras;
-        settings.autostart = if extras { platform::autostart_get() } else { None };
+        // run-at-startup lives with the wallpaper (not previews / tests)
+        settings.autostart = if extras || wallpaper { platform::autostart_get() } else { None };
         settings.keyboard = keyboard;
         // only the wallpaper itself looks for updates (not previews/exports)
         if wallpaper {
@@ -133,6 +141,8 @@ impl App {
             wallpaper,
             keyboard,
             quit: false,
+            resizing: false,
+            press_at: (0, 0),
             held: [f32::NEG_INFINITY; 4],
             exact_keys: false,
             #[cfg(any(target_os = "linux", windows))]
@@ -181,7 +191,9 @@ impl App {
         self.w = w;
         self.h = h;
         self.frame.resize(w, h);
+        let pockets = self.scene.take_pockets();
         self.scene = Scene::new(w, h, self.seed, &self.cfg.scene);
+        self.scene.set_pockets(pockets);
     }
 
     fn commit_city(&mut self) {
@@ -221,9 +233,15 @@ impl App {
                     self.settings.open = false;
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
                     self.settings.open = true;
+                } else if !self.cfg.layout.locked && self.widgets.on_grip(x, y) {
+                    self.resizing = true;
+                    self.widgets.dragging = Some(4);
+                } else if let (true, Some(wx)) = (self.cfg.layout.locked, self.widgets.map_world_x(x, y)) {
+                    self.scene.look_at(wx);
                 } else if let (false, Some(i)) = (self.cfg.layout.locked, self.widgets.hit(x, y)) {
                     let r = self.widgets.rects[i].unwrap();
                     self.drag = Some((i, x - r.x, y - r.y));
+                    self.press_at = (x, y);
                     self.widgets.dragging = Some(i);
                 } else if !self.scene.grab(x, y) {
                     // nobody to pick up here: an ordinary click on the scene
@@ -236,6 +254,10 @@ impl App {
                     return;
                 }
                 self.scene.set_cursor(Some((x, y)));
+                if self.resizing {
+                    self.widgets.resize_map(x, y, self.w as i32, self.h as i32);
+                    return;
+                }
                 if let Some((i, ox, oy)) = self.drag {
                     self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
                 }
@@ -244,7 +266,23 @@ impl App {
                 self.scene.drag(x, y);
                 self.scene.release();
             }
+            MouseIn::Up(Btn::Left) if self.resizing => {
+                self.resizing = false;
+                self.widgets.resize_map(x, y, self.w as i32, self.h as i32);
+                self.widgets.dragging = None;
+                self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
+                self.cfg.layout.map = self.widgets.cfg.layout.map;
+            }
             MouseIn::Up(Btn::Left) => {
+                if let Some((4, ..)) = self.drag.filter(|_| (x, y) == self.press_at) {
+                    // a click on the map (no drag): look over there
+                    self.drag = None;
+                    self.widgets.dragging = None;
+                    if let Some(wx) = self.widgets.map_world_x(x, y) {
+                        self.scene.look_at(wx);
+                    }
+                    return;
+                }
                 if let Some((i, ox, oy)) = self.drag.take() {
                     // drop where the button came up (there may have been no
                     // Drag event at this spot), and commit only the dragged
@@ -268,6 +306,11 @@ impl App {
                     // the wheel looks around the village
                     let step = (self.w as f32 * 0.06).max(4.0);
                     self.scene.pan(if up { -step } else { step });
+                }
+            }
+            MouseIn::ScrollSky(up) => {
+                if !self.settings.open {
+                    self.scene.pan_up(up);
                 }
             }
             MouseIn::Up(Btn::Right) => {}
@@ -322,6 +365,9 @@ impl App {
             match k {
                 KeyIn::Char('e' | 'E' | ' ') | KeyIn::Enter => self.scene.interact(),
                 KeyIn::Char('f' | 'F') => self.scene.invite(),
+                KeyIn::Char('r' | 'R') => self.scene.snowball(),
+                KeyIn::Char('i' | 'I') => self.scene.toggle_pockets(),
+                KeyIn::Char(c @ '1'..='5') => self.scene.number(c as usize - '0' as usize),
                 _ => {}
             }
         }
@@ -337,6 +383,9 @@ impl App {
             }
         } else if self.settings.open && k == KeyIn::Esc {
             self.settings.open = false;
+        } else if k == KeyIn::Esc && self.scene.close_panels() {
+        } else if k == KeyIn::Esc && self.scene.is_inside() {
+            self.scene.leave();
         } else if !self.wallpaper && (k == KeyIn::Char('q') || k == KeyIn::Esc) {
             self.quit = true;
         } else {
@@ -448,8 +497,19 @@ impl App {
         // `applied` always advances (also mid-drag), so a change is acted on
         // once instead of rebuilding the scene every frame until the drop
         if reseed || !config::same(&self.cfg, &old) {
-            if reseed || self.cfg.scene != old.scene {
+            // walking speed and the traffic side apply live; anything else
+            // about the scene rebuilds it
+            let live = |c: &crate::config::SceneCfg| {
+                let mut c = c.clone();
+                c.walk_speed = 0.0;
+                c.traffic.clear();
+                c.time.clear();
+                c
+            };
+            if reseed || live(&self.cfg.scene) != live(&old.scene) {
+                let pockets = self.scene.take_pockets();
                 self.scene = Scene::new(self.w, self.h, self.seed, &self.cfg.scene);
+                self.scene.set_pockets(pockets);
             }
             #[cfg(any(target_os = "linux", windows))]
             if let Some(fx) = &self.fx {
@@ -477,6 +537,19 @@ impl App {
         self.last = now;
         let (mx, my) = self.move_dir();
         self.scene.set_move(mx, my);
+        let left = match self.cfg.scene.traffic.as_str() {
+            "left" => true,
+            "right" => false,
+            _ => crate::widgets::data::drives_left(&crate::widgets::data::country()),
+        };
+        self.scene.set_live(self.cfg.scene.walk_speed, left);
+        {
+            use chrono::Timelike;
+            let now = chrono::Local::now();
+            let mins = now.hour() as f32 * 60.0 + now.minute() as f32 + now.second() as f32 / 60.0;
+            let (rise, set) = crate::widgets::data::sun_times().unwrap_or((450.0, 1020.0));
+            self.scene.set_daylight(crate::scene::daylight::compute(&self.cfg.scene.time, mins, rise, set));
+        }
         self.scene.update(dt, t);
         let mut sounds = self.scene.take_sounds();
         let mut ui = std::mem::take(&mut self.ui_sounds);
@@ -510,8 +583,10 @@ impl App {
         }
         self.frame.clear();
         self.scene.draw(&mut self.frame, t);
+        self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
         self.settings.draw_gear(&mut self.frame, t);
+        self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         self.settings.draw_banner(&mut self.frame, t);
         self.settings.draw(&mut self.frame, &self.cfg, t);
         self.frame.compose();
@@ -537,6 +612,7 @@ mod tests {
         cfg.widgets.weather = false;
         cfg.widgets.system = false;
         cfg.clock.enabled = false;
+        cfg.widgets.map = false; // (a widget under the pointer takes the press)
         let mut app = App::new(cfg, 9, &path, 300, 60, true, true, false);
         app.scene.demo(0.0);
         app.step();

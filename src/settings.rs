@@ -15,6 +15,9 @@ pub enum F {
     Wind,
     Glow,
     Sleigh,
+    WalkSpeed,
+    Traffic,
+    TimeOfDay,
     Fps,
     Events,
     Aurora,
@@ -41,10 +44,17 @@ pub enum F {
     Bushes,
     Player,
     UpdCheck,
+    Map,
     UpdAuto,
     WinFront,
     WinDocks,
     WinPile,
+    WinDockPile,
+    WinFall,
+    WinWind,
+    WinShake,
+    WinMelt,
+    WinBrush,
     WinDensity,
     WinSettle,
     WinLightStyle,
@@ -87,6 +97,8 @@ pub struct Settings {
     pub extras: bool,
     /// Some(state) where start-with-OS is supported.
     pub autostart: Option<bool>,
+    /// Live sound levels (from the audio thread), when there is one.
+    pub meters: Option<[f32; crate::audio::METERS]>,
     /// Typing works (false behind the Windows desktop icons).
     pub keyboard: bool,
     /// The window snow/lights overlay is running.
@@ -109,6 +121,28 @@ const PANEL_H: i32 = 28;
 
 const SLEIGH_STEPS: [f32; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 10.0, 15.0, 30.0];
 const FPS_STEPS: [f32; 6] = [15.0, 20.0, 24.0, 30.0, 45.0, 60.0];
+
+/// A live level bar: `level` is a 0..1 peak, shown on a -48..0 dB scale.
+fn meter_bar(f: &mut Frame, x: i32, y: i32, level: f32, w: i32) {
+    let db = if level > 0.0 { 20.0 * level.log10() } else { -99.0 };
+    let fill = ((db + 48.0) / 48.0).clamp(0.0, 1.0) * w as f32;
+    const PART: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    for k in 0..w {
+        let c = (fill - k as f32).clamp(0.0, 1.0);
+        let col = if (k as f32) < w as f32 * 0.6 { Rgb::hex(0x5adf8a) } else if (k as f32) < w as f32 * 0.85 { Rgb::hex(0xffd36b) } else { Rgb::hex(0xff6b5a) };
+        let ch = if c >= 1.0 { '█' } else { PART[(c * 8.0) as usize] };
+        f.put_g(x + k, y, Glyph::new(ch, col).bg(Bg::Mix(Rgb::hex(0x0e1428), 0.9)).lit(0.0));
+    }
+}
+
+/// A labelled meter row: name, bar and level in dB.
+fn meter_row(f: &mut Frame, lx: i32, vx: i32, y: i32, label: &str, level: f32, w: i32) {
+    let fg = if level > 0.004 { pal::UI_TEXT } else { pal::UI_DIM };
+    f.text(lx, y, label, fg, BG, 0.0);
+    meter_bar(f, vx, y, level, w);
+    let db = if level > 0.0005 { format!("{:>4.0} dB", 20.0 * level.log10()) } else { "   — ".to_string() };
+    f.text(vx + w + 2, y, &db, pal::UI_DIM, BG, 0.0);
+}
 
 fn step_list(list: &[f32], v: f32, dir: i32) -> f32 {
     if let Some(i) = list.iter().position(|&x| (x - v).abs() < 0.01) {
@@ -146,9 +180,25 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                     cfg.sound.track = names[(i + dir as i32).rem_euclid(names.len() as i32) as usize].to_string();
                 }
                 F::Critters => step(&mut cfg.scene.critters, 0.25 * dir, 0.0, 3.0),
+                F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 3.0),
+                F::TimeOfDay => {
+                    let m = crate::scene::daylight::MODES;
+                    let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
+                    cfg.scene.time = m[(i + dir as i32).rem_euclid(m.len() as i32) as usize].to_string();
+                }
+                F::Traffic => {
+                    let opts = ["auto", "right", "left"];
+                    let i = opts.iter().position(|o| *o == cfg.scene.traffic).unwrap_or(0) as i32;
+                    cfg.scene.traffic = opts[(i + dir as i32).rem_euclid(3) as usize].to_string();
+                }
                 F::WinPile => step(&mut cfg.windows.pile_rows, 0.25 * dir, 0.25, 4.0),
                 F::WinDensity => step(&mut cfg.windows.density, 0.25 * dir, 0.0, 3.0),
                 F::WinSettle => step(&mut cfg.windows.settle, 0.25 * dir, 0.0, 4.0),
+                F::WinDockPile => step(&mut cfg.windows.dock_rows, 0.25 * dir, 0.0, 4.0),
+                F::WinFall => step(&mut cfg.windows.fall, 0.25 * dir, 0.25, 3.0),
+                F::WinWind => step(&mut cfg.windows.wind, 0.25 * dir, 0.0, 3.0),
+                F::WinShake => step(&mut cfg.windows.shake, 0.25 * dir, 0.0, 3.0),
+                F::WinMelt => step(&mut cfg.windows.melt, 0.25 * dir, 0.0, 3.0),
                 F::WinLightGlow => step(&mut cfg.windows.light_glow, 0.1 * dir, 0.0, 2.0),
                 F::WinLightCount => cfg.windows.light_windows = step_list(&LIGHT_COUNTS, cfg.windows.light_windows as f32, dir as i32) as u32,
                 F::WinLightStyle => {
@@ -197,8 +247,10 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Bushes => cfg.scene.bushes ^= true,
                 F::Player => cfg.scene.player ^= true,
                 F::UpdCheck => cfg.updates.check ^= true,
+                F::Map => cfg.widgets.map ^= true,
                 F::UpdAuto => cfg.updates.auto_install ^= true,
                 F::WinFront => cfg.windows.front ^= true,
+                F::WinBrush => cfg.windows.brush ^= true,
                 F::WinDocks => cfg.windows.docks ^= true,
                 F::Units => {
                     cfg.weather.units = if cfg.weather.units.to_lowercase().starts_with('f') { "celsius".into() } else { "fahrenheit".into() }
@@ -383,6 +435,18 @@ impl Settings {
         let sl = if cfg.scene.sleigh_minutes <= 0.0 { "never".to_string() } else { format!("every ~{:.0} min", cfg.scene.sleigh_minutes) };
         self.stepper(f, lx, vx, yy, "Santa's sleigh", F::Sleigh, &sl);
         yy += 1;
+        self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 3.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
+        yy += 1;
+        let side = match cfg.scene.traffic.as_str() {
+            "left" => "keep left",
+            "right" => "keep right",
+            _ => "auto (weather city)",
+        };
+        self.stepper(f, lx, vx, yy, "Traffic", F::Traffic, side);
+        yy += 1;
+        let tod = if cfg.scene.time == "auto" { "auto (real sunrise & sunset)".to_string() } else { cfg.scene.time.clone() };
+        self.stepper(f, lx, vx, yy, "Time of day", F::TimeOfDay, &tod);
+        yy += 1;
         let fps = match self.fps_override {
             Some(o) => format!("{o:.0} fps (--fps)"),
             None => format!("{:.0} fps", cfg.fps),
@@ -391,7 +455,7 @@ impl Settings {
         yy += 2;
         let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
         let cx = self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes) + 3;
-        self.check(f, cx, yy, "You (WASD)", Act::Toggle(F::Player), cfg.scene.player);
+        self.check(f, cx, yy, "Villager (WASD)", Act::Toggle(F::Player), cfg.scene.player);
         yy += 2;
         self.button(f, lx, yy, "↻ shuffle scene", Act::Shuffle);
     }
@@ -408,7 +472,8 @@ impl Settings {
         yy += 1;
         let mut cx = self.check(f, lx, yy, "System", Act::Toggle(F::System), cfg.widgets.system) + 3;
         cx = self.check(f, cx, yy, "Music", Act::Toggle(F::Music), cfg.widgets.music) + 3;
-        self.check(f, cx, yy, "Weather", Act::Toggle(F::Weather), cfg.widgets.weather);
+        cx = self.check(f, cx, yy, "Weather", Act::Toggle(F::Weather), cfg.widgets.weather) + 3;
+        self.check(f, cx, yy, "Map", Act::Toggle(F::Map), cfg.widgets.map);
         yy += 1;
         f.text(lx, yy, "Weather city", pal::UI_TEXT, BG, 0.0);
         let field = Rect { x: vx, y: yy, w: 30, h: 1 };
@@ -450,6 +515,7 @@ impl Settings {
         let ver = crate::update::current();
         let (msg, act) = match crate::update::status() {
             Status::Unsupported => (format!("v{ver} · built from source: updates come from git"), None),
+            Status::Managed => (format!("v{ver} · system-wide install: update via the package manager"), None),
             _ if !crate::update::running() => (format!("v{ver} · the wallpaper checks for updates"), None),
             Status::Idle => (format!("v{ver}"), Some(("check now", Act::CheckUpdate))),
             Status::Checking => (format!("v{ver} · checking…"), None),
@@ -465,11 +531,11 @@ impl Settings {
             self.button(f, cx + 2, yy, label, a);
         }
         yy += 2;
+        let mut cx = lx;
+        if let Some(on) = self.autostart {
+            cx = self.check(f, lx, yy, "Run at startup", Act::Autostart, on) + 4;
+        }
         if self.extras {
-            let mut cx = lx;
-            if let Some(on) = self.autostart {
-                cx = self.check(f, lx, yy, "Start with Windows", Act::Autostart, on) + 4;
-            }
             self.button(f, cx, yy, "✕ quit wallpaper", Act::Quit);
         }
     }
@@ -504,7 +570,27 @@ impl Settings {
             self.slider(f, lx, vx, yy, AMB_ROWS[i], F::Amb(i as u8), v / 1.5, &vol(*v), t);
             yy += 1;
         }
-        f.text(lx, yy + 1, "per-effect volumes are on the Effects tab", pal::UI_DIM, BG, 0.0);
+        yy += 1;
+        self.section(f, lx, yy, "WHAT'S PLAYING");
+        yy += 1;
+        match self.meters {
+            None => {
+                f.text(lx, yy, "live levels show in the wallpaper's own settings (right-click)", pal::UI_DIM, BG, 0.0);
+            }
+            Some(m) => {
+                // music and ambience, then whichever effects are sounding,
+                // loudest first
+                use crate::audio::{meter_label, METER_AMB, METER_MUSIC, METER_OTHER};
+                let mut fx: Vec<usize> = (0..=METER_OTHER).filter(|&i| m[i] > 0.004).collect();
+                fx.sort_by(|a, b| m[*b].partial_cmp(&m[*a]).unwrap_or(std::cmp::Ordering::Equal));
+                let mut rows = vec![METER_MUSIC, METER_AMB];
+                rows.extend(fx.into_iter().take(2));
+                for i in rows {
+                    meter_row(f, lx, lx + 24, yy, meter_label(i), m[i], 20);
+                    yy += 1;
+                }
+            }
+        }
     }
 
     fn tab_effects(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
@@ -513,6 +599,10 @@ impl Settings {
         for (i, (key, label)) in crate::config::EffectVolumes::ROWS.iter().enumerate() {
             let v = cfg.sound.effects.get(key);
             self.slider(f, lx, vx, yy, label, F::Fx(i as u8), v / 1.5, &format!("{:.0}%", v * 100.0), t);
+            // what this group is playing right now
+            if let Some(m) = self.meters {
+                meter_bar(f, vx + 32, yy, m[i], 4);
+            }
             yy += 1;
         }
     }
@@ -522,17 +612,34 @@ impl Settings {
         self.section(f, lx, yy, "SNOW ON WINDOWS");
         yy += 1;
         let mut cx = self.check(f, lx, yy, "Snow on windows", Act::Toggle(F::WinSnow), wc.snow) + 3;
-        cx = self.check(f, cx, yy, "Falling in front", Act::Toggle(F::WinFront), wc.front) + 3;
-        self.check(f, cx, yy, "On taskbar", Act::Toggle(F::WinDocks), wc.docks);
+        cx = self.check(f, cx, yy, "In front", Act::Toggle(F::WinFront), wc.front) + 3;
+        self.check(f, cx, yy, "Cursor sweeps", Act::Toggle(F::WinBrush), wc.brush);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Pile height", F::WinPile, wc.pile_rows / 4.0, &format!("{:.2} rows", wc.pile_rows), t);
+        let pct = |v: f32, max: f32| v / max;
+        self.slider(f, lx, vx, yy, "Pile height", F::WinPile, pct(wc.pile_rows, 4.0), &format!("{:.2} rows", wc.pile_rows), t);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Snowfall", F::WinDensity, wc.density / 3.0, &format!("{:.2}×", wc.density), t);
+        self.slider(f, lx, vx, yy, "Snowfall", F::WinDensity, pct(wc.density, 3.0), &format!("{:.2}×", wc.density), t);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Settling speed", F::WinSettle, wc.settle / 4.0, &format!("{:.2}×", wc.settle), t);
+        self.slider(f, lx, vx, yy, "Settling speed", F::WinSettle, pct(wc.settle, 4.0), &format!("{:.2}×", wc.settle), t);
         yy += 1;
-        let hint = if wc.front { "flakes drift over your windows" } else { "piles still grow; nothing drifts over your work" };
+        self.slider(f, lx, vx, yy, "Fall speed", F::WinFall, pct(wc.fall, 3.0), &format!("{:.2}×", wc.fall), t);
+        yy += 1;
+        self.slider(f, lx, vx, yy, "Wind", F::WinWind, pct(wc.wind, 3.0), &format!("{:.2}×", wc.wind), t);
+        yy += 1;
+        let shake = if wc.shake <= 0.0 { "off".to_string() } else { format!("{:.2}×", wc.shake) };
+        self.slider(f, lx, vx, yy, "Shake-off", F::WinShake, pct(wc.shake, 3.0), &shake, t);
+        yy += 1;
+        let melt = if wc.melt <= 0.0 { "never".to_string() } else { format!("{:.2}×", wc.melt) };
+        self.slider(f, lx, vx, yy, "Melting", F::WinMelt, pct(wc.melt, 3.0), &melt, t);
+        yy += 1;
+        let hint = if wc.front { "flakes drift over open windows" } else { "piles still grow; nothing drifts over the work underneath" };
         f.text(lx, yy, hint, pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        self.section(f, lx, yy, "TASKBAR");
+        yy += 1;
+        self.check(f, lx, yy, "Snow on the taskbar", Act::Toggle(F::WinDocks), wc.docks);
+        yy += 1;
+        self.slider(f, lx, vx, yy, "Taskbar pile", F::WinDockPile, pct(wc.dock_rows, 4.0), &format!("{:.2} rows", wc.dock_rows), t);
         yy += 2;
         self.section(f, lx, yy, "LIGHTS AROUND WINDOWS");
         yy += 1;

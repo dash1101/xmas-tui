@@ -57,6 +57,14 @@ struct Args {
     raw: bool,
     /// --export: just the scene (no widgets, settings gear or prompts).
     clean: bool,
+    /// --export: inside house N (or the church).
+    inside: Option<usize>,
+    /// --export: look this many rows up into the sky.
+    sky: f32,
+    /// --export: time of day (as the setting: night, dawn, noon…).
+    time: Option<String>,
+    /// --export: at the cocoa cabin with the menu and pockets open.
+    shop: bool,
 }
 
 fn parse_args() -> Args {
@@ -83,6 +91,10 @@ fn parse_args() -> Args {
         after_update: None,
         raw: false,
         clean: false,
+        inside: None,
+        sky: 0.0,
+        time: None,
+        shop: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -100,6 +112,10 @@ fn parse_args() -> Args {
             "--update" => {}
             "--raw" => a.raw = true,
             "--clean" => a.clean = true,
+            "--time" => a.time = it.next(),
+            "--shop" => a.shop = true,
+            "--sky" => a.sky = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            "--inside" => a.inside = it.next().and_then(|v| v.parse().ok()),
             "--after-update" => a.after_update = it.next().and_then(|v| v.parse().ok()),
             "--pan" => a.pan = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--wallpaper" => a.wallpaper = true,
@@ -347,6 +363,8 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                         MouseEventKind::Down(MouseButton::Right) => MouseIn::Down(Btn::Right),
                         MouseEventKind::Drag(MouseButton::Left) => MouseIn::Drag,
                         MouseEventKind::Up(MouseButton::Left) => MouseIn::Up(Btn::Left),
+                        MouseEventKind::ScrollUp if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::ScrollSky(true),
+                        MouseEventKind::ScrollDown if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::ScrollSky(false),
                         MouseEventKind::ScrollUp => MouseIn::Scroll(true),
                         MouseEventKind::ScrollDown => MouseIn::Scroll(false),
                         _ => continue,
@@ -451,6 +469,10 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         scene.sleigh.trigger((args.at - 9.0).max(0.0));
     }
     scene.jump(args.pan);
+    scene.look_up(args.sky);
+    if let Some(m) = &args.time {
+        scene.set_daylight(scene::daylight::compute(m, 720.0, 450.0, 1020.0));
+    }
     while t < args.at {
         scene.update(dt, t);
         t += dt;
@@ -460,6 +482,15 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     settings.open = args.settings;
     settings.tab = args.tab;
     settings.window_fx = true;
+    // previews: plausible levels for the meters
+    if args.settings {
+        let mut m = [0.0f32; audio::METERS];
+        m[audio::METER_MUSIC] = 0.18;
+        m[audio::METER_AMB] = 0.05;
+        m[2] = 0.3;
+        m[5] = 0.08;
+        settings.meters = Some(m);
+    }
     if args.demo {
         scene.demo(t);
         for _ in 0..(3.0 / dt) as usize {
@@ -467,6 +498,16 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             t += dt;
         }
         widgets.hover = Some(1);
+    }
+    if let Some(i) = args.inside {
+        scene.preview_inside(i);
+        for _ in 0..(4.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+    }
+    if args.shop {
+        scene.preview_shop();
     }
     if args.clean {
         scene.quiet_player();
@@ -477,7 +518,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         frame.clear();
         scene.draw(&mut frame, t);
         if !args.clean {
-            widgets.draw(&mut frame, t);
+            widgets.map = Some(scene.minimap());
+            widgets.map = Some(scene.minimap());
+        widgets.draw(&mut frame, t);
             settings.draw_gear(&mut frame, t);
             settings.draw(&mut frame, cfg, t);
         }

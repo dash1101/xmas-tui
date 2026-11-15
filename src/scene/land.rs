@@ -20,6 +20,11 @@ pub struct Land {
     pub track_row: i32,
     /// Cell rows of the sidewalk through the village (top row).
     pub walk_row: i32,
+    /// Powerline poles on the hills: (x, top pixel row, base pixel row).
+    pub poles: Vec<(i32, i32, i32)>,
+    /// Little cabins up on the mountains (far-layer pixel coords of their
+    /// lit window).
+    pub cabins: Vec<(f32, f32)>,
     far: Layer,
     cache: Layer,
     glints: Vec<(i32, i32, f32, f32)>,
@@ -49,7 +54,7 @@ impl Land {
         let h = ph / 2;
         let track_row = ((max_hill / 2.0).ceil() as i32 + 1).min(h as i32 - 2);
         let walk_row = ((h as f32 * 0.875).round() as i32).min(h as i32 - 3);
-        let mut l = Land { mountains, hills, ground, horizon, track_row, walk_row, far: Layer::new(fw, ph), cache: Layer::new(pw, ph), glints: vec![] };
+        let mut l = Land { mountains, hills, ground, horizon, track_row, walk_row, poles: vec![], cabins: vec![], far: Layer::new(fw, ph), cache: Layer::new(pw, ph), glints: vec![] };
         l.build(seed);
         l
     }
@@ -79,6 +84,36 @@ impl Land {
                 let a = if depth < 1.0 { (1.0 - (top - top.floor())).clamp(0.0, 1.0) } else { 1.0 };
                 layer.blend(x as i32, y as i32, base.lerp(fog, fogk), a);
             }
+        }
+        // a few cabins tucked up on the mountainsides, windows lit
+        let mut crng = Rng::new(seed as u64 ^ 0xcab1);
+        let n = (fw / 110).max(2);
+        let mut tries = 0;
+        while self.cabins.len() < n && tries < 400 {
+            tries += 1;
+            let x = crng.int(8, fw as i32 - 9) as usize;
+            let (l, r) = (self.mountains[x - 5], self.mountains[x + 5]);
+            if (l - r).abs() > 3.0 || self.cabins.iter().any(|c| (c.0 - x as f32).abs() < 40.0) {
+                continue;
+            }
+            let y = (self.mountains[x - 3].max(self.mountains[x + 3]) + crng.range(4.0, 9.0)).round() as i32;
+            if y as f32 > ph as f32 * 0.55 {
+                continue;
+            }
+            let xi = x as i32;
+            let wood = Rgb::hex(0x3a2a26).lerp(fog, 0.35);
+            let snow = Rgb::hex(0xdfe6f4).lerp(fog, 0.3);
+            for dx in -3..=3 {
+                self.far.set(xi + dx, y - 2, if dx.abs() == 3 { snow * 0.8 } else { snow });
+            }
+            for dx in -2..=2 {
+                self.far.set(xi + dx, y - 1, wood);
+                self.far.set(xi + dx, y, wood);
+            }
+            self.far.set(xi + 2, y - 3, Rgb::hex(0x4a3a36).lerp(fog, 0.3)); // chimney
+            self.far.set(xi - 1, y, Rgb::hex(0xffc060));
+            self.far.set(xi + 1, y, Rgb::hex(0xffb050));
+            self.cabins.push((xi as f32, y as f32));
         }
         let layer = &mut self.cache;
         // pine treeline along the hills
@@ -119,6 +154,33 @@ impl Land {
                 let c = Rgb::hex(0x4b5788).lerp(Rgb::hex(0x323c66), (depth / 25.0).min(1.0)) * (lit * (0.92 + 0.12 * n));
                 let a = if depth < 1.0 { (1.0 - (top - top.floor())).clamp(0.0, 1.0) } else { 1.0 };
                 layer.blend(x as i32, y as i32, c, a);
+            }
+        }
+        // a powerline marching along the hills (subtle; it's an easter egg)
+        let pole_c = Rgb::hex(0x1a1620).lerp(fog, 0.22);
+        let wire_c = Rgb::hex(0x121218);
+        let mut px = rng.int(6, 20);
+        while (px as usize) < pw - 2 {
+            let base = (self.hills[px as usize] + 3.0) as i32;
+            let top = base - 10;
+            for y in top..=base {
+                layer.blend(px, y, pole_c, 0.8);
+            }
+            for dx in -1..=1 {
+                layer.blend(px + dx, top + 1, pole_c, 0.8);
+            }
+            self.poles.push((px, top, base));
+            px += 26 + rng.int(0, 7);
+        }
+        for w in self.poles.windows(2) {
+            let ((x0, t0, _), (x1, t1, _)) = (w[0], w[1]);
+            for k in [-1, 1] {
+                let span = (x1 - x0) as f32;
+                for x in (x0 + k)..=(x1 + k) {
+                    let u = (x - x0 - k) as f32 / span;
+                    let y = (t0 + 1) as f32 + (t1 - t0) as f32 * u + 2.5 * 4.0 * u * (1.0 - u);
+                    layer.blend(x, y.round() as i32, wire_c, 0.45);
+                }
             }
         }
         // foreground snowfield
@@ -163,19 +225,46 @@ impl Land {
             }
             layer.set(xi, wy + 3, pal::SNOW * 0.7);
         }
-        // the distant road, just below the railway (cars travel along it)
+        // the distant road, just below the railway: two lanes (one cell row
+        // each), cars keep to their side
         let ry = (self.track_row + 1) * 2;
         for x in 0..pw {
             let xi = x as i32;
-            for y in ry..ry + 2 {
+            for y in ry..ry + 4 {
                 let c = Rgb::hex(0x262a3c).lerp(fog, 0.35);
                 layer.set(xi, y, c);
             }
             if (xi / 3) % 3 == 0 {
-                // faint centre-line dashes
-                layer.set(xi, ry, Rgb::hex(0x6b6a58).lerp(fog, 0.4));
+                // faint centre-line dashes between the lanes
+                layer.set(xi, ry + 2, Rgb::hex(0x6b6a58).lerp(fog, 0.4));
             }
-            layer.set(xi, ry + 2, Rgb::hex(0x56607f).lerp(fog, 0.3));
+            layer.set(xi, ry + 4, Rgb::hex(0x56607f).lerp(fog, 0.3));
+        }
+    }
+
+    /// Is cell (x, cy) (world column) on a powerline pole or wire?
+    pub fn on_powerline(&self, x: i32, cy: i32) -> bool {
+        let (p0, p1) = (cy * 2 - 1, cy * 2 + 2);
+        for w in self.poles.windows(2) {
+            let ((x0, t0, b0), (x1, t1, _)) = (w[0], w[1]);
+            if (x - x0).abs() <= 1 && p1 >= t0 && p0 <= b0 {
+                return true;
+            }
+            if x > x0 && x < x1 {
+                let u = (x - x0) as f32 / (x1 - x0) as f32;
+                let y = (t0 + 1) as f32 + (t1 - t0) as f32 * u + 10.0 * u * (1.0 - u);
+                return y >= p0 as f32 && y <= p1 as f32;
+            }
+        }
+        false
+    }
+
+    /// The mountain cabins' window glow (they're on their own power).
+    pub fn draw_lights(&self, f: &mut Frame, cam: f32, t: f32, glow: f32) {
+        let off = cam * PARALLAX;
+        for (i, &(x, y)) in self.cabins.iter().enumerate() {
+            let fl = 0.8 + 0.2 * crate::rng::noise1(t * 3.0 + i as f32 * 7.0, 91);
+            f.light_px(x - off + 0.5, y + 0.5, Rgb::hex(0xffb050) * (0.9 * fl * glow));
         }
     }
 

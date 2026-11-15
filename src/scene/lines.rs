@@ -232,6 +232,8 @@ const KID_REPLY: &[&str] = &["hi!! wanna build a snowman?", "I saw a fox!", "is 
 const FOLLOW_YES: &[&str] = &["sure, I'll walk with you!", "lead the way!", "a stroll? lovely", "ooh, an adventure!", "I've got nowhere to be"];
 const FOLLOW_KID: &[&str] = &["yay! where are we going?", "I'm coming too!", "can we see the train?"];
 const FOLLOW_BYE: &[&str] = &["see you around!", "thanks for the walk!", "merry Christmas!", "that was fun!", "bye for now!"];
+const HIT: &[&str] = &["hey!", "oof — right in the scarf!", "oh, it's ON now!", "who threw that?!", "brr, down my collar!", "nice shot…", "my cocoa!", "really? REALLY?"];
+const KID_HIT: &[&str] = &["snowball fight!!", "you're gonna get it!", "hehe! again!", "missed m— oh.", "no fair, I wasn't ready!"];
 const PICK: &[&str] = &["a handful of berries", "berries! ●", "these look tasty", "for the animals"];
 
 /// Pick lines without repeating any of the last few.
@@ -364,6 +366,16 @@ impl Lines {
 
     pub fn follow_bye(&mut self) -> String {
         self.fresh(|r| r.pick(FOLLOW_BYE).to_string())
+    }
+
+    /// Someone noticing a light show's about to start.
+    pub fn show_soon(&mut self) -> String {
+        self.fresh(|r| r.pick(&["ooh, the light show's starting!", "everyone, to the big tree!", "quick, the lights!", "light show! come on!", "gather round, gather round!"]).to_string())
+    }
+
+    /// Hit by the player's snowball.
+    pub fn hit(&mut self, kid: bool) -> String {
+        self.fresh(|r| r.pick(if kid { KID_HIT } else { HIT }).to_string())
     }
 
     pub fn pick(&mut self) -> String {

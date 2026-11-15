@@ -66,6 +66,13 @@ pub struct Frame {
     /// Camera: world column shown at the left edge. Drawing helpers take
     /// world x and subtract this; screen-fixed things (sky, UI) draw with 0.
     pub ox: i32,
+    /// Vertical camera: everything scene-drawn moves down this many rows
+    /// (looking up into the sky).
+    pub oy: i32,
+    /// Daylight (0 night … 1 day) and sunrise/sunset warmth: cached land
+    /// layers are brightened by this as they're composited.
+    pub day: f32,
+    pub day_warm: f32,
     pub pw: usize,
     pub ph: usize,
     pub px: Vec<Rgb>,
@@ -86,6 +93,9 @@ impl Frame {
     pub fn new(w: usize, h: usize) -> Self {
         let mut f = Frame {
             ox: 0,
+            oy: 0,
+            day: 0.0,
+            day_warm: 0.0,
             w: 0,
             h: 0,
             pw: 0,
@@ -139,6 +149,7 @@ impl Frame {
     #[inline]
     pub fn px_set(&mut self, x: i32, y: i32, c: Rgb) {
         let x = x - self.ox;
+        let y = y + 2 * self.oy;
         if self.px_in(x, y) {
             self.px[y as usize * self.pw + x as usize] = c;
         }
@@ -147,6 +158,7 @@ impl Frame {
     #[inline]
     pub fn px_get(&self, x: i32, y: i32) -> Rgb {
         let x = x - self.ox;
+        let y = y + 2 * self.oy;
         if self.px_in(x, y) {
             self.px[y as usize * self.pw + x as usize]
         } else {
@@ -157,6 +169,7 @@ impl Frame {
     #[inline]
     pub fn px_blend(&mut self, x: i32, y: i32, c: Rgb, a: f32) {
         let x = x - self.ox;
+        let y = y + 2 * self.oy;
         if self.px_in(x, y) {
             let i = y as usize * self.pw + x as usize;
             self.px[i] = self.px[i].lerp(c, a);
@@ -166,6 +179,7 @@ impl Frame {
     #[inline]
     pub fn px_add(&mut self, x: i32, y: i32, c: Rgb) {
         let x = x - self.ox;
+        let y = y + 2 * self.oy;
         if self.px_in(x, y) {
             let i = y as usize * self.pw + x as usize;
             self.px[i] += c;
@@ -187,6 +201,36 @@ impl Frame {
         }
     }
 
+    /// A night-painted colour as it looks at the current time of day.
+    #[inline]
+    pub fn grade(&self, c: Rgb) -> Rgb {
+        if self.day <= 0.0 {
+            return c;
+        }
+        let g = (c.r + c.g + c.b) / 3.0;
+        let n = c.lerp(Rgb { r: g, g, b: g }, 0.25 * self.day);
+        (n * (1.0 + 1.25 * self.day)).lerp(Rgb::hex(0xffb070) * (g * 1.6), 0.18 * self.day_warm)
+    }
+
+    /// Daylight for everything already on the glyph layer (the scene's
+    /// glyphs, before the widgets go on top), and less glow from lights.
+    pub fn grade_scene(&mut self, sun: f32) {
+        if sun <= 0.0 {
+            return;
+        }
+        let k = 1.0 + 0.7 * sun;
+        for g in self.glyph.iter_mut().flatten() {
+            g.fg = g.fg * k;
+            if let Bg::Solid(c) = g.bg {
+                g.bg = Bg::Solid(c * k);
+            }
+        }
+        let l = 1.0 - 0.7 * sun;
+        for c in self.light.iter_mut() {
+            *c = *c * l;
+        }
+    }
+
     // ---------------- glyph layer ----------------
 
     #[inline]
@@ -197,6 +241,7 @@ impl Frame {
     #[inline]
     pub fn put_g(&mut self, x: i32, y: i32, g: Glyph) {
         let x = x - self.ox;
+        let y = y + self.oy;
         if self.cell_in(x, y) {
             self.glyph[y as usize * self.w + x as usize] = Some(g);
         }
@@ -205,6 +250,7 @@ impl Frame {
     #[inline]
     pub fn get_g(&self, x: i32, y: i32) -> Option<Glyph> {
         let x = x - self.ox;
+        let y = y + self.oy;
         if self.cell_in(x, y) {
             self.glyph[y as usize * self.w + x as usize]
         } else {
@@ -230,6 +276,7 @@ impl Frame {
     /// Add emitted light at a pixel-space position (bilinear splat).
     pub fn light_px(&mut self, x: f32, y: f32, c: Rgb) {
         let x = x - self.ox as f32;
+        let y = y + 2.0 * self.oy as f32;
         let (fx, fy) = (x - 0.5, y - 0.5);
         let (ix, iy) = (fx.floor() as i32, fy.floor() as i32);
         let (tx, ty) = (fx - ix as f32, fy - iy as f32);
@@ -375,8 +422,13 @@ impl Layer {
             return;
         }
         let w = self.w as i32;
+        let shift = 2 * f.oy;
         for y in 0..self.h {
-            let (src, dst) = (y * self.w, y * f.pw);
+            let dy = y as i32 + shift;
+            if dy < 0 || dy >= f.ph as i32 {
+                continue;
+            }
+            let (src, dst) = (y * self.w, dy as usize * f.pw);
             for x in 0..f.pw {
                 let sx = x0 + x as i32;
                 if sx < 0 || sx >= w {
@@ -385,9 +437,9 @@ impl Layer {
                 let i = src + sx as usize;
                 let a = self.a[i];
                 if a >= 0.999 {
-                    f.px[dst + x] = self.c[i];
+                    f.px[dst + x] = f.grade(self.c[i]);
                 } else if a > 0.0 {
-                    f.px[dst + x] = f.px[dst + x].lerp(self.c[i], a);
+                    f.px[dst + x] = f.px[dst + x].lerp(f.grade(self.c[i]), a);
                 }
             }
         }

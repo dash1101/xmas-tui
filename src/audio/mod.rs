@@ -134,6 +134,33 @@ impl Sfx {
     }
 }
 
+/// Live level meters: one per effect group (`EffectVolumes::ROWS`), then
+/// other effects, the music and the ambience.
+pub const METERS: usize = crate::config::EffectVolumes::ROWS.len() + 3;
+pub const METER_OTHER: usize = METERS - 3;
+pub const METER_MUSIC: usize = METERS - 2;
+pub const METER_AMB: usize = METERS - 1;
+
+/// What each meter is called.
+pub fn meter_label(i: usize) -> &'static str {
+    match i {
+        _ if i < METER_OTHER => crate::config::EffectVolumes::ROWS[i].1,
+        _ if i == METER_OTHER => "Other effects",
+        _ if i == METER_MUSIC => "Music",
+        _ => "Ambience",
+    }
+}
+
+/// Which meter an effect shows on.
+pub fn meter_of(sfx: Sfx) -> usize {
+    let g = sfx.group();
+    crate::config::EffectVolumes::ROWS.iter().position(|r| r.0 == g).unwrap_or(METER_OTHER)
+}
+
+/// Peak levels (0..1, before the master volume), refreshed by the audio
+/// thread a couple of dozen times a second.
+pub type Meters = Arc<std::sync::Mutex<[f32; METERS]>>;
+
 /// A queued effect. The scene fills `pan` with the event's x in cells and
 /// normalizes it to 0 (left) .. 1 (right) in `Scene::take_sounds`.
 #[derive(Clone, Copy, Debug)]
@@ -166,6 +193,8 @@ pub struct Stats {
 /// output child process).
 pub struct Audio {
     tx: Option<SyncSender<Msg>>,
+    /// What's playing and how loud (for the settings panel).
+    pub meters: Meters,
     /// Disconnects when the audio thread has finished (output closed).
     done: Receiver<()>,
     pub stats: Arc<Stats>,
@@ -176,15 +205,17 @@ impl Audio {
         let (tx, rx) = sync_channel(256);
         let stats = Arc::new(Stats::default());
         let (cfg, st) = (cfg.clone(), stats.clone());
+        let meters: Meters = Arc::new(std::sync::Mutex::new([0.0; METERS]));
+        let m = meters.clone();
         let (done_tx, done) = sync_channel::<()>(1);
         std::thread::Builder::new()
             .name("xmas-audio".into())
             .spawn(move || {
-                run(rx, cfg, st);
+                run(rx, cfg, st, m);
                 drop(done_tx);
             })
             .ok()?;
-        Some(Audio { tx: Some(tx), done, stats })
+        Some(Audio { tx: Some(tx), meters, done, stats })
     }
 
     /// Once per frame: this frame's effects plus the ambience state. Never
@@ -230,7 +261,8 @@ fn to_pcm(buf: &[[f32; 2]], pcm: &mut [i16]) {
     }
 }
 
-fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>) {
+fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>, meters: Meters) {
+    let mut meters_at = Instant::now();
     let debug = std::env::var_os("XMAS_AUDIO_DEBUG").is_some();
     let dev = out::Dev::from_env();
     let mut mx = Mixer::new(crate::app::random_seed());
@@ -335,6 +367,12 @@ fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>) {
         }
         mx.render(&mut buf);
         to_pcm(&buf, &mut pcm);
+        if meters_at.elapsed() >= Duration::from_millis(45) {
+            meters_at = Instant::now();
+            if let Ok(mut m) = meters.lock() {
+                *m = if out.is_some() { mx.meters } else { [0.0; METERS] };
+            }
+        }
         if debug && mx.music.title != title {
             title = mx.music.title.clone();
             log(format!("now playing {title}"));

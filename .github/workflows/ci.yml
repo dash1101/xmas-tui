@@ -12,6 +12,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release
+      - run: cargo build --release
+      - run: ./packaging/linux/build-deb.sh 0.0.0 target/release/xmas-tui /tmp/deb && dpkg-deb -c /tmp/deb/*.deb
   windows:
     runs-on: windows-latest
     steps:
@@ -19,3 +21,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
+      - name: installer builds
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item target\release\xmas-tui.exe, config.example.toml, LICENSE stage\
+          Copy-Item packaging\README-Windows.txt stage\README.txt
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc "/DAppVersion=0.0.0" "/DSrc=$pwd\stage" "/O$pwd" packaging\windows\xmas-tui.iss
+          if (-not (Test-Path xmas-tui-setup-x86_64.exe)) { exit 1 }

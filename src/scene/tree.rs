@@ -56,6 +56,8 @@ pub struct Tree {
     seed: u32,
     /// Clicked: all bulbs blaze and sparkle until this time.
     pub boost_until: f32,
+    /// Power cut: dark until this time (then flickers back).
+    pub dark_until: f32,
 }
 
 impl Tree {
@@ -251,6 +253,7 @@ impl Tree {
             big,
             seed,
             boost_until: 0.0,
+            dark_until: 0.0,
         }
     }
 
@@ -286,6 +289,7 @@ impl Tree {
     /// Shift by `-s` seconds (scene clock rebase, see `Scene::update`).
     pub fn rebase(&mut self, s: f32) {
         self.boost_until -= s;
+        self.dark_until -= s;
     }
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
@@ -296,6 +300,10 @@ impl Tree {
 
     pub fn star(&self) -> (i32, i32) {
         (self.cx, self.top - 1)
+    }
+
+    pub fn is_big(&self) -> bool {
+        self.big
     }
 
     pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, show: f32) {
@@ -371,6 +379,11 @@ impl Tree {
                 let spark = h01(hash3(b.idx as i32, (t * 12.0) as i32, self.seed as i32));
                 lv = lv.max(0.9 + 0.5 * spark * k);
             }
+            if t < self.dark_until {
+                // power's out (the last second: flickering back)
+                let left = self.dark_until - t;
+                lv = if left < 1.0 && h01(hash3(b.idx as i32, (t * 20.0) as i32, 3)) > left { lv } else { 0.0 };
+            }
             let fg = color.lerp(Rgb::WHITE, (lv - 0.75).max(0.0) * 0.9) * (0.35 + 0.95 * lv);
             f.put_g(b.x, b.y, Glyph { ch: bulb_ch, fg, bg: bg_at(b.x, b.y), alpha: 1.0, lit: 0.3 });
             let e = if self.big { 2.4 } else { 1.8 };
@@ -378,7 +391,7 @@ impl Tree {
         }
         // star topper
         let sy = self.top - 1;
-        let pulse = 0.8 + 0.2 * (t * 2.1).sin() + 0.08 * (t * 7.3).sin();
+        let pulse = (0.8 + 0.2 * (t * 2.1).sin() + 0.08 * (t * 7.3).sin()) * if t < self.dark_until { 0.12 } else { 1.0 };
         let gold = Rgb::hex(0xffd65a);
         f.put_g(self.cx, sy, Glyph::new('★', gold * (1.25 * pulse)).lit(0.0));
         f.light_cell(self.cx, sy, gold * ((if self.big { 9.0 } else { 4.5 }) * pulse * glow));

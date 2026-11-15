@@ -25,7 +25,14 @@ pub fn autostart_get() -> Option<bool> {
     }
     #[cfg(not(windows))]
     {
-        None
+        // the systemd user service the installers set up; None if there
+        // isn't one (then there's nothing to toggle)
+        let out = Command::new("systemctl").args(["--user", "is-enabled", "xmas-tui.service"]).output().ok()?;
+        match String::from_utf8_lossy(&out.stdout).trim() {
+            "enabled" | "enabled-runtime" | "linked" => Some(true),
+            "disabled" => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -43,7 +50,8 @@ pub fn autostart_set(on: bool) {
     }
     #[cfg(not(windows))]
     {
-        let _ = on;
+        // enable / disable for the next log-in; never stops the running one
+        let _ = Command::new("systemctl").args(["--user", if on { "enable" } else { "disable" }, "xmas-tui.service"]).output();
     }
 }
 

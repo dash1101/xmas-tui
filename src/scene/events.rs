@@ -92,6 +92,8 @@ pub struct Actor {
     age: f32,
     pause: f32,
     color: Rgb,
+    /// A train that has already stopped at the station.
+    served: bool,
 }
 
 struct Part {
@@ -124,6 +126,12 @@ struct Bubble {
     text: String,
     born: f32,
     life: f32,
+    /// Who's saying it (0: nobody/not matched yet), and where the bubble
+    /// sits relative to them, so it follows them around (carried off
+    /// mid-sentence, say).
+    owner: u64,
+    dy: i32,
+    matched: bool,
 }
 
 /// A car (or now and then a little bus) on the distant road.
@@ -158,6 +166,8 @@ pub struct Ctx {
     pub occluded: Vec<bool>,
     pub church: Option<(i32, i32)>,
     pub sky_rows: i32,
+    /// The railway station: (left column, width).
+    pub station: Option<(i32, i32)>,
     /// Camera (world column at the screen's left edge) and view width.
     pub cam: f32,
     pub vw: i32,
@@ -174,6 +184,19 @@ pub struct Director {
     rockets: Vec<Rocket>,
     cars: Vec<Car>,
     cars_seeded: bool,
+    /// The director of a room indoors (just bubbles, sparkles, notes).
+    pub indoor: bool,
+    /// A light show announced for later: (start, duration).
+    show_at: Option<(f32, f32)>,
+    /// The village should gather round the big tree until this time.
+    pub gather: Option<f32>,
+    /// Passengers off a train at the station (columns), for the scene to
+    /// send walking into the village.
+    pub arrivals: Vec<f32>,
+    car_cd: f32,
+    /// Traffic keeps left (UK, Japan, Australia…) instead of right.
+    pub drive_left: bool,
+    next_train: f32,
     prints: Vec<(i32, i32, f32)>,
     pub gust: Env,
     gust_dir: f32,
@@ -210,6 +233,13 @@ impl Director {
             rockets: vec![],
             cars: vec![],
             cars_seeded: false,
+            indoor: false,
+            show_at: None,
+            gather: None,
+            arrivals: vec![],
+            car_cd: 0.0,
+            drive_left: false,
+            next_train: 20.0,
             prints: vec![],
             gust: Env::default(),
             gust_dir: 1.0,
@@ -236,6 +266,10 @@ impl Director {
             e.rebase(s);
         }
         self.bells_until -= s;
+        self.next_train -= s;
+        if let Some(sa) = &mut self.show_at {
+            sa.0 -= s;
+        }
         self.next_firework -= s;
         self.next_strike -= s;
         for p in &mut self.prints {
@@ -260,8 +294,23 @@ impl Director {
     }
 
     /// Centre column of the distant train, while one is running.
-    pub fn train_x(&self) -> Option<f32> {
-        self.actors.iter().find(|a| a.kind == Kind::Train).map(|a| a.x + (TRAIN_LEN / 2) as f32)
+    /// Seconds until the next scheduled train.
+    pub fn next_train_in(&self, t: f32) -> f32 {
+        self.next_train - t
+    }
+
+    /// Centres of all the trains running.
+    pub fn trains(&self) -> Vec<f32> {
+        self.actors.iter().filter(|a| a.kind == Kind::Train).map(|a| a.x + (TRAIN_LEN / 2) as f32).collect()
+    }
+
+    /// The train nearest world column `near`, if any is running.
+    pub fn train_x(&self, near: f32) -> Option<f32> {
+        self.actors
+            .iter()
+            .filter(|a| a.kind == Kind::Train)
+            .map(|a| a.x + (TRAIN_LEN / 2) as f32)
+            .min_by(|a, b| (a - near).abs().partial_cmp(&(b - near).abs()).unwrap_or(std::cmp::Ordering::Equal))
     }
 
     pub fn gust_wind(&self, t: f32) -> f32 {
@@ -273,7 +322,33 @@ impl Director {
 
     pub fn bubble(&mut self, x: i32, y: i32, text: &str, t: f32) {
         self.bubbles.retain(|b| (b.x - x).abs() > 4 || (b.y - y).abs() > 2);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life: 3.8 });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life: 3.8, owner: 0, dy: 0, matched: false });
+    }
+
+    /// Keep speech bubbles over whoever's speaking. `who`: (id, centre
+    /// column, baseline row) of everyone who might be talking. A new bubble
+    /// is matched to the speaker it was placed over; after that it follows
+    /// them.
+    pub fn track(&mut self, who: &[(u64, f32, f32)]) {
+        for b in &mut self.bubbles {
+            if !b.matched {
+                b.matched = true;
+                let best = who
+                    .iter()
+                    .filter(|(_, x, y)| (x.round() as i32 - b.x).abs() <= 1 && b.y >= *y as i32 - 6 && b.y <= *y as i32)
+                    .min_by_key(|(_, x, _)| (x.round() as i32 - b.x).abs());
+                if let Some(&(id, _, y)) = best {
+                    b.owner = id;
+                    b.dy = b.y - y.round() as i32;
+                }
+            }
+            if b.owner != 0 {
+                if let Some(&(_, x, y)) = who.iter().find(|w| w.0 == b.owner) {
+                    b.x = x.round() as i32;
+                    b.y = y.round() as i32 + b.dy;
+                }
+            }
+        }
     }
 
     /// One line of a conversation, said at `t`: any speech bubble nearby
@@ -285,7 +360,7 @@ impl Director {
                 b.life = b.life.min(t - b.born);
             }
         }
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
     }
 
     pub fn footprint(&mut self, x: i32, y: i32, t: f32) {
@@ -442,8 +517,8 @@ impl Director {
             self.spawn_requests.push(kind);
             return;
         }
-        // A refused spawn (there's only ever one train) pushes nothing, so
-        // move the existing train rather than whatever was pushed last.
+        // A refused spawn pushes nothing, so move an existing train rather
+        // than whatever was pushed last.
         let target = if self.spawn_actor(kind, ctx) {
             self.actors.last_mut()
         } else {
@@ -469,8 +544,8 @@ impl Director {
 
     /// Returns false if the spawn was refused.
     fn spawn_actor(&mut self, kind: Kind, ctx: &Ctx) -> bool {
-        if kind == Kind::Train && self.actors.iter().any(|a| a.kind == Kind::Train) {
-            return false;
+        if kind == Kind::Train {
+            return self.spawn_train(ctx);
         }
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
         // sprites are drawn rightwards from x, so a right-moving actor must
@@ -494,7 +569,7 @@ impl Director {
             }
             Kind::Train => (self.rng.range(7.0, 10.0), Rgb::hex(0x7a1f26)),
         };
-        self.actors.push(Actor { kind, x, y, dir, speed, age: 0.0, pause: 0.0, color });
+        self.actors.push(Actor { kind, x, y, dir, speed, age: 0.0, pause: 0.0, color, served: false });
         true
     }
 
@@ -511,7 +586,7 @@ impl Director {
                 self.spawn_requests.push(Kind::Kid);
             }
             53..=61 => {
-                self.spawn_actor(Kind::Train, ctx);
+                self.spawn_train(ctx);
             }
             62..=71 => {
                 // don't flip the wind around in the middle of a running gust
@@ -531,8 +606,12 @@ impl Director {
             }
             78..=83 => self.flare.fire(t, self.rng.range(25.0, 45.0)),
             84..=88 => {
-                let dur = self.rng.range(12.0, 20.0);
-                self.light_show(t, dur);
+                // announced: everyone gathers round the big tree first
+                if self.show_at.is_none() && !self.show.active(t) {
+                    let dur = self.rng.range(14.0, 22.0);
+                    self.show_at = Some((t + 10.0, dur));
+                    self.gather = Some(t + 10.0 + dur);
+                }
             }
             89..=94 => self.house_toggle = Some(self.rng.int(0, 64) as usize),
             95..=96 => self.blizzard.fire(t, self.rng.range(15.0, 25.0)),
@@ -561,71 +640,112 @@ impl Director {
             self.random_event(t, ctx);
             self.next = t + self.rng.range(6.0, 18.0) / self.mult;
         }
-        // calendar events
-        let now = Local::now();
-        let key = now.ordinal() as i64 * 100 + now.hour() as i64;
-        if now.minute() == 0 && self.bell_key != key {
-            self.bell_key = key;
-            LAST_BELL_KEY.store(key, Ordering::Relaxed);
-            self.bells_until = t + 8.0 + (now.hour() % 12) as f32;
-            // toll the hour
-            self.bell_strikes = if now.hour() % 12 == 0 { 12 } else { now.hour() % 12 };
-            self.next_strike = t + 1.0;
-        }
-        if self.bell_strikes > 0 && t >= self.next_strike {
-            self.bell_strikes -= 1;
-            self.next_strike = t + 2.6;
-            if let Some((cx, _)) = ctx.church {
-                self.sound(Sfx::ChurchBell, cx as f32, 1.0);
+        if let Some((start, dur)) = self.show_at {
+            if t >= start {
+                self.show_at = None;
+                self.light_show(t, dur);
             }
         }
-        if t < self.bells_until && self.rng.chance(dt * 1.6) {
-            if let Some((cx, cy)) = ctx.church {
-                self.notes(cx as f32, cy as f32, 1);
+        // (a room indoors has no bells, trains or traffic of its own)
+        if !self.indoor {
+            // calendar events
+            let now = Local::now();
+            let key = now.ordinal() as i64 * 100 + now.hour() as i64;
+            if now.minute() == 0 && self.bell_key != key {
+                self.bell_key = key;
+                LAST_BELL_KEY.store(key, Ordering::Relaxed);
+                self.bells_until = t + 8.0 + (now.hour() % 12) as f32;
+                // toll the hour
+                self.bell_strikes = if now.hour() % 12 == 0 { 12 } else { now.hour() % 12 };
+                self.next_strike = t + 1.0;
             }
-        }
-        let nye = (now.month() == 12 && now.day() == 31 && now.hour() >= 20) || (now.month() == 1 && now.day() == 1 && now.hour() < 1);
-        if nye && t > self.next_firework {
-            self.firework(ctx);
-            let midnight = now.month() == 1 && now.hour() == 0 && now.minute() < 15;
-            self.next_firework = t + if midnight { self.rng.range(0.2, 0.8) } else { self.rng.range(3.0, 9.0) };
-        }
-
-        // traffic on the distant road: a few cars around the view
-        if !self.cars_seeded {
-            self.cars_seeded = true;
-            for _ in 0..2 {
-                let x = ctx.cam + self.rng.range(0.0, ctx.vw as f32);
-                self.add_car(x);
-            }
-        }
-        let near = self.cars.iter().filter(|c| c.x > ctx.cam - 60.0 && c.x < ctx.cam + ctx.vw as f32 + 60.0).count();
-        if near < 4 && self.rng.chance(dt * 0.15) {
-            let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
-            let x = if dir > 0.0 { ctx.cam - 10.0 } else { ctx.cam + ctx.vw as f32 + 4.0 };
-            self.add_car(x);
-            self.cars.last_mut().unwrap().dir = dir;
-        }
-        for c in &mut self.cars {
-            c.x += c.dir * c.speed * dt;
-        }
-        // don't drive through the car ahead: match its speed
-        let n = self.cars.len();
-        for i in 0..n {
-            for j in 0..n {
-                let (a, b) = (&self.cars[i], &self.cars[j]);
-                if i != j && a.dir == b.dir && (b.x - a.x) * a.dir > 0.0 && (b.x - a.x).abs() < (a.len() + 3) as f32 && a.speed > b.speed {
-                    let v = b.speed;
-                    self.cars[i].speed = v;
+            if self.bell_strikes > 0 && t >= self.next_strike {
+                self.bell_strikes -= 1;
+                self.next_strike = t + 2.6;
+                if let Some((cx, _)) = ctx.church {
+                    self.sound(Sfx::ChurchBell, cx as f32, 1.0);
                 }
             }
+            if t < self.bells_until && self.rng.chance(dt * 1.6) {
+                if let Some((cx, cy)) = ctx.church {
+                    self.notes(cx as f32, cy as f32, 1);
+                }
+            }
+            let nye = (now.month() == 12 && now.day() == 31 && now.hour() >= 20) || (now.month() == 1 && now.day() == 1 && now.hour() < 1);
+            if nye && t > self.next_firework {
+                self.firework(ctx);
+                let midnight = now.month() == 1 && now.hour() == 0 && now.minute() < 15;
+                self.next_firework = t + if midnight { self.rng.range(0.2, 0.8) } else { self.rng.range(3.0, 9.0) };
+            }
+
+            // trains: every minute or so (several can be out on the long line)
+            if t >= self.next_train && self.mult > 0.0 {
+                self.spawn_train(ctx);
+                self.next_train = t + self.rng.range(35.0, 75.0) / self.mult.max(0.3);
+            }
+            // traffic along the whole road, both ways (each direction in its lane)
+            let target = (ctx.w as usize / 50).max(4);
+            if !self.cars_seeded {
+                self.cars_seeded = true;
+                for _ in 0..target {
+                    let x = self.rng.range(0.0, ctx.w as f32);
+                    if !self.cars.iter().any(|c| (c.x - x).abs() < 10.0) {
+                        self.add_car(x);
+                    }
+                }
+            }
+            self.car_cd -= dt;
+            if self.cars.len() < target && self.car_cd <= 0.0 {
+                self.car_cd = self.rng.range(0.4, 2.0);
+                let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
+                let x = if dir > 0.0 { -10.0 } else { ctx.w as f32 + 4.0 };
+                // room at the on-ramp?
+                if !self.cars.iter().any(|c| c.dir == dir && (c.x - x).abs() < 14.0) {
+                    self.add_car(x);
+                    self.cars.last_mut().unwrap().dir = dir;
+                }
+            }
+            for c in &mut self.cars {
+                c.x += c.dir * c.speed * dt;
+            }
+            // don't drive through the car ahead: match its speed
+            let n = self.cars.len();
+            for i in 0..n {
+                for j in 0..n {
+                    let (a, b) = (&self.cars[i], &self.cars[j]);
+                    if i != j && a.dir == b.dir && (b.x - a.x) * a.dir > 0.0 && (b.x - a.x).abs() < (a.len() + 3) as f32 && a.speed > b.speed {
+                        let v = b.speed;
+                        self.cars[i].speed = v;
+                    }
+                }
+            }
+            self.cars.retain(|c| c.x > -20.0 && c.x < ctx.w as f32 + 20.0);
         }
-        let (lo, hi) = (ctx.cam - ctx.vw as f32 * 1.5, ctx.cam + ctx.vw as f32 * 2.5);
-        self.cars.retain(|c| c.x > lo && c.x < hi && c.x > -20.0 && c.x < ctx.w as f32 + 20.0);
 
         // actors
+        // trains stop at the station; a train behind a stopped one waits
+        let trains: Vec<(f32, f32, bool)> = self.actors.iter().filter(|a| a.kind == Kind::Train).map(|a| (a.x, a.dir, a.pause > 0.0)).collect();
         for a in &mut self.actors {
             a.age += dt;
+            if a.kind == Kind::Train && a.pause <= 0.0 {
+                let mid = a.x + TRAIN_LEN as f32 / 2.0;
+                if let (false, Some((sx, sw))) = (a.served, ctx.station) {
+                    let scx = sx as f32 + sw as f32 / 2.0;
+                    if (mid - scx) * a.dir >= 0.0 && (mid - scx).abs() < 2.0 {
+                        a.served = true;
+                        a.pause = 9.0;
+                        self.sounds.push(SoundEvent { sfx: Sfx::TrainWhistle, pan: scx, gain: 0.9 });
+                        let n = self.rng.int(1, 4);
+                        for k in 0..n {
+                            self.arrivals.push(scx - 4.0 + k as f32 * 3.0);
+                        }
+                    }
+                }
+                let blocked = trains.iter().any(|&(ox, odir, stopped)| stopped && odir == a.dir && (ox - a.x) * a.dir > 0.0 && (ox - a.x).abs() < TRAIN_LEN as f32 + 8.0);
+                if blocked {
+                    continue;
+                }
+            }
             if a.pause > 0.0 {
                 a.pause -= dt;
                 continue;
@@ -642,7 +762,7 @@ impl Director {
         let w = ctx.w as f32;
         self.actors.retain(|a| a.x > -40.0 && a.x < w + 40.0);
         // the train whistles now and then as it goes
-        if let Some(x) = self.train_x() {
+        if let Some(x) = self.train_x(ctx.cam + ctx.vw as f32 / 2.0) {
             if self.rng.chance(dt * 0.04) {
                 self.sound(Sfx::TrainWhistle, x, 0.8);
             }
@@ -692,6 +812,26 @@ impl Director {
         }
     }
 
+    /// A train rolls in from just beyond the edge of the view. There's one
+    /// track, so every train runs the same way, at the same speed, spaced
+    /// out. Returns false if there's no room for one right now.
+    fn spawn_train(&mut self, ctx: &Ctx) -> bool {
+        let running: Vec<(f32, f32, f32)> = self.actors.iter().filter(|a| a.kind == Kind::Train).map(|a| (a.x, a.dir, a.speed)).collect();
+        let (dir, speed) = match running.first() {
+            Some(&(_, d, s)) => (d, s),
+            None => (if self.rng.chance(0.5) { 1.0 } else { -1.0 }, self.rng.range(7.0, 10.0)),
+        };
+        let len = TRAIN_LEN as f32;
+        let x = if dir > 0.0 { ctx.cam - len - 4.0 } else { ctx.cam + ctx.vw as f32 + 4.0 };
+        let x = x.clamp(-len - 2.0, ctx.w as f32 + 2.0);
+        if running.iter().any(|&(ox, ..)| ox < x + len + 40.0 && ox + len + 40.0 > x) {
+            return false;
+        }
+        self.sound(Sfx::TrainWhistle, x + len / 2.0, 1.0);
+        self.actors.push(Actor { kind: Kind::Train, x, y: ctx.track_row, dir, speed, age: 0.0, pause: 0.0, color: Rgb::hex(0x7a1f26), served: false });
+        true
+    }
+
     fn add_car(&mut self, x: f32) {
         let colors = [0xb3202a, 0x1f6e3a, 0x2a4c8a, 0xd8d4cc, 0x3a3a44, 0xc8862a, 0x6a3a8a, 0x8fb8d8];
         let bus = self.rng.chance(0.12);
@@ -736,10 +876,39 @@ impl Director {
                 f.put_g(x, y, Glyph::new('·', Rgb::hex(0x56607f)).alpha(0.8 * k).lit(0.5));
             }
         }
-        // traffic, one row in front of the railway, behind the houses
-        let road = ctx.track_row + 1;
-        if road < ctx.h {
+        // the railway station, by the tracks
+        if let Some((sx, sw)) = ctx.station {
+            let ty = ctx.track_row;
+            let snow = Rgb::hex(0xe8eef8);
+            let slate = Rgb::hex(0x3a4466);
+            let brick = Rgb::hex(0x6a3a2a);
+            let warm = Rgb::hex(0xffcf7a);
+            for x in sx..sx + sw {
+                f.put_g(x, ty - 4, Glyph::new('▄', snow).lit(0.6));
+                f.put_g(x, ty - 3, Glyph::new('▀', snow * 0.85).solid(slate).lit(0.6));
+                f.put_g(x, ty - 2, Glyph::new(' ', brick).solid(brick).lit(0.6));
+                f.put_g(x, ty - 1, Glyph::new(' ', brick).solid(brick * 0.9).lit(0.6));
+                f.put_g(x, ty, Glyph::new('▔', Rgb::hex(0x8a8a9a)).lit(0.6));
+            }
+            let mid = sx + sw / 2;
+            f.put_g(mid, ty - 3, Glyph::new('◷', Rgb::hex(0xf0e8d0)).solid(slate).lit(0.4));
+            f.text(mid - 3, ty - 2, "STATION", Rgb::hex(0xffd36b), crate::frame::Bg::Solid(brick), 0.3);
+            for &wx in &[sx + 1, sx + 2, sx + sw - 3, sx + sw - 2] {
+                f.put_g(wx, ty - 1, Glyph::new('▪', warm).solid(brick * 0.9).lit(0.0));
+                f.light_cell(wx, ty - 1, warm * 0.6);
+            }
+            f.put_g(mid, ty - 1, Glyph::new('▐', Rgb::hex(0x2a1810)).solid(Rgb::hex(0x4a2a18)).lit(0.5));
+            // a lamp on the platform
+            f.put_g(sx + sw, ty - 2, Glyph::new('▣', warm).lit(0.0));
+            f.put_g(sx + sw, ty - 1, Glyph::new('┃', Rgb::hex(0x22242c)).lit(0.6));
+            f.light_cell(sx + sw, ty - 2, warm * 1.2);
+        }
+        // traffic, in front of the railway, behind the houses: two lanes,
+        // keeping to the right (nearer lane going right) unless drive_left
+        if ctx.track_row + 2 < ctx.h {
             for c in &self.cars {
+                let near = (c.dir > 0.0) != self.drive_left;
+                let road = ctx.track_row + if near { 2 } else { 1 };
                 let n = c.len();
                 let x0 = c.x as i32;
                 for i in 0..n {
@@ -869,17 +1038,28 @@ impl Director {
                 f.light_cell(x, y, p.color * (p.glow * k * 2.0 * glow));
             }
         }
-        for b in &self.bubbles {
+        // speech bubbles: only once they've started (lines of a conversation
+        // are queued ahead of time), oldest first; one that would overlap a
+        // bubble already placed is lifted above it, its tail stretched down
+        let mut order: Vec<&Bubble> = self.bubbles.iter().filter(|b| t >= b.born && b.x >= f.ox && b.x < f.ox + f.w as i32).collect();
+        order.sort_by(|a, b| a.born.partial_cmp(&b.born).unwrap_or(std::cmp::Ordering::Equal));
+        let mut placed: Vec<(i32, i32, i32)> = vec![]; // (x0, x1, y0)
+        for b in order {
             let age = t - b.born;
             let shown = ((age * 40.0) as usize).min(b.text.chars().count());
             let text: String = b.text.chars().take(shown).collect();
             let w = b.text.chars().count() as i32 + 4;
             // keep the box on screen (its tail still points at b.x)
-            if b.x < f.ox || b.x >= f.ox + f.w as i32 {
-                continue; // the speaker is out of view
-            }
             let x0 = (b.x - w / 2).min(f.ox + f.w as i32 - w).max(f.ox);
-            let y0 = b.y - 3;
+            let mut y0 = b.y - 3;
+            for _ in 0..4 {
+                let hit = placed.iter().any(|&(px0, px1, py0)| x0 <= px1 + 1 && x0 + w - 1 >= px0 - 1 && (y0 - py0).abs() < 3);
+                if !hit {
+                    break;
+                }
+                y0 -= 3;
+            }
+            placed.push((x0, x0 + w - 1, y0));
             let fade = if age > b.life - 0.5 { (b.life - age) / 0.5 } else { 1.0 };
             let bg = Bg::Mix(Rgb::hex(0xf4efe6), 0.92 * fade);
             let fg = Rgb::hex(0x2a1a14);
@@ -893,7 +1073,11 @@ impl Director {
             f.put_g(x0, y0 + 1, Glyph::new('│', fg).bg(bg).lit(0.0));
             f.put_g(x0 + w - 1, y0 + 1, Glyph::new('│', fg).bg(bg).lit(0.0));
             f.text(x0 + 2, y0 + 1, &text, fg, bg, 0.0);
-            f.put_g(b.x, y0 + 3, Glyph::new('╵', Rgb::hex(0xf4efe6) * fade).lit(0.0));
+            let tail = Rgb::hex(0xf4efe6) * fade;
+            for y in y0 + 3..b.y {
+                f.put_g(b.x, y, Glyph::new('│', tail * 0.8).lit(0.0));
+            }
+            f.put_g(b.x, b.y.max(y0 + 3), Glyph::new('╵', tail).lit(0.0));
         }
     }
 }

@@ -19,46 +19,58 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 
 ## ✨ Highlights
 
+- **A whole village to explore**: about 2½ screens wide, with parallax mountains, lit cabins on the slopes, a
+  cobbled sidewalk, two-lane traffic, a railway with a station, and a sky above the sky.
+- **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
+  along, step inside houses, and spend "cheer" at the cocoa cabin.
+- **Townsfolk and wildlife**: deer, foxes, rabbits, carollers and kids who chat in groups, play, gather for the
+  light shows and step around each other.
+- **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
+- **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather and a village map.
+- **Synthesized music and sound**: no audio files, all generated live, with live level meters.
+- **Snow on open windows**: it piles up on window tops and the taskbar, with string lights.
+- **Installers and updates**: a per-user Windows setup, a `.deb`, a no-sudo Linux installer, and built-in updates.
+
+<p align="center"><img src="docs/village.gif" width="100%" alt="Snow falling on the village: the cocoa cabin, the station with a train, the snowman and townsfolk with lanterns"></p>
+
+## 📸 A look around
+
 <table>
 <tr>
-<td width="55%"><img src="docs/village.gif" alt="Snow falling on the village, lights twinkling, townsfolk walking past the snowman"></td>
-<td>
-
-- **A whole village to explore**: about 2½ screens wide, with parallax mountains, a cobbled sidewalk, a
-  distant road with traffic and a railway.
-- **A villager to walk around**: say hello, pet and feed animals, pick berries, bring friends along.
-- **Townsfolk and wildlife**: deer, foxes, rabbits, carollers and kids who chat, play and react.
-- **Widgets**: a big clock with a Christmas countdown, system stats, now playing and weather.
-- **Synthesized music and sound**: no audio files, all generated live.
-- **Snow on open windows**: it piles up on window tops and the taskbar, with string lights.
-- **Built-in updates**: it asks first, or installs on its own.
-
-</td>
+<td width="50%"><img src="docs/interior.png" alt="Inside a house: a crackling fire with stockings, a bookshelf, the front door with a wreath, the host and the villager"><br><sub><b>Inside a house</b>: walk up to a front door and press E.</sub></td>
+<td width="50%"><img src="docs/church.png" alt="Inside the church: stained-glass windows, candles on the altar, a tree and the organ"><br><sub><b>The church</b>: stained glass, candles and an organ to play.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/shop.png" alt="The Cocoa and Gifts cabin with its menu open, next to the railway station"><br><sub><b>Cocoa & Gifts</b>: spend cheer on cocoa, gingerbread, carrots and a lantern.</sub></td>
+<td><img src="docs/high-sky.png" alt="The high sky: the Milky Way, constellations, a hot-air balloon and a shooting star"><br><sub><b>Above the clouds</b>: Ctrl+wheel looks up to constellations and a balloon.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/noon.png" alt="The village at noon under a blue sky"><br><sub><b>Noon</b>, with the time of day set to follow the real sun…</sub></td>
+<td><img src="docs/dusk.png" alt="The village at dusk with an orange sunset behind the mountains"><br><sub>…and <b>dusk</b>, as the lights come on.</sub></td>
 </tr>
 </table>
 
-<p align="center">
-  <img src="docs/townsfolk.png" width="49%" alt="Townsfolk with lanterns, a fox, presents under the big tree and the church">
-  <img src="docs/village-east.png" width="49%" alt="The eastern end of the village after scrolling: more houses, trees and the railway">
-</p>
-
 ## 📦 Install
 
-**Linux** (x86_64; needs [kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.36 and a layer-shell compositor such as
-KDE Plasma 6, Sway or Hyprland; GNOME isn't supported):
+| Platform | Download | Notes |
+|---|---|---|
+| **Windows** 10/11 | `xmas-tui-setup-x86_64.exe` | Per-user install (no admin needed), Start menu entries, optional run at startup, uninstaller. |
+| | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
+| **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
+| **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo); then `systemctl --user enable --now xmas-tui`. Updated through the package manager. |
+
+All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). The no-sudo Linux
+installer also runs straight from the repo:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.sh | bash
 ```
-This installs to `~/.local/share/xmas-tui`, keeps settings in `~/.config/xmas-tui/config.toml`, and runs from a
-systemd user service that restarts it whenever it exits. Remove it with the same command plus `-s -- --remove`.
-
-**Windows** (10/11, x86_64): download `xmas-tui-windows.zip` from the
-[latest release](https://github.com/dash1101/xmas-tui/releases/latest), unzip it anywhere and run `xmas-tui.exe`.
-The bundled README covers the rest.
+Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.36 and a layer-shell compositor such as KDE Plasma 6, Sway
+or Hyprland (GNOME isn't supported). Settings live in `~/.config/xmas-tui/config.toml` (Linux) or
+`%APPDATA%\xmas-tui\config.toml` (Windows). Remove the Linux install with the same command plus `-s -- --remove`.
 
 **Updates:** when a new version is out, a small banner asks whether to install it. **Install automatically** under
 Settings → Display → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
-anything is replaced, and `xmas-tui --update` does the same from a terminal.
+anything is replaced, and `xmas-tui --update` does the same from a terminal. **Run at startup** sits in the same tab.
 
 ## 🎮 Controls
 
@@ -67,41 +79,58 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | Input | What it does |
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows |
-| **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at |
+| **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…) |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
-| **mouse wheel** | look around the village |
-| **drag** a person or animal | carry them about (they'll have opinions), then drop them in the snow |
-| **click** things | presents, trees, the snowman, houses, lamps, the moon, the sky… |
+| **R** | scoop a snowball, press again to throw it |
+| **I** | show or hide the pockets |
+| **1**–**5** | use an item, or buy one while the cabin's menu is open |
+| **Esc** | close a menu, or step back outside |
+| **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
+| **drag** anyone (the villager too) | carry them about, then drop them in the snow |
+| **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
 | **⚙** or **right-click** | settings |
 
 ## 🌟 What's in the scene
 - A big tiered tree with light strings that cycle through twinkle, chase, wave, breathe and sparkle patterns,
   plus tinsel, glinting ornaments and a pulsing star.
 - Smaller trees with warm, icy and multicolour lights, and presents with ribbons and bows.
-- Houses with firelit windows, roofline lights and chimney smoke, plus a church with stained glass.
-- Lamp posts, fences, berry bushes and a snowman.
+- Houses with firelit windows, roofline lights and chimney smoke, plus a church with stained glass. Every one
+  can be visited.
+- Lamp posts, fences, berry bushes, a snowman, the Cocoa & Gifts cabin and the railway station.
 - Three depths of snow in gusty wind, and glinting snowfields.
-- A moon with a halo, an aurora, shooting stars, and Santa's sleigh flying past every few minutes.
+- A moon with a halo, an aurora, shooting stars, and Santa's sleigh flying past every few minutes. Higher up:
+  the Milky Way, constellations, the North Star, a hot-air balloon and the odd satellite.
+- A subtle powerline along the hills. (Click it enough times and see what happens.)
 
 **Widgets** (each can be dragged anywhere, toggled, and locked in place):
 - A big glowing clock with a Christmas countdown.
 - A system panel: CPU, GPU, VRAM, RAM, disk and network, with candy-cane bars and sparklines.
 - Now playing, from any MPRIS player (Linux) or media session (Windows).
 - Weather, from Open-Meteo, which needs no API key.
+- A map of the whole village: where the villager is, where they started (⚑), what's on screen, trains and
+  townsfolk. Click it to look somewhere; drag its ◢ corner to resize it.
 
 ## 🖱️ Interacting in detail
 **Walking around** (click the desktop first so it has keyboard focus)
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
-  The view follows along; the **mouse wheel** looks around independently.
+  The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the Scene tab.
 - **E, Space or Enter** interacts with whatever the `[E]` prompt points at:
   - **people:** say hello and they answer;
   - **animals:** a pat, or (with berries in hand) a snack, after which they tag along for a while;
   - **berry bushes:** pick a few berries (they grow back);
-  - **presents, trees, lamps, houses, the church and the snowman:** the same as clicking them.
+  - **front doors:** step inside: a cozy room with a fire, a tree, someone home and a cat on the rug (the church
+    has candles and an organ). E pokes at things in there too; walk out the door or press Esc to leave;
+  - **the cocoa cabin:** opens its menu;
+  - **presents, trees, lamps, houses, the station and the snowman:** the same as clicking them.
 - **F** invites the person in front to come along (animals need a berry). Companions follow the villager around.
   Stopping near someone else gets the companions talking with them, or with each other. **F** with nobody in
   front says goodbye to everyone.
-- The villager can be turned off with **You (WASD)** in the Scene tab.
+- **R** packs a snowball, and **R** again throws it at whoever's ahead. People react, and kids often throw one back.
+- **Cheer (✦)** is earned by being neighbourly: first hellos, feeding animals, snowball fights, watching a light
+  show by the big tree, finding constellations. It buys things at the **Cocoa & Gifts** cabin: hot cocoa (cozy
+  glow), gingerbread and candy canes (to give away), carrots (a deer or rabbit becomes a friend) and a lantern.
+  **I** shows the pockets; **1**–**5** use what's in them.
+- The villager can be turned off with **Villager (WASD)** in the Scene tab.
 
 **Mouse**
 - **Drag any widget** to move it. Positions are saved, and can be locked or reset in settings.
@@ -114,9 +143,11 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   - **Trees** blaze. Click a tree's **star** for a starburst.
   - The **snowman** talks back. Try clicking him a few times in a row.
   - **Houses** switch their lights off and on. The **church** rings its bells.
-  - **Lamps** sputter.
+  - **Lamps** sputter. The **station** says when the next train is due.
   - The **moon** summons Santa.
   - **Empty sky** launches a shooting star, and **snow** puffs up.
+  - Up in the high sky: **constellations** light up and name themselves, the **balloon** fires its burner, and
+    the **North Star** grants a wish.
 
 **Typed easter eggs** (also need keyboard focus)
 - Type `hohoho`, `snow`, `joy`, `aurora` or `lights` to trigger an effect.
@@ -124,10 +155,12 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 
 **Things that happen on their own**, timed by the "Surprises" setting:
 - **Wildlife:** deer, foxes and rabbits wander through and leave footprints.
-- **People and travel:** walkers carrying lanterns, often in twos and threes chatting as they go, cars on the
-  distant road, and a train with lit carriages.
+- **People and travel:** walkers carrying lanterns, often in twos and threes chatting as they go; cars in both
+  lanes of the distant road (keeping right, or left where the weather city drives on the left); trains that stop
+  at the station and let passengers off.
 - **Sky and weather:** wind gusts, short blizzards, meteor showers, aurora flares and a rare comet.
-- **Lights:** village-wide rainbow light shows, and houses switching their lights.
+- **Lights:** village-wide rainbow light shows (announced first, so everyone gathers round the big tree), and
+  houses switching their lights.
 - **On a schedule:** church bells on the hour, Santa flying more often on Christmas Eve, and
   fireworks on New Year's Eve.
 
@@ -140,7 +173,7 @@ speaks StatusNotifierItem; the notification area on Windows).
 - **Right click** gives quick toggles:
   - **Linux:** Settings…, Window snow, Sound, Pause effects, Quit wallpaper.
     **Pause effects** freezes the animation and hides window snow and lights until it's unticked. It isn't saved.
-  - **Windows:** Settings…, Window snow, Sound, Start with Windows, Quit wallpaper.
+  - **Windows:** Settings…, Window snow, Sound, Run at startup, Quit wallpaper.
 - **Quit wallpaper:** under the systemd service, this runs `systemctl --user stop xmas-tui` (a plain exit would
   just be restarted). Otherwise it exits cleanly.
 - The settings window also runs on its own: `xmas-tui --settings-window [--config PATH]`.
@@ -160,6 +193,10 @@ Every sound is synthesized live in code. There are no audio files and nothing co
 
 **Settings → SOUND** has an on/off switch, master, music, effects and ambience volumes, the music style
 ("shuffle" or one style) and the cursor sparkle. These are also under `[sound]` in the config.
+
+**What's playing:** the Sound tab shows live level meters for the music, the ambience and whichever effects are
+sounding right now (loudest first, in dB), and the Effects tab puts a small live bar beside each effect's volume.
+That makes it easy to tell which sound is which, and which slider turns it down.
 
 **Output:**
 - **Linux:** streams to PipeWire through `pw-cat`, or to PulseAudio through `paplay`. If the player dies,
@@ -184,6 +221,10 @@ Snow also falls in front of open windows. It settles on the top edge of each win
 - **Closing or minimizing a window** drops its pile.
 - **Lights:** twinkling bulbs hang on a wire around the six topmost windows, and droop along the top edge.
 
+**Settings → Windows** tunes it all: pile height, snowfall, settling speed, how fast the flakes fall, the wind,
+how easily shaking a window throws its snow off (or never), slow melting, and whether the cursor sweeps piles away.
+The **taskbar** has its own on/off and pile height.
+
 Both effects can be switched on or off in settings ("Snow on windows" / "Lights around windows") or in `[windows]` in
 the config. Everything is hidden while a fullscreen app is in front.
 
@@ -203,12 +244,13 @@ On Windows the status line also has per-phase timings. `XMAS_WINFX=1 xmas-tui --
 next to a normal window, for testing (e.g. under Wine).
 
 ## 🪟 Windows
-`dist/xmas-tui-windows.zip` holds a standalone `xmas-tui.exe`; its README explains how to use it.
+The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) and a portable zip with a standalone
+`xmas-tui.exe`; its README explains how to use it.
 - **How it runs:** it draws the same grid itself, with fonts bundled inside the `.exe`, and attaches behind the
   desktop icons on the main monitor. It pauses during fullscreen games.
-- **Controls:** ⚙ (top-right corner) opens settings, which include **Start with Windows** and **Quit**.
-  Walking works too: click the bare desktop, then use WASD / the arrows, E and F (the wheel can't scroll the view
-  there, because the icon layer sits on top).
+- **Controls:** ⚙ (top-right corner) opens settings, which include **Run at startup** and **Quit**.
+  Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
+  scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
 - **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons
   can't receive typing.
 - **Window snow and lights:** see above; they're on by default and run in front of all windows.
@@ -226,8 +268,8 @@ needs the `x86_64-pc-windows-gnullvm` Rust target plus [llvm-mingw](https://gith
   closed window's pile, and shuts down cleanly when the app closes.
 
 **Not yet tested on real Windows:** the desktop attach (classic and 24H2), clicks and keys through the icon layer,
-GPU %, now-playing, the fullscreen pause, Start with Windows, self-updating, and the window snow overlay's real
-CPU/DWM cost.
+GPU %, now-playing, the fullscreen pause, run at startup, the setup program, self-updating, and the window snow
+overlay's real CPU/DWM cost. (CI builds the `.exe` and the installer on Windows for every release.)
 
 **Desktop attach:** on Windows 10 through 11 23H2 the wallpaper becomes a child of the WorkerW that Explorer creates
 behind the icons. On Windows 11 24H2's "raised desktop" (Progman has `WS_EX_NOREDIRECTIONBITMAP`, and both the icon
@@ -245,6 +287,10 @@ stick around for a few minutes. They also interact:
   Each line pops up in turn over whoever's speaking. Drop two people next to each other, or lead companions
   over to someone, to get one going.
 - **Play:** a fox plays chase with a rabbit (the fox never catches it), and kids have snowball fights.
+- **Manners:** nobody walks through anybody. People step a row up or down to get round each other (and the
+  villager), or stop for a chat first and then step round.
+- **Light shows:** when one's coming, it's announced, a few more folk come out, and everyone gathers round the
+  big tree to watch.
 - **Snacking:** animals stop at the snow-capped berry bushes. The berries get eaten and regrow a minute or two later.
 - **The cursor:** animals startle when it rushes at them, and come over curious when it rests nearby.
 
@@ -258,16 +304,18 @@ The Scene tab sets how many visitors come by ("Animals & people") and turns the 
 <img src="docs/settings.png" align="right" width="360" alt="The settings panel, Scene tab: snowfall, wind, glow, surprises, visitors, sleigh and frame rate">
 
 The settings panel (⚙ or right-click, or the tray icon's standalone window) has five tabs:
-- **Scene:** snow, wind, glow, surprises, visitors, sleigh, frame rate, aurora, bushes, and the villager.
-- **Display:** clock, widgets, weather city and units, widget layout, updates.
+- **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
+  **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
+  rate, aurora, bushes, and the villager.
+- **Display:** clock, widgets (including the map), weather city and units, widget layout, updates, run at startup.
 - **Sound:** master, music, effects and ambience volumes, music style, a per-layer ambience mix, and **Quiet while
   other media plays**. When on, the sound fades out as soon as a browser video or music player starts, and comes
   back a few seconds after it stops.
-- **Effects:** a separate volume for each kind of effect, 16 in all.
+- **Effects:** a separate volume for each kind of effect, 16 in all, each with a live level bar.
 - **Windows:** the snow on open windows and the lights around them:
-  - pile height, density and settling speed
-  - **falling snow in front of windows** on/off (piles still grow when it's off)
-  - snow on the taskbar
+  - pile height, snowfall, settling speed, fall speed, wind, shake-off and melting
+  - **falling snow in front of windows** on/off (piles still grow when it's off), and cursor sweeping
+  - snow on the taskbar, with its own pile height
   - light colours (multicolour, warm white, icy blue, candy cane), how many windows get lights, and brightness
 
 ## 🔁 Staying on
@@ -297,7 +345,8 @@ systemctl --user restart xmas-tui   # restart it by hand (status/stop work too)
 ./scripts/xmas-wallpaper.sh     # start the wallpaper manually
 ./target/release/xmas-tui       # run inside any truecolor terminal (q or Esc quits)
 ```
-A build from source never updates itself; pull and rebuild instead. Releases are cut by pushing a `vX.Y.Z` tag
+A build from source never updates itself; pull and rebuild instead. The installers are built by CI from
+`packaging/linux/build-deb.sh` (the `.deb`) and `packaging/windows/xmas-tui.iss` (the Inno Setup per-user setup). Releases are cut by pushing a `vX.Y.Z` tag
 (matching `Cargo.toml`): CI builds both platforms and publishes them with `SHA256SUMS`.
 Config lives at `~/.config/xmas-tui/config.toml`. See `config.example.toml`
 for every option, including the weather city.

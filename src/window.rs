@@ -71,7 +71,9 @@ struct Runner {
     polled: (bool, bool),
     /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
     #[cfg_attr(not(windows), allow(dead_code))]
-    keys: [bool; 6],
+    keys: [bool; 13],
+    /// Ctrl is held (Ctrl+wheel looks up into the sky).
+    ctrl: bool,
     paused: bool,
     /// Desktop mode: attach_to_desktop succeeded (false = we're the
     /// top-level fallback window).
@@ -234,9 +236,23 @@ impl Runner {
         let _ = was_r;
         // walking around: keys go to Explorer's desktop window, so read
         // them while it's focused and feed presses / releases through
-        let keys = crate::winsys::desktop_keys().unwrap_or([false; 6]);
-        let names = [KeyIn::Left, KeyIn::Right, KeyIn::Up, KeyIn::Down, KeyIn::Char('e'), KeyIn::Char('f')];
-        for i in 0..6 {
+        let keys = crate::winsys::desktop_keys().unwrap_or([false; 13]);
+        let names = [
+            KeyIn::Left,
+            KeyIn::Right,
+            KeyIn::Up,
+            KeyIn::Down,
+            KeyIn::Char('e'),
+            KeyIn::Char('f'),
+            KeyIn::Char('r'),
+            KeyIn::Char('i'),
+            KeyIn::Char('1'),
+            KeyIn::Char('2'),
+            KeyIn::Char('3'),
+            KeyIn::Char('4'),
+            KeyIn::Char('5'),
+        ];
+        for i in 0..names.len() {
             match (self.keys[i], keys[i]) {
                 (false, true) => app.key(names[i]),
                 (true, false) => app.key_up(names[i]),
@@ -498,8 +514,11 @@ impl ApplicationHandler for Runner {
                 };
                 let (cx, cy) = self.to_cell(self.cursor.0, self.cursor.1);
                 if let Some(app) = self.app.as_mut() {
-                    app.mouse(MouseIn::Scroll(up), cx, cy);
+                    app.mouse(if self.ctrl { MouseIn::ScrollSky(up) } else { MouseIn::Scroll(up) }, cx, cy);
                 }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.ctrl = m.state().control_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let Some(app) = self.app.as_mut() else { return };
@@ -593,7 +612,8 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         pointer: "",
         #[cfg(windows)]
         polled: (false, false),
-        keys: [false; 6],
+        keys: [false; 13],
+        ctrl: false,
         paused: false,
         #[cfg(windows)]
         attached: false,

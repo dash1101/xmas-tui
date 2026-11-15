@@ -42,6 +42,8 @@ pub struct Mixer {
     pub nonfinite: u64,
     /// Per-group effect volumes from the config.
     fx_vol: crate::config::EffectVolumes,
+    /// Live peak levels per effect group / music / ambience (decaying).
+    pub meters: [f32; super::METERS],
 }
 
 /// Slider position (0..1) → gain: squared, so the slider feels even.
@@ -58,6 +60,7 @@ impl Mixer {
         }
         Mixer {
             voices: Vec::with_capacity(MAX_VOICES),
+            meters: [0.0; super::METERS],
             amb: Ambience::new(seed),
             music: Music::new(seed),
             reverb: Reverb::new(),
@@ -128,7 +131,12 @@ impl Mixer {
         if g <= 0.0 {
             return;
         }
+        let before = self.voices.len();
         sfx::spawn(sfx, pan, gain * g, &mut self.rng, &mut self.voices);
+        let tag = super::meter_of(sfx) as u8;
+        for v in &mut self.voices[before..] {
+            v.tag = tag;
+        }
     }
 
     /// Fill `out` with the next frames (post-limiter, within ±1).
@@ -166,6 +174,9 @@ impl Mixer {
             }
         }
         self.amb.render(dry, rev, ga, &mut self.voices);
+        // meters: what's sounding, by group (peak, falling back over ~1 s)
+        let mut now = [0.0f32; super::METERS];
+        now[super::METER_AMB] = dry.iter().fold(0.0f32, |m, s| m.max(s[0].abs()).max(s[1].abs()));
         let group = self.group;
         self.voices.retain_mut(|v| {
             let g = match v.bus {
@@ -173,8 +184,19 @@ impl Mixer {
                 Bus::Sfx => gs,
                 Bus::Amb => ga,
             };
-            v.render(dry, rev, g)
+            let alive = v.render(dry, rev, g);
+            let k = match v.bus {
+                Bus::Music => super::METER_MUSIC,
+                Bus::Amb => super::METER_AMB,
+                Bus::Sfx => (v.tag as usize).min(super::METER_OTHER),
+            };
+            now[k] = now[k].max(v.level);
+            alive
         });
+        let fall = (-(n as f32) / (0.35 * SR)).exp();
+        for (m, x) in self.meters.iter_mut().zip(now) {
+            *m = x.max(*m * fall);
+        }
         if self.voices.len() > MAX_VOICES {
             let extra = self.voices.len() - MAX_VOICES;
             self.voices.drain(0..extra);

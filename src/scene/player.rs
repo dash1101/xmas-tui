@@ -25,21 +25,88 @@ pub struct Player {
     pub dir: f32,
     pub berries: u32,
     pub moving: bool,
+    /// Walking speed multiplier (the "Walk speed" setting).
+    pub speed: f32,
     /// When the player last moved or did something (scene time).
     pub active_at: f32,
     phase: f32,
     step_cd: f32,
     breath_at: f32,
+    /// Being carried by the mouse: grab offset from (x, y).
+    pub held: Option<(f32, f32)>,
+    /// Falling after being let go: (speed, where it started).
+    fall: Option<(f32, f32)>,
+    pub dizzy_until: f32,
+    /// Crouched, packing a snowball, until then.
+    pub scoop_until: f32,
+    /// A snowball in hand, ready to throw.
+    pub snowball: bool,
+    pub throw_until: f32,
+    /// Carrying a lit lantern / warm from cocoa (set by the scene).
+    pub lantern: bool,
+    pub cozy: bool,
 }
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0 }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false }
     }
 
     pub fn rebase(&mut self, s: f32) {
         self.active_at -= s;
         self.breath_at -= s;
+        self.dizzy_until -= s;
+        self.scoop_until -= s;
+        self.throw_until -= s;
+    }
+
+    /// Can walk / act right now (not carried, falling, dizzy or busy)?
+    pub fn free(&self, t: f32) -> bool {
+        self.held.is_none() && self.fall.is_none() && t >= self.dizzy_until && t >= self.scoop_until
+    }
+
+    /// (x, top, w, h) of the sprite, in cells.
+    pub fn bbox(&self) -> (i32, i32, i32, i32) {
+        (self.x.round() as i32, self.y.round() as i32 - 4, 2, 5)
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        let (bx, by, bw, bh) = self.bbox();
+        x >= bx - 1 && x <= bx + bw && y >= by && y < by + bh
+    }
+
+    pub fn grab(&mut self, x: i32, y: i32, t: f32) {
+        self.held = Some((x as f32 - self.x, y as f32 - self.y));
+        self.fall = None;
+        self.snowball = false;
+        self.scoop_until = 0.0;
+        self.active_at = t;
+    }
+
+    pub fn drag(&mut self, x: i32, y: i32, w: f32, h: f32) {
+        if let Some((ox, oy)) = self.held {
+            self.x = (x as f32 - ox).clamp(1.0, w - 4.0);
+            self.y = (y as f32 - oy).clamp(4.0, h - 1.0);
+        }
+    }
+
+    /// Let go: down into the snow.
+    pub fn release(&mut self) {
+        if self.held.take().is_some() {
+            self.fall = Some((0.0, self.y));
+        }
+    }
+
+    /// Hit by a snowball.
+    pub fn bonk(&mut self, t: f32, d: &mut Director) {
+        self.dizzy_until = t + 1.2;
+        self.snowball = false;
+        d.snow_puff(self.centre(), self.y - 2.0);
+    }
+
+    /// Walk-cycle phase (for drawing).
+    pub fn phase(&self) -> f32 {
+        self.phase
     }
 
     /// Centre column of the sprite.
@@ -51,16 +118,41 @@ impl Player {
     /// column x; `w`/`h`: world size.
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, dt: f32, t: f32, mv: (f32, f32), lo: impl Fn(f32) -> f32, w: f32, h: f32, d: &mut Director) {
-        let (mx, my) = mv;
+        let ground = lo(self.centre()).max(0.0);
+        if self.held.is_some() {
+            self.moving = false;
+            return;
+        }
+        if let Some((vy, from)) = self.fall {
+            let vy = vy + 70.0 * dt;
+            self.y += vy * dt;
+            let to = self.y.min(h - 1.0).max(ground);
+            if self.y >= to && self.y >= ground {
+                self.y = to.round();
+                self.fall = None;
+                d.snow_puff(self.centre(), self.y);
+                let high = self.y - from > 3.0;
+                d.sound(Sfx::Drop, self.centre(), if high { 1.0 } else { 0.6 });
+                if high {
+                    self.dizzy_until = t + 1.8;
+                }
+            } else {
+                self.fall = Some((vy, from));
+            }
+            self.moving = false;
+            return;
+        }
+        let (mx, my) = if self.free(t) { mv } else { (0.0, 0.0) };
         self.moving = mx != 0.0 || my != 0.0;
         if self.moving {
             self.active_at = t;
             if mx != 0.0 {
                 self.dir = mx.signum();
             }
-            self.x = (self.x + mx * SPEED_X * dt).clamp(1.0, w - 4.0);
-            self.y += my * SPEED_Y * dt;
-            self.phase += dt * if mx != 0.0 { 9.0 } else { 6.0 };
+            let k = self.speed.clamp(0.25, 3.0);
+            self.x = (self.x + mx * SPEED_X * k * dt).clamp(1.0, w - 4.0);
+            self.y += my * SPEED_Y * k.sqrt() * dt;
+            self.phase += dt * k.sqrt() * if mx != 0.0 { 9.0 } else { 6.0 };
             self.step_cd -= dt;
             if self.step_cd <= 0.0 {
                 self.step_cd = 0.32;
@@ -79,9 +171,21 @@ impl Player {
 
     pub fn draw(&self, f: &mut Frame, t: f32, glow: f32) {
         let step = (self.phase as i32) % 2 == 0;
+        let kick = (t * 7.0) as i32 % 2 == 0;
+        let up = self.held.is_some() || self.fall.is_some();
+        let scooping = t < self.scoop_until;
+        let throwing = t < self.throw_until;
         // facing right; mirrored for left
-        let rows: [&str; 4] = [" ▲", " ●", "~█", if self.moving && step { " ╨" } else { " ║" }];
-        let wave = !self.moving && (t * 0.5).sin() > 0.97;
+        let rows: [&str; 4] = if up {
+            [" ▲", "╲●╱", " █", if kick { " ╱" } else { " ╲" }]
+        } else if scooping {
+            ["", " ▲", "~●▖", " ▀"]
+        } else if throwing {
+            [" ▲╱", " ●", "~█", " ║"]
+        } else {
+            [" ▲", " ●", "~█", if self.moving && step { " ╨" } else { " ║" }]
+        };
+        let wave = !self.moving && !up && !scooping && !throwing && (t * 0.5).sin() > 0.97;
         let top = self.y.round() as i32 - 3;
         let x0 = self.x.round() as i32;
         for (ry, row) in rows.iter().enumerate() {
@@ -91,10 +195,11 @@ impl Player {
                 }
                 let (cx, ch) = if self.dir > 0.0 { (x0 + i as i32, ch) } else { (x0 + 1 - i as i32, super::events::mirror(ch)) };
                 let col = match (ry, ch) {
-                    (0, _) => HAT,
-                    (1, _) => SKIN,
-                    (2, '~') => SCARF,
-                    (3, _) => BOOTS,
+                    (_, '▲') => HAT,
+                    (_, '●') => SKIN,
+                    (_, '~') => SCARF,
+                    (3, '╨' | '║' | '▀') => BOOTS,
+                    (3, '╱' | '╲') if up => BOOTS,
                     _ => COAT,
                 };
                 // the scarf's loose end flutters
@@ -103,13 +208,38 @@ impl Player {
             }
         }
         // the pompom, and a wave now and then while standing about
-        f.put_g(x0 + if self.dir > 0.0 { 1 } else { 0 }, top - 1, Glyph::new('•', Rgb::hex(0xf4f0ea)).lit(0.5));
+        let ptop = if scooping { top } else { top - 1 };
+        f.put_g(x0 + if self.dir > 0.0 { 1 } else { 0 }, ptop, Glyph::new('•', Rgb::hex(0xf4f0ea)).lit(0.5));
+        // a snowball in hand
+        if self.snowball && !throwing && !scooping {
+            let hx = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
+            f.put_g(hx, top + 2, Glyph::new('●', Rgb::hex(0xf2f6ff)).lit(0.4));
+        }
+        // dizzy stars
+        if t < self.dizzy_until {
+            let cx = self.centre();
+            for k in 0..3 {
+                let a = t * 5.0 + k as f32 * 2.09;
+                let (sx, sy) = (cx + a.cos() * 1.6, top as f32 - 1.0 + a.sin() * 0.4);
+                f.put_g(sx.round() as i32, sy.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a)).lit(0.0));
+            }
+        }
         if wave {
             let ax = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
             f.put_g(ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
         }
-        // a soft lantern-ish glow so the villager is always easy to spot
+        // a soft glow so the villager is always easy to spot (much more
+        // with a lantern; a little more, warm and rosy, after cocoa)
         f.light_cell(x0 + 1, top + 2, Rgb::hex(0xffc878) * (1.6 * glow));
+        if self.lantern && !up {
+            let lx = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
+            let fl = 0.85 + 0.15 * (t * 9.0).sin();
+            f.put_g(lx, top + 2, Glyph::new('▣', Rgb::hex(0xffd27a) * (1.2 * fl)).lit(0.0));
+            f.light_cell(lx, top + 2, Rgb::hex(0xffb050) * (7.0 * fl * glow));
+        }
+        if self.cozy {
+            f.light_cell(x0 + 1, top + 1, Rgb::hex(0xff9a7a) * (1.4 * glow));
+        }
     }
 
     /// The little prompt shown over whatever E would interact with.

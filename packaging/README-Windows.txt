@@ -2,7 +2,8 @@ xmas-tui — a cozy, glowing Christmas scene as a live desktop wallpaper
 =========================================================================
 
 START IT
-  Double-click xmas-tui.exe. It tucks itself behind the desktop icons on
+  With the installer (xmas-tui-setup-x86_64.exe) it's in the Start menu,
+  and can run at startup. From the zip: double-click xmas-tui.exe. It tucks itself behind the desktop icons on
   the main monitor and becomes the wallpaper. Nothing gets installed.
 
   Windows will probably warn "Windows protected your PC", because the
@@ -12,7 +13,7 @@ SETTINGS
   Click the ⚙ in the top-right corner of the desktop. Settings include:
     - adjust snow, wind, glow, how often surprises happen, Santa's sleigh,
       the clock and the widgets
-    - turn on "Start with Windows" so it runs at every log-in
+    - turn on "Run at startup" so it runs at every log-in
     - "✕ quit wallpaper" to stop it
 
   Weather city: clicking the city field opens the settings file in Notepad.
@@ -37,6 +38,10 @@ WALK AROUND THE VILLAGE
     E, Space or Enter   say hello, pet an animal, pick berries, poke things
     F                   invite someone along (animals want a berry);
                         F with nobody nearby says goodbye to everyone
+    R                   scoop a snowball; R again throws it
+    I                   pockets (what the villager carries)
+    1-5                 use an item, or buy one at the cocoa cabin
+    Esc                 close a menu, or step back outside a house
   Stop near someone with companions in tow and they start chatting.
 
 UPDATES
@@ -51,7 +56,8 @@ IF IT SHOWS UP AS A NORMAL WINDOW INSTEAD OF THE WALLPAPER
 
 FILES
   Settings: %APPDATA%\xmas-tui\config.toml
-  To remove it: open settings, untick "Start with Windows", click
+  Installed with the setup: uninstall from the Start menu (or Settings >
+  Apps). From the zip: open settings, untick "Run at startup", click
   "✕ quit wallpaper", then delete xmas-tui.exe and the %APPDATA%\xmas-tui folder.
 
 Fonts: DejaVu (Bitstream Vera license) and Noto Sans Symbols 2 (SIL OFL),

@@ -112,6 +112,11 @@ pub struct Voice {
     vib: (f32, f32, f32),
     noise: Option<NoiseLayer>,
     sustained: bool,
+    /// Which effect group made it (for the level meters): an index into
+    /// `METERS`, or `u8::MAX` when untagged.
+    pub tag: u8,
+    /// Peak output level in the last block (for the meters).
+    pub level: f32,
 }
 
 impl Voice {
@@ -137,6 +142,8 @@ impl Voice {
             vib: (0.0, 0.0, 0.0),
             noise: None,
             sustained: false,
+            tag: u8::MAX,
+            level: 0.0,
         }
     }
 
@@ -272,9 +279,11 @@ impl Voice {
         let (pl, pr) = pan(self.pan);
         let g = g * self.gain;
         let (gl, gr, gs) = (g * pl, g * pr, g * self.send);
+        let mut peak = 0.0f32;
         let modulated = self.glide.0 != 1.0 || self.vib.1 > 0.0 || self.noise.as_ref().map(|n| n.sweep.is_some()).unwrap_or(false);
         while i < n {
             if self.age >= self.len {
+                self.level = peak;
                 return false;
             }
             if modulated && self.age % MOD_EVERY == 0 {
@@ -288,12 +297,14 @@ impl Voice {
                 s += nl.tick(self.age);
             }
             let v = s * self.env();
+            peak = peak.max((v * g).abs());
             dry[i][0] += v * gl;
             dry[i][1] += v * gr;
             rev[i] += v * gs;
             self.age += 1;
             i += 1;
         }
+        self.level = peak;
         if self.sustained && self.age % 1024 < n as u32 {
             for k in 0..self.np {
                 if self.tau[k] <= 0.0 {

@@ -3,6 +3,10 @@
 
 pub mod critters;
 pub mod events;
+pub mod daylight;
+pub mod shop;
+pub mod high_sky;
+pub mod interior;
 pub mod land;
 pub mod lines;
 pub mod player;
@@ -69,6 +73,29 @@ pub struct Scene {
     player: Option<player::Player>,
     mv: (f32, f32),
     focus: Option<Focus>,
+    /// Powerline easter egg: zaps in a row, when the count resets, and the
+    /// blackout they cause.
+    zaps: u32,
+    zap_reset: f32,
+    /// The map's unchanging parts (houses, trees, mountains, home).
+    map: MiniMap,
+    /// Indoors (the player went through a front door).
+    inside: Option<Box<interior::Interior>>,
+    /// The sky above the sky, and how far the view has been lifted into
+    /// it (rows; Ctrl+wheel).
+    high: high_sky::HighSky,
+    sky_up: f32,
+    sky_up_target: f32,
+    /// The Cocoa & Gifts cabin, the player's pockets (and cheer), and
+    /// whether the pockets panel is showing.
+    shop: Option<shop::Shop>,
+    /// Time of day (set every frame by the app).
+    daylight: daylight::Daylight,
+    pockets: shop::Pockets,
+    show_pockets: bool,
+    show_cheered: bool,
+    blackout_until: f32,
+    power_back: bool,
     /// Cursor in cells (None when the pointer left the desktop).
     cursor: Option<(f32, f32)>,
     cursor_prev: Option<(f32, f32)>,
@@ -85,9 +112,32 @@ pub struct Scene {
     epoch: f64,
 }
 
+/// What the map widget shows: the world from end to end.
+#[derive(Clone, Default)]
+pub struct MiniMap {
+    /// World width, the camera and the view width (cells).
+    pub ww: f32,
+    pub cam: f32,
+    pub vw: f32,
+    pub player: Option<f32>,
+    /// Where the player started.
+    pub home: f32,
+    /// House centres (true: the church).
+    pub houses: Vec<(f32, bool)>,
+    /// Trees (true: the big one).
+    pub trees: Vec<(f32, bool)>,
+    /// Mountain heights across the world, 0 (low) .. 1 (high).
+    pub ridge: Vec<f32>,
+    /// Animals and people (true: a person).
+    pub critters: Vec<(f32, bool)>,
+    pub trains: Vec<f32>,
+}
+
 /// What the player would interact with, and where its [E] prompt goes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Focus {
+    Shop(i32, i32),
+    Door(usize, i32, i32),
     Critter(u64, i32, i32),
     Bush(usize, i32, i32),
     Spot(i32, i32),
@@ -96,7 +146,7 @@ enum Focus {
 impl Focus {
     fn mark(&self) -> (i32, i32) {
         match *self {
-            Focus::Critter(_, x, y) | Focus::Bush(_, x, y) | Focus::Spot(x, y) => (x, y),
+            Focus::Shop(x, y) | Focus::Door(_, x, y) | Focus::Critter(_, x, y) | Focus::Bush(_, x, y) | Focus::Spot(x, y) => (x, y),
         }
     }
 }
@@ -299,7 +349,9 @@ impl Scene {
         }
         let church = village.houses.iter().find_map(|h| h.steeple());
         let sky_rows = (land.horizon / 2.0) as i32;
-        let ctx = Ctx { w: wi, h: hi, ground_row, track_row, occluded, church, sky_rows, cam, vw: w as i32 };
+        let tree_cols: Vec<(i32, i32)> = trees.iter().map(|t| (t.cx - t.hw_base as i32 - 2, t.cx + t.hw_base as i32 + 2)).collect();
+        let station = find_station(&occluded, wi, hi, track_row, &tree_cols);
+        let ctx = Ctx { w: wi, h: hi, ground_row, track_row, occluded, church, sky_rows, station, cam, vw: w as i32 };
         let mut rng = Rng::new(seed as u64 ^ 0xc11c);
         // relative to creation, so a rebuild on Christmas Eve doesn't launch
         // Santa on the very next frame
@@ -315,7 +367,7 @@ impl Scene {
             let lo = (ctx.ground_row[(px as usize).min(ww - 1)] + 4).min(hi - 2) as f32;
             player::Player::new(px, ((lo + hf - 1.0) / 2.0).round())
         });
-        Scene {
+        let mut s = Scene {
             w,
             h,
             ww,
@@ -324,6 +376,20 @@ impl Scene {
             player,
             mv: (0.0, 0.0),
             focus: None,
+            zaps: 0,
+            zap_reset: 0.0,
+            map: MiniMap::default(),
+            inside: None,
+            high: high_sky::HighSky::new(w, h, seed),
+            sky_up: 0.0,
+            sky_up_target: 0.0,
+            shop: None,
+            daylight: daylight::Daylight::default(),
+            pockets: shop::Pockets::new(),
+            show_pockets: false,
+            show_cheered: false,
+            blackout_until: 0.0,
+            power_back: false,
             cfg: cfg.clone(),
             sky,
             land,
@@ -346,6 +412,142 @@ impl Scene {
             lines: lines::Lines::new(seed),
             clock: 0.0,
             epoch: 0.0,
+        };
+        s.map = s.static_map();
+        s.shop = s.place_shop();
+        s
+    }
+
+    /// A free spot on the snowfield for the cocoa cabin, near where the
+    /// player starts.
+    fn place_shop(&self) -> Option<shop::Shop> {
+        let p = self.player.as_ref()?;
+        let want = p.centre() as i32 - 22;
+        let ww = self.ww as i32;
+        let lo = |x: i32| (self.ctx.ground_row[(x.clamp(0, ww - 1)) as usize] + 4).min(self.h as i32 - 2);
+        let clear = |x0: i32| {
+            let base = lo(x0 + shop::SHOP_W / 2) + 1;
+            if x0 < 2 || x0 + shop::SHOP_W >= ww - 2 || base >= self.h as i32 {
+                return None;
+            }
+            for x in x0 - 2..x0 + shop::SHOP_W + 2 {
+                for y in base - 7..=base + 1 {
+                    if self.pokeable(x, y) || self.critters.bush_at(x, y).is_some() {
+                        return None;
+                    }
+                }
+            }
+            Some(base)
+        };
+        (0..ww).flat_map(|d| [want - d, want + d]).find_map(|x| clear(x).map(|base| shop::Shop { x, base, open: false }))
+    }
+
+    /// The player's pockets (kept when the scene is rebuilt).
+    pub fn take_pockets(&mut self) -> shop::Pockets {
+        std::mem::take(&mut self.pockets)
+    }
+
+    pub fn set_pockets(&mut self, p: shop::Pockets) {
+        if p.cheer > 0 || p.items.iter().any(|&n| n > 0) || !p.greeted.is_empty() {
+            self.pockets = p;
+        }
+    }
+
+    /// Cheer for being neighbourly, with a little sparkle over the player.
+    fn cheer(&mut self, n: u32) {
+        if n == 0 {
+            return;
+        }
+        self.pockets.cheer += n;
+        if let Some(p) = &self.player {
+            self.director.emote(p.centre(), p.y - 4.0, '✦', Rgb::hex(0xffd36b), n as usize);
+            self.director.sound(Sfx::Sparkle, p.centre(), 0.35);
+        }
+    }
+
+    /// I: show / hide the pockets panel.
+    pub fn toggle_pockets(&mut self) {
+        if self.player.is_some() {
+            self.show_pockets = !self.show_pockets;
+        }
+    }
+
+    /// Esc: close the shop / pockets first. True if something closed.
+    pub fn close_panels(&mut self) -> bool {
+        let shop_open = self.shop.as_ref().map(|s| s.open).unwrap_or(false);
+        if let Some(s) = &mut self.shop {
+            s.open = false;
+        }
+        let had = shop_open || self.show_pockets;
+        self.show_pockets = false;
+        had
+    }
+
+    /// 1-5: buy (at the open shop) or use an item.
+    pub fn number(&mut self, n: usize) {
+        let Some(&item) = shop::ITEMS.get(n.wrapping_sub(1)) else { return };
+        let t = self.now();
+        let Some(p) = self.player.as_ref() else { return };
+        let (px, py) = (p.centre(), p.y);
+        if self.inside.is_some() {
+            return;
+        }
+        if let Some(s) = self.shop.as_ref().filter(|s| s.open) {
+            let (kx, ky) = (s.centre(), s.base - 4);
+            if self.pockets.cheer >= item.price() {
+                self.pockets.cheer -= item.price();
+                self.pockets.add(item);
+                let line = *self.rng.pick(&["here you go!", "enjoy!", "merry Christmas!", "a fine choice!"]);
+                self.director.say(kx, ky, line, t, 2.2, 6);
+                self.director.sound(Sfx::Present, kx as f32, 0.7);
+            } else {
+                self.director.say(kx, ky, "a bit more cheer first — go be neighbourly!", t, 3.0, 6);
+            }
+            return;
+        }
+        let have = self.pockets.count(item) > 0;
+        if !have {
+            self.director.say(px.round() as i32, py as i32 - 4, &format!("no {} in my pockets", item.name()), t, 2.0, 6);
+            return;
+        }
+        let target = match self.focus {
+            Some(Focus::Critter(id, ..)) => Some(id),
+            _ => None,
+        };
+        match item {
+            shop::Item::Cocoa => {
+                self.pockets.take(item);
+                self.pockets.cozy_until = t + 45.0;
+                self.director.say(px.round() as i32, py as i32 - 4, "mmm, cocoa!", t, 2.0, 6);
+                self.director.emote(px, py - 3.0, '♥', Rgb::hex(0xff6b8a), 2);
+                self.director.sound(Sfx::Munch, px, 0.6);
+            }
+            shop::Item::Gingerbread | shop::Item::CandyCane => match target.filter(|&id| self.critters.is_person(id)) {
+                Some(id) => {
+                    self.pockets.take(item);
+                    self.critters.gift(id, item.name(), t, &mut self.director);
+                    self.cheer(1);
+                }
+                None => {
+                    self.pockets.take(item);
+                    self.director.say(px.round() as i32, py as i32 - 4, "*crunch* delicious", t, 2.0, 6);
+                    self.director.sound(Sfx::Munch, px, 0.6);
+                }
+            },
+            shop::Item::Carrot => match target.filter(|&id| self.critters.is_animal(id)) {
+                Some(id) => {
+                    self.pockets.take(item);
+                    self.critters.befriend(id, t, &mut self.director);
+                    self.cheer(1);
+                }
+                None => {
+                    self.director.say(px.round() as i32, py as i32 - 4, "this is for a deer or a rabbit", t, 2.4, 6);
+                }
+            },
+            shop::Item::Lantern => {
+                self.pockets.lantern_on = !self.pockets.lantern_on;
+                self.director.sound(Sfx::Lamp, px, 0.6);
+            }
         }
     }
 
@@ -379,6 +581,12 @@ impl Scene {
             if let Some(p) = &mut self.player {
                 p.rebase(s);
             }
+            self.zap_reset -= s;
+            self.blackout_until -= s;
+            self.high.rebase(s);
+            if let Some(inn) = &mut self.inside {
+                inn.rebase(s);
+            }
         }
     }
 
@@ -410,6 +618,17 @@ impl Scene {
         let w = self.w.max(1) as f32;
         let cam = self.cam;
         let mut v = std::mem::take(&mut self.director.sounds);
+        if let Some(inn) = &mut self.inside {
+            // indoors the village is muffled; the room's own sounds are on
+            // screen coordinates
+            for e in &mut v {
+                e.gain *= 0.35;
+            }
+            for mut e in std::mem::take(&mut inn.director.sounds) {
+                e.pan += cam;
+                v.push(e);
+            }
+        }
         for e in &mut v {
             if e.pan.is_finite() {
                 // world x → position in view; things further away are quieter
@@ -436,7 +655,7 @@ impl Scene {
             wind: 0.3 * self.cfg.wind.min(3.0) + self.director.gust_wind(t).abs() / 10.0,
             snow: if self.cfg.snow > 0.0 { self.cfg.snow.min(3.0) * (1.0 + bliz) } else { 0.0 },
             sleigh: self.sleigh.audio_x().map(|x| ((x / w).clamp(0.0, 1.0), edge(x))),
-            train: self.director.train_x().map(|x| x - self.cam).map(|x| ((x / w).clamp(0.0, 1.0), edge(x))),
+            train: self.director.train_x(self.cam + w / 2.0).map(|x| x - self.cam).map(|x| ((x / w).clamp(0.0, 1.0), edge(x))),
             aurora: if self.cfg.aurora { self.director.flare.value(t) } else { 0.0 },
         }
     }
@@ -457,6 +676,76 @@ impl Scene {
 
     fn cam_i(&self) -> i32 {
         self.cam.round() as i32
+    }
+
+    /// How many rows the view is lifted into the sky.
+    fn oy_i(&self) -> i32 {
+        if self.inside.is_some() { 0 } else { self.sky_up.round() as i32 }
+    }
+
+    /// Previews: look `rows` up into the sky right away.
+    pub fn look_up(&mut self, rows: f32) {
+        self.sky_up_target = rows.clamp(0.0, self.high.depth as f32);
+        self.sky_up = self.sky_up_target;
+    }
+
+    /// Ctrl+wheel: look up into (or back down from) the sky.
+    pub fn pan_up(&mut self, up: bool) {
+        if self.inside.is_some() {
+            return;
+        }
+        let step = (self.h as f32 * 0.12).max(3.0);
+        self.sky_up_target = (self.sky_up_target + if up { step } else { -step }).clamp(0.0, self.high.depth as f32);
+    }
+
+    fn static_map(&self) -> MiniMap {
+        let ww = self.ww as f32;
+        let m = &self.land.mountains;
+        let (lo, hi) = m.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let ridge = (0..128).map(|i| {
+            let v = m[(i * (m.len() - 1)) / 127];
+            1.0 - (v - lo) / (hi - lo).max(1.0)
+        });
+        MiniMap {
+            ww,
+            vw: self.w as f32,
+            home: self.player.as_ref().map(|p| p.centre()).unwrap_or(ww / 2.0),
+            houses: self.village.houses.iter().map(|h| (h.x as f32 + h.w as f32 / 2.0, h.church)).collect(),
+            trees: self.trees.iter().map(|t| (t.cx as f32, t.is_big())).collect(),
+            ridge: ridge.collect(),
+            ..MiniMap::default()
+        }
+    }
+
+    /// Everything the map widget needs this frame.
+    pub fn minimap(&self) -> MiniMap {
+        let mut m = self.map.clone();
+        m.cam = self.cam;
+        m.player = match (&self.inside, &self.player) {
+            (Some(inn), _) => Some(inn.outside.0 + 1.0),
+            (None, p) => p.as_ref().map(|p| p.centre()),
+        };
+        m.critters = self.critters.positions();
+        m.trains = self.director.trains();
+        m
+    }
+
+    /// Look at world column `x` (the map widget was clicked).
+    pub fn look_at(&mut self, x: f32) {
+        let max = (self.ww - self.w) as f32;
+        self.cam_target = (x - self.w as f32 / 2.0).clamp(0.0, max);
+    }
+
+    pub fn set_daylight(&mut self, d: daylight::Daylight) {
+        self.daylight = d;
+    }
+
+    /// Settings that apply without rebuilding the scene.
+    pub fn set_live(&mut self, walk_speed: f32, drive_left: bool) {
+        self.director.drive_left = drive_left;
+        if let Some(p) = &mut self.player {
+            p.speed = walk_speed;
+        }
     }
 
     /// The direction keys currently held: x and y each -1, 0 or 1.
@@ -486,6 +775,12 @@ impl Scene {
         let p = self.player.as_ref()?;
         let (px, py) = (p.centre(), p.y);
         let t = self.now();
+        // at the cocoa cabin's counter
+        if let Some(s) = &self.shop {
+            if (s.centre() as f32 - px).abs() <= 9.0 && py >= s.base as f32 && py <= s.base as f32 + 6.0 {
+                return Some(Focus::Shop(s.centre(), s.base - 8));
+            }
+        }
         if let Some(id) = self.critters.nearest(px, py, 7.0) {
             let (bx, by, bw, _) = self.critters.bbox_of(id, t)?;
             return Some(Focus::Critter(id, bx + bw / 2, by - 1));
@@ -494,12 +789,18 @@ impl Scene {
             let (bx, base, bw) = self.critters.bush_rect(b);
             return Some(Focus::Bush(b, bx + bw / 2, base - 3));
         }
+        // on a doorstep: go in
+        for (i, h) in self.village.houses.iter().enumerate() {
+            if (h.door() as f32 + 0.5 - px).abs() <= 2.5 && p.y - (h.base as f32) <= 5.0 && p.y >= h.base as f32 - 1.0 {
+                return Some(Focus::Door(i, h.door(), h.base - 3));
+            }
+        }
         // in front first, then right underfoot, then just behind
         let (x0, y0) = (px.round() as i32, py.round() as i32);
         let d = p.dir as i32;
         for k in [1, 2, 0, 3, 4, -1, 5, 6, -2] {
             let x = x0 + d * k;
-            for y in (y0 - 12..=y0).rev() {
+            for y in (y0 - 16..=y0).rev() {
                 if self.pokeable(x, y) {
                     return Some(Focus::Spot(x, y));
                 }
@@ -517,13 +818,35 @@ impl Scene {
             })
             || self.village.lamps.iter().any(|l| l.x == x && y > l.base - l.h && y <= l.base)
             || self.village.houses.iter().any(|h| h.contains(x, y))
+            || self.on_station(x, y)
+            || self.shop.as_ref().map(|s| s.contains(x, y)).unwrap_or(false)
+    }
+
+    fn on_station(&self, x: i32, y: i32) -> bool {
+        self.ctx.station.map(|(sx, sw)| x >= sx && x <= sx + sw && y >= self.ctx.track_row - 4 && y <= self.ctx.track_row).unwrap_or(false)
     }
 
     /// E / Space / Enter: say hello, pet or feed, pick berries, or poke
     /// whatever's in front of the player.
     pub fn interact(&mut self) {
         let t = self.now();
-        let Some(p) = self.player.as_mut() else { return };
+        if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
+            if !p.free(t) {
+                return;
+            }
+            p.active_at = t;
+            if let Some((what, ..)) = inn.nearest(p.centre()) {
+                if inn.poke(what, p, t) {
+                    self.leave();
+                }
+            }
+            return;
+        }
+        if let Some(Focus::Door(i, ..)) = self.focus {
+            self.enter(i);
+            return;
+        }
+        let Some(p) = self.player.as_mut().filter(|p| p.free(t)) else { return };
         p.active_at = t;
         let (px, py) = (p.centre(), p.y);
         match self.focus {
@@ -532,7 +855,26 @@ impl Scene {
                 if face != 0.0 {
                     p.dir = face;
                 }
+                let berries = p.berries;
                 self.critters.meet(id, px, py, &mut p.berries, t, &mut self.director, &mut self.lines);
+                let fed = p.berries < berries;
+                // cheer: a first hello, or feeding an animal
+                if self.critters.is_person(id) && !self.pockets.greeted.contains(&id) {
+                    self.pockets.greeted.push(id);
+                    self.cheer(1);
+                } else if fed {
+                    self.cheer(2);
+                }
+            }
+            Some(Focus::Shop(..)) => {
+                if let Some(s) = &mut self.shop {
+                    s.open = !s.open;
+                    if s.open {
+                        let (kx, ky) = (s.centre(), s.base - 4);
+                        self.director.say(kx, ky, "welcome! cocoa's hot", t, 2.4, 6);
+                        self.director.sound(Sfx::Greet, kx as f32, 0.7);
+                    }
+                }
             }
             Some(Focus::Bush(b, ..)) => {
                 let n = self.critters.pick_berries(b, t, &mut self.director);
@@ -547,6 +889,7 @@ impl Scene {
             Some(Focus::Spot(x, y)) => {
                 self.poke(x, y);
             }
+            Some(Focus::Door(..)) => {}
             None => {
                 // nothing about: a happy little hop in the snow
                 self.director.snow_puff(px, py);
@@ -554,11 +897,78 @@ impl Scene {
         }
     }
 
+    /// Go in through house `i`'s front door.
+    fn enter(&mut self, i: usize) {
+        let t = self.now();
+        let seed = self.seed_for(i);
+        let Some(h) = self.village.houses.get(i) else { return };
+        let Some(p) = self.player.as_mut() else { return };
+        let inn = interior::Interior::new(i, h.church, h.wall, self.w, self.h, seed, (p.x, p.y), t);
+        let (ex, ey) = inn.entrance();
+        (p.x, p.y, p.dir) = (ex, ey, 1.0);
+        p.snowball = false;
+        self.director.sound(Sfx::Click, h.door() as f32, 0.9);
+        self.inside = Some(Box::new(inn));
+    }
+
+    /// Back out into the snow, on the doorstep.
+    pub fn leave(&mut self) {
+        let Some(inn) = self.inside.take() else { return };
+        if let Some(p) = &mut self.player {
+            (p.x, p.y) = inn.outside;
+            p.dir = 1.0;
+            self.director.sound(Sfx::Click, p.centre(), 0.9);
+        }
+    }
+
+    /// Previews: standing at the cocoa cabin, menu and pockets open.
+    pub fn preview_shop(&mut self) {
+        let Some((kx, base)) = self.shop.as_ref().map(|s| (s.centre(), s.base)) else { return };
+        let t = self.now();
+        if let Some(p) = &mut self.player {
+            p.x = kx as f32 + 2.0;
+            p.y = base as f32 + 2.0;
+            p.dir = -1.0;
+            p.active_at = t;
+        }
+        self.look_at(kx as f32);
+        self.cam = self.cam_target;
+        self.pockets.cheer = 9;
+        self.pockets.add(shop::Item::Cocoa);
+        self.pockets.add(shop::Item::Carrot);
+        if let Some(s) = &mut self.shop {
+            s.open = true;
+        }
+        self.show_pockets = true;
+    }
+
+    /// Previews: step inside house `i` (an index past the end: the church).
+    pub fn preview_inside(&mut self, i: usize) {
+        let i = if i < self.village.houses.len() { i } else { self.village.houses.iter().position(|h| h.church).unwrap_or(0) };
+        self.enter(i);
+        let t = self.now();
+        if let Some(p) = &mut self.player {
+            p.active_at = t;
+            p.x = self.w as f32 * 0.36;
+        }
+    }
+
+    pub fn is_inside(&self) -> bool {
+        self.inside.is_some()
+    }
+
+    fn seed_for(&self, i: usize) -> u32 {
+        (self.ww as u32).wrapping_mul(2654435761) ^ (i as u32).wrapping_mul(0x9e37_79b9) ^ self.h as u32
+    }
+
     /// F: ask whoever's nearby to come along (animals want a berry), or
     /// say goodbye to everyone following.
     pub fn invite(&mut self) {
+        if self.inside.is_some() {
+            return;
+        }
         let t = self.now();
-        let Some(p) = self.player.as_mut() else { return };
+        let Some(p) = self.player.as_mut().filter(|p| p.free(t)) else { return };
         p.active_at = t;
         if let Some(Focus::Critter(id, ..)) = self.focus {
             if !self.critters.following(id) {
@@ -578,6 +988,9 @@ impl Scene {
 
     /// Scroll the view (mouse wheel), in cells.
     pub fn pan(&mut self, dx: f32) {
+        if self.inside.is_some() {
+            return;
+        }
         let max = (self.ww - self.w) as f32;
         self.cam_target = (self.cam_target + dx).clamp(0.0, max);
     }
@@ -590,33 +1003,89 @@ impl Scene {
 
     /// Someone under the cursor who can be picked up?
     pub fn grabbable(&self, x: i32, y: i32) -> bool {
-        self.critters.grabbable(x + self.cam_i(), y, self.now())
+        if self.inside.is_some() {
+            return false;
+        }
+        let y = y - self.oy_i();
+        let wx = x + self.cam_i();
+        self.player.as_ref().map(|p| p.contains(wx, y)).unwrap_or(false) || self.critters.grabbable(wx, y, self.now())
     }
 
-    /// Start carrying whoever is at (x, y). False if nobody's there.
+    /// Start carrying whoever is at (x, y) — the player included. False if
+    /// nobody's there.
     pub fn grab(&mut self, x: i32, y: i32) -> bool {
+        if self.inside.is_some() {
+            return false;
+        }
+        let y = y - self.oy_i();
         let t = self.now();
         let x = x + self.cam_i();
+        if let Some(p) = self.player.as_mut().filter(|p| p.contains(x, y)) {
+            p.grab(x, y, t);
+            self.director.sound(Sfx::Pickup, p.centre(), 1.0);
+            return true;
+        }
         self.critters.grab(x, y, t, &mut self.director)
     }
 
     pub fn drag(&mut self, x: i32, y: i32) {
         self.set_cursor(Some((x, y)));
-        self.critters.drag(x + self.cam_i(), y);
+        let y = y - self.oy_i();
+        let (wx, ww, h) = (x + self.cam_i(), self.ww as f32, self.h as f32);
+        if let Some(p) = self.player.as_mut().filter(|p| p.held.is_some()) {
+            p.drag(wx, y, ww, h);
+            return;
+        }
+        self.critters.drag(wx, y);
     }
 
     /// Let go (a click without dragging becomes a pat or a hello).
     pub fn release(&mut self) {
         let t = self.now();
+        if let Some(p) = self.player.as_mut().filter(|p| p.held.is_some()) {
+            p.release();
+            return;
+        }
         self.critters.release(t, &mut self.director, &mut self.lines);
     }
 
     pub fn holding(&self) -> bool {
-        self.critters.holding()
+        self.player.as_ref().map(|p| p.held.is_some()).unwrap_or(false) || self.critters.holding()
+    }
+
+    /// R: pack a snowball (a moment, crouched), then throw it the way
+    /// the player is facing — at whoever's over there.
+    pub fn snowball(&mut self) {
+        if self.inside.is_some() {
+            return;
+        }
+        let t = self.now();
+        let Some(p) = self.player.as_mut() else { return };
+        if !p.free(t) {
+            return;
+        }
+        p.active_at = t;
+        if p.snowball {
+            p.snowball = false;
+            p.throw_until = t + 0.35;
+            let (x, y, dir) = (p.centre(), p.y, p.dir);
+            self.critters.throw(x, y, dir, &mut self.director);
+        } else {
+            p.scoop_until = t + 0.6;
+            p.snowball = true;
+            self.director.sound(Sfx::Crunch, p.centre(), 0.5);
+        }
     }
 
     /// Is there something under this cell that reacts to a click?
     pub fn clickable(&self, x: i32, y: i32) -> bool {
+        if let Some(inn) = &self.inside {
+            return inn.thing_at(x, y).is_some();
+        }
+        let y = y - self.oy_i();
+        if y < 0 {
+            return self.high.clickable(x, y);
+        }
         let (sx, x) = (x, x + self.cam_i());
         if self.critters.bush_at(x, y).is_some() {
             return true;
@@ -629,7 +1098,49 @@ impl Scene {
             })
             || self.village.lamps.iter().any(|l| l.x == x && y > l.base - l.h && y <= l.base)
             || self.village.houses.iter().any(|h| h.contains(x, y))
+            || self.land.on_powerline(x, y)
             || self.on_moon(sx, y)
+    }
+
+    /// Clicking the powerline: sparks. Keep at it and the whole village's
+    /// power goes out for a while.
+    fn zap(&mut self, x: i32, y: i32) {
+        let t = self.now();
+        if t < self.blackout_until {
+            return;
+        }
+        self.zaps = if t < self.zap_reset { self.zaps + 1 } else { 1 };
+        self.zap_reset = t + 10.0;
+        let sparks = [Rgb::WHITE, Rgb::hex(0xfff2a0), Rgb::hex(0x9fd8ff)];
+        let (xf, yf) = (x as f32, y as f32);
+        self.director.burst(xf, yf, 6 + self.zaps as usize * 4, &sparks, 5.0 + self.zaps as f32, 9.0);
+        self.director.sound(Sfx::Lamp, xf, 0.6 + 0.1 * self.zaps as f32);
+        if self.zaps < 5 {
+            return;
+        }
+        // blackout
+        self.zaps = 0;
+        let end = t + 25.0;
+        self.blackout_until = end;
+        self.power_back = true;
+        self.director.burst(xf, yf, 50, &sparks, 12.0, 6.0);
+        self.director.sound(Sfx::Puff, xf, 1.0);
+        for h in &mut self.village.houses {
+            // the lights come back one house at a time
+            h.lights_off_until = h.lights_off_until.max(end + self.rng.range(0.0, 3.0));
+        }
+        for l in &mut self.village.lamps {
+            l.off_until = l.off_until.max(end + self.rng.range(0.0, 2.0));
+        }
+        for tr in &mut self.trees {
+            tr.dark_until = end + self.rng.range(0.0, 1.5);
+        }
+        let mut people = self.critters.people();
+        people.truncate(2);
+        for (i, (px, py)) in people.into_iter().enumerate() {
+            let line = *self.rng.pick(&["who turned out the lights?!", "the power's out!", "eek! it's dark!", "was that the powerline?", "anyone got a candle?"]);
+            self.director.say(px, py - 1, line, t + 0.6 + i as f32 * 1.3, 2.8, 6);
+        }
     }
 
     /// Something in the village at world (x, y) — a present, the snowman, a
@@ -637,6 +1148,20 @@ impl Scene {
     /// anything was there.
     fn poke(&mut self, x: i32, y: i32) -> bool {
         let t = self.now();
+        if let Some((kx, ky)) = self.shop.as_ref().filter(|s| s.contains(x, y)).map(|s| (s.centre(), s.base - 4)) {
+            let line = *self.rng.pick(&["hot cocoa, gingerbread, candy canes!", "come by the counter for a cocoa!", "merry Christmas, neighbour!", "warm your hands by the window"]);
+            self.director.say(kx, ky, line, t, 2.6, 6);
+            self.director.sound(Sfx::Greet, kx as f32, 0.6);
+            return true;
+        }
+        if self.on_station(x, y) {
+            let (sx, sw) = self.ctx.station.unwrap_or((x, 1));
+            let wait = self.director.next_train_in(t).max(1.0);
+            let line = if self.director.trains().is_empty() { format!("next train in about {} s", wait.round()) } else { "a train's on the line!".to_string() };
+            self.director.say(sx + sw / 2, self.ctx.track_row - 5, &line, t, 3.0, 6);
+            self.director.sound(Sfx::TrainWhistle, (sx + sw / 2) as f32, 0.4);
+            return true;
+        }
         let (xf, yf) = (x as f32, y as f32);
         let d = &mut self.director;
         if let Some(p) = self.presents.iter_mut().rev().find(|p| p.contains(x, y)) {
@@ -714,6 +1239,23 @@ impl Scene {
 
     /// Left click on the scene: everything reacts a little differently.
     pub fn click(&mut self, x: i32, y: i32, _app_t: f32) {
+        let t = self.now();
+        if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_ref()) {
+            if let Some(what) = inn.thing_at(x, y) {
+                if inn.poke(what, p, t) {
+                    self.leave();
+                }
+            }
+            return;
+        }
+        let y = y - self.oy_i();
+        if y < 0 {
+            // up in the high sky
+            let cam = self.cam;
+            let cheer = self.high.click(x, y, t, &mut self.director, cam);
+            self.cheer(cheer);
+            return;
+        }
         let (sx, x) = (x, x + self.cam_i());
         if let Some(b) = self.critters.bush_at(x, y) {
             let t = self.now();
@@ -724,6 +1266,10 @@ impl Scene {
         let (xf, yf) = (x as f32, y as f32);
         let (moon_hit, sky_hit, ground_hit) = (self.on_moon(sx, y), self.in_sky(sx, y), self.on_ground(x, y));
         if self.poke(x, y) {
+            return;
+        }
+        if self.land.on_powerline(x, y) {
+            self.zap(x, y);
             return;
         }
         let d = &mut self.director;
@@ -796,6 +1342,9 @@ impl Scene {
         self.cam = if d.abs() < 0.05 { self.cam_target } else { self.cam + d * (1.0 - (-dt * 6.0).exp()) };
         self.ctx.cam = self.cam;
         self.ctx.vw = self.w as i32;
+        let dv = self.sky_up_target - self.sky_up;
+        self.sky_up = if dv.abs() < 0.05 { self.sky_up_target } else { self.sky_up + dv * (1.0 - (-dt * 5.0).exp()) };
+        self.high.update(dt, t);
         self.sky.update(dt, t, self.w, self.h * 2);
         // cursor velocity (cells/s), smoothed
         match (self.cursor, self.cursor_prev) {
@@ -809,17 +1358,23 @@ impl Scene {
             _ => self.cursor_vel = (0.0, 0.0),
         }
         self.cursor_prev = self.cursor;
-        if let Some((cx, cy)) = self.cursor {
+        let lift = self.sky_up.round();
+        if let Some((cx, cy)) = self.cursor.map(|(x, y)| (x, y - lift)) {
             let wx = cx + self.cam;
             let ground = self.on_ground(wx as i32, cy as i32);
             self.director.cursor(wx, cy, self.cursor_vel.0, self.cursor_vel.1, ground, dt);
         }
-        if let Some(p) = &mut self.player {
+        let mut walked_out = false;
+        if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
+            walked_out = inn.update(dt, t, self.mv, p);
+        } else if let Some(p) = &mut self.player {
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
             p.update(dt, t, self.mv, lo, self.ww as f32, h, &mut self.director);
             // the camera keeps the player comfortably in view while walking
             if p.moving {
+                // walking brings the view back down to earth
+                self.sky_up_target = 0.0;
                 let (w, c) = (self.w as f32, p.centre());
                 let (l, r) = (w * 0.3, w * 0.7);
                 if c - self.cam_target < l {
@@ -830,17 +1385,77 @@ impl Scene {
                 self.cam_target = self.cam_target.clamp(0.0, (self.ww - self.w) as f32);
             }
         }
-        self.critters.set_player(self.player.as_ref().map(|p| (p.x, p.y, p.dir, p.moving)));
+        if walked_out {
+            self.leave();
+        }
+        // indoors, anyone following the player waits by the door
+        let you = match (&self.inside, &self.player) {
+            (Some(inn), Some(p)) => Some((inn.outside.0, inn.outside.1, p.dir, false)),
+            (None, Some(p)) => Some((p.x, p.y, p.dir, p.moving)),
+            _ => None,
+        };
+        self.critters.set_player(you);
         self.director.update(dt, t, &self.ctx);
+        for x in std::mem::take(&mut self.director.arrivals) {
+            // passengers off the train walk down into the village
+            let kind = if self.rng.chance(0.25) { events::Kind::Kid } else { events::Kind::Walker };
+            self.critters.spawn_demo(kind, x, t);
+        }
+        if let Some(p) = &mut self.player {
+            p.lantern = self.pockets.lantern_on && self.pockets.count(shop::Item::Lantern) > 0;
+            p.cozy = t < self.pockets.cozy_until;
+            // walked away from the counter: the shop menu closes
+            if let Some(s) = &mut self.shop {
+                if s.open && ((s.centre() as f32 - p.centre()).abs() > 14.0 || self.inside.is_some()) {
+                    s.open = false;
+                }
+            }
+        }
+        let hits = self.critters.take_your_hits();
+        self.cheer(hits);
+        // watching a light show by the big tree
+        let showing = self.director.show.active(t);
+        if !showing {
+            self.show_cheered = false;
+        } else if !self.show_cheered {
+            let tree = self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.cx as f32);
+            if let (Some(tx), Some(p)) = (tree, &self.player) {
+                if (p.centre() - tx).abs() < 45.0 && self.inside.is_none() {
+                    self.show_cheered = true;
+                    self.cheer(3);
+                }
+            }
+        }
+        if let Some(until) = self.director.gather.take() {
+            // a few more folk come out for the show, then everyone gathers
+            for _ in 0..3 {
+                self.critters.request(events::Kind::Walker, t);
+            }
+            let tree = self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.cx as f32).unwrap_or(self.ww as f32 / 2.0);
+            self.critters.gather(tree, until, t, &mut self.director, &mut self.lines);
+        }
         for k in std::mem::take(&mut self.director.spawn_requests) {
             self.critters.request(k, t);
         }
         // the cursor matters to the animals for a while after it last moved
         let cam = self.cam;
-        let cur = self.cursor.filter(|_| t - self.cursor_seen < 15.0).map(|(x, y)| (x + cam, y, self.cursor_vel.0, self.cursor_vel.1));
+        let cur = self.cursor.filter(|_| t - self.cursor_seen < 15.0).map(|(x, y)| (x + cam, y - lift, self.cursor_vel.0, self.cursor_vel.1));
         let snowman = self.village.snowmen.first().map(village::snowman_head);
         self.critters.update(dt, t, &self.ctx, &mut self.director, &mut self.lines, cur, snowman);
-        self.focus = self.find_focus();
+        // speech bubbles follow their speakers (the player included)
+        let mut who = self.critters.anchors();
+        if let (None, Some(p)) = (&self.inside, &self.player) {
+            who.push((u64::MAX - 1, p.centre(), p.y));
+        }
+        self.director.track(&who);
+        if self.critters.take_hits_on_you() > 0 {
+            if let Some(p) = &mut self.player {
+                p.bonk(t, &mut self.director);
+                let line = *self.rng.pick(&["brr!", "hey!", "ha — got me!", "oof!", "you're on!"]);
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, line, t + 0.2, 2.0, 6);
+            }
+        }
+        self.focus = if self.inside.is_some() { None } else { self.find_focus() };
         // passers-by sometimes say hello
         if self.rng.chance(dt * 0.04) {
             let walkers = self.critters.people();
@@ -849,6 +1464,11 @@ impl Scene {
                 let msg = self.lines.walker();
                 self.director.bubble(wx, wy, &msg, t);
             }
+        }
+        if self.power_back && t >= self.blackout_until {
+            self.power_back = false;
+            let mid = self.cam + self.w as f32 / 2.0;
+            self.director.sound(Sfx::Chime, mid, 0.8);
         }
         if let Some(i) = self.director.house_toggle.take() {
             let n = self.village.houses.len();
@@ -879,17 +1499,37 @@ impl Scene {
     pub fn draw(&self, f: &mut Frame, _app_t: f32) {
         let t = self.now();
         let glow = self.cfg.glow;
+        f.day = 0.0;
+        f.day_warm = 0.0;
+        if let (Some(inn), Some(p)) = (&self.inside, &self.player) {
+            let prompt = (t - p.active_at < 20.0).then(|| inn.nearest(p.centre()).map(|(_, x, y)| (x, y))).flatten();
+            inn.draw(f, t, glow, p, prompt);
+            f.ox = 0;
+            return;
+        }
         let cam = self.cam_i();
+        let oy = self.oy_i();
+        f.oy = oy;
         // pixel layer (sky things stay on screen, the world scrolls)
         f.ox = 0;
         self.sky.draw_px(f, t, self.director.flare.value(t));
+        let dl = self.daylight;
+        if oy > 0 {
+            self.high.draw(f, t, glow, self.sky.top_color(), dl.sun);
+        }
+        daylight::sky_pass(f, &dl, -2 * oy, self.land.horizon as i32, glow);
+        (f.day, f.day_warm) = (dl.sun, dl.warm);
         self.director.draw_px(f);
         self.land.draw_px(f, self.cam);
+        self.land.draw_lights(f, self.cam, t, glow);
         f.ox = cam;
         self.village.draw_px(f, self.cam);
         // glyph layer, back to front
         f.ox = 0;
-        self.sky.draw_glyphs(f, t);
+        if dl.sun < 0.45 {
+            // stars and the moon's glyphs (not in daylight)
+            self.sky.draw_glyphs(f, t);
+        }
         self.sleigh.draw(f, t, glow);
         f.ox = cam;
         self.village.draw_glyphs(f, t, glow);
@@ -913,6 +1553,9 @@ impl Scene {
         for p in &self.presents {
             p.draw(f, t);
         }
+        if let Some(s) = &self.shop {
+            s.draw(f, t, glow);
+        }
         self.critters.draw(f, t, glow);
         if let Some(p) = &self.player {
             p.draw(f, t, glow);
@@ -935,7 +1578,17 @@ impl Scene {
                 player::Player::draw_prompt(f, x, y, 'E', t);
             }
         }
+        // daylight for the scene's glyphs (before any panels go on top)
+        f.grade_scene(dl.sun);
+        f.day = 0.0;
+        if let Some(s) = self.shop.as_ref().filter(|s| s.open) {
+            s.draw_menu(f, &self.pockets);
+        }
         f.ox = 0;
+        f.oy = 0;
+        if self.show_pockets {
+            shop::draw_pockets(f, &self.pockets);
+        }
         // a soft lantern-like glow that follows the pointer while it moves
         if let Some((cx, cy)) = self.cursor {
             let k = (1.0 - (t - self.cursor_seen) / 2.5).clamp(0.0, 1.0);
@@ -944,6 +1597,21 @@ impl Scene {
             }
         }
     }
+}
+
+/// A spot along the railway, not hidden behind any house, for the station
+/// (as near the middle-left of the village as there is room).
+fn find_station(occluded: &[bool], w: i32, h: i32, track_row: i32, trees: &[(i32, i32)]) -> Option<(i32, i32)> {
+    const SW: i32 = 18;
+    if track_row < 5 || track_row >= h || w < SW + 4 {
+        return None;
+    }
+    let free = |x0: i32| {
+        (x0 - 1..x0 + SW + 2).all(|x| x >= 0 && x < w && (track_row - 4..=track_row).all(|y| !occluded[(y * w + x) as usize]))
+            && !trees.iter().any(|&(a, b)| x0 + SW + 1 > a && x0 - 1 < b)
+    };
+    let want = (w as f32 * 0.42) as i32;
+    (0..w).flat_map(|d| [want - d, want + d]).find(|&x| free(x)).map(|x| (x, SW))
 }
 
 #[cfg(test)]
@@ -1161,5 +1829,110 @@ mod tests {
         s.interact();
         assert_eq!(s.player.as_ref().unwrap().berries, got - 1);
         assert!(s.critters.following(id));
+    }
+
+    #[test]
+    fn people_step_around_each_other_instead_of_through() {
+        let mut cfg = SceneCfg::default();
+        cfg.events = 0.0;
+        cfg.critters = 0.0;
+        let mut s = Scene::new(300, 75, 7, &cfg);
+        let t = s.now();
+        let x = s.cam + s.w as f32 * 0.2;
+        s.critters.spawn_demo(events::Kind::Walker, x, t);
+        let a = s.critters.last_id();
+        s.critters.spawn_demo(events::Kind::Walker, x + 30.0, t);
+        let b = s.critters.last_id();
+        s.critters.set_walking(a, 1.0);
+        s.critters.set_walking(b, -1.0);
+        let mut closest = f32::MAX;
+        for _ in 0..(8.0 / DT) as usize {
+            s.update(DT, 0.0);
+            let (Some((ax, ay)), Some((bx, by))) = (s.critters.pos_of(a), s.critters.pos_of(b)) else { break };
+            if (ax - bx).abs() < 1.5 {
+                closest = closest.min((ay.round() - by.round()).abs());
+            }
+            if std::env::var_os("DBG").is_some() { eprintln!("{ax:.1},{ay:.2}  {bx:.1},{by:.2}"); }
+        }
+        assert!(closest >= 1.0 && closest < f32::MAX, "they walked through each other (row gap {closest})");
+    }
+
+    #[test]
+    fn a_snowball_hit_earns_cheer() {
+        let mut s = walker_scene();
+        let t = s.now();
+        let (px, py) = { let p = s.player.as_ref().unwrap(); (p.centre(), p.y) };
+        s.player.as_mut().unwrap().dir = 1.0;
+        s.critters.spawn_demo(events::Kind::Walker, px + 12.0, t);
+        let id = s.critters.last_id();
+        s.critters.set_walking(id, 0.0);
+        let _ = py;
+        let before = s.pockets.cheer;
+        s.snowball(); // scoop…
+        run(&mut s, 0.8);
+        s.snowball(); // …and throw
+        run(&mut s, 2.0);
+        assert!(s.pockets.cheer > before, "cheer {before} → {}", s.pockets.cheer);
+    }
+
+    #[test]
+    fn the_shop_sells_cocoa_for_cheer() {
+        let mut s = walker_scene();
+        let Some((kx, base)) = s.shop.as_ref().map(|k| (k.centre(), k.base)) else { panic!("no shop placed") };
+        {
+            let p = s.player.as_mut().unwrap();
+            p.x = kx as f32 - 1.0;
+            p.y = base as f32 + 2.0;
+        }
+        s.update(DT, 0.0);
+        assert!(matches!(s.focus, Some(Focus::Shop(..))), "focus {:?}", s.focus);
+        s.interact();
+        assert!(s.shop.as_ref().unwrap().open);
+        assert_eq!(s.pockets.cheer, 5);
+        s.number(1); // cocoa, 3
+        assert_eq!((s.pockets.cheer, s.pockets.count(shop::Item::Cocoa)), (2, 1));
+        s.number(1); // can't afford another
+        assert_eq!((s.pockets.cheer, s.pockets.count(shop::Item::Cocoa)), (2, 1));
+        assert!(s.close_panels());
+        s.number(1); // drink it
+        assert_eq!(s.pockets.count(shop::Item::Cocoa), 0);
+        assert!(s.pockets.cozy_until > s.now());
+    }
+
+    #[test]
+    fn walking_in_a_front_door_and_back_out() {
+        let mut s = walker_scene();
+        let (door, base) = { let h = &s.village.houses[0]; (h.door(), h.base) };
+        let lo = (s.ctx.ground_row[door as usize] + 4).min(s.h as i32 - 2) as f32;
+        {
+            let p = s.player.as_mut().unwrap();
+            p.x = door as f32 - 0.5;
+            p.y = lo.max(base as f32);
+        }
+        s.update(DT, 0.0);
+        if !matches!(s.focus, Some(Focus::Door(0, ..))) {
+            // this house's doorstep isn't reachable from the snowfield here
+            return;
+        }
+        let outside = { let p = s.player.as_ref().unwrap(); (p.x, p.y) };
+        s.interact();
+        assert!(s.is_inside());
+        run(&mut s, 1.0);
+        s.leave();
+        assert!(!s.is_inside());
+        let p = s.player.as_ref().unwrap();
+        assert_eq!((p.x, p.y), outside);
+    }
+
+    #[test]
+    fn daylight_follows_the_sun() {
+        use daylight::compute;
+        let (rise, set) = (7.5 * 60.0, 17.0 * 60.0);
+        assert_eq!(compute("auto", 0.0, rise, set).sun, 0.0);
+        assert!(compute("auto", 12.0 * 60.0, rise, set).sun > 0.99);
+        let dusk = compute("auto", set + 10.0, rise, set);
+        assert!(dusk.sun > 0.0 && dusk.sun < 1.0 && dusk.warm > 0.8, "{dusk:?}");
+        assert_eq!(compute("night", 12.0 * 60.0, rise, set).sun, 0.0);
+        assert!(compute("noon", 0.0, rise, set).sun > 0.99);
     }
 }

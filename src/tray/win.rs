@@ -121,7 +121,7 @@ fn show_menu(hwnd: HWND) {
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(m, MF_STRING | check(flag(config, WINDOW_SNOW)), ID_SNOW, wide("Window snow").as_ptr());
         AppendMenuW(m, MF_STRING | check(flag(config, SOUND)), ID_SOUND, wide("Sound").as_ptr());
-        AppendMenuW(m, MF_STRING | check(platform::autostart_get().unwrap_or(false)), ID_AUTOSTART, wide("Start with Windows").as_ptr());
+        AppendMenuW(m, MF_STRING | check(platform::autostart_get().unwrap_or(false)), ID_AUTOSTART, wide("Run at startup").as_ptr());
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(m, MF_STRING, ID_QUIT, wide("Quit wallpaper").as_ptr());
         SetMenuDefaultItem(m, ID_SETTINGS as u32, 0);

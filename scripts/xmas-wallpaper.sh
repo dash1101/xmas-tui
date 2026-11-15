@@ -9,10 +9,11 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KITTEN="${KITTEN:-$(command -v kitten || echo "$HOME/.local/bin/kitten")}"
-# an installed release keeps its binary in bin/ (and updates it there);
-# a source checkout runs its own build
+# an installed release keeps its binary in bin/ (and updates it there); a
+# source checkout runs its own build; the .deb puts it on the PATH
 BIN="$DIR/bin/xmas-tui"
 [[ -x "$BIN" ]] || BIN="$DIR/target/release/xmas-tui"
+[[ -x "$BIN" ]] || BIN="$(command -v xmas-tui || true)"
 
 # Wait until a real monitor is connected (after deep sleep the display can
 # vanish entirely; starting a panel then would attach to nothing).

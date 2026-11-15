@@ -20,11 +20,18 @@ jobs:
       - run: cargo build --release
         env:
           XMAS_RELEASE: "1"
-      - run: cp target/release/xmas-tui xmas-tui-linux-x86_64
+      - name: package
+        run: |
+          cp target/release/xmas-tui xmas-tui-linux-x86_64
+          cp scripts/get.sh xmas-tui-linux-installer.sh
+          ./packaging/linux/build-deb.sh "${GITHUB_REF_NAME#v}" target/release/xmas-tui .
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: xmas-tui-linux-x86_64
+          path: |
+            xmas-tui-linux-x86_64
+            xmas-tui-linux-installer.sh
+            xmas-tui_*_amd64.deb
 
   windows:
     runs-on: windows-latest
@@ -43,12 +50,20 @@ jobs:
           cp packaging/README-Windows.txt xmas-tui-windows/README.txt
           cp config.example.toml LICENSE assets/fonts/LICENSE-*.txt xmas-tui-windows/
           7z a xmas-tui-windows.zip xmas-tui-windows
+      - name: installer (per-user, no admin)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          & $iscc "/DAppVersion=$ver" "/DSrc=$pwd\xmas-tui-windows" "/O$pwd" packaging\windows\xmas-tui.iss
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             xmas-tui-windows-x86_64.exe
             xmas-tui-windows.zip
+            xmas-tui-setup-x86_64.exe
 
   publish:
     needs: [linux, windows]
