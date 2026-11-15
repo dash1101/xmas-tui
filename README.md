@@ -23,8 +23,9 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   cobbled sidewalk, two-lane traffic, a railway with a station, and a sky above the sky.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
   along, step inside houses, and spend "cheer" at the cocoa cabin.
-- **Townsfolk and wildlife**: deer, foxes, rabbits, carollers and kids who chat in groups, play, gather for the
-  light shows and step around each other.
+- **Townsfolk and wildlife**: named neighbours who hold real back-and-forth conversations about what's going
+  on, react to shooting stars, Santa, fireworks and power cuts, gather for the light shows and step around
+  each other; deer, foxes and rabbits too.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
 - **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather and a village map.
 - **Synthesized music and sound**: no audio files, all generated live, with live level meters.
@@ -86,9 +87,10 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **1**–**5** | use an item, or buy one while the cabin's menu is open |
 | **Esc** | close a menu, or step back outside |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
+| **right-click** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager too) | carry them about, then drop them in the snow |
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
-| **⚙** or **right-click** | settings |
+| **⚙** | settings |
 
 ## 🌟 What's in the scene
 - A big tiered tree with light strings that cycle through twinkle, chase, wave, breathe and sparkle patterns,
@@ -115,7 +117,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
   The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the Scene tab.
 - **E, Space or Enter** interacts with whatever the `[E]` prompt points at:
-  - **people:** say hello and they answer;
+  - **people:** the first time, they say hello and give their name; after that each E is the next line of a
+    little chat about what's going on (the snow, the train, the light show…);
   - **animals:** a pat, or (with berries in hand) a snack, after which they tag along for a while;
   - **berry bushes:** pick a few berries (they grow back);
   - **front doors:** step inside: a cozy room with a fire, a tree, someone home and a cat on the rug (the church
@@ -130,7 +133,18 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   show by the big tree, finding constellations. It buys things at the **Cocoa & Gifts** cabin: hot cocoa (cozy
   glow), gingerbread and candy canes (to give away), carrots (a deer or rabbit becomes a friend) and a lantern.
   **I** shows the pockets; **1**–**5** use what's in them.
-- The villager can be turned off with **Villager (WASD)** in the Scene tab.
+- **Right-click** shows what can be done with whatever's under the pointer, and the villager walks over to do it:
+  - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
+  - **the villager:** the stats card and Christmas list, or the pockets;
+  - **people:** say hello, invite along or say goodbye, give a gingerbread or candy cane, throw a snowball;
+  - **animals:** pet, feed a berry, give a carrot;
+  - **houses and the church:** visit, or switch the lights / ring the bells;
+  - **the cocoa cabin, the station, the sky:** shop, ask about the next train, wish on a star.
+  The settings are always at the bottom of the menu (and on ⚙).
+- **The Christmas list** (on the stats card) has nine little goals: hellos, chats, feeding animals, visiting homes,
+  giving a gift, landing snowballs, watching a light show, finding constellations, walking the village end to end.
+  Each pays cheer when it's done.
+- The villager can be turned off with **Villager (WASD)** in the Scene tab; **Walk speed** goes up to 6×.
 
 **Mouse**
 - **Drag any widget** to move it. Positions are saved, and can be locked or reset in settings.
@@ -248,7 +262,8 @@ The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) 
 `xmas-tui.exe`; its README explains how to use it.
 - **How it runs:** it draws the same grid itself, with fonts bundled inside the `.exe`, and attaches behind the
   desktop icons on the main monitor. It pauses during fullscreen games.
-- **Controls:** ⚙ (top-right corner) opens settings, which include **Run at startup** and **Quit**.
+- **Controls:** ⚙ (top-right corner) opens settings, which include **Run at startup** and **Quit**. (Right-click on
+  the desktop belongs to Windows, so the right-click menus are a Linux / `--windowed` thing.)
   Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
   scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
 - **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons
@@ -283,9 +298,15 @@ The same native window also works on Linux with `--windowed`.
 Deer, foxes, rabbits, people carrying lanterns (often in small groups) and pairs of kids wander through. Animals often
 stick around for a few minutes. They also interact:
 - **Petting and greeting:** passers-by stop to pet animals (hearts float up), greet each other and say hi to the snowman.
-- **Conversations:** people walking together stop for a chat now and then, and strangers who meet sometimes do too.
-  Each line pops up in turn over whoever's speaking. Drop two people next to each other, or lead companions
-  over to someone, to get one going.
+- **Conversations:** everyone has a name, and conversations are written exchanges where each line answers the last.
+  They fit what's going on: morning, afternoon, evening or night; a blizzard; a train that just came in; a light
+  show; the power cut; Santa overhead; a shooting star; how many days are left until Christmas; and where they're
+  standing (the big tree, the church, the cabin, the station). People walking together stop to chat now and then,
+  and strangers who meet sometimes do too. Drop two people next to each other, or lead companions over to someone,
+  to get one going. A passer-by may stop and chime in, and the group answers them.
+- **Reactions:** when something happens (a shooting star, a comet, Santa, fireworks, the light show, the aurora
+  flaring, a blizzard, a train pulling in, the power going out or coming back, a typed easter egg) the people in
+  view stop, look and say something about it.
 - **Play:** a fox plays chase with a rabbit (the fox never catches it), and kids have snowball fights.
 - **Manners:** nobody walks through anybody. People step a row up or down to get round each other (and the
   villager), or stop for a chat first and then step round.

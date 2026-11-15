@@ -193,6 +193,8 @@ pub struct Director {
     /// Passengers off a train at the station (columns), for the scene to
     /// send walking into the village.
     pub arrivals: Vec<f32>,
+    /// Things people might notice: (what, where, if anywhere in particular).
+    pub happenings: Vec<(super::dialogue::Ev, Option<f32>)>,
     car_cd: f32,
     /// Traffic keeps left (UK, Japan, Australia…) instead of right.
     pub drive_left: bool,
@@ -237,6 +239,7 @@ impl Director {
             show_at: None,
             gather: None,
             arrivals: vec![],
+            happenings: vec![],
             car_cd: 0.0,
             drive_left: false,
             next_train: 20.0,
@@ -289,6 +292,7 @@ impl Director {
 
     /// Village-wide rainbow light show, with its sparkle.
     pub fn light_show(&mut self, t: f32, dur: f32) {
+        self.happenings.push((super::dialogue::Ev::LightShow, None));
         self.show.fire(t, dur);
         self.sound(Sfx::LightShow, CENTER, 1.0);
     }
@@ -442,6 +446,7 @@ impl Director {
     }
 
     pub fn firework(&mut self, ctx: &Ctx) {
+        self.happenings.push((super::dialogue::Ev::Fireworks, None));
         let colors = [pal::RED, pal::GOLD, pal::GREEN, pal::BLUE, Rgb::hex(0xff7ae0), Rgb::WHITE];
         let x = ctx.cam + self.rng.range(ctx.vw as f32 * 0.15, ctx.vw as f32 * 0.85);
         let color = *self.rng.pick(&colors);
@@ -604,7 +609,10 @@ impl Director {
                     self.streaks.last_mut().unwrap().age = -(i as f32) * self.rng.range(0.3, 0.8);
                 }
             }
-            78..=83 => self.flare.fire(t, self.rng.range(25.0, 45.0)),
+            78..=83 => {
+                self.flare.fire(t, self.rng.range(25.0, 45.0));
+                self.happenings.push((super::dialogue::Ev::Aurora, None));
+            }
             84..=88 => {
                 // announced: everyone gathers round the big tree first
                 if self.show_at.is_none() && !self.show.active(t) {
@@ -614,7 +622,10 @@ impl Director {
                 }
             }
             89..=94 => self.house_toggle = Some(self.rng.int(0, 64) as usize),
-            95..=96 => self.blizzard.fire(t, self.rng.range(15.0, 25.0)),
+            95..=96 => {
+                self.blizzard.fire(t, self.rng.range(15.0, 25.0));
+                self.happenings.push((super::dialogue::Ev::Blizzard, None));
+            }
             _ => {
                 // rare: a comet drifting across the whole sky
                 let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
@@ -785,6 +796,8 @@ impl Director {
             s.age += dt;
             if was <= 0.0 && s.age > 0.0 {
                 lit.push((if s.life > 10.0 { Sfx::Comet } else { Sfx::ShootingStar }, s.x));
+                let ev = if s.life > 10.0 { super::dialogue::Ev::Comet } else { super::dialogue::Ev::ShootingStar };
+                self.happenings.push((ev, Some(s.x + ctx.cam)));
             }
             if s.age > 0.0 {
                 s.x += s.vx * dt;

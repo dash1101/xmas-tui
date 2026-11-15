@@ -89,24 +89,6 @@ const MOON: &[&str] = &[
     "full speed ahead, reindeer!",
 ];
 
-const WALKER: &[&str] = &[
-    "merry Christmas!",
-    "evening!",
-    "lovely night for a walk",
-    "happy holidays!",
-    "mind the ice!",
-    "is that a sleigh?",
-    "cocoa time soon",
-    "the tree looks amazing this year",
-    "brr! should've worn gloves",
-    "season's greetings!",
-    "did you see the lights?",
-    "off to the carol service",
-    "just picking up some pies",
-    "the snow's coming down nicely",
-    "ho ho—oh, wrong line",
-    "have a cozy night!",
-];
 
 const WISH: &[&str] = &[
     "make a wish!",
@@ -172,63 +154,10 @@ const KID_POKED: &[&str] = &["tag, you're it!", "hehe, that tickles!", "wanna bu
 const PET_DEER: &[&str] = &["hello, gentle deer", "what lovely antlers!", "are you one of Santa's?", "soft nose!", "shh, easy now…"];
 const PET_FOX: &[&str] = &["hello, little fox!", "what a fluffy tail!", "you look cozy", "aren't you clever", "no stealing cookies!"];
 const PET_RABBIT: &[&str] = &["hi, bunny!", "look at those ears!", "so soft!", "hop hop!", "you're adorable"];
-const GREET_A: &[&str] = &["merry Christmas!", "evening, neighbour!", "lovely snow tonight!", "happy holidays!", "off to the carols?", "cold enough for you?"];
-const GREET_B: &[&str] = &["and to you!", "evening!", "isn't it just?", "you too!", "wouldn't miss them!", "brr, just about!"];
 const TO_SNOWMAN: &[&str] = &["hi, snowman!", "nice hat, snowman!", "looking sharp, snowman", "stay frosty!", "evening, mister snowman"];
 const SNOWMAN_REPLY: &[&str] = &["hello!", "thanks, it's new!", "you too!", "*happy snowman noises*", "brr — I mean, hi!"];
 const FOX_GIVES_UP: &[&str] = &["…next time, bunny.", "too fast!", "*pants happily*", "fine, you win", "…was just playing anyway"];
 
-// ---- conversations: little scripted exchanges, speakers alternate
-// (A, B, A, B…; a third speaker, when there is one, takes every third line)
-const CHAT2: &[&[&str]] = &[
-    &["did you see the lights on the church?", "every year they add more!", "one day it'll be visible from space", "ha! one day."],
-    &["finished your shopping yet?", "I haven't even started…", "there's still time!", "is there though?"],
-    &["smell that? gingerbread.", "it's coming from the bakery", "we should go before it's gone", "race you!"],
-    &["the snow's perfect for snowmen", "too powdery, if you ask me", "you're no fun", "I'm extremely fun."],
-    &["how's your mum?", "making enough stuffing for an army", "so, the usual", "the usual!"],
-    &["I heard sleigh bells last night", "probably the wind…", "the wind doesn't go ho ho ho", "…fair point"],
-    &["are you going to the carols?", "only if there's cocoa after", "there's always cocoa after", "then I'm in!"],
-    &["I wrapped everything in comics", "that's very eco of you", "…I ran out of paper", "still counts!"],
-    &["the train's late again", "it's the snow on the tracks", "it's always the snow", "it IS a lot of snow"],
-    &["who built that snowman?", "nobody knows", "it just… appeared?", "best not to ask"],
-    &["I tried to knit a scarf", "and?", "it's a very long sock now", "socks are good!"],
-    &["is it me or is it colder tonight?", "it's definitely colder", "I can't feel my nose", "it's still there, don't worry"],
-    &["have you seen the fox around?", "it stole my mitten yesterday", "a fashionable fox", "a menace, more like"],
-    &["what are you asking Santa for?", "a quiet morning", "that's not a toy", "I'm not seven anymore"],
-    &["the big tree looks taller this year", "they say it grows when no one's looking", "trees do that, yes", "spookily, though"],
-    &["do you think it'll snow on Christmas?", "it hasn't stopped snowing since November", "so… yes?", "so, yes."],
-    &["I've been practising my carols", "let's hear one!", "♪ deck the… ♪ no, I'm shy", "next year then"],
-    &["the bakery's out of mince pies", "a tragedy", "they're making more at nine", "I'll be first in line"],
-    &["look at the stars tonight", "you can see the whole Milky Way", "and the aurora!", "best night of the year"],
-    &["my cat climbed the tree again", "with the ornaments on?", "she IS an ornament now", "festive cat!"],
-];
-const CHAT3: &[&[&str]] = &[
-    &["who's up for a snowball fight?", "always!", "only if I'm on the winning side", "there are no sides, just snow"],
-    &["cocoa at mine after this?", "with marshmallows?", "obviously with marshmallows", "then it's a plan!"],
-    &["did everyone get the card I sent?", "the one with glitter?", "I'm still finding glitter", "glitter is forever"],
-    &["shall we go see the big tree?", "lead the way!", "I'll catch up, my boots are slow", "we'll wait for you!"],
-];
-const KID_CHAT: &[&[&str]] = &[
-    &["I'm gonna stay up and see Santa!", "you fell asleep at eight last year", "that was a TRAINING year", "oh, okay"],
-    &["race you to the tree!", "no fair, you started already!", "hehe!", "wait for meee!"],
-    &["I made a snow angel!", "where?", "…a deer walked on it", "it's a deer angel now"],
-    &["what's your favourite reindeer?", "Rudolph, obviously", "I like Blitzen", "Blitzen's cool too"],
-];
-// the player character's side of things
-const YOU_HI: &[&str] = &["hello there!", "merry Christmas!", "evening!", "lovely night, isn't it?", "happy holidays!", "how's it going?", "nice hat!"];
-const THEY_REPLY: &[&str] = &[
-    "oh, hello! merry Christmas!",
-    "lovely to see you out and about",
-    "evening! mind the icy bit by the lamp",
-    "have you seen the big tree? gorgeous",
-    "happy holidays to you too!",
-    "off to the bakery — want anything?",
-    "brr, isn't it chilly!",
-    "you look cozy in that hat",
-    "the church bells are ringing soon",
-    "can't stop, cocoa's getting cold!",
-];
-const KID_REPLY: &[&str] = &["hi!! wanna build a snowman?", "I saw a fox!", "is it Christmas yet?", "tag! you're it!", "I'm on the nice list. probably.", "do you like my hat?"];
 const FOLLOW_YES: &[&str] = &["sure, I'll walk with you!", "lead the way!", "a stroll? lovely", "ooh, an adventure!", "I've got nowhere to be"];
 const FOLLOW_KID: &[&str] = &["yay! where are we going?", "I'm coming too!", "can we see the train?"];
 const FOLLOW_BYE: &[&str] = &["see you around!", "thanks for the walk!", "merry Christmas!", "that was fun!", "bye for now!"];
@@ -285,9 +214,6 @@ impl Lines {
         self.fresh(|r| r.pick(MOON).to_string())
     }
 
-    pub fn walker(&mut self) -> String {
-        self.fresh(|r| r.pick(WALKER).to_string())
-    }
 
     pub fn wish(&mut self) -> String {
         self.fresh(|r| r.pick(WISH).to_string())
@@ -315,11 +241,6 @@ impl Lines {
         }).to_string())
     }
 
-    /// Two passers-by greeting each other: (first, reply).
-    pub fn greet_pair(&mut self) -> (String, String) {
-        let i = self.rng.int(0, GREET_A.len() as i32) as usize;
-        (GREET_A[i].to_string(), GREET_B[i.min(GREET_B.len() - 1)].to_string())
-    }
 
     pub fn to_snowman(&mut self) -> (String, String) {
         let a = self.fresh(|r| r.pick(TO_SNOWMAN).to_string());
@@ -331,34 +252,7 @@ impl Lines {
         self.fresh(|r| r.pick(FOX_GIVES_UP).to_string())
     }
 
-    /// A little exchange for `n` (2 or 3) people; kids talk like kids.
-    /// Returns the lines in order; speaker k says line k (mod n).
-    pub fn conversation(&mut self, n: usize, kids: bool) -> Vec<String> {
-        let pool: &[&[&str]] = if kids { KID_CHAT } else if n >= 3 { CHAT3 } else { CHAT2 };
-        let i = self.rng.int(0, pool.len() as i32) as usize;
-        // avoid replaying the last few conversations
-        let mut idx = i;
-        for k in 0..pool.len() {
-            let j = (i + k) % pool.len();
-            if !self.recent.contains(&pool[j][0].to_string()) {
-                idx = j;
-                break;
-            }
-        }
-        let lines: Vec<String> = pool[idx].iter().map(|s| s.to_string()).collect();
-        self.recent.push_back(lines[0].clone());
-        if self.recent.len() > 24 {
-            self.recent.pop_front();
-        }
-        lines
-    }
 
-    /// The player says hi; (the player's line, the reply).
-    pub fn you_hi(&mut self, kid: bool) -> (String, String) {
-        let a = self.fresh(|r| r.pick(YOU_HI).to_string());
-        let b = self.fresh(|r| r.pick(if kid { KID_REPLY } else { THEY_REPLY }).to_string());
-        (a, b)
-    }
 
     pub fn follow_yes(&mut self, kid: bool) -> String {
         self.fresh(|r| r.pick(if kid { FOLLOW_KID } else { FOLLOW_YES }).to_string())

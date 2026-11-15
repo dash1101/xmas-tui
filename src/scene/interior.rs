@@ -541,7 +541,7 @@ impl Interior {
             if mx != 0.0 {
                 p.dir = mx.signum();
             }
-            let k = p.speed.clamp(0.25, 3.0);
+            let k = p.speed.clamp(0.25, 6.0);
             p.x += mx * 11.0 * k * dt;
             p.y = (p.y + my * 5.0 * k.sqrt() * dt).clamp((self.floor / 2 + 5) as f32, (self.h - 1) as f32);
         }

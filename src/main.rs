@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod color;
 mod config;
+mod ctxmenu;
 mod export;
 mod frame;
 mod platform;
@@ -65,6 +66,9 @@ struct Args {
     time: Option<String>,
     /// --export: at the cocoa cabin with the menu and pockets open.
     shop: bool,
+    /// --export: the stats card open / a right-click menu at (x, y).
+    stats: bool,
+    menu: Option<(i32, i32)>,
 }
 
 fn parse_args() -> Args {
@@ -95,6 +99,8 @@ fn parse_args() -> Args {
         sky: 0.0,
         time: None,
         shop: false,
+        stats: false,
+        menu: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -114,6 +120,13 @@ fn parse_args() -> Args {
             "--clean" => a.clean = true,
             "--time" => a.time = it.next(),
             "--shop" => a.shop = true,
+            "--stats" => a.stats = true,
+            "--menu" => {
+                a.menu = it.next().and_then(|v| {
+                    let (x, y) = v.split_once(',')?;
+                    Some((x.parse().ok()?, y.parse().ok()?))
+                })
+            }
             "--sky" => a.sky = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--inside" => a.inside = it.next().and_then(|v| v.parse().ok()),
             "--after-update" => a.after_update = it.next().and_then(|v| v.parse().ok()),
@@ -509,6 +522,13 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     if args.shop {
         scene.preview_shop();
     }
+    if args.stats {
+        scene.act(scene::Do::Stats);
+    }
+    let menu = args.menu.map(|(x, y)| {
+        let (title, items) = scene.menu_at(x, y);
+        ctxmenu::CtxMenu::new(x, y, title, items, w as i32, h as i32)
+    });
     if args.clean {
         scene.quiet_player();
     }
@@ -523,6 +543,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         widgets.draw(&mut frame, t);
             settings.draw_gear(&mut frame, t);
             settings.draw(&mut frame, cfg, t);
+        }
+        if let Some(m) = &menu {
+            m.draw(&mut frame);
         }
         frame.compose();
         if args.raw {

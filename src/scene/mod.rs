@@ -4,6 +4,7 @@
 pub mod critters;
 pub mod events;
 pub mod daylight;
+pub mod dialogue;
 pub mod shop;
 pub mod high_sky;
 pub mod interior;
@@ -77,6 +78,13 @@ pub struct Scene {
     /// blackout they cause.
     zaps: u32,
     zap_reset: f32,
+    /// When things last happened, for what people talk about: a train
+    /// at the station, a light show, a shooting star, Santa overhead.
+    last_train: f32,
+    last_show: f32,
+    last_stars: f32,
+    last_sleigh: f32,
+    sleigh_was: bool,
     /// The map's unchanging parts (houses, trees, mountains, home).
     map: MiniMap,
     /// Indoors (the player went through a front door).
@@ -93,6 +101,8 @@ pub struct Scene {
     daylight: daylight::Daylight,
     pockets: shop::Pockets,
     show_pockets: bool,
+    show_stats: bool,
+    goal: Option<Goal>,
     show_cheered: bool,
     blackout_until: f32,
     power_back: bool,
@@ -110,6 +120,37 @@ pub struct Scene {
     clock: f64,
     /// Total rebased away; scene time handed out is `clock - epoch`.
     epoch: f64,
+}
+
+/// Something to do, from the right-click menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Do {
+    /// Arrive from the sky at (world column, row).
+    DropIn(f32, f32),
+    WalkTo(f32, f32),
+    Stats,
+    Pockets,
+    Talk(u64),
+    Invite(u64),
+    Give(u64, shop::Item),
+    Pet(u64),
+    Snowball(u64),
+    Visit(usize),
+    Shop,
+    /// Poke whatever's at this world cell (the station, a house's lights…).
+    Poke(i32, i32),
+    Wish,
+    LookUp,
+    LookDown,
+    Leave,
+}
+
+/// Where the villager is walking on their own, and what to do there.
+#[derive(Clone, Copy, Debug)]
+struct Goal {
+    then: Do,
+    /// Give up after this (scene time).
+    until: f32,
 }
 
 /// What the map widget shows: the world from end to end.
@@ -378,6 +419,11 @@ impl Scene {
             focus: None,
             zaps: 0,
             zap_reset: 0.0,
+            last_train: -1e9,
+            last_show: -1e9,
+            last_stars: -1e9,
+            last_sleigh: -1e9,
+            sleigh_was: false,
             map: MiniMap::default(),
             inside: None,
             high: high_sky::HighSky::new(w, h, seed),
@@ -387,6 +433,8 @@ impl Scene {
             daylight: daylight::Daylight::default(),
             pockets: shop::Pockets::new(),
             show_pockets: false,
+            show_stats: false,
+            goal: None,
             show_cheered: false,
             blackout_until: 0.0,
             power_back: false,
@@ -465,6 +513,195 @@ impl Scene {
         }
     }
 
+    /// The right-click menu for screen cell (x, y): a title and what can be
+    /// done (the app adds "settings…").
+    pub fn menu_at(&self, sx: i32, sy: i32) -> (String, Vec<(String, Do)>) {
+        let t = self.now();
+        let mut out: Vec<(String, Do)> = vec![];
+        if self.inside.is_some() {
+            return ("indoors".into(), vec![("step back outside".into(), Do::Leave)]);
+        }
+        let y = sy - self.oy_i();
+        if y < 0 {
+            return ("the high sky".into(), vec![("wish on a star".into(), Do::Wish), ("back down to the village".into(), Do::LookDown)]);
+        }
+        let x = sx + self.cam_i();
+        let Some(p) = &self.player else {
+            return ("the village".into(), vec![("look up into the sky".into(), Do::LookUp)]);
+        };
+        if p.contains(x, y) {
+            return ("you".into(), vec![("my stats & Christmas list".into(), Do::Stats), ("my pockets".into(), Do::Pockets)]);
+        }
+        if let Some(id) = self.critters.id_at(x, y, t) {
+            let who = self.critters.label(id);
+            if self.critters.is_person(id) {
+                out.push((format!("say hello to {who}"), Do::Talk(id)));
+                let along = self.critters.following(id);
+                out.push((if along { format!("say goodbye to {who}") } else { format!("invite {who} along") }, Do::Invite(id)));
+                for it in [shop::Item::Gingerbread, shop::Item::CandyCane] {
+                    if self.pockets.count(it) > 0 {
+                        out.push((format!("give {who} a {}", it.name()), Do::Give(id, it)));
+                    }
+                }
+            } else {
+                out.push((format!("pet {who}"), Do::Pet(id)));
+                if p.berries > 0 {
+                    out.push((format!("feed {who} a berry"), Do::Pet(id)));
+                }
+                if self.pockets.count(shop::Item::Carrot) > 0 {
+                    out.push((format!("give {who} a carrot"), Do::Give(id, shop::Item::Carrot)));
+                }
+            }
+            out.push((format!("throw a snowball at {who}"), Do::Snowball(id)));
+            return (who, out);
+        }
+        if let Some(s) = self.shop.as_ref().filter(|s| s.contains(x, y)) {
+            let _ = s;
+            return ("Cocoa & Gifts".into(), vec![("visit the cocoa cabin".into(), Do::Shop)]);
+        }
+        if self.on_station(x, y) {
+            return ("the station".into(), vec![("when's the next train?".into(), Do::Poke(x, y))]);
+        }
+        if let Some(i) = self.village.houses.iter().position(|h| h.contains(x, y)) {
+            let church = self.village.houses[i].church;
+            let title = if church { "the church" } else { "a cozy house" };
+            let mut v = vec![(if church { "go inside".to_string() } else { "visit".to_string() }, Do::Visit(i))];
+            v.push((if church { "ring the bells".into() } else { "lights on / off".into() }, Do::Poke(x, y)));
+            return (title.into(), v);
+        }
+        if self.in_sky(sx, y) {
+            return ("the sky".into(), vec![("wish on a star".into(), Do::Wish), ("look up into the sky".into(), Do::LookUp)]);
+        }
+        // open ground (or anywhere else): drop in, or walk over
+        let lo = self.lo_at(x as f32);
+        let row = (y as f32).clamp(lo, self.h as f32 - 1.0);
+        ("here".into(), vec![("✦ drop in here".into(), Do::DropIn(x as f32, row)), ("walk over here".into(), Do::WalkTo(x as f32, row))])
+    }
+
+    /// First walkable row at world column `x`.
+    fn lo_at(&self, x: f32) -> f32 {
+        let g = &self.ctx.ground_row;
+        (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32
+    }
+
+    /// Do something from the right-click menu.
+    pub fn act(&mut self, what: Do) {
+        let t = self.now();
+        match what {
+            Do::DropIn(x, row) => {
+                self.goal = None;
+                if let Some(p) = &mut self.player {
+                    p.drop_in(x, row, t, &mut self.director);
+                }
+                self.look_at(x);
+                self.sky_up_target = 0.0;
+            }
+            Do::Stats => {
+                self.show_stats = !self.show_stats;
+                self.show_pockets = false;
+            }
+            Do::Pockets => {
+                self.show_pockets = !self.show_pockets;
+                self.show_stats = false;
+            }
+            Do::Poke(x, y) => {
+                self.poke(x, y);
+            }
+            Do::Wish => {
+                let (x, y) = (self.rng.range(10.0, self.w as f32 - 10.0), self.rng.range(2.0, self.ctx.sky_rows as f32 * 1.4));
+                self.director.shooting_star(x, y);
+                self.director.happenings.push((dialogue::Ev::ShootingStar, Some(x + self.cam)));
+                if let Some(p) = &self.player {
+                    self.director.say(p.centre().round() as i32, p.y as i32 - 4, "✦ I wish… ✦", t, 2.4, 6);
+                }
+            }
+            Do::LookUp => {
+                self.pan_up(true);
+                self.pan_up(true);
+            }
+            Do::LookDown => self.sky_up_target = 0.0,
+            Do::Leave => self.leave(),
+            // everything else: walk over there first
+            _ => self.goal = Some(Goal { then: what, until: t + 25.0 }),
+        }
+    }
+
+    /// Where a goal is (world column, row, how close counts as there).
+    fn goal_spot(&self, g: &Goal) -> Option<(f32, f32, f32)> {
+        match g.then {
+            Do::WalkTo(x, y) => Some((x, y, 1.0)),
+            Do::Talk(id) | Do::Invite(id) | Do::Give(id, _) | Do::Pet(id) => self.critters.position(id).map(|(x, y)| (x, y, 5.0)),
+            Do::Snowball(id) => self.critters.position(id).map(|(x, y)| (x, y, 22.0)),
+            Do::Visit(i) => self.village.houses.get(i).map(|h| (h.door() as f32 + 0.5, self.lo_at(h.door() as f32).max(h.base as f32), 1.2)),
+            Do::Shop => self.shop.as_ref().map(|s| (s.centre() as f32, s.base as f32 + 2.0, 3.0)),
+            _ => None,
+        }
+    }
+
+    /// Walking to a goal: the direction keys to "hold" this frame, and
+    /// doing the thing on arrival.
+    fn steer(&mut self, t: f32) -> Option<(f32, f32)> {
+        let g = self.goal?;
+        let p = self.player.as_ref()?;
+        if t > g.until || self.inside.is_some() {
+            self.goal = None;
+            return None;
+        }
+        let Some((gx, gy, reach)) = self.goal_spot(&g) else {
+            self.goal = None;
+            return None;
+        };
+        let (dx, dy) = (gx - p.centre(), gy - p.y);
+        let there = dx.abs() <= reach && dy.abs() <= if reach > 4.0 { 3.0 } else { 0.8 };
+        if !there {
+            let mx = if dx.abs() > reach * 0.6 { dx.signum() } else { 0.0 };
+            let my = if dy.abs() > 0.6 { dy.signum() } else { 0.0 };
+            return Some((mx, my));
+        }
+        self.goal = None;
+        if let Some(p) = &mut self.player {
+            if dx.abs() > 0.5 {
+                p.dir = dx.signum();
+            }
+        }
+        let focus_on = |s: &mut Self, id: u64| s.focus = s.critters.position(id).map(|(x, y)| Focus::Critter(id, x as i32, y as i32 - 4));
+        match g.then {
+            Do::Talk(id) | Do::Pet(id) => {
+                focus_on(self, id);
+                self.interact();
+            }
+            Do::Invite(id) => {
+                focus_on(self, id);
+                self.invite();
+            }
+            Do::Give(id, it) => {
+                focus_on(self, id);
+                if let Some(n) = shop::ITEMS.iter().position(|&i| i == it) {
+                    self.number(n + 1);
+                }
+            }
+            Do::Snowball(id) => {
+                focus_on(self, id);
+                // scoop (once), then throw as soon as it's packed
+                let (has, free) = self.player.as_ref().map(|p| (p.snowball, p.free(t))).unwrap_or((false, false));
+                if free {
+                    self.snowball();
+                }
+                if !(has && free) {
+                    self.goal = Some(Goal { then: Do::Snowball(id), until: t + 3.0 });
+                }
+            }
+            Do::Visit(i) => self.enter(i),
+            Do::Shop => {
+                if let Some(s) = &mut self.shop {
+                    s.open = true;
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// I: show / hide the pockets panel.
     pub fn toggle_pockets(&mut self) {
         if self.player.is_some() {
@@ -478,8 +715,9 @@ impl Scene {
         if let Some(s) = &mut self.shop {
             s.open = false;
         }
-        let had = shop_open || self.show_pockets;
+        let had = shop_open || self.show_pockets || self.show_stats;
         self.show_pockets = false;
+        self.show_stats = false;
         had
     }
 
@@ -518,6 +756,7 @@ impl Scene {
             shop::Item::Cocoa => {
                 self.pockets.take(item);
                 self.pockets.cozy_until = t + 45.0;
+                self.pockets.cocoa += 1;
                 self.director.say(px.round() as i32, py as i32 - 4, "mmm, cocoa!", t, 2.0, 6);
                 self.director.emote(px, py - 3.0, '♥', Rgb::hex(0xff6b8a), 2);
                 self.director.sound(Sfx::Munch, px, 0.6);
@@ -526,6 +765,7 @@ impl Scene {
                 Some(id) => {
                     self.pockets.take(item);
                     self.critters.gift(id, item.name(), t, &mut self.director);
+                    self.pockets.gifts += 1;
                     self.cheer(1);
                 }
                 None => {
@@ -538,6 +778,7 @@ impl Scene {
                 Some(id) => {
                     self.pockets.take(item);
                     self.critters.befriend(id, t, &mut self.director);
+                    self.pockets.fed += 1;
                     self.cheer(1);
                 }
                 None => {
@@ -583,6 +824,10 @@ impl Scene {
             }
             self.zap_reset -= s;
             self.blackout_until -= s;
+            self.last_train -= s;
+            self.last_show -= s;
+            self.last_stars -= s;
+            self.last_sleigh -= s;
             self.high.rebase(s);
             if let Some(inn) = &mut self.inside {
                 inn.rebase(s);
@@ -856,15 +1101,21 @@ impl Scene {
                     p.dir = face;
                 }
                 let berries = p.berries;
-                self.critters.meet(id, px, py, &mut p.berries, t, &mut self.director, &mut self.lines);
+                let known = self.pockets.greeted.contains(&id);
+                let earned = self.critters.meet(id, px, py, &mut p.berries, t, &mut self.director, &mut self.lines);
                 let fed = p.berries < berries;
-                // cheer: a first hello, or feeding an animal
-                if self.critters.is_person(id) && !self.pockets.greeted.contains(&id) {
-                    self.pockets.greeted.push(id);
-                    self.cheer(1);
-                } else if fed {
-                    self.cheer(2);
+                // cheer: a first hello, a chat run its course, or feeding an animal
+                if self.critters.is_person(id) {
+                    if !known {
+                        self.pockets.greeted.push(id);
+                    } else if earned > 0 {
+                        self.pockets.chats += 1;
+                    }
                 }
+                if fed {
+                    self.pockets.fed += 1;
+                }
+                self.cheer(if fed { 2 } else { earned });
             }
             Some(Focus::Shop(..)) => {
                 if let Some(s) = &mut self.shop {
@@ -880,6 +1131,7 @@ impl Scene {
                 let n = self.critters.pick_berries(b, t, &mut self.director);
                 if n > 0 {
                     p.berries = (p.berries + n).min(9);
+                    self.pockets.berries += n;
                     let msg = format!("{} ({} ●)", self.lines.pick(), p.berries);
                     self.director.say(px.round() as i32, py as i32 - 4, &msg, t, 2.6, 6);
                 } else {
@@ -909,6 +1161,9 @@ impl Scene {
         p.snowball = false;
         self.director.sound(Sfx::Click, h.door() as f32, 0.9);
         self.inside = Some(Box::new(inn));
+        if !self.pockets.houses.contains(&i) {
+            self.pockets.houses.push(i);
+        }
     }
 
     /// Back out into the snow, on the doorstep.
@@ -1070,6 +1325,7 @@ impl Scene {
             p.throw_until = t + 0.35;
             let (x, y, dir) = (p.centre(), p.y, p.dir);
             self.critters.throw(x, y, dir, &mut self.director);
+            self.pockets.thrown += 1;
         } else {
             p.scoop_until = t + 0.6;
             p.snowball = true;
@@ -1102,6 +1358,42 @@ impl Scene {
             || self.on_moon(sx, y)
     }
 
+    /// What's going on right now, as far as conversation goes.
+    fn talk_ctx(&self, t: f32) -> dialogue::TalkCtx {
+        let d = self.daylight;
+        let part = if d.sun < 0.15 {
+            dialogue::Part::Night
+        } else if d.arc < 0.3 {
+            dialogue::Part::Morning
+        } else if d.arc > 0.72 || (d.warm > 0.5 && d.arc > 0.5) {
+            dialogue::Part::Evening
+        } else {
+            dialogue::Part::Day
+        };
+        let days = {
+            let today = Local::now().date_naive();
+            let mut xmas = chrono::NaiveDate::from_ymd_opt(today.year(), 12, 25).unwrap_or(today);
+            if today > xmas {
+                xmas = chrono::NaiveDate::from_ymd_opt(today.year() + 1, 12, 25).unwrap_or(today);
+            }
+            (xmas - today).num_days()
+        };
+        dialogue::TalkCtx {
+            part,
+            snowy: self.director.blizzard.active(t) || self.director.gust_wind(t).abs() > 8.0,
+            train: t - self.last_train < 90.0,
+            show: t - self.last_show < 120.0,
+            blackout: t < self.blackout_until + 60.0,
+            sleigh: t - self.last_sleigh < 60.0,
+            stars: t - self.last_stars < 45.0,
+            days,
+            tree: self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.cx as f32),
+            church: self.village.houses.iter().find(|h| h.church).map(|h| h.door() as f32),
+            shop: self.shop.as_ref().map(|s| s.centre() as f32),
+            station: self.ctx.station.map(|(x, w)| (x + w / 2) as f32),
+        }
+    }
+
     /// Clicking the powerline: sparks. Keep at it and the whole village's
     /// power goes out for a while.
     fn zap(&mut self, x: i32, y: i32) {
@@ -1120,6 +1412,7 @@ impl Scene {
         }
         // blackout
         self.zaps = 0;
+        self.director.happenings.push((dialogue::Ev::Blackout, Some(xf)));
         let end = t + 25.0;
         self.blackout_until = end;
         self.power_back = true;
@@ -1135,12 +1428,7 @@ impl Scene {
         for tr in &mut self.trees {
             tr.dark_until = end + self.rng.range(0.0, 1.5);
         }
-        let mut people = self.critters.people();
-        people.truncate(2);
-        for (i, (px, py)) in people.into_iter().enumerate() {
-            let line = *self.rng.pick(&["who turned out the lights?!", "the power's out!", "eek! it's dark!", "was that the powerline?", "anyone got a candle?"]);
-            self.director.say(px, py - 1, line, t + 0.6 + i as f32 * 1.3, 2.8, 6);
-        }
+
     }
 
     /// Something in the village at world (x, y) — a present, the snowman, a
@@ -1253,6 +1541,7 @@ impl Scene {
             // up in the high sky
             let cam = self.cam;
             let cheer = self.high.click(x, y, t, &mut self.director, cam);
+            self.pockets.stars += cheer;
             self.cheer(cheer);
             return;
         }
@@ -1326,8 +1615,9 @@ impl Scene {
         } else {
             return;
         }
-        // every easter egg gets a little fanfare
+        // every easter egg gets a little fanfare (and the village notices)
         d.sound(Sfx::Fanfare, CENTER, 1.0);
+        d.happenings.push((dialogue::Ev::Magic, None));
         self.typed.clear();
     }
 
@@ -1364,13 +1654,20 @@ impl Scene {
             let ground = self.on_ground(wx as i32, cy as i32);
             self.director.cursor(wx, cy, self.cursor_vel.0, self.cursor_vel.1, ground, dt);
         }
+        // walking somewhere on their own (from the right-click menu); any
+        // direction key takes over again
+        if self.mv != (0.0, 0.0) {
+            self.goal = None;
+        }
+        let mv = self.steer(t).unwrap_or(self.mv);
+        let before = self.player.as_ref().map(|p| (p.x, p.y));
         let mut walked_out = false;
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
-            walked_out = inn.update(dt, t, self.mv, p);
+            walked_out = inn.update(dt, t, mv, p);
         } else if let Some(p) = &mut self.player {
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
-            p.update(dt, t, self.mv, lo, self.ww as f32, h, &mut self.director);
+            p.update(dt, t, mv, lo, self.ww as f32, h, &mut self.director);
             // the camera keeps the player comfortably in view while walking
             if p.moving {
                 // walking brings the view back down to earth
@@ -1388,6 +1685,27 @@ impl Scene {
         if walked_out {
             self.leave();
         }
+        // stats: how far the villager's walked, and whether they've been to
+        // both ends of the village
+        if let (Some((bx, by)), Some(p), None) = (before, &self.player, &self.inside) {
+            self.pockets.steps += ((p.x - bx).powi(2) + (p.y - by).powi(2)).sqrt();
+            if p.x < 30.0 {
+                self.pockets.ends.0 = true;
+            }
+            if p.x > self.ww as f32 - 34.0 {
+                self.pockets.ends.1 = true;
+            }
+        }
+        // the Christmas list
+        for i in self.pockets.newly_done() {
+            let (goal, reward) = shop::GOALS[i];
+            self.cheer(reward);
+            if let Some(p) = &self.player {
+                let line = format!("✓ Christmas list: {goal}!");
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, &line, t + 0.3, 3.5, 6);
+                self.director.sound(Sfx::Fanfare, p.centre(), 0.5);
+            }
+        }
         // indoors, anyone following the player waits by the door
         let you = match (&self.inside, &self.player) {
             (Some(inn), Some(p)) => Some((inn.outside.0, inn.outside.1, p.dir, false)),
@@ -1396,7 +1714,34 @@ impl Scene {
         };
         self.critters.set_player(you);
         self.director.update(dt, t, &self.ctx);
-        for x in std::mem::take(&mut self.director.arrivals) {
+        // what's going on, for what people say (and who reacts to what)
+        let arrivals = std::mem::take(&mut self.director.arrivals);
+        if !arrivals.is_empty() {
+            self.last_train = t;
+            self.director.happenings.push((dialogue::Ev::Train, arrivals.first().copied()));
+        }
+        let flying = self.sleigh.flying();
+        if flying && !self.sleigh_was {
+            self.director.happenings.push((dialogue::Ev::Sleigh, None));
+        }
+        if flying {
+            self.last_sleigh = t;
+        }
+        self.sleigh_was = flying;
+        if self.director.show.active(t) {
+            self.last_show = t;
+        }
+        for (ev, x) in std::mem::take(&mut self.director.happenings) {
+            if matches!(ev, dialogue::Ev::ShootingStar | dialogue::Ev::Comet | dialogue::Ev::Fireworks) {
+                self.last_stars = t;
+            }
+            if self.inside.is_none() {
+                self.critters.react(ev, x, t, &mut self.director);
+            }
+        }
+        let tctx = self.talk_ctx(t);
+        self.critters.set_talk(tctx);
+        for x in arrivals {
             // passengers off the train walk down into the village
             let kind = if self.rng.chance(0.25) { events::Kind::Kid } else { events::Kind::Walker };
             self.critters.spawn_demo(kind, x, t);
@@ -1423,6 +1768,7 @@ impl Scene {
                 if (p.centre() - tx).abs() < 45.0 && self.inside.is_none() {
                     self.show_cheered = true;
                     self.cheer(3);
+                    self.pockets.shows += 1;
                 }
             }
         }
@@ -1456,17 +1802,13 @@ impl Scene {
             }
         }
         self.focus = if self.inside.is_some() { None } else { self.find_focus() };
-        // passers-by sometimes say hello
+        // passers-by sometimes remark on what's going on
         if self.rng.chance(dt * 0.04) {
-            let walkers = self.critters.people();
-            if !walkers.is_empty() {
-                let (wx, wy) = walkers[self.rng.int(0, walkers.len() as i32) as usize];
-                let msg = self.lines.walker();
-                self.director.bubble(wx, wy, &msg, t);
-            }
+            self.critters.chatter(t, &mut self.director);
         }
         if self.power_back && t >= self.blackout_until {
             self.power_back = false;
+            self.director.happenings.push((dialogue::Ev::PowerBack, None));
             let mid = self.cam + self.w as f32 / 2.0;
             self.director.sound(Sfx::Chime, mid, 0.8);
         }
@@ -1586,7 +1928,9 @@ impl Scene {
         }
         f.ox = 0;
         f.oy = 0;
-        if self.show_pockets {
+        if self.show_stats {
+            shop::draw_stats(f, &self.pockets);
+        } else if self.show_pockets {
             shop::draw_pockets(f, &self.pockets);
         }
         // a soft lantern-like glow that follows the pointer while it moves
@@ -1934,5 +2278,51 @@ mod tests {
         assert!(dusk.sun > 0.0 && dusk.sun < 1.0 && dusk.warm > 0.8, "{dusk:?}");
         assert_eq!(compute("night", 12.0 * 60.0, rise, set).sun, 0.0);
         assert!(compute("noon", 0.0, rise, set).sun > 0.99);
+    }
+
+    #[test]
+    fn right_click_drop_in_lands_the_villager_there() {
+        let mut s = walker_scene();
+        run(&mut s, 0.2);
+        // an open bit of snowfield, on screen
+        let sx = 20;
+        let row = s.h as i32 - 3;
+        let (_, items) = s.menu_at(sx, row);
+        let drop = items.iter().find_map(|(_, d)| matches!(d, Do::DropIn(..)).then_some(*d)).expect("no drop-in on open ground");
+        let target = sx as f32 + s.cam;
+        s.act(drop);
+        assert!(s.player.as_ref().unwrap().y < row as f32 - 5.0, "should start up in the sky");
+        run(&mut s, 3.0);
+        let p = s.player.as_ref().unwrap();
+        assert!((p.centre() - target).abs() < 2.0, "landed at {} not {target}", p.centre());
+        assert_eq!(p.y, row as f32);
+        assert!(p.free(s.now()));
+        // right-clicking the villager offers the stats card
+        let (px, py) = (p.x.round() as i32 + 1 - s.cam_i(), p.y as i32 - 1);
+        let (title, items) = s.menu_at(px, py);
+        assert_eq!(title, "you");
+        assert!(items.iter().any(|(_, d)| *d == Do::Stats));
+    }
+
+    #[test]
+    fn menu_hello_walks_over_says_hi_and_ticks_the_list() {
+        let mut s = walker_scene();
+        let t = s.now();
+        let (px, py) = { let p = s.player.as_ref().unwrap(); (p.centre(), p.y) };
+        let _ = py;
+        s.critters.spawn_demo(events::Kind::Walker, px + 30.0, t);
+        let id = s.critters.last_id();
+        s.critters.set_walking(id, 0.0);
+        s.act(Do::Talk(id));
+        run(&mut s, 6.0);
+        assert!(s.pockets.greeted.contains(&id), "never got there to say hello");
+        // four more hellos tick off the first Christmas-list goal (+5 cheer)
+        for k in 0..4 {
+            s.pockets.greeted.push(1000 + k);
+        }
+        let before = s.pockets.cheer;
+        run(&mut s, 0.1);
+        assert!(s.pockets.done & 1 == 1);
+        assert!(s.pockets.cheer >= before + 5);
     }
 }

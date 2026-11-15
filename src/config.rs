@@ -492,7 +492,7 @@ impl Config {
         fix(&mut s.wind, 0.0, 3.0, ds.wind);
         fix(&mut s.glow, 0.0, 2.0, ds.glow);
         fix(&mut s.events, 0.0, 3.0, ds.events);
-        fix(&mut s.walk_speed, 0.25, 3.0, ds.walk_speed);
+        fix(&mut s.walk_speed, 0.25, 6.0, ds.walk_speed);
         if !crate::scene::daylight::MODES.contains(&s.time.as_str()) {
             s.time = ds.time.clone();
         }

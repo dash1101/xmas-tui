@@ -69,6 +69,8 @@ pub struct App {
     drag: Option<(usize, i32, i32)>,
     /// Resizing the map by its corner grip.
     resizing: bool,
+    /// The right-click menu, while it's open.
+    menu: Option<crate::ctxmenu::CtxMenu>,
     /// Where the current widget press started (a press that doesn't move
     /// on the map is a click: look there).
     press_at: (i32, i32),
@@ -142,6 +144,7 @@ impl App {
             keyboard,
             quit: false,
             resizing: false,
+            menu: None,
             press_at: (0, 0),
             held: [f32::NEG_INFINITY; 4],
             exact_keys: false,
@@ -212,8 +215,20 @@ impl App {
         self.settings.hover = (x, y);
         match ev {
             MouseIn::Move => {
+                if let Some(m) = &mut self.menu {
+                    m.hover = m.hit(x, y);
+                }
                 self.scene.set_cursor(Some((x, y)));
                 self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(x, y) };
+            }
+            MouseIn::Down(Btn::Left) if self.menu.is_some() => {
+                // a click picks from the menu (or, outside it, just closes it)
+                let m = self.menu.take().unwrap();
+                match m.hit(x, y).map(|i| m.items[i].1) {
+                    Some(crate::ctxmenu::MenuAct::Settings) => self.settings.open = true,
+                    Some(crate::ctxmenu::MenuAct::Scene(d)) => self.scene.act(d),
+                    None => {}
+                }
             }
             MouseIn::Down(Btn::Left) => {
                 let in_panel = self.settings.rect.map(|r| r.contains(x, y)).unwrap_or(false);
@@ -294,8 +309,15 @@ impl App {
                 }
             }
             MouseIn::Down(Btn::Right) => {
+                // right-click: options for whatever's under the pointer (the
+                // settings are always at the bottom); again to close
                 self.commit_city();
-                self.settings.open = !self.settings.open;
+                if self.settings.open {
+                    self.settings.open = false;
+                } else if self.menu.take().is_none() {
+                    let (title, items) = self.scene.menu_at(x, y);
+                    self.menu = Some(crate::ctxmenu::CtxMenu::new(x, y, title, items, self.w as i32, self.h as i32));
+                }
             }
             MouseIn::Scroll(up) => {
                 if self.settings.open {
@@ -383,6 +405,7 @@ impl App {
             }
         } else if self.settings.open && k == KeyIn::Esc {
             self.settings.open = false;
+        } else if k == KeyIn::Esc && self.menu.take().is_some() {
         } else if k == KeyIn::Esc && self.scene.close_panels() {
         } else if k == KeyIn::Esc && self.scene.is_inside() {
             self.scene.leave();
@@ -407,6 +430,9 @@ impl App {
     /// What the mouse pointer should look like right now.
     pub fn pointer(&self) -> &'static str {
         let (hx, hy) = self.settings.hover;
+        if let Some(m) = self.menu.as_ref().filter(|m| m.contains(hx, hy)) {
+            return if m.hit(hx, hy).is_some() { "pointer" } else { "default" };
+        }
         if self.drag.is_some() || self.scene.holding() {
             "grabbing"
         } else if self.settings.open && self.settings.rect.map(|r| r.contains(hx, hy)).unwrap_or(false) {
@@ -589,6 +615,9 @@ impl App {
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         self.settings.draw_banner(&mut self.frame, t);
         self.settings.draw(&mut self.frame, &self.cfg, t);
+        if let Some(m) = &self.menu {
+            m.draw(&mut self.frame);
+        }
         self.frame.compose();
         &self.frame.out
     }

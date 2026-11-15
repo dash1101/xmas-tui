@@ -45,11 +45,14 @@ pub struct Player {
     /// Carrying a lit lantern / warm from cocoa (set by the scene).
     pub lantern: bool,
     pub cozy: bool,
+    /// Dropping in from the sky (right-click → drop in here): the row to
+    /// land on; drawn shimmering on the way down.
+    pub drop_to: Option<f32>,
 }
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, drop_to: None }
     }
 
     pub fn rebase(&mut self, s: f32) {
@@ -97,6 +100,18 @@ impl Player {
         }
     }
 
+    /// Arrive from the sky at column `x`, landing on row `row`.
+    pub fn drop_in(&mut self, x: f32, row: f32, t: f32, d: &mut Director) {
+        self.held = None;
+        self.x = x - 1.0;
+        self.y = (row - 30.0).max(1.0);
+        self.fall = Some((4.0, self.y));
+        self.drop_to = Some(row);
+        self.snowball = false;
+        self.active_at = t;
+        d.sound(Sfx::Magic, x, 0.8);
+    }
+
     /// Hit by a snowball.
     pub fn bonk(&mut self, t: f32, d: &mut Director) {
         self.dizzy_until = t + 1.2;
@@ -126,14 +141,21 @@ impl Player {
         if let Some((vy, from)) = self.fall {
             let vy = vy + 70.0 * dt;
             self.y += vy * dt;
-            let to = self.y.min(h - 1.0).max(ground);
+            let to = self.drop_to.unwrap_or(self.y).min(h - 1.0).max(ground);
+            if self.drop_to.is_some() && (t * 12.0).fract() < dt * 12.0 {
+                // a trail of sparkles on the way down
+                d.emote(self.centre(), self.y - 2.0, '✦', Rgb::hex(0xbfe4ff), 1);
+            }
             if self.y >= to && self.y >= ground {
                 self.y = to.round();
                 self.fall = None;
                 d.snow_puff(self.centre(), self.y);
                 let high = self.y - from > 3.0;
                 d.sound(Sfx::Drop, self.centre(), if high { 1.0 } else { 0.6 });
-                if high {
+                if self.drop_to.take().is_some() {
+                    // a soft, magical landing (no dizziness)
+                    d.burst(self.centre(), self.y - 1.0, 24, &[Rgb::hex(0xbfe4ff), Rgb::WHITE, Rgb::hex(0xffd36b)], 7.0, 4.0);
+                } else if high {
                     self.dizzy_until = t + 1.8;
                 }
             } else {
@@ -149,7 +171,7 @@ impl Player {
             if mx != 0.0 {
                 self.dir = mx.signum();
             }
-            let k = self.speed.clamp(0.25, 3.0);
+            let k = self.speed.clamp(0.25, 6.0);
             self.x = (self.x + mx * SPEED_X * k * dt).clamp(1.0, w - 4.0);
             self.y += my * SPEED_Y * k.sqrt() * dt;
             self.phase += dt * k.sqrt() * if mx != 0.0 { 9.0 } else { 6.0 };
@@ -204,7 +226,10 @@ impl Player {
                 };
                 // the scarf's loose end flutters
                 let ch = if ch == '~' && (t * 6.0) as i32 % 2 == 0 { '≈' } else { ch };
-                f.put_g(cx, top + ry as i32, Glyph::new(ch, col).bg(Bg::Scene).lit(0.6));
+                // phasing in from the sky: shimmering, half there
+                let a = if self.drop_to.is_some() { 0.45 + 0.35 * (t * 14.0 + ry as f32).sin().abs() } else { 1.0 };
+                let col = if self.drop_to.is_some() { col.lerp(Rgb::hex(0xbfe4ff), 0.5) } else { col };
+                f.put_g(cx, top + ry as i32, Glyph::new(ch, col).bg(Bg::Scene).alpha(a).lit(0.6));
             }
         }
         // the pompom, and a wave now and then while standing about
@@ -227,6 +252,9 @@ impl Player {
         if wave {
             let ax = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
             f.put_g(ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
+        }
+        if self.drop_to.is_some() {
+            f.light_cell(x0 + 1, top + 1, Rgb::hex(0x9fd8ff) * (5.0 * glow));
         }
         // a soft glow so the villager is always easy to spot (much more
         // with a lantern; a little more, warm and rosy, after cocoa)

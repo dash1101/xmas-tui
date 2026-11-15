@@ -13,7 +13,7 @@ glow = 1.0            # light/bloom intensity
 critters = 1.0        # how many animals & people come by (0 = none)
 bushes = true         # festive berry bushes the animals snack from
 player = true         # the villager walked around with WASD / the arrow keys
-walk_speed = 1.0      # how fast the villager walks (0.25..3)
+walk_speed = 1.0      # how fast the villager walks (0.25..6)
 time = "auto"         # time of day: "auto" (real sunrise & sunset at the weather city),
                       # or "night", "dawn", "morning", "noon", "afternoon", "dusk"
 traffic = "auto"      # side of the road: "auto" (from the weather city), "right" or "left"

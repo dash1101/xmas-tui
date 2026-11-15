@@ -65,6 +65,112 @@ pub struct Pockets {
     pub cozy_until: f32,
     /// People already said hello to (cheer for a first hello only).
     pub greeted: Vec<u64>,
+    // ---- what the player's been up to (the stats card)
+    pub steps: f32,
+    pub chats: u32,
+    pub fed: u32,
+    pub thrown: u32,
+    pub hits: u32,
+    pub houses: Vec<usize>,
+    pub stars: u32,
+    pub shows: u32,
+    pub berries: u32,
+    pub gifts: u32,
+    pub cocoa: u32,
+    /// Reached the far left / far right end of the village.
+    pub ends: (bool, bool),
+    /// Christmas-list goals done (bit per goal).
+    pub done: u32,
+}
+
+/// The Christmas list: (goal, how much cheer it's worth).
+pub const GOALS: [(&str, u32); 9] = [
+    ("say hello to 5 neighbours", 5),
+    ("have 3 proper chats", 4),
+    ("feed 3 animals", 4),
+    ("visit 3 homes", 4),
+    ("give someone a gift", 3),
+    ("land 5 snowballs", 3),
+    ("watch a light show by the big tree", 3),
+    ("find 3 constellations", 4),
+    ("walk the village from end to end", 5),
+];
+
+impl Pockets {
+    /// Progress on goal `i`: (so far, needed).
+    pub fn goal(&self, i: usize) -> (u32, u32) {
+        let (cur, need) = match i {
+            0 => (self.greeted.len() as u32, 5),
+            1 => (self.chats, 3),
+            2 => (self.fed, 3),
+            3 => (self.houses.len() as u32, 3),
+            4 => (self.gifts, 1),
+            5 => (self.hits, 5),
+            6 => (self.shows, 1),
+            7 => (self.stars, 3),
+            _ => ((self.ends.0 as u32) + (self.ends.1 as u32), 2),
+        };
+        (cur.min(need), need)
+    }
+
+    /// Goals newly done since last asked (marks them done).
+    pub fn newly_done(&mut self) -> Vec<usize> {
+        let mut out = vec![];
+        for i in 0..GOALS.len() {
+            let (cur, need) = self.goal(i);
+            if cur >= need && self.done & (1 << i) == 0 {
+                self.done |= 1 << i;
+                out.push(i);
+            }
+        }
+        out
+    }
+}
+
+/// The stats card: what the player's been up to, and the Christmas list.
+pub fn draw_stats(f: &mut Frame, p: &Pockets) {
+    let w = 58;
+    let h = GOALS.len() as i32 + 8;
+    let (x0, y0) = (3, (f.h as i32 - h - 4).max(0));
+    let bg = Bg::Mix(pal::UI_PANEL, 0.92);
+    let border = Rgb::hex(0xffd36b) * 0.8;
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
+                (true, _, true, _) => '╭',
+                (_, true, true, _) => '╮',
+                (true, _, _, true) => '╰',
+                (_, true, _, true) => '╯',
+                (_, _, true, _) | (_, _, _, true) => '─',
+                (true, _, _, _) | (_, true, _, _) => '│',
+                _ => ' ',
+            };
+            f.put_g(x, y, Glyph::new(ch, border).bg(bg).lit(0.0));
+        }
+    }
+    f.text(x0 + 2, y0, " my village ", pal::UI_TITLE, bg, 0.0);
+    let cheer = format!(" ✦ {} cheer ", p.cheer);
+    f.text(x0 + w - 2 - cheer.chars().count() as i32, y0, &cheer, Rgb::hex(0xffd36b), bg, 0.0);
+    let lines = [
+        format!("walked {} steps · met {} · {} chats", (p.steps / 2.0) as u32, p.greeted.len(), p.chats),
+        format!("fed {} animals · {} snowballs ({} hits) · {} gifts", p.fed, p.thrown, p.hits, p.gifts),
+        format!("{} homes visited · {} constellations · {} cocoas", p.houses.len(), p.stars, p.cocoa),
+    ];
+    for (i, l) in lines.iter().enumerate() {
+        f.text(x0 + 2, y0 + 1 + i as i32, l, pal::UI_TEXT, bg, 0.0);
+    }
+    f.text(x0 + 2, y0 + 5, "CHRISTMAS LIST", Rgb::hex(0xffd36b), bg, 0.0);
+    for (i, (goal, reward)) in GOALS.iter().enumerate() {
+        let y = y0 + 6 + i as i32;
+        let done = p.done & (1 << i) != 0;
+        let (cur, need) = p.goal(i);
+        let (mark, fg) = if done { ('✓', Rgb::hex(0x5adf8a)) } else { ('○', pal::UI_DIM) };
+        f.put_g(x0 + 2, y, Glyph::new(mark, fg).bg(bg).lit(0.0));
+        f.text(x0 + 4, y, goal, if done { pal::UI_DIM } else { pal::UI_TEXT }, bg, 0.0);
+        let right = if done { format!("+{reward} ✦") } else if need > 1 { format!("{cur}/{need}  +{reward} ✦") } else { format!("+{reward} ✦") };
+        f.text(x0 + w - 2 - right.chars().count() as i32, y, &right, if done { Rgb::hex(0x5adf8a) } else { pal::UI_DIM }, bg, 0.0);
+    }
+    f.text(x0 + 2, y0 + h - 1, " Esc or right-click to close ", pal::UI_DIM, bg, 0.0);
 }
 
 impl Pockets {

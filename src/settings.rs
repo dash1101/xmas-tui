@@ -180,7 +180,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                     cfg.sound.track = names[(i + dir as i32).rem_euclid(names.len() as i32) as usize].to_string();
                 }
                 F::Critters => step(&mut cfg.scene.critters, 0.25 * dir, 0.0, 3.0),
-                F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 3.0),
+                F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 6.0),
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -435,7 +435,7 @@ impl Settings {
         let sl = if cfg.scene.sleigh_minutes <= 0.0 { "never".to_string() } else { format!("every ~{:.0} min", cfg.scene.sleigh_minutes) };
         self.stepper(f, lx, vx, yy, "Santa's sleigh", F::Sleigh, &sl);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 3.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
+        self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 6.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
         yy += 1;
         let side = match cfg.scene.traffic.as_str() {
             "left" => "keep left",

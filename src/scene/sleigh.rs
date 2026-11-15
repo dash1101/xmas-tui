@@ -75,6 +75,10 @@ impl Sleigh {
     }
 
     /// Centre column of the team + sleigh while flying (for the bells).
+    pub fn flying(&self) -> bool {
+        self.active
+    }
+
     pub fn audio_x(&self) -> Option<f32> {
         self.active.then_some(self.x + (DEER * 5) as f32 * 0.75)
     }

@@ -9,6 +9,7 @@
 //! little dizzy). A click without dragging is a friendly poke / pet.
 
 use super::events::{Ctx, Director, Kind};
+use super::dialogue::{self, Ev, Talk, TalkCtx};
 use super::lines::Lines;
 use crate::audio::Sfx;
 use crate::color::{pal, Rgb};
@@ -64,6 +65,11 @@ struct Critter {
     gap: f32,
     /// Stepping round someone: which way (rows; 0 = not dodging).
     dodge: f32,
+    /// People have names; `met`: has said hello to the player; `chat`: a
+    /// chat with the player in progress (topic, next step).
+    name: &'static str,
+    met: bool,
+    chat: Option<(usize, usize)>,
 }
 
 impl Critter {
@@ -211,6 +217,14 @@ pub struct Critters {
     lo: Vec<i32>,
     mult: f32,
     startle_cd: f32,
+    /// What people talk about: what's going on, and what's been said.
+    talk: Talk,
+    tctx: TalkCtx,
+    /// Conversations under way, for passers-by to chime in on:
+    /// (participants, centre column, row, until, joined yet).
+    convs: Vec<(Vec<u64>, f32, f32, f32, bool)>,
+    /// Who reacted to what lately (no chorus of the same line).
+    react_cd: f32,
     /// Someone hit by the player's snowball who'll throw one back: (id, when).
     revenge: Vec<(u64, f32)>,
     /// Snowballs that hit the player since the scene last asked.
@@ -253,6 +267,10 @@ impl Critters {
             lo,
             mult,
             startle_cd: 0.0,
+            talk: Talk::new(seed),
+            tctx: TalkCtx::default(),
+            convs: vec![],
+            react_cd: 0.0,
             revenge: vec![],
             hits_on_you: 0,
             your_hits: 0,
@@ -371,6 +389,9 @@ impl Critters {
             group: 0,
             gap: 0.0,
             dodge: 0.0,
+            name: if matches!(kind, Kind::Walker | Kind::Kid) { dialogue::name(&mut self.rng, kind == Kind::Kid) } else { "" },
+            met: false,
+            chat: None,
         });
         id
     }
@@ -389,15 +410,6 @@ impl Critters {
         self.companions(id, 2, t);
     }
 
-    /// People currently on screen: (x, head row), for random greetings.
-    pub fn people(&self) -> Vec<(i32, i32)> {
-        let (v0, vw) = self.view;
-        self.list
-            .iter()
-            .filter(|c| c.person() && c.x > v0 + 4.0 && c.x < v0 + vw - 6.0 && matches!(c.st, St::Walk))
-            .map(|c| (c.centre() as i32, c.y as i32 - 3))
-            .collect()
-    }
 
     pub fn rebase(&mut self, s: f32) {
         for c in &mut self.list {
@@ -437,6 +449,10 @@ impl Critters {
         }
         self.startle_cd -= s;
         self.follow_chat_at -= s;
+        self.react_cd -= s;
+        for c in &mut self.convs {
+            c.3 -= s;
+        }
         for r in &mut self.revenge {
             r.1 -= s;
         }
@@ -767,6 +783,7 @@ impl Critters {
 
         self.meetings(t, d, lines, snowman);
         self.group_chats(dt, t, d, lines);
+        self.chime_ins(dt, t, d);
         self.follower_chats(dt, t, d, lines);
         self.cursor_reactions(dt, t, d, cursor);
         self.snack(dt, t);
@@ -947,7 +964,8 @@ impl Critters {
                     // they stop for a proper chat
                     self.converse(&[i, j], t, d, lines);
                 } else if ak == Kind::Walker && bk == Kind::Walker {
-                    let (m1, m2) = lines.greet_pair();
+                    let (an, bn) = (self.list[i].name, self.list[j].name);
+                    let (m1, m2) = self.talk.greet(&self.tctx, ax, an, bn);
                     self.list[i].st = St::Greet { until: t + 3.2 };
                     self.list[i].dir = towards;
                     self.list[j].st = St::Greet { until: t + 3.2 };
@@ -1075,16 +1093,23 @@ impl Critters {
             return;
         }
         let idx = &idx[..n];
-        let kids = idx.iter().all(|&i| self.list[i].kind == Kind::Kid);
-        let script = lines.conversation(n, kids);
+        let _ = lines;
+        let names: Vec<&str> = idx.iter().map(|&i| self.list[i].name).collect();
+        let kids: Vec<bool> = idx.iter().map(|&i| self.list[i].kind == Kind::Kid).collect();
         let mid = idx.iter().map(|&i| self.list[i].centre()).sum::<f32>() / n as f32;
+        let script = self.talk.conversation(&self.tctx, mid, &names, &kids);
+        if script.is_empty() {
+            return;
+        }
         let mut at = t + 0.3;
-        for (k, line) in script.iter().enumerate() {
-            let c = &self.list[idx[k % n]];
+        for (sp, line) in &script {
+            let c = &self.list[idx[(*sp).min(n - 1)]];
             let life = 1.8 + line.chars().count() as f32 * 0.06;
             d.say(c.centre().round() as i32, c.y as i32 - 4, line, at, life, 40);
             at += life + 0.2;
         }
+        let row = self.list[idx[0]].y;
+        self.convs.push((idx.iter().map(|&i| self.list[i].id).collect(), mid, row, at, false));
         for &i in idx {
             let resume = matches!(self.list[i].st, St::Follow { .. });
             let r = self.rng.range(25.0, 50.0);
@@ -1169,6 +1194,29 @@ impl Critters {
             .filter(|c| !c.held() && !matches!(c.st, St::Fall { .. }) && (c.centre() - x).abs() <= rx && (c.y - y).abs() <= 3.5)
             .min_by(|a, b| (a.centre() - x).abs().partial_cmp(&(b.centre() - x).abs()).unwrap_or(std::cmp::Ordering::Equal))
             .map(|c| c.id)
+    }
+
+    /// Who's at (x, y), if anyone.
+    pub fn id_at(&self, x: i32, y: i32, t: f32) -> Option<u64> {
+        self.index_at(x, y, t).map(|i| self.list[i].id)
+    }
+
+    /// (centre column, row) of someone.
+    pub fn position(&self, id: u64) -> Option<(f32, f32)> {
+        self.list.iter().find(|c| c.id == id).map(|c| (c.centre(), c.y))
+    }
+
+    /// What to call someone in a menu: their name, or what they are.
+    pub fn label(&self, id: u64) -> String {
+        match self.list.iter().find(|c| c.id == id) {
+            Some(c) if c.person() => c.name.to_string(),
+            Some(c) => match c.kind {
+                Kind::Deer => "a deer".into(),
+                Kind::Fox => "a fox".into(),
+                _ => "a rabbit".into(),
+            },
+            None => "someone".into(),
+        }
     }
 
     pub fn bbox_of(&self, id: u64, t: f32) -> Option<(i32, i32, i32, i32)> {
@@ -1271,8 +1319,52 @@ impl Critters {
 
     /// The player says hello (people) or pets / feeds (animals).
     #[allow(clippy::too_many_arguments)]
-    pub fn meet(&mut self, id: u64, px: f32, py: f32, berries: &mut u32, t: f32, d: &mut Director, lines: &mut Lines) {
-        let Some(i) = self.list.iter().position(|c| c.id == id) else { return };
+    /// Returns the cheer it earned (a first hello, or a chat run its course).
+    pub fn meet(&mut self, id: u64, px: f32, py: f32, berries: &mut u32, t: f32, d: &mut Director, lines: &mut Lines) -> u32 {
+        let _ = lines;
+        let Some(i) = self.list.iter().position(|c| c.id == id) else { return 0 };
+        let mut cheer = 0;
+        // people: a hello (with their name) the first time; after that, each
+        // E is the next exchange of a little chat about what's going on
+        if self.list[i].person() {
+            let c = &self.list[i];
+            let (cx, cy, kid, name) = (c.centre(), c.y, c.kind == Kind::Kid, c.name);
+            let (mine, theirs) = if !c.met {
+                cheer += 1;
+                ("hello there!".to_string(), self.talk.intro(&self.tctx, cx, name, kid))
+            } else {
+                let (topic, step) = match c.chat {
+                    Some(ch) => ch,
+                    None => (self.talk.chat_topic(&self.tctx, cx, kid), 0),
+                };
+                match self.talk.chat_line(topic, step, self.tctx.days) {
+                    Some(pair) => {
+                        self.list[i].chat = Some((topic, step + 1));
+                        pair
+                    }
+                    None => {
+                        self.list[i].chat = None;
+                        cheer += 1;
+                        ("lovely talking with you!".to_string(), format!("you too! see you around{}", if kid { "!!" } else { "." }))
+                    }
+                }
+            };
+            let c = &mut self.list[i];
+            c.met = true;
+            let toward = (px - cx).signum();
+            if toward != 0.0 {
+                c.dir = toward;
+            }
+            let was_following = matches!(c.st, St::Follow { .. });
+            d.say(px.round() as i32, py as i32 - 4, &mine, t, 2.2, 40);
+            d.say(cx.round() as i32, cy as i32 - 4, &theirs, t + 2.4, 3.6, 40);
+            c.st = St::Talk { until: t + 6.5, resume: was_following };
+            c.social_at = c.social_at.max(t + 12.0);
+            if let Some(s) = c.sfx() {
+                d.sound(s, cx, 0.8);
+            }
+            return cheer;
+        }
         let follow_until = self.list[i].leave_at;
         let c = &mut self.list[i];
         let (cx, top) = (c.centre(), c.y - 3.0);
@@ -1281,16 +1373,7 @@ impl Critters {
             c.dir = toward;
         }
         let was_following = matches!(c.st, St::Follow { .. });
-        if c.person() {
-            let (a, b) = lines.you_hi(c.kind == Kind::Kid);
-            d.say(px.round() as i32, py as i32 - 4, &a, t, 2.2, 40);
-            d.say(cx.round() as i32, c.y as i32 - 4, &b, t + 2.4, 3.4, 40);
-            c.st = St::Talk { until: t + 6.0, resume: was_following };
-            c.social_at = c.social_at.max(t + 12.0);
-            if let Some(s) = c.sfx() {
-                d.sound(s, cx, 0.8);
-            }
-        } else if *berries > 0 {
+        if *berries > 0 {
             // a berry from the player's hand: a friend for a while
             *berries -= 1;
             d.sound(Sfx::Munch, cx, 1.0);
@@ -1305,6 +1388,105 @@ impl Critters {
             if let Some(s) = c.sfx() {
                 d.sound(s, cx, 0.8);
             }
+        }
+        cheer
+    }
+
+    /// What's going on, for what people say (set each frame by the scene).
+    pub fn set_talk(&mut self, ctx: TalkCtx) {
+        self.tctx = ctx;
+    }
+
+    /// Someone in view says something in passing about what's going on.
+    pub fn chatter(&mut self, t: f32, d: &mut Director) {
+        let (v0, vw) = self.view;
+        let walkers: Vec<usize> = (0..self.list.len())
+            .filter(|&i| {
+                let c = &self.list[i];
+                c.person() && matches!(c.st, St::Walk) && c.x > v0 + 4.0 && c.x < v0 + vw - 6.0
+            })
+            .collect();
+        if walkers.is_empty() {
+            return;
+        }
+        let i = walkers[self.rng.int(0, walkers.len() as i32) as usize];
+        let (cx, cy, kid) = (self.list[i].centre(), self.list[i].y, self.list[i].kind == Kind::Kid);
+        let line = self.talk.remark(&self.tctx, cx, kid);
+        d.say(cx.round() as i32, cy as i32 - 4, &line, t, 2.8, 6);
+    }
+
+    /// Something just happened (near column `x`, if it's somewhere): the
+    /// people in view stop, look and say so.
+    pub fn react(&mut self, ev: Ev, x: Option<f32>, t: f32, d: &mut Director) {
+        if t < self.react_cd {
+            return;
+        }
+        self.react_cd = t + 6.0;
+        let (v0, vw) = self.view;
+        let mut who: Vec<usize> = (0..self.list.len())
+            .filter(|&i| {
+                let c = &self.list[i];
+                c.person() && matches!(c.st, St::Walk | St::Idle { .. } | St::Greet { .. } | St::Follow { .. } | St::Gather { .. }) && c.x > v0 && c.x < v0 + vw
+            })
+            .collect();
+        // a couple of them say something; the rest just look
+        for k in (1..who.len()).rev() {
+            let j = self.rng.int(0, k as i32 + 1) as usize;
+            who.swap(k, j);
+        }
+        for (n, &i) in who.iter().take(4).enumerate() {
+            let kid = self.list[i].kind == Kind::Kid;
+            let line = (n < 2).then(|| self.talk.react(ev, kid));
+            let c = &mut self.list[i];
+            let (cx, cy) = (c.centre(), c.y);
+            if let Some(x) = x {
+                let to = (x - cx).signum();
+                if to != 0.0 {
+                    c.dir = to;
+                }
+            }
+            let resume_follow = matches!(c.st, St::Follow { .. });
+            if !resume_follow && !matches!(c.st, St::Gather { .. }) {
+                c.st = St::Idle { until: t + 2.5 + n as f32 * 0.4 };
+            }
+            d.emote(cx, cy - 3.0, '!', Rgb::hex(0xffd36b), 1);
+            if let Some(line) = line {
+                d.say(cx.round() as i32, cy as i32 - 4, &line, t + 0.2 + n as f32 * 1.1, 2.8, 6);
+            }
+            if kid && n < 2 {
+                d.sound(Sfx::Laugh, cx, 0.5);
+            }
+        }
+    }
+
+    /// A passer-by stops to chime in on a conversation under way.
+    fn chime_ins(&mut self, dt: f32, t: f32, d: &mut Director) {
+        self.convs.retain(|c| t < c.3);
+        for k in 0..self.convs.len() {
+            if self.convs[k].4 || !self.rng.chance(dt * 0.6) {
+                continue;
+            }
+            let (ids, mx, row) = (self.convs[k].0.clone(), self.convs[k].1, self.convs[k].2);
+            let Some(j) = (0..self.list.len()).find(|&j| {
+                let c = &self.list[j];
+                c.person() && matches!(c.st, St::Walk) && t >= c.social_at && !ids.contains(&c.id) && (c.centre() - mx).abs() < 10.0 && (c.y - row).abs() < 4.0
+            }) else {
+                continue;
+            };
+            self.convs[k].4 = true;
+            let name = |id: u64| self.list.iter().find(|c| c.id == id).map(|c| c.name).unwrap_or("friend");
+            let (a, b) = (name(ids[0]), name(*ids.get(1).unwrap_or(&ids[0])));
+            let (cname, cx, cy) = (self.list[j].name, self.list[j].centre(), self.list[j].y);
+            let (line, reply) = self.talk.chime(&self.tctx, mx, a, b, cname);
+            d.say(cx.round() as i32, cy as i32 - 4, &line, t, 2.6, 6);
+            // whoever's nearest in the group answers
+            if let Some(r) = self.list.iter().filter(|c| ids.contains(&c.id)).min_by(|p, q| (p.centre() - cx).abs().partial_cmp(&(q.centre() - cx).abs()).unwrap_or(std::cmp::Ordering::Equal)) {
+                d.say(r.centre().round() as i32, r.y as i32 - 4, &reply, t + 2.8, 3.0, 6);
+            }
+            let c = &mut self.list[j];
+            c.dir = (mx - cx).signum();
+            c.st = St::Greet { until: t + 5.5 };
+            c.social_at = t + 30.0;
         }
     }
 
