@@ -374,10 +374,18 @@ A cut-down village for the phone's home screen, made to be watched rather than p
 
 **Install:** download `xmas-tui-android.apk` from the [latest release](https://github.com/dash1101/xmas-tui/releases/latest)
 on the phone, open it (allowing installs from the browser or file manager when asked), then open **xmas-tui
-village** and tap **Set as live wallpaper**. Android 7 or newer.
+village** and tap **Set as live wallpaper**. Android 7 or newer. [Orbit](https://github.com/dash1101/orbit) on Android
+installs it too, and keeps it updated.
 
 **Build:** `android/build.sh` (a JDK 17 and the Android SDK; no Gradle). The village itself is plain Java in
 `android/src/.../core`, and `android/preview/Preview.java` renders it to PNGs on the desktop.
+
+**Signing:** releases are signed with xmas-tui's own release key, and Android only installs an update signed with
+the same key. Its certificate's SHA-256 is in `android/release-cert.sha256`. The release workflow signs the APK with
+the key from the repository's secrets (`XMAS_KEYSTORE_B64`, the keystore in base64, and `XMAS_KEYSTORE_PASSWORD`), and
+CI checks those secrets on every push to main. Locally, `build.sh` signs with the key in
+`~/.local/share/xmas-tui-signing/`; `XMAS_NEW_KEY=1` makes a new key for a fork or a test build. Without the secrets, a
+release has no APK, and one built with `build.sh` is uploaded by hand (and added to `SHA256SUMS`).
 
 <br clear="right">
 

@@ -31,3 +31,28 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
           & $iscc "/DAppVersion=0.0.0" "/DSrc=$pwd\stage" "/O$pwd" packaging\windows\xmas-tui.iss
           if (-not (Test-Path xmas-tui-setup-x86_64.exe)) { exit 1 }
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - name: builds, signed with the release key when the secrets are there (a throwaway one otherwise)
+        env:
+          XMAS_KEYSTORE_B64: ${{ secrets.XMAS_KEYSTORE_B64 }}
+          XMAS_KEYSTORE_PASSWORD: ${{ secrets.XMAS_KEYSTORE_PASSWORD }}
+          XMAS_KEYSTORE: ${{ runner.temp }}/k.jks
+          XMAS_KEYPASS: ${{ runner.temp }}/k.pass
+          ANDROID_PLATFORM: android-35
+          ANDROID_BUILD_TOOLS: 35.0.0
+        run: |
+          printf "y\n%.0s" {1..8} | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          if [ -n "$XMAS_KEYSTORE_B64" ] && [ -n "$XMAS_KEYSTORE_PASSWORD" ]; then
+            echo "$XMAS_KEYSTORE_B64" | base64 -d > "$XMAS_KEYSTORE"
+            printf '%s' "$XMAS_KEYSTORE_PASSWORD" > "$XMAS_KEYPASS"
+            export XMAS_EXPECT_CERT="$(cat android/release-cert.sha256)"
+          else
+            export XMAS_NEW_KEY=1
+          fi
+          android/build.sh "" "$RUNNER_TEMP/check.apk"
+          rm -f "$XMAS_KEYSTORE" "$XMAS_KEYPASS"

@@ -1,5 +1,7 @@
-# Push a tag like v1.2.3 → build Linux + Windows, publish a GitHub release
-# with the binaries and SHA256SUMS (what the in-app updater downloads).
+# Push a tag like v1.2.3 → build Linux, Windows and the Android live wallpaper,
+# publish a GitHub release with them and SHA256SUMS (what the in-app updater
+# and Orbit download). The APK is signed with the release key from the
+# repository's secrets; without them the release has no APK.
 name: release
 on:
   push:
@@ -65,8 +67,45 @@ jobs:
             xmas-tui-windows.zip
             xmas-tui-setup-x86_64.exe
 
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - name: signing key (repository secrets)
+        id: key
+        env:
+          XMAS_KEYSTORE_B64: ${{ secrets.XMAS_KEYSTORE_B64 }}
+          XMAS_KEYSTORE_PASSWORD: ${{ secrets.XMAS_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$XMAS_KEYSTORE_B64" ] || [ -z "$XMAS_KEYSTORE_PASSWORD" ]; then
+            echo "::warning::No XMAS_KEYSTORE_B64 / XMAS_KEYSTORE_PASSWORD secrets: this release has no Android app. Build it with android/build.sh and upload it (README.md, Android live wallpaper)."
+            exit 0
+          fi
+          echo "$XMAS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/xmas-tui.jks"
+          printf '%s' "$XMAS_KEYSTORE_PASSWORD" > "$RUNNER_TEMP/keystore.pass"
+          echo "have=1" >> "$GITHUB_OUTPUT"
+      - name: build and sign
+        if: steps.key.outputs.have == '1'
+        env:
+          XMAS_KEYSTORE: ${{ runner.temp }}/xmas-tui.jks
+          XMAS_KEYPASS: ${{ runner.temp }}/keystore.pass
+          ANDROID_PLATFORM: android-35
+          ANDROID_BUILD_TOOLS: 35.0.0
+        run: |
+          printf "y\n%.0s" {1..8} | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          XMAS_EXPECT_CERT="$(cat android/release-cert.sha256)" \
+            android/build.sh "${GITHUB_REF_NAME#v}" "$PWD/xmas-tui-android.apk"
+          rm -f "$XMAS_KEYSTORE" "$XMAS_KEYPASS"
+      - uses: actions/upload-artifact@v4
+        if: steps.key.outputs.have == '1'
+        with:
+          name: android
+          path: xmas-tui-android.apk
+
   publish:
-    needs: [linux, windows]
+    needs: [linux, windows, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
