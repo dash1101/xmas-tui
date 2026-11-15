@@ -9,6 +9,7 @@
 //! little dizzy). A click without dragging is a friendly poke / pet.
 
 use super::events::{Ctx, Director, Kind};
+use super::pets::{self, PetKind, Pose};
 use super::dialogue::{self, Ev, Talk, TalkCtx};
 use super::lines::Lines;
 use crate::audio::Sfx;
@@ -70,7 +71,31 @@ struct Critter {
     name: &'static str,
     met: bool,
     chat: Option<(usize, usize)>,
+    /// A pet out for a walk with them.
+    pet: Option<VPet>,
 }
+
+/// A villager's pet: trots along behind them (a dog on its lead), sits when
+/// they stop, chases after them when they're carried off.
+struct VPet {
+    kind: PetKind,
+    body: Rgb,
+    marks: Rgb,
+    name: &'static str,
+    x: f32,
+    y: f32,
+    dir: f32,
+    walking: bool,
+    /// Petted: bouncing about happily until then.
+    happy_until: f32,
+}
+
+/// What people say about their pet (by kind): {n} is its name.
+const PET_FACTS: [&[&str]; 3] = [
+    &["this is {n}! he thinks every snowflake is a tennis ball", "that's {n}. she's never met a stranger", "{n}! sit! …well, nearly", "say hello, {n}! he's been dying to meet you"],
+    &["this is {n}. she lets me walk with her", "{n} insisted on coming. cats do that, apparently", "that's {n}. he's only out for the attention", "{n}! don't eat the snow!"],
+    &["this is {n}! she hops when she's happy", "that's {n}. he's very brave about the snow", "{n} likes carrots and adventures", "meet {n}! careful, she's ticklish"],
+];
 
 impl Critter {
     fn animal(&self) -> bool {
@@ -422,7 +447,27 @@ impl Critters {
             name: if matches!(kind, Kind::Walker | Kind::Kid) { dialogue::name(&mut self.rng, kind == Kind::Kid) } else { "" },
             met: false,
             chat: None,
+            pet: None,
         });
+        // some folk bring their pet along
+        let p = match kind {
+            Kind::Walker => 0.22,
+            Kind::Kid => 0.12,
+            _ => 0.0,
+        };
+        if at.is_none() && self.rng.chance(p) {
+            let pk = if kind == Kind::Kid {
+                *self.rng.pick(&[PetKind::Dog, PetKind::Bunny, PetKind::Cat, PetKind::Bunny])
+            } else {
+                *self.rng.pick(&[PetKind::Dog, PetKind::Dog, PetKind::Dog, PetKind::Cat])
+            };
+            let coats = pk.coats();
+            let (_, b, m) = coats[self.rng.int(0, coats.len() as i32) as usize];
+            let name = *self.rng.pick(super::pets::NAMES);
+            if let Some(c) = self.list.last_mut() {
+                c.pet = Some(VPet { kind: pk, body: Rgb::hex(b), marks: Rgb::hex(m), name, x: c.x - c.dir * 3.0, y, dir: c.dir, walking: false, happy_until: 0.0 });
+            }
+        }
         id
     }
 
@@ -431,6 +476,19 @@ impl Critters {
     pub fn spawn_demo(&mut self, kind: Kind, x: f32, t: f32) {
         let y = (self.lo_at(x) + 2.0).min((self.h - 1) as f32);
         self.spawn(kind, t, Some((x, y)));
+    }
+
+    /// For previews: someone out walking their pet (kind 0 dog, 1 cat, 2
+    /// bunny; `coat` index).
+    pub fn spawn_demo_pet(&mut self, kind: usize, coat: usize, x: f32, t: f32) {
+        let pk = [PetKind::Dog, PetKind::Cat, PetKind::Bunny][kind % 3];
+        self.spawn_demo(if pk == PetKind::Bunny { Kind::Kid } else { Kind::Walker }, x, t);
+        let coats = pk.coats();
+        let (_, b, m) = coats[coat % coats.len()];
+        if let Some(c) = self.list.last_mut() {
+            c.pet = Some(VPet { kind: pk, body: Rgb::hex(b), marks: Rgb::hex(m), name: pets::NAMES[coat % pets::NAMES.len()], x: c.x - c.dir * 3.0, y: c.y, dir: c.dir, walking: false, happy_until: 0.0 });
+            c.st = St::Idle { until: t + 30.0 };
+        }
     }
 
     /// For previews: a little group out for a walk.
@@ -833,6 +891,26 @@ impl Critters {
         self.snack(dt, t);
 
         self.fights_update(dt, t, d);
+        // pets keep up with their people
+        for c in &mut self.list {
+            let (cx, cy, cdir, held) = (c.centre(), c.y, c.dir, c.held() || matches!(c.st, St::Fall { .. }));
+            let ground = self.lo.get((cx.max(0.0) as usize).min(self.lo.len().saturating_sub(1))).copied().unwrap_or(0) as f32;
+            let Some(p) = &mut c.pet else { continue };
+            // a step behind (the dog a lead's length), and on the ground even
+            // while their person is up in the air
+            let tx = cx - cdir * if p.kind == PetKind::Dog { 4.0 } else { 3.0 };
+            let ty = if held { p.y.max(ground) } else { cy };
+            let dx = tx - p.x;
+            p.walking = dx.abs() > 0.6;
+            if p.walking {
+                let v = (dx.abs() * 3.0).clamp(2.0, if held { 14.0 } else { 30.0 });
+                p.x += dx.signum() * (v * dt).min(dx.abs());
+                p.dir = dx.signum();
+            } else {
+                p.dir = cdir;
+            }
+            p.y += (ty - p.y) * (1.0 - (-dt * 4.0).exp());
+        }
 
         // snowballs
         let mut hits = vec![];
@@ -1007,7 +1085,7 @@ impl Critters {
                     if let Some(s) = self.list[j].sfx() {
                         d.sound(s, bx, 0.6);
                     }
-                } else if a.person() && b.person() && self.rng.chance(if ak == Kind::Kid && bk == Kind::Kid { 0.3 } else { 0.45 }) {
+                } else if a.person() && b.person() && self.rng.chance((if ak == Kind::Kid && bk == Kind::Kid { 0.3 } else { 0.45 }) * super::events::chattiness()) {
                     // they stop for a proper chat
                     self.converse(&[i, j], t, d, lines);
                 } else if ak == Kind::Walker && bk == Kind::Walker {
@@ -1152,7 +1230,7 @@ impl Critters {
         let mut at = t + 0.3;
         for (sp, line) in &script {
             let c = &self.list[idx[(*sp).min(n - 1)]];
-            let life = 1.8 + line.chars().count() as f32 * 0.06;
+            let life = (1.8 + line.chars().count() as f32 * 0.06) * super::events::talk_time();
             d.say(c.centre().round() as i32, c.y as i32 - 4, line, at, life, 40);
             at += life + 0.2;
         }
@@ -1176,7 +1254,7 @@ impl Critters {
     fn group_chats(&mut self, dt: f32, t: f32, d: &mut Director, lines: &mut Lines) {
         for i in 0..self.list.len() {
             let l = &self.list[i];
-            if l.group != 0 || !l.person() || !matches!(l.st, St::Walk) || t < l.social_at || !self.rng.chance(dt * 0.07) {
+            if l.group != 0 || !l.person() || !matches!(l.st, St::Walk) || t < l.social_at || !self.rng.chance(dt * 0.07 * super::events::chattiness()) {
                 continue;
             }
             let (id, lx) = (l.id, l.centre());
@@ -1223,6 +1301,41 @@ impl Critters {
     /// (id, centre column, baseline row) of everyone, for speech bubbles.
     pub fn anchors(&self) -> Vec<(u64, f32, f32)> {
         self.list.iter().map(|c| (c.id, c.centre(), c.y)).collect()
+    }
+
+    /// Whose pet is at (x, y) (world column, row), if any.
+    pub fn pet_at(&self, x: i32, y: i32) -> Option<u64> {
+        self.list.iter().find(|c| c.pet.as_ref().is_some_and(|p| (p.x - x as f32 - 0.5).abs() <= pets::half_width(p.kind) && (y as f32 - p.y).abs() <= 1.5 && y as f32 <= p.y + 0.5)).map(|c| c.id)
+    }
+
+    /// Someone's pet, petted: it bounces, and its person says who it is.
+    pub fn pet_the_pet(&mut self, owner: u64, t: f32, d: &mut Director) {
+        let Some(c) = self.list.iter_mut().find(|c| c.id == owner) else { return };
+        let (cx, cy, kid) = (c.centre(), c.y, c.kind == Kind::Kid);
+        let Some(p) = &mut c.pet else { return };
+        p.happy_until = t + 2.5;
+        let (px, py) = (p.x, p.y);
+        d.emote(px, py - 2.0, '♥', Rgb::hex(0xff6b8a), 3);
+        d.sound(match p.kind {
+            PetKind::Dog => Sfx::Bark,
+            PetKind::Cat => Sfx::Meow,
+            PetKind::Bunny => Sfx::Rabbit,
+        }, px, 0.8);
+        let i = match p.kind {
+            PetKind::Dog => 0,
+            PetKind::Cat => 1,
+            PetKind::Bunny => 2,
+        };
+        let mut line = self.rng.pick(PET_FACTS[i]).replace("{n}", p.name);
+        if kid {
+            line = format!("{line}!!");
+        }
+        d.say(cx.round() as i32, cy as i32 - 4, &line, t + 0.4, 3.0, 6);
+    }
+
+    /// Their pet, if they have one: (kind, name).
+    pub fn pet_of(&self, id: u64) -> Option<(PetKind, &'static str)> {
+        self.list.iter().find(|c| c.id == id).and_then(|c| c.pet.as_ref().map(|p| (p.kind, p.name)))
     }
 
     /// Christmas Eve night: everyone heads home to bed (anyone walking with
@@ -1684,6 +1797,10 @@ impl Critters {
     /// Something just happened (near column `x`, if it's somewhere): the
     /// people in view stop, look and say so.
     pub fn react(&mut self, ev: Ev, x: Option<f32>, t: f32, d: &mut Director) {
+        // (a quiet village keeps its thoughts to itself)
+        if !self.rng.chance(super::events::chattiness().min(1.0)) {
+            return;
+        }
         if t < self.react_cd {
             return;
         }
@@ -1949,6 +2066,24 @@ impl Critters {
                 Item::B(b) => draw_bush(f, b, t, glow),
                 Item::C(c) => draw_critter(f, c, t, glow),
             }
+        }
+        // pets (pixel art, under the glyphs): the lead first, then the pet
+        for c in &self.list {
+            let Some(p) = &c.pet else { continue };
+            let feet = (p.y * 2.0).round() as i32 + 1;
+            if p.kind == PetKind::Dog && !c.held() {
+                // from the hand to the collar, sagging a little
+                let (hx, hy) = (c.centre() + c.dir * 0.2, c.y * 2.0 - 2.0);
+                let (kx, ky) = (p.x + 0.5 + p.dir * 1.5, feet as f32 - 3.0);
+                let n = ((hx - kx).abs().max((hy - ky).abs()) as i32).max(1);
+                for k in 0..=n {
+                    let u = k as f32 / n as f32;
+                    let sag = (u * std::f32::consts::PI).sin() * 1.0;
+                    f.px_set((hx + (kx - hx) * u).round() as i32, (hy + (ky - hy) * u + sag).round() as i32, Rgb::hex(0x3a2a4a));
+                }
+            }
+            let pose = if t < p.happy_until { Pose::Up } else if p.walking { Pose::Walk } else { Pose::Sit };
+            pets::draw(f, p.kind, p.body, p.marks, p.x + 0.5, feet, p.dir, pose, t + c.id as f32, 1, Some(Rgb::hex(0xc8202a)));
         }
     }
 

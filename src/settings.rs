@@ -11,6 +11,10 @@ const BG: Bg = Bg::Mix(pal::UI_PANEL, 0.90);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum F {
+    TalkTime,
+    Chatty,
+    PetKind,
+    PetCoat,
     Snow,
     Wind,
     Glow,
@@ -73,6 +77,7 @@ pub enum Act {
     Inc(F),
     Toggle(F),
     EditCity,
+    EditPetName,
     Close,
     ResetLayout,
     /// Open the village in its own window / full screen (as a game).
@@ -91,8 +96,10 @@ pub enum Act {
 #[derive(Default)]
 pub struct Settings {
     pub open: bool,
-    /// Some(text) while the city field is being edited.
+    /// Some(text) while the city field (or the pet's name) is being edited.
     pub editing: Option<String>,
+    /// The field being edited is the pet's name.
+    pub editing_pet: bool,
     regions: Vec<(Rect, Act)>,
     banner: Vec<(Rect, Act)>,
     pub rect: Option<Rect>,
@@ -193,6 +200,26 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 }
                 F::Critters => step(&mut cfg.scene.critters, 0.25 * dir, 0.0, 3.0),
                 F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 6.0),
+                F::TalkTime => step(&mut cfg.scene.talk_time, 0.25 * dir, 0.5, 3.0),
+                F::Chatty => step(&mut cfg.scene.chattiness, 0.25 * dir, 0.0, 2.0),
+                F::PetKind => {
+                    let opts = ["dog", "cat", "bunny", "none"];
+                    let i = opts.iter().position(|o| *o == cfg.scene.pet.kind).unwrap_or(0) as i32;
+                    cfg.scene.pet.kind = opts[(i + dir as i32).rem_euclid(4) as usize].to_string();
+                    // a colour this kind comes in
+                    if let Some(k) = crate::scene::pets::PetKind::from_str(&cfg.scene.pet.kind) {
+                        if !k.coats().iter().any(|c| c.0 == cfg.scene.pet.coat) {
+                            cfg.scene.pet.coat = k.coats()[0].0.to_string();
+                        }
+                    }
+                }
+                F::PetCoat => {
+                    if let Some(k) = crate::scene::pets::PetKind::from_str(&cfg.scene.pet.kind) {
+                        let c = k.coats();
+                        let i = c.iter().position(|o| o.0 == cfg.scene.pet.coat).unwrap_or(0) as i32;
+                        cfg.scene.pet.coat = c[(i + dir as i32).rem_euclid(c.len() as i32) as usize].0.to_string();
+                    }
+                }
                 F::Scale => cfg.scale = step_list(&[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], cfg.scale, dir as i32),
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
@@ -278,7 +305,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             }
             true
         }
-        Act::Shuffle | Act::EditCity | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
+        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
     }
 }
 
@@ -496,12 +523,46 @@ impl Settings {
             None => format!("{:.0} fps", cfg.fps),
         };
         self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
+        yy += 1;
+        self.slider(f, lx, vx, yy, "Speech bubbles", F::TalkTime, pct(cfg.scene.talk_time, 3.0), &format!("{:.2}× as long", cfg.scene.talk_time), t);
+        yy += 1;
+        let chat = if cfg.scene.chattiness <= 0.0 { "quiet".to_string() } else { format!("{:.2}×", cfg.scene.chattiness) };
+        self.slider(f, lx, vx, yy, "Chattiness", F::Chatty, pct(cfg.scene.chattiness, 2.0), &chat, t);
         yy += 2;
         let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
         let cx = self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes) + 3;
         self.check(f, cx, yy, "Villager (WASD)", Act::Toggle(F::Player), cfg.scene.player);
         yy += 2;
-        self.button(f, lx, yy, "↻ shuffle scene", Act::Shuffle);
+        // the villager's pet: kind, colour, name
+        self.stepper(f, lx, vx, yy, "Pet", F::PetKind, &cfg.scene.pet.kind);
+        if cfg.scene.pet.kind != "none" {
+            let cx = vx + 13;
+            f.text(cx, yy, "colour", pal::UI_TEXT, BG, 0.0);
+            self.arrow(f, cx + 7, yy, '◂', Act::Dec(F::PetCoat));
+            let c = f.text(cx + 9, yy, &cfg.scene.pet.coat, pal::UI_TITLE, BG, 0.0);
+            self.arrow(f, c + 1, yy, '▸', Act::Inc(F::PetCoat));
+        }
+        yy += 1;
+        if cfg.scene.pet.kind != "none" {
+            f.text(lx, yy, "Pet's name", pal::UI_TEXT, BG, 0.0);
+            let field = Rect { x: vx, y: yy, w: 18, h: 1 };
+            let (txt, editing) = match (&self.editing, self.editing_pet) {
+                (Some(s), true) => (s.clone(), true),
+                _ => (if cfg.scene.pet.name.is_empty() { "(not named yet)".into() } else { cfg.scene.pet.name.clone() }, false),
+            };
+            for i in 0..field.w {
+                let fg = if editing { pal::UI_TITLE } else { pal::UI_TEXT };
+                let bgc = if editing { Rgb::hex(0x24305a) } else { Rgb::hex(0x1a2242) };
+                let ch = txt.chars().nth(i as usize).unwrap_or(' ');
+                f.put_g(field.x + i, yy, Glyph::new(ch, fg).solid(bgc).lit(0.0));
+            }
+            if editing && (t * 2.0) as i32 % 2 == 0 {
+                let cx = field.x + txt.chars().count().min(field.w as usize - 1) as i32;
+                f.put_g(cx, yy, Glyph::new('▏', Rgb::hex(0xffd36b)).solid(Rgb::hex(0x1a2240)).lit(0.0));
+            }
+            self.regions.push((field, Act::EditPetName));
+        }
+        self.button(f, vx + 22, yy, "↻ shuffle scene", Act::Shuffle);
     }
 
     fn tab_display(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
@@ -521,9 +582,9 @@ impl Settings {
         yy += 1;
         f.text(lx, yy, "Weather city", pal::UI_TEXT, BG, 0.0);
         let field = Rect { x: vx, y: yy, w: 30, h: 1 };
-        let (txt, editing) = match &self.editing {
-            Some(s) => (s.clone(), true),
-            None => (if cfg.weather.city.is_empty() { "(click to set)".into() } else { cfg.weather.city.clone() }, false),
+        let (txt, editing) = match (&self.editing, self.editing_pet) {
+            (Some(s), false) => (s.clone(), true),
+            _ => (if cfg.weather.city.is_empty() { "(click to set)".into() } else { cfg.weather.city.clone() }, false),
         };
         for i in 0..field.w {
             let fg = if editing { pal::UI_TITLE } else { pal::UI_TEXT };

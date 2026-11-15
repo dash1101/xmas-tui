@@ -304,6 +304,30 @@ pub struct SceneCfg {
     /// Which side of the road the cars keep to: "auto" (from the weather
     /// city's country), "right" or "left".
     pub traffic: String,
+    /// How long speech bubbles stay up (multiplier; longer lines already
+    /// stay longer).
+    pub talk_time: f32,
+    /// How often people stop to chat and remark on things (0 = quiet).
+    pub chattiness: f32,
+    /// The villager's own pet.
+    pub pet: PetCfg,
+}
+
+/// The villager's pet: what it is, its colour and its name (empty: not
+/// named yet — it asks).
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct PetCfg {
+    /// "dog", "cat", "bunny" or "none".
+    pub kind: String,
+    pub coat: String,
+    pub name: String,
+}
+
+impl Default for PetCfg {
+    fn default() -> Self {
+        PetCfg { kind: "dog".into(), coat: "golden".into(), name: String::new() }
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -359,7 +383,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default() }
     }
 }
 

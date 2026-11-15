@@ -253,6 +253,19 @@ pub fn spawn(sfx: Sfx, pan: f32, gain: f32, rng: &mut Rng, out: &mut Vec<Voice>)
                     .done(),
             );
         }
+        Sfx::Bark => {
+            // a friendly little "ruff ruff"
+            for k in 0..2 {
+                let f = 330.0 + (seed() % 60) as f32;
+                out.push(Voice::new(Bus::Sfx).noise(NoiseLayer::new(seed(), Mode::Bp, 700.0, 1.2, 0.5, 0.05).attack(0.005)).pan(p).gain(0.5).at(k as f32 * 0.2).done());
+                out.push(vocal(f, (650.0, 1300.0), 0.09, 0.75).pan(p).gain(0.9).at(k as f32 * 0.2).done());
+            }
+        }
+        Sfx::Meow => {
+            // "mrrr-OW": up, then down
+            out.push(vocal(520.0, (800.0, 1900.0), 0.38, 1.35).pan(p).gain(0.55).done());
+            out.push(vocal(700.0, (900.0, 2000.0), 0.22, 0.7).pan(p).gain(0.4).at(0.3).done());
+        }
         Sfx::Hoot => {
             // "hoo… hoo-hoo"
             for (k, at) in [0.0, 0.55, 0.78].iter().enumerate() {

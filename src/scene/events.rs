@@ -175,6 +175,32 @@ pub struct Ctx {
     pub vw: i32,
 }
 
+/// How long speech bubbles stay up and how chatty people are (settings;
+/// f32 bits, 1.0 by default).
+static TALK_TIME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+static CHATTY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn set_talk(time: f32, chatty: f32) {
+    TALK_TIME.store(time.clamp(0.25, 4.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    CHATTY.store(chatty.clamp(0.0, 3.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn talk_time() -> f32 {
+    f32::from_bits(TALK_TIME.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// How often people talk and remark on things (0 = they keep to themselves).
+pub fn chattiness() -> f32 {
+    f32::from_bits(CHATTY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// How long a line of `text` stays up: at least `min` seconds, longer
+/// lines longer (time to read them), scaled by the setting.
+pub fn read_time(text: &str, min: f32) -> f32 {
+    let n = text.chars().count() as f32;
+    min.max(1.4 + n * 0.065) * talk_time()
+}
+
 pub struct Director {
     rng: Rng,
     next: f32,
@@ -338,7 +364,8 @@ impl Director {
 
     pub fn bubble(&mut self, x: i32, y: i32, text: &str, t: f32) {
         self.bubbles.retain(|b| (b.x - x).abs() > 4 || (b.y - y).abs() > 2);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life: 3.8, owner: 0, dy: 0, matched: false });
+        let life = read_time(text, 3.8);
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
     }
 
     /// Keep speech bubbles over whoever's speaking. `who`: (id, centre
@@ -376,6 +403,7 @@ impl Director {
                 b.life = b.life.min(t - b.born);
             }
         }
+        let life = read_time(text, life);
         self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
     }
 

@@ -250,6 +250,16 @@ impl App {
     }
 
     fn commit_city(&mut self) {
+        if self.settings.editing_pet {
+            self.settings.editing_pet = false;
+            if let Some(text) = self.settings.editing.take() {
+                let name: String = text.trim().chars().take(16).collect();
+                if !name.is_empty() {
+                    self.cfg.scene.pet.name = name;
+                }
+            }
+            return;
+        }
         if let Some(text) = self.settings.editing.take() {
             let city = text.trim().to_string();
             if city != self.cfg.weather.city {
@@ -643,7 +653,24 @@ impl App {
                     self.commit_city();
                     self.settings.open = false;
                 }
+                Act::EditPetName => {
+                    if self.keyboard {
+                        if !self.settings.editing_pet || self.settings.editing.is_none() {
+                            self.commit_city();
+                            self.settings.editing_pet = true;
+                            self.settings.editing = Some(self.cfg.scene.pet.name.clone());
+                        }
+                    } else {
+                        if !self.sync.path().exists() {
+                            self.sync.save_now(&self.cfg);
+                        }
+                        platform::open_in_editor(self.sync.path());
+                    }
+                }
                 Act::EditCity => {
+                    if self.settings.editing_pet {
+                        self.commit_city();
+                    }
                     if self.keyboard {
                         // clicking back into the field while typing keeps the text
                         if self.settings.editing.is_none() {
@@ -693,6 +720,10 @@ impl App {
         // pick up edits to the config file (by hand, the settings window,
         // the tray) and save ours; nothing is written while a drag is in
         // progress or while the file doesn't parse
+        // the pet named / recoloured in the village: keep it in the config
+        if let Some(p) = self.scene.take_pet_change() {
+            self.cfg.scene.pet = p;
+        }
         if self.sync.poll(&mut self.cfg, self.drag.is_none()) && self.cfg.seed != 0 && self.cfg.seed as u32 != self.seed {
             self.seed = self.cfg.seed as u32;
             reseed = true;
@@ -711,6 +742,9 @@ impl App {
                 c.walk_speed = 0.0;
                 c.traffic.clear();
                 c.time.clear();
+                c.talk_time = 0.0;
+                c.chattiness = 0.0;
+                c.pet = Default::default();
                 c
             };
             if reseed || live(&self.cfg.scene) != live(&old.scene) {
@@ -753,6 +787,8 @@ impl App {
             _ => crate::widgets::data::drives_left(&crate::widgets::data::country()),
         };
         self.scene.set_live(self.cfg.scene.walk_speed, left);
+        crate::scene::events::set_talk(self.cfg.scene.talk_time, self.cfg.scene.chattiness);
+        self.scene.set_pet(&self.cfg.scene.pet);
         {
             use chrono::Timelike;
             let now = crate::clock::now();

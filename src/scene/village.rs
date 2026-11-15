@@ -28,6 +28,8 @@ pub struct House {
     pub asleep: bool,
     /// A carrot left out on the step for the reindeer.
     pub carrot: bool,
+    /// The villager's own house (lit rooms upstairs, a flag by the door).
+    pub home: bool,
     /// Cells actually covered by the art (walls, roof, chimney, steeple,
     /// cross), for hit-testing and the train's occlusion. `bounds()` is a
     /// loose rectangle that's mostly empty sky around the roof/steeple.
@@ -113,6 +115,7 @@ impl House {
             lights_off_until: 0.0,
             asleep: false,
             carrot: false,
+            home: false,
             mask: HashSet::new(),
         };
         // a cell counts if either of its half-block pixels is painted
@@ -290,6 +293,28 @@ impl House {
             let ch = if self.church { '┃' } else { '┼' };
             f.put_g(x, y, Glyph::new(ch, frame).solid(glowc * flick).lit(0.0));
             f.light_cell(x, y, glowc * (1.6 * flick * glow));
+        }
+        // home: lit rooms up under the roof (the bedroom, the attic) and a
+        // little flag by the door
+        if self.home {
+            let c = self.x + self.w / 2;
+            let rp = self.roof_h * 2;
+            let row = (self.wall_top_px() - rp * 45 / 100) / 2;
+            let warm = Rgb::hex(0xffd27a);
+            for dx in [-3, 3] {
+                f.put_g(c + dx, row, Glyph::new('▪', warm).solid(Rgb::hex(0x3a2214)).lit(0.0));
+                f.light_cell(c + dx, row, warm * (1.4 * glow));
+            }
+            if self.roof_h >= 4 {
+                f.put_g(c, row - 2, Glyph::new('◉', Rgb::hex(0xffe0a0)).lit(0.0));
+                f.light_cell(c, row - 2, warm * (1.0 * glow));
+            }
+            let fx = self.door + 2;
+            for y in self.base - 3..self.base {
+                f.put_g(fx, y, Glyph::new('│', Rgb::hex(0x8a8a92)).lit(0.4));
+            }
+            let wave = (t * 3.0).sin() > 0.0;
+            f.put_g(fx + 1, self.base - 3, Glyph::new(if wave { '▶' } else { '▸' }, Rgb::hex(0xd8283a)).lit(0.3));
         }
         // a carrot on the step for the reindeer
         if self.carrot {

@@ -27,8 +27,14 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   on, react to shooting stars, Santa, fireworks and power cuts, gather for the light shows and step around
   each other; kids who build snowmen and igloos (and pile inside) and start snowball fights; deer, foxes and
   rabbits too.
-- **Talk like a story game**: a dialogue box with choices. Every grown-up has a job and a mood, every kid a wish,
-  and the talk follows whatever's going on, including what they just saw the villager do.
+- **Talk like a story game**: a dialogue box with choices. Everyone has their own way of talking (warm, chatty,
+  shy, cheeky, dreamy or gruff-but-kind) and remembers the villager; every grown-up has a job and a mood, every kid
+  a wish, and the talk follows whatever's going on, including what they just saw the villager do.
+- **Homes worth visiting**: every house is its own household (the baker's, the toymaker's, the bookworm's…) with a
+  family that potters about, a cat or dog, chairs to sit in, an oven, books, music, little jobs to help with, and
+  windows that look out on the real village.
+- **A home and a pet of the villager's own**: a house with a parlour, a kitchen, a bedroom upstairs and an attic with
+  a telescope, and a dog, cat or bunny (named, coloured, and remembered) that follows everywhere.
 - **Play it like a game**: pop the village out into its own window, or go full screen.
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
@@ -74,10 +80,14 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo); then `systemctl --user enable --now xmas-tui`. Updated through the package manager. |
 
-All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). The no-sudo Linux
-installer also runs straight from the repo:
+All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
+have a one-line installer straight from the repo. On **Linux** (no sudo):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.sh | bash
+```
+On **Windows**, in PowerShell (per-user, no admin; installs the latest release with run at startup, then starts it):
+```powershell
+irm https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.ps1 | iex
 ```
 Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.36 and a layer-shell compositor such as KDE Plasma 6, Sway
 or Hyprland (GNOME isn't supported). Settings live in `~/.config/xmas-tui/config.toml` (Linux) or
@@ -94,12 +104,13 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | Input | What it does |
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows |
-| **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…) |
+| **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
 | **I** | show or hide the pockets |
 | **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
-| **Esc** | close a menu or conversation, or step back outside |
+| **Esc** | close a menu or conversation, step back from a window, or step back outside |
+| **A** / **D** at a window | lean to look further along the street |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
 | **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager too) | carry them about, then drop them in the snow |
@@ -143,8 +154,26 @@ Click the bare desktop first so the wallpaper has keyboard focus.
     anywhere and stays there. Walking away or Esc ends it;
   - **animals:** a pat, or (with berries in hand) a snack, after which they tag along for a while;
   - **berry bushes:** pick a few berries (they grow back);
-  - **front doors:** step inside: a cozy room with a fire, a tree, someone home and a cat on the rug (the church
-    has candles and an organ). E pokes at things in there too; walk out the door or press Esc to leave;
+  - **front doors:** step inside. Every house is its own: a household with a theme (the baker's oven and cookie
+    jar, the toymaker's workbench and a toy train round the tree, the bookworm's shelves, the musician's piano and
+    gramophone, the sailor's telescope, the candle-maker's glow, the farmer's rocking chair and radio), its own
+    wallpaper, floor and furniture, one to three people who move about (warming their hands, sitting down, looking
+    out of the window), and often a cat or dog. In there:
+    - **talk** to anyone at home in the dialogue box: about their home, their family, how long they've lived there;
+      they'll offer a seat or a fresh cookie, play the piano, or ask for a hand (put the star back on the tree, a log
+      on the fire, find the cat, play a tune, hang the last stocking) — and are grateful when it's done;
+    - **sit** in the armchairs and on the sofas, **bake** (the oven dings when the cookies are done), **read** a
+      book, **play** the piano, gramophone or radio, **decorate** the tree, peek in a **stocking**, play with the
+      **pet** (the dog fetches, the cat chases string);
+    - **look out of a window**: the real, live village outside, from where that window is (A/D to lean, E or Esc to
+      step back). Walk out the door or press Esc to leave;
+  - **the villager's own house** (the one with the flag by the door and lights up under the roof): a parlour with
+    a sofa, a kitchen next door with an oven and a table, stairs up to a bedroom with a quilted bed, and a ladder up
+    to the attic with a round window and a telescope. Each window looks out from its own height — the attic's up
+    into the stars;
+  - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. The first E on it
+    asks for a name; after that it can be fussed over, played with, renamed, given a new look, or asked to stay home.
+    Its kind, colour and name live in the Scene tab (and are remembered);
   - **the cocoa cabin:** opens its menu;
   - **presents, trees, lamps, houses, the station and the snowman:** the same as clicking them.
 - **F** invites the person in front to come along (animals need a berry). Companions follow the villager around.
@@ -349,6 +378,8 @@ stick around for a few minutes. They also interact:
 - **Reactions:** when something happens (a shooting star, a comet, Santa, fireworks, the light show, the aurora
   flaring, a blizzard, a train pulling in, the power going out or coming back, a typed easter egg) the people in
   view stop, look and say something about it.
+- **Pets:** some folk walk their dog on a lead; others have a cat or a bunny along. Click a pet for a happy bounce
+  (and its person says who it is), and ask its owner about it.
 - **Play:** a fox plays chase with a rabbit (the fox never catches it). Kids square off in two sides for proper
   snowball fights, build snowmen ball by ball, and raise igloos block by block, then all pile inside for a while
   (giggling) before coming back out. What they build stands for about ten minutes, then melts.
@@ -372,7 +403,9 @@ The settings panel (the **⚙ settings** button, the bottom of any right-click m
 window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has five tabs:
 - **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
-  rate, aurora, bushes, and the villager.
+  rate, **speech bubbles** (how long they stay up; longer lines always stay longer), **chattiness** (how often people
+  stop to talk and remark on things), aurora, bushes, the villager, and the villager's **pet** (dog, cat, bunny or
+  none, its colour and its name).
 - **Display:** clock, widgets (including the map), weather city and units, widget layout, **render scale**
   (0.5× to 2×: bigger makes everything chunkier), **pop out** (the village in a window of its own, to play it like
   a game) and **full screen** (F11 toggles it in a window); the wallpaper rests and goes quiet while either is

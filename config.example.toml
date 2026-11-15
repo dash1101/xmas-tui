@@ -18,6 +18,15 @@ walk_speed = 1.0      # how fast the villager walks (0.25..6)
 time = "auto"         # time of day: "auto" (real sunrise & sunset at the weather city),
                       # or "night", "dawn", "morning", "noon", "afternoon", "dusk"
 traffic = "auto"      # side of the road: "auto" (from the weather city), "right" or "left"
+talk_time = 1.0       # how long speech bubbles stay up (0.5..3; longer lines always stay longer)
+chattiness = 1.0      # how often people stop to talk and remark on things (0 = quiet .. 2)
+
+[scene.pet]           # the villager's own pet (named in the village, or here)
+kind = "dog"          # "dog", "cat", "bunny" or "none"
+coat = "golden"       # dog: golden chocolate black snowy spotty grey red
+                      # cat: ginger black snowy tabby calico cream tuxedo
+                      # bunny: snowy brown grey black cream
+name = ""             # empty: it asks the first time they meet
 
 [clock]
 enabled = true

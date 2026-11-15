@@ -71,6 +71,14 @@ struct Args {
     shop: bool,
     /// --export: talking with someone (0 = a grown-up, 1 = a kid).
     talk: Option<u8>,
+    /// --export: people out with their pets.
+    pets: bool,
+    /// --export: a room of the home (with `--inside 900`), and looking out
+    /// of its window (0) or through the telescope (1).
+    room: Option<usize>,
+    look: Option<u8>,
+    /// --export: "host" (talking with them, indoors) or "pet" (its menu).
+    ui: Option<String>,
     /// --export: the stats card open / a right-click menu at (x, y).
     stats: bool,
     menu: Option<(i32, i32)>,
@@ -106,6 +114,10 @@ fn parse_args() -> Args {
         time: None,
         shop: false,
         talk: None,
+        pets: false,
+        room: None,
+        look: None,
+        ui: None,
         stats: false,
         menu: None,
     };
@@ -133,6 +145,10 @@ fn parse_args() -> Args {
             }
             "--shop" => a.shop = true,
             "--talk" => a.talk = it.next().and_then(|v| v.parse().ok()),
+            "--pets" => a.pets = true,
+            "--room" => a.room = it.next().and_then(|v| v.parse().ok()),
+            "--look" => a.look = it.next().and_then(|v| v.parse().ok()),
+            "--ui" => a.ui = it.next(),
             "--stats" => a.stats = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
@@ -570,6 +586,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     }
     if let Some(i) = args.inside {
         scene.preview_inside(i);
+        if args.room.is_some() || args.look.is_some() {
+            scene.preview_room(args.room.unwrap_or(0), args.look);
+        }
         for _ in 0..(4.0 / dt) as usize {
             scene.update(dt, t);
             t += dt;
@@ -577,6 +596,20 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     }
     if args.shop {
         scene.preview_shop();
+    }
+    if let Some(u) = &args.ui {
+        scene.preview_ui(u);
+        for _ in 0..(2.5 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+    }
+    if args.pets {
+        scene.preview_pets();
+        for _ in 0..(1.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
     }
     if let Some(k) = args.talk {
         scene.preview_talk(k == 1);

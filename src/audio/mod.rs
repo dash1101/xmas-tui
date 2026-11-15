@@ -73,9 +73,12 @@ pub enum Sfx {
     Honk,
     Plane,
     Hoot,
+    // pets
+    Bark,
+    Meow,
 }
 
-pub const ALL_SFX: [Sfx; 35] = [
+pub const ALL_SFX: [Sfx; 37] = [
     Sfx::Present,
     Sfx::Snowman,
     Sfx::ShootingStar,
@@ -111,6 +114,8 @@ pub const ALL_SFX: [Sfx; 35] = [
     Sfx::Honk,
     Sfx::Plane,
     Sfx::Hoot,
+    Sfx::Bark,
+    Sfx::Meow,
 ];
 
 impl Sfx {
@@ -137,7 +142,7 @@ impl Sfx {
             Sfx::Pet | Sfx::Greet | Sfx::Laugh => "people",
             Sfx::Pickup | Sfx::Drop | Sfx::Snowball => "handling",
             Sfx::Rustle | Sfx::Bird => "bushes",
-            Sfx::Hoot => "animals",
+            Sfx::Hoot | Sfx::Bark | Sfx::Meow => "animals",
         }
     }
 }
