@@ -1,0 +1,613 @@
+//! Native window front-end: draws the same cell grid itself (bundled fonts,
+//! CPU raster, only changed cells re-drawn). On Windows it attaches itself
+//! behind the desktop icons; with `--windowed` it's an ordinary window on
+//! any OS (handy for testing, or for Lively Wallpaper's "application" mode).
+
+use crate::app::{App, Btn, KeyIn, MouseIn};
+use crate::config::Config;
+use crate::frame::Cell;
+use crate::raster::Raster;
+use softbuffer::{Context, Surface};
+use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{CursorIcon, Window, WindowId};
+
+pub struct Opts {
+    /// Attach behind the desktop icons (Windows) instead of a normal window.
+    pub desktop: bool,
+    /// Target number of text rows (sets the cell size).
+    pub rows: u32,
+}
+
+struct Gfx {
+    window: Rc<Window>,
+    surface: Surface<Rc<Window>, Rc<Window>>,
+    raster: Raster,
+    fb: Vec<u32>,
+    prev: Vec<Cell>,
+    size: (u32, u32),
+    #[cfg_attr(not(windows), allow(dead_code))]
+    origin: (i32, i32),
+    offset: (usize, usize),
+    force: bool,
+    /// Too small to hold a single cell (e.g. minimized: Resized(0x0)):
+    /// nothing is laid out or drawn until the next usable size.
+    hidden: bool,
+    /// Our HWND (Windows), for the desktop attach / liveness checks.
+    #[cfg(windows)]
+    hwnd: usize,
+}
+
+/// Windows desktop mode: the window we were attached to is gone (Explorer
+/// restarted or rebuilt its desktop) and we're waiting to attach a new one.
+#[cfg(windows)]
+struct Reattach {
+    /// Next time to look.
+    at: Instant,
+    /// When Explorer's desktop was first seen again (we let it settle).
+    ready: Option<Instant>,
+    tries: u32,
+}
+
+struct Runner {
+    cfg: Config,
+    seed: u32,
+    path: PathBuf,
+    opts: Opts,
+    gfx: Option<Gfx>,
+    app: Option<App>,
+    next: Instant,
+    cursor: (f64, f64),
+    left_down: bool,
+    pointer: &'static str,
+    #[cfg(windows)]
+    polled: (bool, bool),
+    /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    keys: [bool; 6],
+    paused: bool,
+    /// Desktop mode: attach_to_desktop succeeded (false = we're the
+    /// top-level fallback window).
+    #[cfg(windows)]
+    attached: bool,
+    #[cfg(windows)]
+    reattach: Option<Reattach>,
+    /// Last seen (monitor rect, parent client origin), re-checked about once
+    /// a second to follow resolution / layout / primary-monitor changes.
+    #[cfg(windows)]
+    geom: (Option<(i32, i32, i32, i32)>, (i32, i32)),
+    #[cfg(windows)]
+    last_geom_check: Instant,
+    #[cfg(windows)]
+    last_pause_check: Instant,
+    /// Window snow & lights overlay (Windows desktop mode, or `--windowed`
+    /// with XMAS_WINFX=1 for testing). Dropped = stopped.
+    #[cfg(windows)]
+    winfx: Option<crate::winsnow::win::Overlay>,
+}
+
+fn cell_size(height: u32, rows: u32) -> (usize, usize) {
+    let ch = (height / rows.max(10)).clamp(10, 48) as usize;
+    let cw = ((ch as f32 * 0.474).round() as usize).max(5);
+    (cw, ch)
+}
+
+impl Runner {
+    fn layout(&mut self, size: PhysicalSize<u32>) {
+        let Some(g) = self.gfx.as_mut() else { return };
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        let (cw, ch) = cell_size(h, self.opts.rows);
+        // smaller than one cell (minimized, or dragged tiny): the offset
+        // maths below would underflow; just stop drawing until it's back
+        g.hidden = (w as usize) < cw || (h as usize) < ch;
+        if g.hidden {
+            return;
+        }
+        g.raster = Raster::new(cw, ch);
+        g.size = (w, h);
+        let (cols, rows) = (w as usize / cw, h as usize / ch); // both >= 1 now
+        g.offset = ((w as usize - cols * cw) / 2, (h as usize - rows * ch) / 2);
+        g.fb = vec![0x0003_050f; (w * h) as usize];
+        g.prev.clear();
+        g.force = true;
+        let _ = g.surface.resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap());
+        match self.app.as_mut() {
+            Some(app) => app.resize(cols, rows),
+            None => {
+                let desktop = self.opts.desktop;
+                let mut app = App::new(self.cfg.clone(), self.seed, &self.path, cols, rows, desktop, !desktop, true);
+                app.start_audio();
+                self.app = Some(app);
+            }
+        }
+    }
+
+    /// Physical pixel (window-relative) → cell.
+    fn to_cell(&self, x: f64, y: f64) -> (i32, i32) {
+        let Some(g) = self.gfx.as_ref() else { return (-1, -1) };
+        let cx = ((x - g.offset.0 as f64) / g.raster.cw as f64).floor() as i32;
+        let cy = ((y - g.offset.1 as f64) / g.raster.ch as f64).floor() as i32;
+        (cx, cy)
+    }
+
+    fn draw(&mut self) {
+        let (Some(g), Some(app)) = (self.gfx.as_mut(), self.app.as_mut()) else { return };
+        if g.hidden {
+            return;
+        }
+        let (cols, rows) = (app.w, app.h);
+        let cells = app.step();
+        let (cw, ch) = (g.raster.cw, g.raster.ch);
+        let stride = g.size.0 as usize;
+        let full = g.force || g.prev.len() != cells.len();
+        let (mut y0, mut y1) = (usize::MAX, 0usize);
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let i = cy * cols + cx;
+                if full || cells[i] != g.prev[i] {
+                    g.raster.draw_cell(&mut g.fb, stride, g.offset.0 + cx * cw, g.offset.1 + cy * ch, &cells[i]);
+                    y0 = y0.min(cy);
+                    y1 = y1.max(cy);
+                }
+            }
+        }
+        g.prev = cells.to_vec();
+        let Ok(mut buf) = g.surface.buffer_mut() else { return };
+        let (dy0, dy1) = if full || buf.age() != 1 {
+            (0, g.size.1 as usize)
+        } else if y0 == usize::MAX {
+            (0, 0)
+        } else {
+            (g.offset.1 + y0 * ch, g.offset.1 + (y1 + 1) * ch)
+        };
+        if full || buf.age() != 1 {
+            buf.copy_from_slice(&g.fb);
+        } else if dy1 > dy0 {
+            buf[dy0 * stride..dy1 * stride].copy_from_slice(&g.fb[dy0 * stride..dy1 * stride]);
+        }
+        g.force = false;
+        if dy1 > dy0 {
+            let rect = softbuffer::Rect {
+                x: 0,
+                y: dy0 as u32,
+                width: NonZeroU32::new(g.size.0).unwrap(),
+                height: NonZeroU32::new((dy1 - dy0) as u32).unwrap(),
+            };
+            let _ = buf.present_with_damage(&[rect]);
+        } else {
+            let _ = buf.present();
+        }
+        // pointer shape (only meaningful for a normal window)
+        let want = app.pointer();
+        if want != self.pointer && !self.opts.desktop {
+            self.pointer = want;
+            g.window.set_cursor(match want {
+                "pointer" => CursorIcon::Pointer,
+                "grab" => CursorIcon::Grab,
+                "grabbing" => CursorIcon::Grabbing,
+                "text" => CursorIcon::Text,
+                _ => CursorIcon::Default,
+            });
+        }
+    }
+
+    /// Windows desktop mode: we sit under the icon layer, so read the mouse
+    /// ourselves and only react to clicks on the bare desktop.
+    #[cfg(windows)]
+    fn poll_desktop_input(&mut self) {
+        let p = crate::winsys::poll();
+        let Some(g) = self.gfx.as_ref() else { return };
+        let (lx, ly) = ((p.x - g.origin.0) as f64, (p.y - g.origin.1) as f64);
+        let inside = lx >= 0.0 && ly >= 0.0 && lx < g.size.0 as f64 && ly < g.size.1 as f64;
+        let (cx, cy) = self.to_cell(lx, ly);
+        let (was_l, was_r) = self.polled;
+        self.polled = (p.left, p.right);
+        let Some(app) = self.app.as_mut() else { return };
+        if inside {
+            if (lx, ly) != self.cursor {
+                self.cursor = (lx, ly);
+                app.mouse(if p.left && self.left_down { MouseIn::Drag } else { MouseIn::Move }, cx, cy);
+            }
+            // a press on a desktop icon belongs to Explorer (open / drag the
+            // icon), not to the scene or a widget under it
+            if p.on_desktop && p.left && !was_l && !crate::winsys::over_icon(p.x, p.y) {
+                self.left_down = true;
+                app.mouse(MouseIn::Down(Btn::Left), cx, cy);
+            }
+            // right-click belongs to Windows' desktop menu; the ⚙ opens settings
+        }
+        // the release always counts, wherever it happens (e.g. a widget
+        // dragged off onto another monitor): clamp it onto the grid, or the
+        // drag would stay stuck
+        if !p.left && self.left_down {
+            self.left_down = false;
+            let (mx, my) = (app.w.max(1) as i32 - 1, app.h.max(1) as i32 - 1);
+            app.mouse(MouseIn::Up(Btn::Left), cx.clamp(0, mx), cy.clamp(0, my));
+        }
+        let _ = was_r;
+        // walking around: keys go to Explorer's desktop window, so read
+        // them while it's focused and feed presses / releases through
+        let keys = crate::winsys::desktop_keys().unwrap_or([false; 6]);
+        let names = [KeyIn::Left, KeyIn::Right, KeyIn::Up, KeyIn::Down, KeyIn::Char('e'), KeyIn::Char('f')];
+        for i in 0..6 {
+            match (self.keys[i], keys[i]) {
+                (false, true) => app.key(names[i]),
+                (true, false) => app.key_up(names[i]),
+                _ => {}
+            }
+        }
+        self.keys = keys;
+    }
+
+    /// Windows desktop mode, about once a second: are we still attached to
+    /// a live desktop, and did the monitor / desktop geometry change?
+    #[cfg(windows)]
+    fn check_desktop(&mut self, el: &ActiveEventLoop) {
+        use windows_sys::Win32::Foundation::HWND;
+        let Some(g) = self.gfx.as_mut() else { return };
+        let hwnd = g.hwnd as HWND;
+        if self.attached && !crate::winsys::still_attached(hwnd) {
+            eprintln!("xmas-tui: lost the desktop window (Explorer restarted?); re-attaching");
+            self.lost_desktop();
+            return;
+        }
+        let mon = el.primary_monitor().or_else(|| el.available_monitors().next());
+        let rect = mon.map(|m| (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32));
+        let geom = (rect, crate::winsys::parent_origin(hwnd));
+        if geom == self.geom {
+            return;
+        }
+        let rect_changed = geom.0 != self.geom.0;
+        self.geom = geom;
+        if let Some((x, y, w, h)) = rect {
+            // the Resized event this causes re-runs layout()
+            crate::winsys::reposition(hwnd, x, y, w, h);
+            g.origin = (x, y);
+            if rect_changed {
+                self.restart_winfx(Some((x, y, w, h)));
+            }
+        }
+    }
+
+    /// Our desktop window died with its parent: drop it and start looking
+    /// for Explorer's new desktop (handled in about_to_wait). The App (and
+    /// with it the scene, widgets and audio) lives on.
+    #[cfg(windows)]
+    fn lost_desktop(&mut self) {
+        self.gfx = None;
+        // finish a widget drag in progress (Up doesn't use the position)
+        if std::mem::take(&mut self.left_down) {
+            if let Some(app) = self.app.as_mut() {
+                app.mouse(MouseIn::Up(Btn::Left), 0, 0);
+            }
+        }
+        self.reattach = Some(Reattach { at: Instant::now() + Duration::from_millis(500), ready: None, tries: 0 });
+    }
+
+    /// (Re)start the window snow & lights overlay for monitor `rect`. It
+    /// skips our own window (should attaching have failed, that's a
+    /// borderless monitor-sized window that would look like a game).
+    #[cfg(windows)]
+    fn restart_winfx(&mut self, rect: Option<(i32, i32, i32, i32)>) {
+        if !(self.opts.desktop || std::env::var_os("XMAS_WINFX").is_some()) {
+            return;
+        }
+        drop(self.winfx.take());
+        let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
+        if let (Some(rect), Some(app)) = (rect, self.app.as_mut()) {
+            let fx = std::sync::Arc::new(std::sync::Mutex::new(app.fx_cfg()));
+            self.winfx = Some(crate::winsnow::win::spawn(fx.clone(), rect, own));
+            app.set_fx(fx);
+        }
+    }
+
+    /// Create the window (and in desktop mode attach it behind the icons).
+    /// False if the window couldn't be created.
+    fn create(&mut self, el: &ActiveEventLoop) -> bool {
+        let mut attrs = Window::default_attributes().with_title("xmas-tui");
+        let mut origin = (0, 0);
+        let mon = el.primary_monitor().or_else(|| el.available_monitors().next());
+        // the monitor we cover (physical px), for the window-snow overlay
+        #[cfg_attr(not(windows), allow(unused_variables))]
+        let mon_rect = mon.as_ref().map(|m| (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32));
+        if self.opts.desktop {
+            if let Some(m) = mon {
+                let (p, s) = (m.position(), m.size());
+                origin = (p.x, p.y);
+                attrs = attrs
+                    .with_decorations(false)
+                    .with_position(PhysicalPosition::new(p.x, p.y))
+                    .with_inner_size(PhysicalSize::new(s.width, s.height));
+            }
+            #[cfg(windows)]
+            {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs = attrs.with_skip_taskbar(true);
+            }
+        } else {
+            attrs = attrs.with_inner_size(PhysicalSize::new(1600u32, 900u32));
+        }
+        let window = match el.create_window(attrs) {
+            Ok(w) => Rc::new(w),
+            Err(e) => {
+                eprintln!("xmas-tui: can't create window: {e}");
+                return false;
+            }
+        };
+        #[cfg(windows)]
+        let mut own_hwnd = 0usize;
+        #[cfg(windows)]
+        if self.opts.desktop {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = window.window_handle() {
+                if let RawWindowHandle::Win32(w32) = h.as_raw() {
+                    let s = window.inner_size();
+                    let hwnd = w32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+                    own_hwnd = hwnd as usize;
+                    self.attached = crate::winsys::attach_to_desktop(hwnd, origin.0, origin.1, s.width as i32, s.height as i32);
+                    if !self.attached {
+                        eprintln!("xmas-tui: couldn't find the desktop window; running as a normal window");
+                    }
+                    self.geom = (mon_rect, crate::winsys::parent_origin(hwnd));
+                }
+            }
+        }
+        let context = Context::new(window.clone()).expect("softbuffer context");
+        let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
+        let size = window.inner_size();
+        self.gfx = Some(Gfx {
+            window: window.clone(),
+            surface,
+            raster: Raster::new(8, 17),
+            fb: vec![],
+            prev: vec![],
+            size: (0, 0),
+            origin,
+            offset: (0, 0),
+            force: true,
+            hidden: false,
+            #[cfg(windows)]
+            hwnd: own_hwnd,
+        });
+        self.layout(size);
+        // window snow & lights in front of the other windows
+        #[cfg(windows)]
+        self.restart_winfx(mon_rect);
+        self.next = Instant::now();
+        window.request_redraw();
+        true
+    }
+
+    /// Windows desktop mode after losing the desktop: once Explorer's new
+    /// desktop exists (and had a moment to settle), create a fresh window
+    /// and attach it. A failed attach is retried for a while before we
+    /// settle for the top-level fallback window.
+    #[cfg(windows)]
+    fn try_reattach(&mut self, el: &ActiveEventLoop, now: Instant) {
+        let Some(r) = self.reattach.as_mut() else { return };
+        if now < r.at {
+            return;
+        }
+        if !crate::winsys::desktop_ready() {
+            r.ready = None;
+            r.at = now + Duration::from_secs(1);
+            return;
+        }
+        if r.ready.is_none() {
+            r.ready = Some(now);
+            r.at = now + Duration::from_millis(1500);
+            return;
+        }
+        let tries = r.tries + 1;
+        let ok = self.create(el);
+        if ok && self.attached {
+            self.reattach = None;
+            return;
+        }
+        if tries >= 20 {
+            // give up: keep whatever we have (the fallback window, if any)
+            self.reattach = None;
+            if !ok {
+                el.exit();
+            }
+            return;
+        }
+        // not attached (yet): throw this window away and try again later
+        self.gfx = None;
+        self.reattach = Some(Reattach { at: now + Duration::from_secs(2), ready: None, tries });
+    }
+}
+
+impl ApplicationHandler for Runner {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.gfx.is_some() {
+            return;
+        }
+        #[cfg(windows)]
+        if self.reattach.is_some() {
+            return;
+        }
+        if !self.create(el) {
+            el.exit();
+        }
+    }
+
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        // take the overlay down with us (destroys its window on its thread)
+        #[cfg(windows)]
+        drop(self.winfx.take());
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::Destroyed => {
+                // a window we replaced ourselves (re-attach): nothing to do
+                if self.gfx.as_ref().map(|g| g.window.id()) != Some(id) {
+                    return;
+                }
+                // attached to the desktop, our window dies with Explorer's
+                // (restart / crash / desktop rebuilt): attach a new one
+                #[cfg(windows)]
+                if self.opts.desktop && self.attached {
+                    eprintln!("xmas-tui: the desktop window went away (Explorer restarted?); re-attaching");
+                    self.lost_desktop();
+                    return;
+                }
+                el.exit();
+            }
+            WindowEvent::Resized(size) => self.layout(size),
+            WindowEvent::RedrawRequested => {
+                if !self.paused {
+                    self.draw();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+                let (cx, cy) = self.to_cell(position.x, position.y);
+                let drag = self.left_down;
+                if let Some(app) = self.app.as_mut() {
+                    app.mouse(if drag { MouseIn::Drag } else { MouseIn::Move }, cx, cy);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let (cx, cy) = self.to_cell(self.cursor.0, self.cursor.1);
+                let btn = match button {
+                    MouseButton::Left => Btn::Left,
+                    MouseButton::Right => Btn::Right,
+                    _ => return,
+                };
+                if btn == Btn::Left {
+                    self.left_down = state == ElementState::Pressed;
+                }
+                if let Some(app) = self.app.as_mut() {
+                    app.mouse(if state == ElementState::Pressed { MouseIn::Down(btn) } else { MouseIn::Up(btn) }, cx, cy);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let up = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                };
+                let (cx, cy) = self.to_cell(self.cursor.0, self.cursor.1);
+                if let Some(app) = self.app.as_mut() {
+                    app.mouse(MouseIn::Scroll(up), cx, cy);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let Some(app) = self.app.as_mut() else { return };
+                let keys: Vec<KeyIn> = match &event.logical_key {
+                    Key::Named(NamedKey::Enter) => vec![KeyIn::Enter],
+                    Key::Named(NamedKey::Backspace) => vec![KeyIn::Backspace],
+                    Key::Named(NamedKey::Escape) => vec![KeyIn::Esc],
+                    Key::Named(NamedKey::ArrowUp) => vec![KeyIn::Up],
+                    Key::Named(NamedKey::ArrowDown) => vec![KeyIn::Down],
+                    Key::Named(NamedKey::ArrowLeft) => vec![KeyIn::Left],
+                    Key::Named(NamedKey::ArrowRight) => vec![KeyIn::Right],
+                    Key::Named(NamedKey::Space) => vec![KeyIn::Char(' ')],
+                    Key::Character(s) => s.chars().map(KeyIn::Char).collect(),
+                    _ => vec![],
+                };
+                for k in keys {
+                    match (event.state, event.repeat) {
+                        (ElementState::Pressed, false) => app.key(k),
+                        (ElementState::Pressed, true) => app.key_repeat(k),
+                        (ElementState::Released, _) => app.key_up(k),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.app.as_ref().map(|a| a.quit).unwrap_or(false) || crate::tray::quit_requested() || crate::update::restart_requested() {
+            el.exit();
+            return;
+        }
+        let now = Instant::now();
+        #[cfg(windows)]
+        if self.opts.desktop {
+            if self.reattach.is_some() {
+                self.try_reattach(el, now);
+            }
+            if self.gfx.is_some() && now - self.last_geom_check >= Duration::from_secs(1) {
+                self.last_geom_check = now;
+                self.check_desktop(el);
+            }
+            // nobody can see the wallpaper during a fullscreen game or while
+            // the session is locked: rest (checked a few times a second)
+            if self.gfx.is_none() {
+                self.paused = true;
+            } else if self.paused || now - self.last_pause_check >= Duration::from_millis(250) {
+                self.last_pause_check = now;
+                let was = self.paused;
+                let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
+                self.paused = crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND);
+                if was && !self.paused {
+                    // back: draw right away rather than at the end of a 500 ms rest
+                    self.next = self.next.min(now);
+                }
+            }
+            if !self.paused {
+                self.poll_desktop_input();
+            }
+        }
+        let dt = if self.paused {
+            Duration::from_millis(500)
+        } else {
+            self.app.as_ref().map(|a| a.frame_dt()).unwrap_or(Duration::from_millis(33))
+        };
+        if now >= self.next {
+            self.next = if now - self.next > dt { now + dt } else { self.next + dt };
+            if let Some(g) = &self.gfx {
+                g.window.request_redraw();
+            }
+        }
+        // poll input a few times per frame in desktop mode for snappy clicks
+        // (not while paused: then we only wake every 500 ms to re-check)
+        let wake = if self.opts.desktop && !self.paused { self.next.min(now + Duration::from_millis(8)) } else { self.next };
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
+    }
+}
+
+pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<dyn std::error::Error>> {
+    let el = EventLoop::new()?;
+    let mut r = Runner {
+        cfg,
+        seed,
+        path,
+        opts,
+        gfx: None,
+        app: None,
+        next: Instant::now(),
+        cursor: (-1.0, -1.0),
+        left_down: false,
+        pointer: "",
+        #[cfg(windows)]
+        polled: (false, false),
+        keys: [false; 6],
+        paused: false,
+        #[cfg(windows)]
+        attached: false,
+        #[cfg(windows)]
+        reattach: None,
+        #[cfg(windows)]
+        geom: (None, (0, 0)),
+        #[cfg(windows)]
+        last_geom_check: Instant::now(),
+        #[cfg(windows)]
+        last_pause_check: Instant::now(),
+        #[cfg(windows)]
+        winfx: None,
+    };
+    el.run_app(&mut r)?;
+    Ok(())
+}

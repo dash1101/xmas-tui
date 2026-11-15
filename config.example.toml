@@ -1,0 +1,80 @@
+# xmas-tui config — copy to ~/.config/xmas-tui/config.toml
+# Every field is optional; these are the defaults.
+
+fps = 30          # frames per second (lower = less CPU)
+seed = 0          # 0 = new random layout each launch; any other number = fixed layout
+
+[scene]
+aurora = true
+snow = 1.0            # snowfall density multiplier, 0 disables snow
+wind = 1.0            # wind strength multiplier
+sleigh_minutes = 4.0  # average minutes between Santa fly-bys, 0 disables
+glow = 1.0            # light/bloom intensity
+critters = 1.0        # how many animals & people come by (0 = none)
+bushes = true         # festive berry bushes the animals snack from
+
+[clock]
+enabled = true
+hour24 = false
+seconds = false
+countdown = true      # "40 days 10:57:34 until Christmas"
+
+[widgets]
+system = true         # CPU / GPU / VRAM / RAM / disk / network
+music = true          # now playing, from any MPRIS player (browsers, Spotify, …)
+weather = true
+disk = "/"            # mount point shown in the DISK row
+
+[weather]
+city = ""             # e.g. "Oslo" or "Denver, CO" — looked up via Open-Meteo (no API key)
+# latitude = 39.77    # or set coordinates directly instead of a city
+# longitude = -86.16
+units = "fahrenheit"  # or "celsius"
+refresh_minutes = 15
+
+[sound]               # everything is synthesized — no audio files
+enabled = true
+master = 0.5          # 0..1 slider positions
+music = 0.6           # generated music: original tunes + public-domain carols
+sfx = 0.7             # effects: presents, snowman, sleigh bells, church bells, fireworks…
+ambience = 0.5        # wind, snowfall, a crackling fire, distant chimes
+track = "shuffle"     # or one style: "music-box", "celesta", "piano", "sleigh-ride"
+cursor = true         # a soft sparkle when the cursor moves fast
+pause_for_media = true  # fade out while another app plays media (a video, music…)
+
+[sound.effects]       # per-effect volumes, 0..1.5 (on top of `sfx`)
+presents = 1.0
+snowman = 1.0
+animals = 1.0         # deer snorts, fox yips, rabbit thumps, munching
+people = 1.0          # greetings, giggles, petting "aww"s
+handling = 1.0        # picking someone up / dropping them in the snow
+bushes = 1.0          # bush rustles and cardinals
+sleigh = 1.0
+stars = 1.0
+bells = 1.0
+fireworks = 1.0
+sparkles = 1.0
+snow = 1.0
+switches = 1.0
+train = 1.0
+fanfare = 1.0
+cursor = 1.0
+
+[sound.ambience_mix]  # ambience layers, 0..1.5 (on top of `ambience`)
+wind = 1.0
+snowfall = 1.0
+fire = 1.0
+chimes = 1.0
+aurora = 1.0
+
+[windows]             # snow & lights on your open windows (KDE Plasma Wayland, Windows)
+snow = true
+lights = true
+pile_rows = 1.5       # max pile height, in text rows
+density = 1.0         # falling snow in front of windows
+front = true          # false: flakes stay invisible (piles still grow) — nothing drifts over your work
+docks = true          # snow settles on the taskbar / panels too
+settle = 1.0          # how fast piles build up
+light_style = "multi" # "multi", "warm", "icy" or "candy"
+light_windows = 6     # how many windows (topmost first) get lights
+light_glow = 1.0      # bulb brightness

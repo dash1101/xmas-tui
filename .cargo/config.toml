@@ -1,0 +1,8 @@
+# Windows builds: +crt-static links the C runtime / libunwind statically so
+# the .exe needs no extra DLLs. (The cross-compile from Linux finds
+# llvm-mingw via scripts/build-windows.sh; nothing machine-specific here.)
+[target.x86_64-pc-windows-gnullvm]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

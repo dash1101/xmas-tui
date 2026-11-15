@@ -1,0 +1,69 @@
+# Push a tag like v1.2.3 → build Linux + Windows, publish a GitHub release
+# with the binaries and SHA256SUMS (what the in-app updater downloads).
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04 # older glibc: runs on most current distros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: version matches tag
+        run: grep -q "^version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
+      - run: cargo test --release
+      - run: cargo build --release
+        env:
+          XMAS_RELEASE: "1"
+      - run: cp target/release/xmas-tui xmas-tui-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: xmas-tui-linux-x86_64
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+        env:
+          XMAS_RELEASE: "1"
+      - name: package
+        shell: bash
+        run: |
+          cp target/release/xmas-tui.exe xmas-tui-windows-x86_64.exe
+          mkdir xmas-tui-windows
+          cp target/release/xmas-tui.exe xmas-tui-windows/
+          cp packaging/README-Windows.txt xmas-tui-windows/README.txt
+          cp config.example.toml LICENSE assets/fonts/LICENSE-*.txt xmas-tui-windows/
+          7z a xmas-tui-windows.zip xmas-tui-windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            xmas-tui-windows-x86_64.exe
+            xmas-tui-windows.zip
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=.github/release-notes/${GITHUB_REF_NAME}.md
+          if [ -f "$notes" ]; then flag=(--notes-file "$notes"); else flag=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --title "xmas-tui $GITHUB_REF_NAME" "${flag[@]}"

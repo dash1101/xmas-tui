@@ -1,0 +1,531 @@
+// No console window when double-clicked on Windows (release builds).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod app;
+mod audio;
+mod color;
+mod config;
+mod export;
+mod frame;
+mod platform;
+mod raster;
+mod rng;
+mod scene;
+mod setwin;
+mod settings;
+mod term;
+mod tray;
+mod update;
+mod widgets;
+mod window;
+#[cfg(windows)]
+mod winsys;
+#[cfg(any(target_os = "linux", windows))]
+mod winsnow;
+
+use app::{App, Btn, KeyIn, MouseIn};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use frame::Frame;
+use scene::Scene;
+use settings::Settings;
+use std::time::{Duration, Instant};
+use term::Term;
+use widgets::Widgets;
+
+struct Args {
+    config: Option<String>,
+    export: Option<String>,
+    frames: usize,
+    size: Option<(usize, usize)>,
+    at: f32,
+    sleigh: bool,
+    bench: usize,
+    fps: Option<f32>,
+    wallpaper: bool,
+    settings: bool,
+    tab: usize,
+    demo: bool,
+    windowed: bool,
+    terminal: bool,
+    settings_window: bool,
+    rows: u32,
+    export_audio: Option<String>,
+    audio_test: f32,
+    pan: f32,
+    after_update: Option<u32>,
+}
+
+fn parse_args() -> Args {
+    let mut a = Args {
+        config: None,
+        export: None,
+        frames: 1,
+        size: None,
+        at: 12.0,
+        sleigh: false,
+        bench: 0,
+        fps: None,
+        wallpaper: false,
+        settings: false,
+        tab: 0,
+        demo: false,
+        windowed: false,
+        terminal: false,
+        settings_window: false,
+        rows: 68,
+        export_audio: None,
+        audio_test: 0.0,
+        pan: 0.0,
+        after_update: None,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--config" => a.config = it.next(),
+            "--export" => a.export = it.next(),
+            "--export-audio" => a.export_audio = it.next(),
+            "--audio-test" => a.audio_test = it.next().and_then(|v| v.parse().ok()).unwrap_or(8.0),
+            "--frames" => a.frames = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--at" => a.at = it.next().and_then(|v| v.parse().ok()).unwrap_or(12.0),
+            "--sleigh" => a.sleigh = true,
+            "--settings" => a.settings = true,
+            "--tab" => a.tab = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--demo" => a.demo = true,
+            "--update" => {}
+            "--after-update" => a.after_update = it.next().and_then(|v| v.parse().ok()),
+            "--pan" => a.pan = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            "--wallpaper" => a.wallpaper = true,
+            "--windowed" => a.windowed = true,
+            "--terminal" => a.terminal = true,
+            "--settings-window" => a.settings_window = true,
+            "--rows" => a.rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(68),
+            "--bench" => a.bench = it.next().and_then(|v| v.parse().ok()).unwrap_or(300),
+            "--fps" => a.fps = it.next().and_then(|v| v.parse().ok()),
+            "--size" => {
+                a.size = it.next().and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+            }
+            "-h" | "--help" => {
+                println!(
+                    "xmas-tui — cozy glowing Christmas scene for your terminal / desktop\n\n\
+                     USAGE: xmas-tui [--config PATH] [--fps N]           (Linux: run inside a terminal; Windows: desktop wallpaper)\n\
+                     \x20      xmas-tui --wallpaper                       (terminal mode, keys don't quit — used by the kitty launcher)\n\
+                     \x20      xmas-tui --windowed [--rows N]             (a normal window, any OS)\n\
+                     \x20      xmas-tui --settings-window [--export DIR]  (just the settings panel; what the tray icon opens)\n\
+                     \x20      xmas-tui --export DIR [--size 568x75] [--frames N] [--at SECONDS] [--sleigh] [--settings] [--demo] [--pan CELLS]\n\
+                     \x20      xmas-tui --bench FRAMES [--size WxH]\n\
+                     \x20      xmas-tui --update                         (install a newer release now; release builds)\n\
+                     \x20      xmas-tui --export-audio DIR                (render all sounds/music to WAV; nothing is played)\n\
+                     \x20      xmas-tui --audio-test SECONDS              (drive the real sound output; see XMAS_AUDIO_DEV_* in src/audio/out.rs)\n\n\
+                     Mouse: drag widgets, click things in the scene, ⚙ or right-click for settings.\n\
+                     Config: {}",
+                    config::default_path().display()
+                );
+                std::process::exit(0);
+            }
+            other => eprintln!("ignoring unknown argument {other}"),
+        }
+    }
+    a
+}
+
+fn main() {
+    let args = parse_args();
+    if std::env::args().any(|a| a == "--update") {
+        std::process::exit(update::cli());
+    }
+    if let Some(pid) = args.after_update {
+        // just updated: let the previous version finish exiting first
+        update::wait_for(pid);
+    }
+    let cfg = config::load(args.config.as_deref());
+    if let Some(f) = args.fps {
+        // interactive modes: an override for this run only, kept out of the
+        // config the app saves (see `app::set_fps_override`)
+        app::set_fps_override(f);
+    }
+    let seed = if cfg.seed == 0 { app::random_seed() } else { cfg.seed as u32 };
+    let path = config::resolve(args.config.as_deref());
+    if args.settings_window {
+        let res = match &args.export {
+            Some(dir) => setwin::export(cfg, &path, dir).map_err(|e| e.into()),
+            None => setwin::run(cfg, path),
+        };
+        if let Err(e) = res {
+            eprintln!("xmas-tui: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(dir) = &args.export_audio {
+        if let Err(e) = audio::export::export_all(dir, &cfg.sound) {
+            eprintln!("xmas-tui: audio export failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.audio_test > 0.0 {
+        audio::run_test(args.audio_test, &cfg.sound);
+        return;
+    }
+    if args.export.is_some() || args.bench > 0 {
+        // the one-shot tools never save, so they can just use the override
+        let mut cfg = cfg.clone();
+        if let Some(f) = args.fps {
+            cfg.fps = config::clean_fps(f);
+        }
+        match &args.export {
+            Some(dir) => run_export(&cfg, seed, dir, &args),
+            None => run_bench(&cfg, seed, &args),
+        }
+        return;
+    }
+    let native = args.windowed || (cfg!(windows) && !args.terminal);
+    if native {
+        let desktop = cfg!(windows) && !args.windowed;
+        if desktop && !platform::single_instance() {
+            return; // already running
+        }
+        if desktop {
+            tray::spawn(path.clone());
+        }
+        let res = window::run(cfg, seed, path, window::Opts { desktop, rows: args.rows });
+        tray::shutdown();
+        if let Err(e) = res {
+            eprintln!("xmas-tui: {e}");
+            std::process::exit(1);
+        }
+        if update::restart_requested() {
+            update::relaunch();
+        }
+        return;
+    }
+    if let Err(e) = run_terminal(cfg, seed, &path, args.wallpaper) {
+        Term::leave();
+        eprintln!("xmas-tui: {e}");
+        std::process::exit(1);
+    }
+    if update::restart_requested() {
+        update::relaunch();
+    }
+}
+
+/// Terminal front-end (the kitty wallpaper on Linux): crossterm events in,
+/// diffed escape sequences out.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Set once this process started the window-snow overlay (whose bridge
+/// loads the "xmas-snow" KWin script).
+#[cfg(target_os = "linux")]
+static FX_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Did this process load the KWin script? The overlay's bridge owns the
+/// D-Bus name the script reports to for as long as the script is ours; a
+/// second instance fails to get the name (and doesn't load the script).
+#[cfg(target_os = "linux")]
+fn owns_kwin_script() -> bool {
+    if !FX_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let owner_pid = || -> zbus::Result<u32> {
+        let conn = zbus::blocking::Connection::session()?;
+        let dbus = zbus::blocking::fdo::DBusProxy::new(&conn)?;
+        // same name as winsnow::kde::NAME
+        let name = zbus::names::BusName::try_from("org.xmastui.Snow")?;
+        Ok(dbus.get_connection_unix_process_id(name)?)
+    };
+    owner_pid().map(|pid| pid == std::process::id()).unwrap_or(false)
+}
+
+fn shutdown_extras() {
+    tray::shutdown();
+    // only the instance that loaded the KWin script may unload it: quitting
+    // a preview in Konsole (or a second wallpaper instance) must not take
+    // the running wallpaper's window snow down with it
+    #[cfg(target_os = "linux")]
+    if owns_kwin_script() {
+        winsnow::kde::unload_script();
+    }
+}
+
+/// As the wallpaper our stderr is kitty's terminal: anything printed there
+/// would scribble over the scene. Send it to a log file instead.
+#[cfg(unix)]
+fn redirect_stderr_to_log() {
+    use std::os::fd::AsRawFd;
+    let dir = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"))
+        .join("xmas-tui");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("wallpaper.log");
+    // keep the log small: start fresh once it passes 1 MB
+    let big = std::fs::metadata(&path).map(|m| m.len() > 1 << 20).unwrap_or(false);
+    let file = std::fs::OpenOptions::new().create(true).append(!big).write(true).truncate(big).open(&path);
+    if let Ok(f) = file {
+        unsafe {
+            libc::dup2(f.as_raw_fd(), 2);
+        }
+    }
+}
+
+fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpaper: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if wallpaper {
+        redirect_stderr_to_log();
+    }
+    std::panic::set_hook(Box::new(|info| {
+        Term::leave();
+        shutdown_extras();
+        eprintln!("{info}");
+    }));
+    // exit cleanly (and unload the KWin script) when systemd / kitty stop us
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as usize);
+        libc::signal(libc::SIGHUP, on_signal as *const () as usize);
+        libc::signal(libc::SIGINT, on_signal as *const () as usize);
+        // if kitty (our parent) goes away, we're told to stop too
+        #[cfg(target_os = "linux")]
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    }
+    Term::enter()?;
+    let (w, h) = crossterm::terminal::size().map(|(w, h)| (w as usize, h as usize))?;
+    let mut app = App::new(cfg, seed, path, w, h, wallpaper, true, false);
+    app.start_audio();
+    // window snow + lights overlay: only as the actual wallpaper on KDE Wayland
+    #[cfg(target_os = "linux")]
+    let mut fx_handle = None;
+    #[cfg(target_os = "linux")]
+    {
+        let kde = std::env::var("XDG_CURRENT_DESKTOP").map(|d| d.contains("KDE")).unwrap_or(false);
+        if wallpaper && kde && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let fx = std::sync::Arc::new(std::sync::Mutex::new(app.fx_cfg()));
+            winsnow::overlay::spawn(fx.clone());
+            FX_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            app.set_fx(fx.clone());
+            fx_handle = Some(fx);
+        }
+    }
+    // tray / status icon (settings window, quick toggles) for the wallpaper
+    if wallpaper {
+        tray::spawn(path.to_path_buf());
+    }
+    let mut was_paused = false;
+    let mut term = Term::new();
+    let mut pointer = "";
+    let mut next = Instant::now();
+    loop {
+        // bounded per frame, and bail out promptly once asked to stop (a
+        // hung-up terminal can report "readable" forever)
+        let mut budget = 256;
+        while budget > 0 && !STOP.load(std::sync::atomic::Ordering::SeqCst) && event::poll(Duration::ZERO)? {
+            budget -= 1;
+            match event::read()? {
+                Event::Mouse(m) => {
+                    let (x, y) = (m.column as i32, m.row as i32);
+                    let ev = match m.kind {
+                        MouseEventKind::Moved => MouseIn::Move,
+                        MouseEventKind::Down(MouseButton::Left) => MouseIn::Down(Btn::Left),
+                        MouseEventKind::Down(MouseButton::Right) => MouseIn::Down(Btn::Right),
+                        MouseEventKind::Drag(MouseButton::Left) => MouseIn::Drag,
+                        MouseEventKind::Up(MouseButton::Left) => MouseIn::Up(Btn::Left),
+                        MouseEventKind::ScrollUp => MouseIn::Scroll(true),
+                        MouseEventKind::ScrollDown => MouseIn::Scroll(false),
+                        _ => continue,
+                    };
+                    app.mouse(ev, x, y);
+                }
+                Event::Key(k) => {
+                    if k.modifiers.contains(KeyModifiers::CONTROL) && k.kind == KeyEventKind::Press {
+                        if k.code == KeyCode::Char('c') && !wallpaper {
+                            break;
+                        }
+                        continue;
+                    }
+                    let key = match k.code {
+                        KeyCode::Char(c) => KeyIn::Char(c),
+                        KeyCode::Backspace => KeyIn::Backspace,
+                        KeyCode::Enter => KeyIn::Enter,
+                        KeyCode::Esc => KeyIn::Esc,
+                        KeyCode::Up => KeyIn::Up,
+                        KeyCode::Down => KeyIn::Down,
+                        KeyCode::Left => KeyIn::Left,
+                        KeyCode::Right => KeyIn::Right,
+                        _ => continue,
+                    };
+                    match k.kind {
+                        KeyEventKind::Press => app.key(key),
+                        KeyEventKind::Repeat => app.key_repeat(key),
+                        KeyEventKind::Release => app.key_up(key),
+                    }
+                }
+                Event::Resize(_, _) => term.invalidate(),
+                _ => {}
+            }
+        }
+        if app.quit || STOP.load(std::sync::atomic::Ordering::SeqCst) || tray::quit_requested() || update::restart_requested() {
+            break;
+        }
+        // tray "Pause effects": hold the last frame, hide window snow/lights
+        let paused = tray::paused();
+        if paused != was_paused {
+            was_paused = paused;
+            #[cfg(target_os = "linux")]
+            if let Some(fx) = &fx_handle {
+                let mut c = app.fx_cfg();
+                if paused {
+                    (c.snow, c.lights) = (false, false);
+                }
+                if let Ok(mut f) = fx.lock() {
+                    *f = c;
+                }
+            }
+        }
+        if paused {
+            std::thread::sleep(Duration::from_millis(100));
+            next = Instant::now();
+            continue;
+        }
+        let (nw, nh) = crossterm::terminal::size().map(|(w, h)| (w as usize, h as usize))?;
+        if (nw, nh) != (app.w, app.h) && nw > 0 && nh > 0 {
+            app.resize(nw, nh);
+            term.invalidate();
+        }
+        let want = app.pointer();
+        if want != pointer {
+            pointer = want;
+            Term::pointer(want);
+        }
+        let (w, h) = (app.w, app.h);
+        let cells = app.step();
+        if let Err(e) = term.draw(cells, w, h) {
+            Term::leave();
+            shutdown_extras();
+            return Err(e);
+        }
+        let frame_dt = app.frame_dt();
+        next += frame_dt;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else {
+            next = now;
+        }
+    }
+    Term::leave();
+    shutdown_extras();
+    Ok(())
+}
+
+fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
+    let (w, h) = args.size.unwrap_or((568, 75));
+    std::fs::create_dir_all(dir).expect("create export dir");
+    let mut frame = Frame::new(w, h);
+    frame.glow_near = cfg.scene.glow;
+    frame.glow_far = cfg.scene.glow;
+    let mut scene = Scene::new(w, h, seed, &cfg.scene);
+    let mut widgets = Widgets::new(cfg);
+    // give the data threads a moment to report
+    std::thread::sleep(Duration::from_millis(2600));
+    let dt = 1.0 / cfg.fps.max(1.0);
+    let mut t = 0.0;
+    if args.sleigh {
+        scene.sleigh.trigger((args.at - 9.0).max(0.0));
+    }
+    scene.jump(args.pan);
+    while t < args.at {
+        scene.update(dt, t);
+        t += dt;
+    }
+    let mut ex = export::Exporter::new();
+    let mut settings = Settings::default();
+    settings.open = args.settings;
+    settings.tab = args.tab;
+    settings.window_fx = true;
+    if args.demo {
+        scene.demo(t);
+        for _ in 0..(3.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+        widgets.hover = Some(1);
+    }
+    for i in 0..args.frames {
+        scene.update(dt, t);
+        frame.clear();
+        scene.draw(&mut frame, t);
+        widgets.draw(&mut frame, t);
+        settings.draw_gear(&mut frame, t);
+        settings.draw(&mut frame, cfg, t);
+        frame.compose();
+        let p = std::path::Path::new(dir).join(format!("frame_{i:04}.png"));
+        ex.render(&frame.out, w, h, &p).expect("write png");
+        t += dt;
+    }
+    eprintln!("exported {} frame(s) of {}x{} cells to {}", args.frames, w, h, dir);
+}
+
+fn run_bench(cfg: &config::Config, seed: u32, args: &Args) {
+    let (w, h) = args.size.unwrap_or((568, 75));
+    let mut frame = Frame::new(w, h);
+    let mut scene = Scene::new(w, h, seed, &cfg.scene);
+    let mut widgets = Widgets::new(cfg);
+    let dt = 1.0 / cfg.fps.max(1.0);
+    let mut t = 0.0;
+    let mut prev: Vec<frame::Cell> = vec![];
+    let (mut t_sim, mut t_comp, mut changed) = (0.0f64, 0.0f64, 0usize);
+    let mut term = Term::new();
+    let (mut bytes, mut t_term) = (0usize, 0.0f64);
+    for _ in 0..args.bench {
+        let a = Instant::now();
+        scene.update(dt, t);
+        frame.clear();
+        scene.draw(&mut frame, t);
+        widgets.draw(&mut frame, t);
+        let b = Instant::now();
+        frame.compose();
+        let c = Instant::now();
+        t_sim += (b - a).as_secs_f64();
+        t_comp += (c - b).as_secs_f64();
+        if prev.len() == frame.out.len() {
+            changed += frame.out.iter().zip(&prev).filter(|(x, y)| x != y).count();
+        }
+        prev = frame.out.clone();
+        let d = Instant::now();
+        let n = term.render(&frame.out, w, h);
+        t_term += d.elapsed().as_secs_f64();
+        if t > 0.0 {
+            bytes += n;
+        }
+        t += dt;
+    }
+    let n = args.bench as f64;
+    println!(
+        "{}x{} cells: scene+widgets {:.2} ms/frame, compose {:.2} ms/frame, ~{:.0} cells changed/frame ({:.1}%), encode {:.2} ms/frame, ~{:.0} KB/frame",
+        w,
+        h,
+        t_sim / n * 1e3,
+        t_comp / n * 1e3,
+        changed as f64 / (n - 1.0),
+        changed as f64 / (n - 1.0) / (w * h) as f64 * 100.0,
+        t_term / n * 1e3,
+        bytes as f64 / (n - 1.0) / 1024.0
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let w = &cfg.windows;
+        let _ = w;
+        let fx = winsnow::FxCfg::from_cfg(&cfg.windows);
+        print!("{}", winsnow::bench::run(args.bench, fx));
+    }
+}

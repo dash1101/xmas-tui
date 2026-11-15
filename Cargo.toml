@@ -1,0 +1,61 @@
+[package]
+name = "xmas-tui"
+version = "1.0.0"
+edition = "2021"
+description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
+license = "MIT"
+repository = "https://github.com/dash1101/xmas-tui"
+
+[dependencies]
+crossterm = "0.28"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ureq = "2"
+fontdue = "0.9"
+png = "0.17"
+winit = "0.30"
+softbuffer = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+smithay-client-toolkit = { version = "0.19", default-features = false }
+wayland-client = "0.31"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Media_Control",
+    "Win32_Graphics_Dxgi",
+    "Win32_System_WinRT",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
