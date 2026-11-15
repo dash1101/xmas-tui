@@ -53,6 +53,10 @@ struct Args {
     audio_test: f32,
     pan: f32,
     after_update: Option<u32>,
+    /// --export: raw RGB frames to stdout (for ffmpeg) instead of PNGs.
+    raw: bool,
+    /// --export: just the scene (no widgets, settings gear or prompts).
+    clean: bool,
 }
 
 fn parse_args() -> Args {
@@ -77,6 +81,8 @@ fn parse_args() -> Args {
         audio_test: 0.0,
         pan: 0.0,
         after_update: None,
+        raw: false,
+        clean: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -92,6 +98,8 @@ fn parse_args() -> Args {
             "--tab" => a.tab = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--demo" => a.demo = true,
             "--update" => {}
+            "--raw" => a.raw = true,
+            "--clean" => a.clean = true,
             "--after-update" => a.after_update = it.next().and_then(|v| v.parse().ok()),
             "--pan" => a.pan = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--wallpaper" => a.wallpaper = true,
@@ -114,7 +122,7 @@ fn parse_args() -> Args {
                      \x20      xmas-tui --wallpaper                       (terminal mode, keys don't quit — used by the kitty launcher)\n\
                      \x20      xmas-tui --windowed [--rows N]             (a normal window, any OS)\n\
                      \x20      xmas-tui --settings-window [--export DIR]  (just the settings panel; what the tray icon opens)\n\
-                     \x20      xmas-tui --export DIR [--size 568x75] [--frames N] [--at SECONDS] [--sleigh] [--settings] [--demo] [--pan CELLS]\n\
+                     \x20      xmas-tui --export DIR [--size 568x75] [--frames N] [--at SECONDS] [--sleigh] [--settings] [--demo] [--pan CELLS] [--clean] [--raw]\n\
                      \x20      xmas-tui --bench FRAMES [--size WxH]\n\
                      \x20      xmas-tui --update                         (install a newer release now; release builds)\n\
                      \x20      xmas-tui --export-audio DIR                (render all sounds/music to WAV; nothing is played)\n\
@@ -460,16 +468,33 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         }
         widgets.hover = Some(1);
     }
+    if args.clean {
+        scene.quiet_player();
+    }
+    let mut out = std::io::BufWriter::with_capacity(1 << 22, std::io::stdout().lock());
     for i in 0..args.frames {
         scene.update(dt, t);
         frame.clear();
         scene.draw(&mut frame, t);
-        widgets.draw(&mut frame, t);
-        settings.draw_gear(&mut frame, t);
-        settings.draw(&mut frame, cfg, t);
+        if !args.clean {
+            widgets.draw(&mut frame, t);
+            settings.draw_gear(&mut frame, t);
+            settings.draw(&mut frame, cfg, t);
+        }
         frame.compose();
-        let p = std::path::Path::new(dir).join(format!("frame_{i:04}.png"));
-        ex.render(&frame.out, w, h, &p).expect("write png");
+        if args.raw {
+            use std::io::Write;
+            let (img, iw, ih) = ex.rgb(&frame.out, w, h);
+            if i == 0 {
+                eprintln!("raw rgb24 {iw}x{ih}");
+            }
+            if out.write_all(&img).is_err() {
+                return; // the reader went away
+            }
+        } else {
+            let p = std::path::Path::new(dir).join(format!("frame_{i:04}.png"));
+            ex.render(&frame.out, w, h, &p).expect("write png");
+        }
         t += dt;
     }
     eprintln!("exported {} frame(s) of {}x{} cells to {}", args.frames, w, h, dir);

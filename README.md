@@ -260,6 +260,7 @@ for every option, including setting your weather city.
 Developer tools:
 ```bash
 xmas-tui --export DIR --size 568x75 --frames 1 --at 20 --sleigh   # render frames to PNG (--pan CELLS to look around)
+xmas-tui --export X --frames 720 --fps 24 --clean --raw | ffmpeg -f rawvideo -pix_fmt rgb24 -s 5112x1425 -r 24 -i - out.mp4  # a video
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame
 xmas-tui --settings-window --export DIR                            # settings window + tray icons to PNG
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame (+ window fx on Linux)

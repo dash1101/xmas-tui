@@ -15,7 +15,8 @@ impl Exporter {
         Exporter { raster: Raster::new(9, 19) }
     }
 
-    pub fn render(&mut self, cells: &[Cell], w: usize, h: usize, path: &Path) -> std::io::Result<()> {
+    /// The frame as packed RGB bytes: (pixels, width, height).
+    pub fn rgb(&mut self, cells: &[Cell], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
         let (cw, ch) = (self.raster.cw, self.raster.ch);
         let (iw, ih) = (w * cw, h * ch);
         let mut buf = vec![0u32; iw * ih];
@@ -28,6 +29,11 @@ impl Exporter {
         for p in buf {
             img.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
         }
+        (img, iw, ih)
+    }
+
+    pub fn render(&mut self, cells: &[Cell], w: usize, h: usize, path: &Path) -> std::io::Result<()> {
+        let (img, iw, ih) = self.rgb(cells, w, h);
         let file = std::fs::File::create(path)?;
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), iw as u32, ih as u32);
         enc.set_color(png::ColorType::Rgb);

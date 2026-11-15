@@ -469,6 +469,13 @@ impl Scene {
         self.player.as_ref().map(|p| p.x)
     }
 
+    /// Previews: you stand about idly (no [E] prompts).
+    pub fn quiet_player(&mut self) {
+        if let Some(p) = &mut self.player {
+            p.active_at = f32::NEG_INFINITY;
+        }
+    }
+
     pub fn has_player(&self) -> bool {
         self.player.is_some()
     }
