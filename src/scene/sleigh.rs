@@ -30,6 +30,12 @@ pub struct Sleigh {
     rng: Rng,
     w: f32,
     moon_row: f32,
+    /// Pulled up to a hover until then (clicked: Santa stops for a chat),
+    /// and how fast it's going now (0 stopped .. 1 full speed).
+    halt_until: f32,
+    pace: f32,
+    /// Santa's busy on his rounds: no fly-bys start meanwhile.
+    pub hold: bool,
 }
 
 const DEER: usize = 4;
@@ -56,6 +62,9 @@ impl Sleigh {
             rng,
             w: w as f32,
             moon_row,
+            halt_until: -1.0,
+            pace: 1.0,
+            hold: false,
         }
     }
 
@@ -72,6 +81,32 @@ impl Sleigh {
         if let Some(r) = &mut self.requested {
             *r -= s;
         }
+        self.halt_until -= s;
+    }
+
+    /// Slow to a stop and hover until `until`.
+    pub fn halt(&mut self, until: f32) {
+        self.halt_until = self.halt_until.max(until);
+    }
+
+    pub fn halted(&self, t: f32) -> bool {
+        self.active && t < self.halt_until
+    }
+
+    /// Whether (column, row) on screen is on the team or the sleigh.
+    pub fn hit(&self, x: i32, y: i32, t: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        let (x, y) = (x as f32, y as f32);
+        let x1 = self.x + (DEER * 5) as f32 + 10.0;
+        x >= self.x - 2.0 && x <= x1 && (y - self.y_at(x.min(x1), t)).abs() <= 2.5
+    }
+
+    /// Santa's face (screen column, row) while flying.
+    pub fn santa_at(&self, t: f32) -> Option<(f32, f32)> {
+        let sx = self.x + (DEER * 5) as f32;
+        self.active.then(|| (sx + 3.0, self.y_at(sx, t).round() - 1.0))
     }
 
     /// Centre column of the team + sleigh while flying (for the bells).
@@ -90,7 +125,7 @@ impl Sleigh {
     pub fn update(&mut self, dt: f32, t: f32) {
         let asked = self.requested.is_some_and(|r| t >= r);
         let due = self.interval > 0.0 && t >= self.next;
-        if !self.active && (asked || due) {
+        if !self.active && !self.hold && (asked || due) {
             self.active = true;
             self.requested = None;
             self.x = self.w + 4.0;
@@ -102,8 +137,11 @@ impl Sleigh {
             }
         }
         if self.active {
-            self.x -= self.speed * dt;
-            self.spawn += dt;
+            // easing down to a hover when halted, and back up to speed after
+            let want = if t < self.halt_until { 0.0 } else { 1.0 };
+            self.pace += (want - self.pace) * (1.0 - (-dt * 1.6).exp());
+            self.x -= self.speed * self.pace * dt;
+            self.spawn += dt * (0.25 + 0.75 * self.pace);
             while self.spawn > 0.03 {
                 self.spawn -= 0.03;
                 let tail = self.x + (DEER * 5) as f32 + 9.0;
@@ -115,6 +153,7 @@ impl Sleigh {
             }
             if self.x < -((DEER * 5) as f32 + 14.0) {
                 self.active = false;
+                self.pace = 1.0;
             }
         }
         for s in &mut self.sparks {
@@ -136,11 +175,19 @@ impl Sleigh {
         if !self.active {
             return;
         }
+        draw_team(f, self.x, |x| self.y_at(x, t), t, glow, true);
+    }
+}
+
+/// The reindeer team and the sleigh, heading left from column `x` (the
+/// sleigh trails behind at `x + 20`); `y(x)`: the row at column x. With
+/// `santa` false the seat's empty (he's off down a chimney).
+pub fn draw_team(f: &mut Frame, x0: f32, y_of: impl Fn(f32) -> f32, t: f32, glow: f32, santa: bool) {
         let gallop = ((t * 8.0) as i32) % 2 == 0;
         // reindeer team, Rudolph in front
         for d in 0..DEER {
-            let x = self.x + (d * 5) as f32;
-            let y = self.y_at(x, t).round() as i32;
+            let x = x0 + (d * 5) as f32;
+            let y = y_of(x).round() as i32;
             let xi = x.round() as i32;
             if d == 0 {
                 f.put_g(xi - 1, y, Glyph::new('●', Rgb::hex(0xff2a2a) * 1.4).lit(0.0));
@@ -158,13 +205,12 @@ impl Sleigh {
             f.put_g(xi + 4, y, Glyph::new('╌', GOLD * 0.7).lit(0.0));
         }
         // the sleigh
-        let sx = self.x + (DEER * 5) as f32;
-        let y = self.y_at(sx, t).round() as i32;
+        let sx = x0 + (DEER * 5) as f32;
+        let y = y_of(sx).round() as i32;
         let x = sx.round() as i32;
-        // Santa
-        f.put_g(x + 3, y - 2, Glyph::new('▲', RED * 1.1).lit(0.3));
-        f.put_g(x + 4, y - 2, Glyph::new('•', WHITE).lit(0.3));
-        f.put_g(x + 3, y - 1, Glyph::new('☻', WHITE).solid(RED * 0.9).lit(0.3));
+        if santa {
+            draw_santa(f, x + 3, y - 1);
+        }
         f.put_g(x + 5, y - 1, Glyph::new('▄', Rgb::hex(0x7a3a1a)).lit(0.3));
         f.put_g(x + 6, y - 1, Glyph::new('▄', Rgb::hex(0x2a6a3a)).lit(0.3));
         // body
@@ -181,5 +227,15 @@ impl Sleigh {
         }
         f.put_g(x + 9, y + 1, Glyph::new('╯', GOLD).lit(0.0));
         f.light_cell(x + 1, y, GOLD * (1.5 * glow));
-    }
 }
+
+/// Santa himself: hat and pompom above (x, y), face and red coat at it.
+pub fn draw_santa(f: &mut Frame, x: i32, y: i32) {
+    f.put_g(x, y - 1, Glyph::new('▲', RED * 1.1).lit(0.3));
+    f.put_g(x + 1, y - 1, Glyph::new('•', WHITE).lit(0.3));
+    f.put_g(x, y, Glyph::new('☻', WHITE).solid(RED * 0.9).lit(0.3));
+}
+
+/// Where Santa sits in a team drawn at `x0` (column of his face, relative).
+pub const SEAT: f32 = (DEER * 5) as f32 + 3.0;
+

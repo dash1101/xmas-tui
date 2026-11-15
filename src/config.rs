@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub fps: f32,
+    /// Render scale: bigger cells (2.0) or smaller (0.5) — how large
+    /// everything looks.
+    pub scale: f32,
     /// 0 = random seed each launch.
     pub seed: u64,
     pub scene: SceneCfg,
@@ -340,6 +343,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             fps: 30.0,
+            scale: 1.0,
             seed: 0,
             scene: SceneCfg::default(),
             clock: ClockCfg::default(),
@@ -487,6 +491,7 @@ impl Config {
     pub fn sanitize(&mut self) {
         let d = Config::default();
         self.fps = clean_fps(self.fps);
+        fix(&mut self.scale, 0.5, 2.0, d.scale);
         let (s, ds) = (&mut self.scene, &d.scene);
         fix(&mut s.snow, 0.0, 3.0, ds.snow);
         fix(&mut s.wind, 0.0, 3.0, ds.wind);

@@ -152,6 +152,9 @@ impl Critter {
 }
 
 /// A snow-capped holly-ish bush with berries that animals snack on.
+/// Someone out of the scene for a while (inside an igloo).
+pub struct Hidden(Critter);
+
 pub struct Bush {
     pub x: i32,
     pub base: i32,
@@ -206,6 +209,8 @@ pub struct Critters {
     birds: Vec<Bird>,
     rng: Rng,
     next_id: u64,
+    /// Christmas Eve night: people stay home.
+    asleep: bool,
     held: Option<u64>,
     grab_at: (f32, f32),
     moved: bool,
@@ -237,7 +242,24 @@ pub struct Critters {
     /// may next strike up a conversation.
     still: f32,
     follow_chat_at: f32,
+    /// Snowball fights between the kids, and when the next may start.
+    fights: Vec<Fight>,
+    next_fight: f32,
 }
+
+/// Two sides of kids pelting each other from where they've dug in.
+struct Fight {
+    /// (id, their spot: column, row) per side.
+    sides: [Vec<(u64, f32, f32)>; 2],
+    /// The no-man's-land between them (what they face).
+    mid: f32,
+    until: f32,
+    next_line: f32,
+}
+
+const FIGHT_START: &[&str] = &["SNOWBALL FIGHT!!", "you're going DOWN!", "snowball fight! you vs us!", "ready… aim…"];
+const FIGHT_MID: &[&str] = &["gotcha!", "missed me!", "ha ha!", "take THAT!", "no fair!", "right in the hat!", "incoming!!", "duck!", "ha — too slow!", "I've got a stockpile!"];
+const FIGHT_END: &[&str] = &["truce! truce!", "okay okay, you win!", "rematch tomorrow!", "my hands are frozen!", "we're BOTH winners", "best fight ever"];
 
 const RED_BERRY: Rgb = Rgb::hex(0xe8283c);
 const LEAF: Rgb = Rgb::hex(0x1e5a32);
@@ -258,6 +280,7 @@ impl Critters {
             birds: vec![],
             rng: Rng::new(seed as u64 ^ 0x5eed),
             next_id: 1,
+            asleep: false,
             held: None,
             grab_at: (0.0, 0.0),
             moved: false,
@@ -277,6 +300,8 @@ impl Critters {
             player: None,
             still: 0.0,
             follow_chat_at: 0.0,
+            fights: vec![],
+            next_fight: rng.range(40.0, 120.0),
         };
         if bushes && ctx.h >= 20 {
             let u = (ctx.h as f32 / 75.0).max(0.5);
@@ -310,7 +335,7 @@ impl Critters {
 
     /// The director asked for someone to come by.
     pub fn request(&mut self, kind: Kind, t: f32) {
-        if self.mult <= 0.0 || self.list.len() >= 24 {
+        if self.mult <= 0.0 || self.list.len() >= 24 || (self.asleep && matches!(kind, Kind::Walker | Kind::Kid)) {
             return;
         }
         // fewer/more visitors with the "Animals & people" setting
@@ -342,6 +367,8 @@ impl Critters {
     }
 
     fn spawn(&mut self, kind: Kind, t: f32, at: Option<(f32, f32)>) -> u64 {
+        // the village is in bed: only the animals are out
+        let kind = if self.asleep && at.is_none() && matches!(kind, Kind::Walker | Kind::Kid) { *self.rng.pick(&[Kind::Deer, Kind::Fox, Kind::Rabbit]) } else { kind };
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
         let x = match at {
             Some((x, _)) => x,
@@ -412,6 +439,11 @@ impl Critters {
 
 
     pub fn rebase(&mut self, s: f32) {
+        self.next_fight -= s;
+        for f in &mut self.fights {
+            f.until -= s;
+            f.next_line -= s;
+        }
         for c in &mut self.list {
             c.social_at -= s;
             c.leave_at -= s;
@@ -788,6 +820,8 @@ impl Critters {
         self.cursor_reactions(dt, t, d, cursor);
         self.snack(dt, t);
 
+        self.fights_update(dt, t, d);
+
         // snowballs
         let mut hits = vec![];
         for b in &mut self.balls {
@@ -1060,7 +1094,8 @@ impl Critters {
 
     /// A light show's about to start: the townsfolk nearby gather round the
     /// tree at column `x` (in a loose crowd in front of it) until `until`.
-    pub fn gather(&mut self, x: f32, until: f32, t: f32, d: &mut Director, lines: &mut Lines) {
+    /// `line`: what the first one in view says about it.
+    pub fn gather(&mut self, x: f32, until: f32, t: f32, d: &mut Director, line: &str) {
         let h = (self.h - 1) as f32;
         let mut k = 0;
         let mut announced = false;
@@ -1079,7 +1114,7 @@ impl Critters {
             self.list[i].leave_at = self.list[i].leave_at.max(until);
             if !announced && (cx - self.view.0) > 0.0 && (cx - self.view.0) < self.view.1 {
                 announced = true;
-                d.say(cx.round() as i32, cy as i32 - 4, &lines.show_soon(), t, 3.0, 6);
+                d.say(cx.round() as i32, cy as i32 - 4, line, t, 3.0, 6);
             }
             k += 1;
         }
@@ -1175,6 +1210,209 @@ impl Critters {
     /// (id, centre column, baseline row) of everyone, for speech bubbles.
     pub fn anchors(&self) -> Vec<(u64, f32, f32)> {
         self.list.iter().map(|c| (c.id, c.centre(), c.y)).collect()
+    }
+
+    /// Christmas Eve night: everyone heads home to bed (anyone walking with
+    /// the player stays), and nobody new comes out.
+    pub fn set_asleep(&mut self, on: bool, t: f32, d: &mut Director) {
+        if on == self.asleep {
+            return;
+        }
+        self.asleep = on;
+        if !on {
+            return;
+        }
+        let mut said = 0;
+        for c in &mut self.list {
+            if c.person() && c.free() {
+                c.leave_at = 0.0;
+                c.st = St::Walk;
+                if said < 3 && self.rng.chance(0.5) {
+                    said += 1;
+                    let line = *self.rng.pick(&["off to bed — Santa's coming!", "goodnight, everyone!", "early night tonight!", "can't let Santa catch me awake!", "night night!"]);
+                    d.say(c.centre().round() as i32, c.y as i32 - 4, line, t + said as f32 * 0.8, 2.6, 6);
+                }
+            }
+        }
+    }
+
+    /// Kids having snowball fights: now and then a few in view square off
+    /// in two sides and pelt each other for half a minute or so.
+    fn fights_update(&mut self, dt: f32, t: f32, d: &mut Director) {
+        let (v0, vw) = self.view;
+        if !self.asleep && self.fights.is_empty() && t > self.next_fight {
+            self.next_fight = t + self.rng.range(90.0, 220.0);
+            let mut kids: Vec<(u64, f32)> = self.list.iter().filter(|c| c.kind == Kind::Kid && c.free() && c.x > v0 + 4.0 && c.x < v0 + vw - 4.0).map(|c| (c.id, c.centre())).collect();
+            if kids.len() < 2 {
+                // round up a couple more kids for next time
+                self.request(Kind::Kid, t);
+                self.request(Kind::Kid, t);
+                self.next_fight = t + self.rng.range(15.0, 30.0);
+            } else {
+                kids.truncate(4);
+                let mid = (kids.iter().map(|k| k.1).sum::<f32>() / kids.len() as f32).clamp(v0 + 24.0, v0 + vw - 24.0);
+                let h = (self.h - 1) as f32;
+                let mut sides: [Vec<(u64, f32, f32)>; 2] = [vec![], vec![]];
+                for (k, &(id, _)) in kids.iter().enumerate() {
+                    let side = k % 2;
+                    let sign = if side == 0 { -1.0 } else { 1.0 };
+                    let x = mid + sign * (self.rng.range(9.0, 13.0) + (k / 2) as f32 * 3.0);
+                    let lo = self.lo_at(x);
+                    let y = self.rng.range(lo + 1.0, h).round();
+                    sides[side].push((id, x, y));
+                }
+                let until = t + self.rng.range(20.0, 35.0);
+                for side in &sides {
+                    for &(id, x, y) in side {
+                        self.work_at(id, x, y, mid, until);
+                    }
+                }
+                if let Some(&(id, ..)) = sides[0].first() {
+                    if let Some((x, y)) = self.position(id) {
+                        let line = *self.rng.pick(FIGHT_START);
+                        d.say(x.round() as i32, y as i32 - 4, line, t, 2.4, 6);
+                        d.sound(Sfx::Laugh, x, 0.6);
+                    }
+                }
+                self.fights.push(Fight { sides, mid, until, next_line: t + 4.0 });
+            }
+        }
+        let mut fights = std::mem::take(&mut self.fights);
+        for f in &mut fights {
+            // anyone who's been carried off or gone home is out of it
+            for side in &mut f.sides {
+                side.retain(|&(id, ..)| self.list.iter().any(|c| c.id == id && !c.held()));
+            }
+            let over = t > f.until || f.sides.iter().any(|s| s.is_empty());
+            if over {
+                let all: Vec<u64> = f.sides.iter().flatten().map(|m| m.0).collect();
+                if let Some((x, y)) = all.first().and_then(|&id| self.position(id)) {
+                    let line = *self.rng.pick(FIGHT_END);
+                    d.say(x.round() as i32, y as i32 - 4, line, t, 2.6, 6);
+                }
+                for id in all {
+                    self.stop_work(id, t);
+                    if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
+                        if matches!(c.st, St::Dizzy { .. } | St::Throw { .. }) {
+                            c.st = St::Walk;
+                        }
+                    }
+                }
+                f.until = -1.0;
+                continue;
+            }
+            for s in 0..2 {
+                for k in 0..f.sides[s].len() {
+                    let (id, x, y) = f.sides[s][k];
+                    let Some(i) = self.list.iter().position(|c| c.id == id) else { continue };
+                    // back to their spot after a throw or a hit
+                    if matches!(self.list[i].st, St::Walk | St::Idle { .. }) {
+                        self.list[i].st = St::Gather { tx: x, ty: y, face: f.mid, until: f.until, moving: true };
+                    }
+                    if !matches!(self.list[i].st, St::Gather { moving: false, .. }) || !self.rng.chance(dt * 0.55) {
+                        continue;
+                    }
+                    // throw at someone on the other side
+                    let foes = &f.sides[1 - s];
+                    let (fid, ..) = foes[self.rng.int(0, foes.len() as i32) as usize];
+                    let Some(j) = self.list.iter().position(|c| c.id == fid) else { continue };
+                    let (ax, ay) = (self.list[i].centre(), self.list[i].y);
+                    let (bx, by) = (self.list[j].centre(), self.list[j].y);
+                    let dist = bx - ax + self.rng.range(-1.5, 1.5);
+                    let flight = (dist.abs() / 30.0).clamp(0.4, 0.8);
+                    self.list[i].dir = dist.signum();
+                    self.list[i].st = St::Throw { until: t + 0.6 };
+                    self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (by - ay) / flight - 15.0 * flight, target: fid, age: 0.0, yours: false, land: by + 0.5 });
+                    d.sound(Sfx::Snowball, ax, 0.4);
+                }
+            }
+            if t > f.next_line {
+                f.next_line = t + self.rng.range(2.5, 5.0);
+                let all: Vec<u64> = f.sides.iter().flatten().map(|m| m.0).collect();
+                let who = all[self.rng.int(0, all.len() as i32) as usize];
+                if let Some((x, y)) = self.position(who) {
+                    let line = *self.rng.pick(FIGHT_MID);
+                    d.say(x.round() as i32, y as i32 - 4, line, t, 1.8, 6);
+                }
+            }
+        }
+        fights.retain(|f| f.until > 0.0);
+        self.fights = fights;
+    }
+
+    /// In a conversation with the player: they stand and face them.
+    pub fn hold_talk(&mut self, id: u64, px: f32, t: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && (c.free() || matches!(c.st, St::Talk { .. } | St::Greet { .. }))) {
+            let resume = matches!(c.st, St::Talk { resume: true, .. });
+            c.st = St::Talk { until: t + 1.0, resume };
+            let toward = (px - c.centre()).signum();
+            if toward != 0.0 {
+                c.dir = toward;
+            }
+            c.social_at = c.social_at.max(t + 8.0);
+            c.met = true;
+        }
+    }
+
+    pub fn is_kid(&self, id: u64) -> bool {
+        self.list.iter().any(|c| c.id == id && c.kind == Kind::Kid)
+    }
+
+    /// A kid up for a snowball fight with the player: a few throws coming.
+    pub fn challenge(&mut self, id: u64, t: f32) {
+        for k in 0..3 {
+            self.revenge.push((id, t + 1.2 + k as f32 * 1.6));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fighting(&self) -> usize {
+        self.fights.len()
+    }
+
+    /// Send someone to stand at (tx, ty) facing column `face` until `until`
+    /// (kids building something in the snow).
+    pub fn work_at(&mut self, id: u64, tx: f32, ty: f32, face: f32, until: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && !c.held()) {
+            c.st = St::Gather { tx, ty, face, until, moving: true };
+            c.leave_at = c.leave_at.max(until + 20.0);
+        }
+    }
+
+    /// Done with whatever they were at: back to wandering.
+    pub fn stop_work(&mut self, id: u64, t: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && matches!(c.st, St::Gather { .. })) {
+            c.st = St::Walk;
+            c.leave_at = c.leave_at.max(t + 25.0);
+        }
+    }
+
+    /// Whether someone is standing where they were sent (not walking there).
+    pub fn arrived(&self, id: u64) -> bool {
+        self.list.iter().any(|c| c.id == id && matches!(c.st, St::Gather { moving: false, .. }))
+    }
+
+    /// Someone goes indoors somewhere (an igloo): out of the scene, kept
+    /// as they are for when they come back out.
+    pub fn take(&mut self, id: u64) -> Option<Hidden> {
+        let i = self.list.iter().position(|c| c.id == id && !c.held())?;
+        Some(Hidden(self.list.remove(i)))
+    }
+
+    /// …and back out again at column `x`, row `y`.
+    pub fn put_back(&mut self, h: Hidden, x: f32, y: f32, t: f32) {
+        let mut c = h.0;
+        c.x = x - c.centre() + c.x;
+        c.y = y;
+        c.st = St::Walk;
+        c.leave_at = t + self.rng.range(15.0, 40.0);
+        c.dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
+        self.list.push(c);
+    }
+
+    /// The people out and about, free to chat: (id, centre column, row, is a kid).
+    pub fn people(&self) -> Vec<(u64, f32, f32, bool)> {
+        self.list.iter().filter(|c| c.person() && c.free()).map(|c| (c.id, c.centre(), c.y, c.kind == Kind::Kid)).collect()
     }
 
     /// Where everyone is (x, is a person), for the map.

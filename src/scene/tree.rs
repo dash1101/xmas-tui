@@ -302,6 +302,11 @@ impl Tree {
         (self.cx, self.top - 1)
     }
 
+    /// Bottom row (the foot of the trunk).
+    pub fn base(&self) -> i32 {
+        self.trunk.iter().map(|c| c.1).max().unwrap_or(self.top)
+    }
+
     pub fn is_big(&self) -> bool {
         self.big
     }
@@ -479,6 +484,10 @@ impl Present {
     /// Shift by `-s` seconds (scene clock rebase, see `Scene::update`).
     pub fn rebase(&mut self, s: f32) {
         self.jiggle_until -= s;
+    }
+
+    pub fn base_row(&self) -> i32 {
+        self.base
     }
 
     pub fn top_center(&self) -> (i32, i32) {

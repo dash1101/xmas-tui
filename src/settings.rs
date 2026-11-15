@@ -18,6 +18,7 @@ pub enum F {
     WalkSpeed,
     Traffic,
     TimeOfDay,
+    Scale,
     Fps,
     Events,
     Aurora,
@@ -181,6 +182,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 }
                 F::Critters => step(&mut cfg.scene.critters, 0.25 * dir, 0.0, 3.0),
                 F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 6.0),
+                F::Scale => cfg.scale = step_list(&[0.5, 0.75, 1.0, 1.25, 1.5, 2.0], cfg.scale, dir as i32),
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -505,6 +507,9 @@ impl Settings {
         yy += 1;
         let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
+        yy += 2;
+        let sc = format!("{:.2}×  (how big everything looks)", cfg.scale);
+        self.stepper(f, lx, vx, yy, "Render scale", F::Scale, &sc);
         yy += 2;
         self.section(f, lx, yy, "UPDATES");
         yy += 1;

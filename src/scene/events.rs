@@ -8,7 +8,7 @@ use crate::audio::{Sfx, SoundEvent};
 use crate::color::{pal, Rgb};
 use crate::frame::{Bg, Frame, Glyph};
 use crate::rng::Rng;
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Timelike};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Last hour the church bells tolled for. Process-wide rather than per
@@ -186,6 +186,8 @@ pub struct Director {
     cars_seeded: bool,
     /// The director of a room indoors (just bubbles, sparkles, notes).
     pub indoor: bool,
+    /// Christmas Eve night: no trains, no traffic.
+    pub quiet: bool,
     /// A light show announced for later: (start, duration).
     show_at: Option<(f32, f32)>,
     /// The village should gather round the big tree until this time.
@@ -236,6 +238,7 @@ impl Director {
             cars: vec![],
             cars_seeded: false,
             indoor: false,
+            quiet: false,
             show_at: None,
             gather: None,
             arrivals: vec![],
@@ -660,7 +663,7 @@ impl Director {
         // (a room indoors has no bells, trains or traffic of its own)
         if !self.indoor {
             // calendar events
-            let now = Local::now();
+            let now = crate::clock::now();
             let key = now.ordinal() as i64 * 100 + now.hour() as i64;
             if now.minute() == 0 && self.bell_key != key {
                 self.bell_key = key;
@@ -690,13 +693,13 @@ impl Director {
             }
 
             // trains: every minute or so (several can be out on the long line)
-            if t >= self.next_train && self.mult > 0.0 {
+            if t >= self.next_train && self.mult > 0.0 && !self.quiet {
                 self.spawn_train(ctx);
                 self.next_train = t + self.rng.range(35.0, 75.0) / self.mult.max(0.3);
             }
             // traffic along the whole road, both ways (each direction in its lane)
             let target = (ctx.w as usize / 50).max(4);
-            if !self.cars_seeded {
+            if !self.cars_seeded && !self.quiet {
                 self.cars_seeded = true;
                 for _ in 0..target {
                     let x = self.rng.range(0.0, ctx.w as f32);
@@ -706,7 +709,7 @@ impl Director {
                 }
             }
             self.car_cd -= dt;
-            if self.cars.len() < target && self.car_cd <= 0.0 {
+            if self.cars.len() < target && self.car_cd <= 0.0 && !self.quiet {
                 self.car_cd = self.rng.range(0.4, 2.0);
                 let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
                 let x = if dir > 0.0 { -10.0 } else { ctx.w as f32 + 4.0 };

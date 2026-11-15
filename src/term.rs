@@ -88,7 +88,7 @@ impl Term {
         let mut o = io::stdout();
         // alt screen, hide cursor, no autowrap, clear
         o.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J")?;
-        crossterm::execute!(o, crossterm::event::EnableMouseCapture)?;
+        crossterm::execute!(o, crossterm::event::EnableMouseCapture, crossterm::event::EnableFocusChange)?;
         // kitty keyboard protocol: report key releases too, so holding a
         // direction key walks smoothly and letting go stops at once
         // (terminals without it ignore this; see App::key_up)
@@ -107,7 +107,7 @@ impl Term {
     pub fn leave() {
         let mut o = io::stdout();
         let _ = crossterm::execute!(o, crossterm::event::PopKeyboardEnhancementFlags);
-        let _ = crossterm::execute!(o, crossterm::event::DisableMouseCapture);
+        let _ = crossterm::execute!(o, crossterm::event::DisableMouseCapture, crossterm::event::DisableFocusChange);
         let _ = o.write_all(b"\x1b]22;default\x1b\\");
         let _ = o.write_all(b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l");
         let _ = o.flush();

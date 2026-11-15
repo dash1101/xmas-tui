@@ -19,13 +19,18 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 
 ## ✨ Highlights
 
-- **A whole village to explore**: about 2½ screens wide, with parallax mountains, lit cabins on the slopes, a
+- **A whole village to explore**: about 3½ screens wide, with parallax mountains, lit cabins on the slopes, a
   cobbled sidewalk, two-lane traffic, a railway with a station, and a sky above the sky.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
   along, step inside houses, and spend "cheer" at the cocoa cabin.
 - **Townsfolk and wildlife**: named neighbours who hold real back-and-forth conversations about what's going
   on, react to shooting stars, Santa, fireworks and power cuts, gather for the light shows and step around
-  each other; deer, foxes and rabbits too.
+  each other; kids who build snowmen and igloos (and pile inside) and start snowball fights; deer, foxes and
+  rabbits too.
+- **Talk like a story game**: a dialogue box with choices. Every grown-up has a job and a mood, every kid a wish,
+  and the talk follows whatever's going on in the village.
+- **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
+  presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
 - **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather and a village map.
 - **Synthesized music and sound**: no audio files, all generated live, with live level meters.
@@ -44,6 +49,14 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 <tr>
 <td><img src="docs/shop.png" alt="The Cocoa and Gifts cabin with its menu open, next to the railway station"><br><sub><b>Cocoa & Gifts</b>: spend cheer on cocoa, gingerbread, carrots and a lantern.</sub></td>
 <td><img src="docs/high-sky.png" alt="The high sky: the Milky Way, constellations, a hot-air balloon and a shooting star"><br><sub><b>Above the clouds</b>: Ctrl+wheel looks up to constellations and a balloon.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/christmas-eve.png" alt="Christmas Eve: the village asleep with dark windows while Santa's sleigh hovers by a roof and he calls ho ho ho down the chimney"><br><sub><b>Christmas Eve</b>: everyone's in bed, carrots are out, and Santa goes roof to roof.</sub></td>
+<td><img src="docs/new-year.png" alt="Midnight on New Year's: HAPPY NEW YEAR in big letters over the big tree, with the ball-drop mast beside it"><br><sub><b>New Year's Eve</b>: the ball drops, the sky counts down, and midnight is a party.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/talk.png" alt="Talking with a kid called Ned: a dialogue box with what he said and three numbered answers"><br><sub><b>Conversations</b>: pick what to say with 1-5 or a click.</sub></td>
+<td><img src="docs/snow-play.png" alt="Dusk: kids in a glowing igloo they just built, saying this is our house now"><br><sub><b>Kids at play</b>: snowmen, igloos (with them inside) and snowball fights.</sub></td>
 </tr>
 <tr>
 <td><img src="docs/noon.png" alt="The village at noon under a blue sky"><br><sub><b>Noon</b>, with the time of day set to follow the real sun…</sub></td>
@@ -84,8 +97,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
 | **I** | show or hide the pockets |
-| **1**–**5** | use an item, or buy one while the cabin's menu is open |
-| **Esc** | close a menu, or step back outside |
+| **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
+| **Esc** | close a menu or conversation, or step back outside |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
 | **right-click** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager too) | carry them about, then drop them in the snow |
@@ -117,8 +130,11 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
   The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the Scene tab.
 - **E, Space or Enter** interacts with whatever the `[E]` prompt points at:
-  - **people:** the first time, they say hello and give their name; after that each E is the next line of a
-    little chat about what's going on (the snow, the train, the light show…);
+  - **people:** a conversation opens in a dialogue box: they say something, and **1**–**5** (or a click, or E for
+    the first answer) picks what to say back. Grown-ups talk about how they are, their job, tips for a newcomer
+    and what's going on (the snow, the train, the light show…), and can be asked to walk along; kids talk about
+    what they're up to, what they want for Christmas and Santa, and are always up for a snowball fight. A cocoa
+    in the pockets can be handed over to someone who'd like one. Walking away or Esc ends it;
   - **animals:** a pat, or (with berries in hand) a snack, after which they tag along for a while;
   - **berry bushes:** pick a few berries (they grow back);
   - **front doors:** step inside: a cozy room with a fire, a tree, someone home and a cat on the rug (the church
@@ -141,8 +157,9 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   - **houses and the church:** visit, or switch the lights / ring the bells;
   - **the cocoa cabin, the station, the sky:** shop, ask about the next train, wish on a star.
   The settings are always at the bottom of the menu (and on ⚙).
-- **The Christmas list** (on the stats card) has nine little goals: hellos, chats, feeding animals, visiting homes,
-  giving a gift, landing snowballs, watching a light show, finding constellations, walking the village end to end.
+- **The Christmas list** (on the stats card) has ten little goals: hellos, chats, feeding animals, visiting homes,
+  giving a gift, landing snowballs, watching a light show, finding constellations, walking the village end to end,
+  and waving down Santa's sleigh.
   Each pays cheer when it's done.
 - The villager can be turned off with **Villager (WASD)** in the Scene tab; **Walk speed** goes up to 6×.
 
@@ -158,7 +175,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   - The **snowman** talks back. Try clicking him a few times in a row.
   - **Houses** switch their lights off and on. The **church** rings its bells.
   - **Lamps** sputter. The **station** says when the next train is due.
-  - The **moon** summons Santa.
+  - The **moon** summons Santa. **Click the sleigh** as it flies past: Santa pulls up for a word with whoever's
+    below, or just gives a hearty "ho ho ho".
   - **Empty sky** launches a shooting star, and **snow** puffs up.
   - Up in the high sky: **constellations** light up and name themselves, the **balloon** fires its burner, and
     the **North Star** grants a wish.
@@ -175,8 +193,21 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - **Sky and weather:** wind gusts, short blizzards, meteor showers, aurora flares and a rare comet.
 - **Lights:** village-wide rainbow light shows (announced first, so everyone gathers round the big tree), and
   houses switching their lights.
-- **On a schedule:** church bells on the hour, Santa flying more often on Christmas Eve, and
-  fireworks on New Year's Eve.
+- **Sky life:** clouds drifting past (moonlit at night), a blinking airplane, flocks of birds by day, an owl
+  across the moon, and paper lanterns floating up from the village. The sky drifts a little as the view scrolls.
+- **On a schedule:** church bells on the hour, and on December nights Santa sometimes drops in on a house or two:
+  the sleigh hovers by the roof, he climbs over to the chimney and goes down, and another present appears under
+  the big tree.
+
+**Special nights** (going by the clock):
+- **Christmas Eve** (from 6 pm): the kids put carrots out on the doorsteps in the afternoon. At night the village
+  goes to bed: windows go dark (bar the odd night-light), the traffic and trains stop, the cocoa cabin shuts, and the
+  trees and presents glow softly. Santa works his way round every house, roof by roof, all night. The reindeer
+  eat the carrots, and the pile under the big tree grows. In the morning everyone's up at once, the bells ring
+  and there's a light show.
+- **New Year's Eve** (from 6 pm): a ball-drop mast goes up beside the big tree and party blowers come out. Ten minutes
+  before midnight everyone gathers round. The ball slides down over the last minute, the last ten seconds count
+  down huge across the sky, and at midnight there are fireworks, confetti, cheering and HAPPY NEW YEAR.
 
 ## 🔔 Tray icon and settings window
 While it runs as the wallpaper, a little glowing tree sits in the system tray (KDE Plasma, or any tray that
@@ -307,7 +338,9 @@ stick around for a few minutes. They also interact:
 - **Reactions:** when something happens (a shooting star, a comet, Santa, fireworks, the light show, the aurora
   flaring, a blizzard, a train pulling in, the power going out or coming back, a typed easter egg) the people in
   view stop, look and say something about it.
-- **Play:** a fox plays chase with a rabbit (the fox never catches it), and kids have snowball fights.
+- **Play:** a fox plays chase with a rabbit (the fox never catches it). Kids square off in two sides for proper
+  snowball fights, build snowmen ball by ball, and raise igloos block by block, then all pile inside for a while
+  (giggling) before coming back out. What they build stands for about ten minutes, then melts.
 - **Manners:** nobody walks through anybody. People step a row up or down to get round each other (and the
   villager), or stop for a chat first and then step round.
 - **Light shows:** when one's coming, it's announced, a few more folk come out, and everyone gathers round the
@@ -328,7 +361,8 @@ The settings panel (⚙ or right-click, or the tray icon's standalone window) ha
 - **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
   rate, aurora, bushes, and the villager.
-- **Display:** clock, widgets (including the map), weather city and units, widget layout, updates, run at startup.
+- **Display:** clock, widgets (including the map), weather city and units, widget layout, **render scale**
+  (0.5× to 2×: bigger makes everything chunkier), updates, run at startup.
 - **Sound:** master, music, effects and ambience volumes, music style, a per-layer ambience mix, and **Quiet while
   other media plays**. When on, the sound fades out as soon as a browser video or music player starts, and comes
   back a few seconds after it stops.

@@ -33,8 +33,17 @@ until monitor_connected; do sleep 2; waited=1; done
 # focus (needed to type a city in settings, and for the typed easter eggs).
 # confirm_os_window_close=0: when the compositor drops the surface (monitor
 # unplugged/asleep) kitty must just exit, not wait on an invisible dialog.
+# the render scale (Settings → Display) sizes the font: read it from the
+# config; the app changes it live through kitty's control socket
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/xmas-tui/config.toml"
+SCALE="$(sed -n 's/^scale *= *\([0-9.]*\).*/\1/p' "$CONF" 2>/dev/null | head -n1)"
+BASE="${XMAS_FONT_SIZE:-10}"
+FONT="$(awk -v b="$BASE" -v s="${SCALE:-1}" 'BEGIN { s = (s < 0.5 ? 0.5 : (s > 2 ? 2 : s)); printf "%.2f", b * s }')"
+SOCK="${XDG_RUNTIME_DIR:-/tmp}/xmas-tui-kitty-$$"
+export XMAS_KITTY_SOCKET="unix:$SOCK" XMAS_FONT_BASE="$BASE" XMAS_KITTEN="$KITTEN"
 ARGS=(panel --edge=background --class xmas-tui --focus-policy=on-demand
-      -o "font_size=${XMAS_FONT_SIZE:-10}"
+      -o "font_size=$FONT"
+      -o allow_remote_control=socket-only -o "listen_on=unix:$SOCK"
       -o background=#03050f
       -o confirm_os_window_close=0
       -o cursor_shape=block -o cursor_blink_interval=0

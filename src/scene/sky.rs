@@ -152,16 +152,23 @@ impl Sky {
         c * (1.0 / n as f32)
     }
 
-    pub fn draw_px(&self, f: &mut Frame, t: f32, boost: f32) {
+    /// `off`: how far the sky has drifted left (a slow parallax as the
+    /// village scrolls); it wraps round.
+    pub fn draw_px(&self, f: &mut Frame, t: f32, boost: f32, off: i32) {
         if self.base.len() == f.px.len() {
-            // shifted down while looking up into the sky
-            let shift = (2 * f.oy).clamp(0, f.ph as i32) as usize * f.pw;
-            let n = f.px.len() - shift;
-            f.px[shift..].copy_from_slice(&self.base[..n]);
+            // shifted down while looking up into the sky, and drifted
+            let pw = f.pw;
+            let shift = (2 * f.oy).clamp(0, f.ph as i32) as usize;
+            let rot = off.rem_euclid(pw.max(1) as i32) as usize;
+            for y in 0..f.ph - shift {
+                let (src, dst) = (&self.base[y * pw..(y + 1) * pw], (y + shift) * pw);
+                f.px[dst..dst + pw - rot].copy_from_slice(&src[rot..]);
+                f.px[dst + pw - rot..dst + pw].copy_from_slice(&src[..rot]);
+            }
         }
         let horizon = self.horizon;
         if self.aurora {
-            self.draw_aurora(f, t, horizon, boost);
+            self.draw_aurora(f, t, horizon, boost, off);
         }
 
         if let Some(s) = &self.shooting {
@@ -178,13 +185,13 @@ impl Sky {
         }
     }
 
-    fn draw_aurora(&self, f: &mut Frame, t: f32, horizon: f32, boost: f32) {
+    fn draw_aurora(&self, f: &mut Frame, t: f32, horizon: f32, boost: f32, off: i32) {
         let pw = f.pw;
         let green = Rgb::hex(0x2ef59a);
         let teal = Rgb::hex(0x2bc4d8);
         let violet = Rgb::hex(0x8a5cff);
         for x in 0..pw {
-            let xf = x as f32;
+            let xf = (x as i32 + off) as f32;
             let band = fbm1(xf * 0.006 - t * 0.025, 3, self.seed ^ 0xa0);
             let band = ((band - 0.42 + boost * 0.3) / 0.3).clamp(0.0, 1.0);
             if band <= 0.0 {
@@ -237,9 +244,10 @@ impl Sky {
     }
 
     /// Glyph-layer stars (bright ones get real characters + a small glow).
-    pub fn draw_glyphs(&self, f: &mut Frame, t: f32) {
+    pub fn draw_glyphs(&self, f: &mut Frame, t: f32, off: i32) {
+        let w = f.w.max(1) as i32;
         for s in &self.stars {
-            let (cx, cy) = (s.x as i32, (s.y / 2.0) as i32);
+            let (cx, cy) = ((s.x as i32 - off).rem_euclid(w), (s.y / 2.0) as i32);
             let Some(ch) = s.glyph else {
                 if f.has_g(cx, cy) {
                     continue;

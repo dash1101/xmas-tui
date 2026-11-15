@@ -3,6 +3,7 @@
 
 pub mod critters;
 pub mod events;
+pub mod skylife;
 pub mod daylight;
 pub mod dialogue;
 pub mod shop;
@@ -12,6 +13,10 @@ pub mod land;
 pub mod lines;
 pub mod player;
 pub mod sky;
+pub mod builds;
+pub mod newyear;
+pub mod santa;
+pub mod story;
 pub mod sleigh;
 pub mod snow;
 pub mod tree;
@@ -22,7 +27,7 @@ use crate::color::{pal, Rgb};
 use crate::config::SceneCfg;
 use crate::frame::Frame;
 use crate::rng::Rng;
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Timelike};
 use events::{Ctx, Director, CENTER};
 use tree::{LightStyle, Present, Tree};
 use village::{House, Lamp, Snowman, Village};
@@ -89,6 +94,8 @@ pub struct Scene {
     map: MiniMap,
     /// Indoors (the player went through a front door).
     inside: Option<Box<interior::Interior>>,
+    /// Clouds, planes, birds, an owl, lanterns.
+    skylife: skylife::SkyLife,
     /// The sky above the sky, and how far the view has been lifted into
     /// it (rows; Ctrl+wheel).
     high: high_sky::HighSky,
@@ -113,13 +120,51 @@ pub struct Scene {
     cursor_seen: f32,
     snowman_clicks: u32,
     typed: String,
-    next_eve_sleigh: f32,
+    /// Santa's rounds, roof to roof (December nights; all night on
+    /// Christmas Eve), and when the next one's due.
+    rounds: Option<santa::Rounds>,
+    next_round: f32,
+    /// New Year's Eve: the ball drop and the countdown.
+    newyear: Option<newyear::NewYear>,
+    /// Snowmen and igloos the kids are building.
+    builds: builds::Builds,
+    /// A conversation with someone (the dialogue box), its own way of
+    /// picking topics, and which answer the pointer's over.
+    convo: Option<story::Convo>,
+    story_talk: dialogue::Talk,
+    convo_hover: Option<usize>,
     rng: Rng,
     lines: lines::Lines,
     /// Seconds since this scene was created (sum of frame `dt`s).
     clock: f64,
     /// Total rebased away; scene time handed out is `clock - epoch`.
     epoch: f64,
+}
+
+/// The special nights (and day) of the season.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Special {
+    None,
+    /// Christmas Eve, from 6 pm until dawn: the village asleep, Santa's rounds.
+    EveNight,
+    /// Christmas Day.
+    XmasDay,
+    /// New Year's Eve, from 6 pm to half past midnight.
+    NewYear,
+}
+
+/// Which special time it is (by the clock, see `crate::clock`).
+pub fn special_now() -> Special {
+    let now = crate::clock::now();
+    let (m, d, h) = (now.month(), now.day(), now.hour());
+    match (m, d) {
+        (12, 24) if h >= 18 => Special::EveNight,
+        (12, 25) if h < 6 => Special::EveNight,
+        (12, 25) => Special::XmasDay,
+        (12, 31) if h >= 18 => Special::NewYear,
+        (1, 1) if h == 0 && now.minute() < 30 => Special::NewYear,
+        _ => Special::None,
+    }
 }
 
 /// Something to do, from the right-click menu.
@@ -197,7 +242,7 @@ impl Scene {
         let (pw, ph) = (w, h * 2);
         let (wf, hf) = (w as f32, h as f32);
         // a wider world to wander through (small screens just get one screen)
-        let ww = if w >= 150 && h >= 30 { (wf * 2.6) as usize } else { w };
+        let ww = if w >= 150 && h >= 30 { (wf * 3.6) as usize } else { w };
         let wwf = ww as f32;
         let mut rng = Rng::new(seed as u64);
         let land = land::Land::new(ww, w, ph, seed);
@@ -396,7 +441,7 @@ impl Scene {
         let mut rng = Rng::new(seed as u64 ^ 0xc11c);
         // relative to creation, so a rebuild on Christmas Eve doesn't launch
         // Santa on the very next frame
-        let next_eve_sleigh = rng.range(20.0, 45.0);
+        let next_round = rng.range(20.0, 45.0);
         // berry bushes go on the open snow, clear of trees, presents and the snowman
         let mut avoid: Vec<(i32, i32)> = trees.iter().map(|t| (t.cx - t.hw_base as i32 - 4, t.cx + t.hw_base as i32 + 4)).collect();
         avoid.extend(village.snowmen.iter().map(|s| (s.cx - 9, s.cx + 9)));
@@ -427,6 +472,7 @@ impl Scene {
             map: MiniMap::default(),
             inside: None,
             high: high_sky::HighSky::new(w, h, seed),
+            skylife: skylife::SkyLife::new(w, land.horizon, seed),
             sky_up: 0.0,
             sky_up_target: 0.0,
             shop: None,
@@ -455,7 +501,13 @@ impl Scene {
             cursor_seen: -10.0,
             snowman_clicks: 0,
             typed: String::new(),
-            next_eve_sleigh,
+            rounds: None,
+            next_round,
+            newyear: None,
+            builds: builds::Builds::new(h, seed),
+            convo: None,
+            story_talk: dialogue::Talk::new(seed ^ 0x570),
+            convo_hover: None,
             rng,
             lines: lines::Lines::new(seed),
             clock: 0.0,
@@ -487,7 +539,7 @@ impl Scene {
             }
             Some(base)
         };
-        (0..ww).flat_map(|d| [want - d, want + d]).find_map(|x| clear(x).map(|base| shop::Shop { x, base, open: false }))
+        (0..ww).flat_map(|d| [want - d, want + d]).find_map(|x| clear(x).map(|base| shop::Shop { x, base, open: false, closed: false }))
     }
 
     /// The player's pockets (kept when the scene is rebuilt).
@@ -694,12 +746,110 @@ impl Scene {
             Do::Visit(i) => self.enter(i),
             Do::Shop => {
                 if let Some(s) = &mut self.shop {
-                    s.open = true;
+                    s.open = !s.closed;
                 }
             }
             _ => {}
         }
         None
+    }
+
+    /// Open the dialogue box with someone.
+    fn start_convo(&mut self, id: u64) {
+        let t = self.now();
+        let Some(px) = self.player.as_ref().map(|p| p.centre()) else { return };
+        let Some((cx, cy)) = self.critters.position(id) else { return };
+        let first = !self.pockets.greeted.contains(&id);
+        if first {
+            self.pockets.greeted.push(id);
+            self.cheer(1);
+        }
+        let ctx = self.talk_ctx(t);
+        let name = self.critters.label(id);
+        let kid = self.critters.is_kid(id);
+        let c = story::Convo::open(id, &name, kid, first, &ctx, &mut self.story_talk, cx, self.rng.next_u32());
+        self.director.say(cx.round() as i32, cy as i32 - 4, &c.line, t, 3.0, 40);
+        if let Some(p) = &self.player {
+            let hi = if first { "hello there!" } else { "hi again!" };
+            self.director.say(p.centre().round() as i32, p.y as i32 - 4, hi, t - 0.01, 1.2, 0);
+        }
+        self.critters.hold_talk(id, px, t);
+        self.director.sound(Sfx::Greet, cx, 0.7);
+        self.show_pockets = false;
+        self.show_stats = false;
+        self.convo = Some(c);
+    }
+
+    /// Answer `n` (1-based) in the conversation.
+    fn answer(&mut self, n: usize) {
+        let t = self.now();
+        let ctx = self.talk_ctx(t);
+        let cocoa = self.pockets.count(shop::Item::Cocoa) > 0;
+        let Some(c) = &mut self.convo else { return };
+        let Some((mine, theirs, act)) = c.choose(n, t, &ctx, &self.story_talk, cocoa) else { return };
+        let (id, ended, steps) = (c.id, c.ended_at.is_some(), c.steps);
+        if let Some(p) = &self.player {
+            self.director.say(p.centre().round() as i32, p.y as i32 - 4, &mine, t, 2.0, 40);
+        }
+        if let Some((cx, cy)) = self.critters.position(id) {
+            self.director.say(cx.round() as i32, cy as i32 - 4, &theirs, t + 1.2, 3.2, 40);
+        }
+        match act {
+            story::Act::Invite => {
+                if let Some((x, y)) = self.critters.position(id) {
+                    self.focus = Some(Focus::Critter(id, x as i32, y as i32 - 4));
+                }
+                if !self.critters.following(id) {
+                    if let Some(p) = &mut self.player {
+                        self.critters.invite(id, &mut p.berries, t, &mut self.director, &mut self.lines);
+                    }
+                }
+            }
+            story::Act::Snowball => {
+                self.critters.challenge(id, t);
+                self.director.sound(Sfx::Laugh, self.critters.centre_of(id).unwrap_or(0.0), 0.8);
+            }
+            story::Act::GiveCocoa => {
+                if self.pockets.take(shop::Item::Cocoa) {
+                    self.critters.gift(id, "cocoa", t, &mut self.director);
+                    self.pockets.gifts += 1;
+                    self.cheer(2);
+                }
+            }
+            story::Act::Go(_) => {}
+        }
+        if ended && steps >= 2 {
+            self.pockets.chats += 1;
+            self.cheer(1);
+        }
+    }
+
+    /// A click on the dialogue box (true if it was on it).
+    pub fn convo_click(&mut self, x: i32, y: i32) -> bool {
+        let (w, h) = (self.w as i32, self.h as i32);
+        let Some(c) = &self.convo else { return false };
+        if !c.contains(x, y, w, h) {
+            return false;
+        }
+        if let Some(n) = c.option_at(x, y, w, h) {
+            self.answer(n);
+        }
+        true
+    }
+
+    /// The pointer's over the dialogue box (which answer, for the highlight).
+    pub fn convo_hover(&mut self, x: i32, y: i32) -> bool {
+        let (w, h) = (self.w as i32, self.h as i32);
+        match &self.convo {
+            Some(c) if c.contains(x, y, w, h) => {
+                self.convo_hover = c.option_at(x, y, w, h);
+                true
+            }
+            _ => {
+                self.convo_hover = None;
+                false
+            }
+        }
     }
 
     /// I: show / hide the pockets panel.
@@ -715,7 +865,8 @@ impl Scene {
         if let Some(s) = &mut self.shop {
             s.open = false;
         }
-        let had = shop_open || self.show_pockets || self.show_stats;
+        let had = shop_open || self.show_pockets || self.show_stats || self.convo.is_some();
+        self.convo = None;
         self.show_pockets = false;
         self.show_stats = false;
         had
@@ -723,6 +874,10 @@ impl Scene {
 
     /// 1-5: buy (at the open shop) or use an item.
     pub fn number(&mut self, n: usize) {
+        if self.convo.as_ref().is_some_and(|c| c.ended_at.is_none()) {
+            self.answer(n);
+            return;
+        }
         let Some(&item) = shop::ITEMS.get(n.wrapping_sub(1)) else { return };
         let t = self.now();
         let Some(p) = self.player.as_ref() else { return };
@@ -818,7 +973,14 @@ impl Scene {
                 p.rebase(s);
             }
             self.cursor_seen -= s;
-            self.next_eve_sleigh -= s;
+            self.next_round -= s;
+            if let Some(n) = &mut self.newyear {
+                n.rebase(s);
+            }
+            self.builds.rebase(s);
+            if let Some(r) = &mut self.rounds {
+                r.rebase(s);
+            }
             if let Some(p) = &mut self.player {
                 p.rebase(s);
             }
@@ -829,6 +991,7 @@ impl Scene {
             self.last_stars -= s;
             self.last_sleigh -= s;
             self.high.rebase(s);
+            self.skylife.rebase(s);
             if let Some(inn) = &mut self.inside {
                 inn.rebase(s);
             }
@@ -1003,6 +1166,11 @@ impl Scene {
         self.player.as_ref().map(|p| p.x)
     }
 
+    #[cfg(test)]
+    pub fn player_y(&self) -> Option<f32> {
+        self.player.as_ref().map(|p| p.y)
+    }
+
     /// Previews: the player stands about idly (no [E] prompts).
     pub fn quiet_player(&mut self) {
         if let Some(p) = &mut self.player {
@@ -1100,6 +1268,15 @@ impl Scene {
                 if face != 0.0 {
                     p.dir = face;
                 }
+                // people: a conversation, story-game style (E picks the first answer)
+                if self.critters.is_person(id) {
+                    if self.convo.as_ref().is_some_and(|c| c.id == id && c.ended_at.is_none()) {
+                        self.answer(1);
+                    } else {
+                        self.start_convo(id);
+                    }
+                    return;
+                }
                 let berries = p.berries;
                 let known = self.pockets.greeted.contains(&id);
                 let earned = self.critters.meet(id, px, py, &mut p.berries, t, &mut self.director, &mut self.lines);
@@ -1119,7 +1296,11 @@ impl Scene {
             }
             Some(Focus::Shop(..)) => {
                 if let Some(s) = &mut self.shop {
-                    s.open = !s.open;
+                    s.open = !s.open && !s.closed;
+                    if s.closed {
+                        let (kx, ky) = (s.centre(), s.base - 4);
+                        self.director.say(kx, ky, "closed for Christmas Eve — see you in the morning!", t, 3.0, 6);
+                    }
                     if s.open {
                         let (kx, ky) = (s.centre(), s.base - 4);
                         self.director.say(kx, ky, "welcome! cocoa's hot", t, 2.4, 6);
@@ -1174,6 +1355,18 @@ impl Scene {
             p.dir = 1.0;
             self.director.sound(Sfx::Click, p.centre(), 0.9);
         }
+    }
+
+    /// Previews: chatting with someone (`kid`), a couple of answers in.
+    pub fn preview_talk(&mut self, kid: bool) {
+        let t = self.now();
+        let Some((px, py)) = self.player.as_ref().map(|p| (p.centre(), p.y)) else { return };
+        let kind = if kid { events::Kind::Kid } else { events::Kind::Walker };
+        self.critters.spawn_demo(kind, px + 6.0, t);
+        let Some(id) = self.critters.people().iter().filter(|p| (p.1 - px - 6.0).abs() < 3.0).map(|p| p.0).next() else { return };
+        let _ = py;
+        self.start_convo(id);
+        self.answer(2);
     }
 
     /// Previews: standing at the cocoa cabin, menu and pockets open.
@@ -1250,8 +1443,15 @@ impl Scene {
         self.cam_target = (self.cam_target + dx).clamp(0.0, max);
     }
 
+    /// How far the sky has drifted with the view (a slow parallax: far
+    /// slower than the mountains).
+    fn sky_off(&self) -> i32 {
+        (self.cam * 0.08).round() as i32
+    }
+
     fn on_moon(&self, x: i32, y: i32) -> bool {
         let (mx, my, r) = self.sky.moon;
+        let mx = mx - self.sky_off() as f32;
         let (dx, dy) = (x as f32 + 0.5 - mx, y as f32 * 2.0 + 1.0 - my);
         dx * dx + dy * dy <= (r + 2.0) * (r + 2.0)
     }
@@ -1335,6 +1535,11 @@ impl Scene {
 
     /// Is there something under this cell that reacts to a click?
     pub fn clickable(&self, x: i32, y: i32) -> bool {
+        if let Some(c) = &self.convo {
+            if c.option_at(x, y, self.w as i32, self.h as i32).is_some() {
+                return true;
+            }
+        }
         if let Some(inn) = &self.inside {
             return inn.thing_at(x, y).is_some();
         }
@@ -1371,7 +1576,7 @@ impl Scene {
             dialogue::Part::Day
         };
         let days = {
-            let today = Local::now().date_naive();
+            let today = crate::clock::now().date_naive();
             let mut xmas = chrono::NaiveDate::from_ymd_opt(today.year(), 12, 25).unwrap_or(today);
             if today > xmas {
                 xmas = chrono::NaiveDate::from_ymd_opt(today.year() + 1, 12, 25).unwrap_or(today);
@@ -1528,6 +1733,9 @@ impl Scene {
     /// Left click on the scene: everything reacts a little differently.
     pub fn click(&mut self, x: i32, y: i32, _app_t: f32) {
         let t = self.now();
+        if self.convo_click(x, y) {
+            return;
+        }
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_ref()) {
             if let Some(what) = inn.thing_at(x, y) {
                 if inn.poke(what, p, t) {
@@ -1561,11 +1769,17 @@ impl Scene {
             self.zap(x, y);
             return;
         }
+        if self.sleigh.hit(sx, y, t) {
+            self.santa_clicked(t);
+            return;
+        }
+        let sky_off = self.sky_off() as f32;
         let d = &mut self.director;
         if moon_hit {
             self.sleigh.trigger(t);
             let (mx, my, r) = self.sky.moon;
-            let mx = mx + (x - sx) as f32; // the moon is on screen; bubbles live in the world
+            // the moon is on screen (drifted a little); bubbles live in the world
+            let mx = mx - sky_off + (x - sx) as f32;
             d.sound(Sfx::Magic, mx, 1.0);
             let msg = self.lines.moon();
             d.bubble(mx as i32, ((my - r) / 2.0) as i32, &msg, t);
@@ -1582,6 +1796,47 @@ impl Scene {
         if ground_hit {
             d.snow_puff(xf, yf);
         }
+    }
+
+    /// The sleigh was clicked: sometimes Santa pulls up for a word with
+    /// whoever's below, other times it's just a hearty "ho ho ho".
+    fn santa_clicked(&mut self, t: f32) {
+        let Some((sx, sy)) = self.sleigh.santa_at(t) else { return };
+        let cam = self.cam;
+        let wx = sx + cam;
+        let d = &mut self.director;
+        d.sound(Sfx::Magic, wx, 1.0);
+        d.burst(wx, sy, 10, &[Rgb::hex(0xffd36b), Rgb::WHITE], 3.0, 1.5);
+        // someone down below, in view, to talk to (nearest under the sleigh)
+        let (l, r) = (cam, cam + self.w as f32);
+        let mut folk: Vec<_> = self.critters.people().into_iter().filter(|p| p.1 > l + 2.0 && p.1 < r - 2.0).collect();
+        folk.sort_by(|a, b| (a.1 - wx).abs().total_cmp(&(b.1 - wx).abs()));
+        if self.sleigh.halted(t) || folk.is_empty() || self.rng.chance(0.45) {
+            let line = *self.rng.pick(santa::HO_HO);
+            self.director.say(wx.round() as i32, sy as i32 - 2, line, t, 2.6, 8);
+            self.sleigh.halt(t + 1.2);
+            self.pockets.santa += 1;
+            return;
+        }
+        let days = self.talk_ctx(t).days;
+        let (_, px, py, kid) = folk[0];
+        let lines = santa::chat(&mut self.rng, kid, days);
+        let (sxi, syi) = (wx.round() as i32, sy as i32 - 2);
+        let (pxi, pyi) = (px.round() as i32, py as i32 - 4);
+        // the sleigh needs a moment to pull up before Santa starts
+        let t0 = t + 1.6;
+        let d = &mut self.director;
+        d.say(sxi, syi, &lines[0], t0, 2.6, 8);
+        d.say(pxi, pyi, &lines[1], t0 + 2.6, 2.8, 8);
+        d.say(sxi, syi, &lines[2], t0 + 5.4, 3.0, 8);
+        d.say(sxi, syi, &lines[3], t0 + 8.6, 2.4, 8);
+        // a wave back from someone else, if there's anyone
+        let (wxi, wyi) = folk.get(1).map(|o| (o.1.round() as i32, o.2 as i32 - 4)).unwrap_or((pxi, pyi));
+        d.say(wxi, wyi, &lines[4], t0 + 9.4, 2.2, 8);
+        d.sound(Sfx::Greet, px, 0.6);
+        self.sleigh.halt(t0 + 9.2);
+        self.pockets.santa += 1;
+        self.cheer(2);
     }
 
     /// Keyboard easter eggs (only reachable when the wallpaper has focus).
@@ -1625,6 +1880,7 @@ impl Scene {
     pub fn update(&mut self, dt: f32, _app_t: f32) {
         self.tick(dt);
         let t = self.now();
+        self.eve_night(t);
         // ease the camera toward where it's been asked to look
         let max = (self.ww - self.w) as f32;
         self.cam_target = self.cam_target.clamp(0.0, max);
@@ -1635,6 +1891,9 @@ impl Scene {
         let dv = self.sky_up_target - self.sky_up;
         self.sky_up = if dv.abs() < 0.05 { self.sky_up_target } else { self.sky_up + dv * (1.0 - (-dt * 5.0).exp()) };
         self.high.update(dt, t);
+        let festive = matches!(special_now(), Special::EveNight | Special::NewYear);
+        let moon_row = self.sky.moon.1 / 2.0;
+        self.skylife.update(dt, t, self.snow.wind, self.daylight.sun, festive, (self.cam, self.w as f32), moon_row);
         self.sky.update(dt, t, self.w, self.h * 2);
         // cursor velocity (cells/s), smoothed
         match (self.cursor, self.cursor_prev) {
@@ -1778,7 +2037,8 @@ impl Scene {
                 self.critters.request(events::Kind::Walker, t);
             }
             let tree = self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.cx as f32).unwrap_or(self.ww as f32 / 2.0);
-            self.critters.gather(tree, until, t, &mut self.director, &mut self.lines);
+            let line = if special_now() == Special::NewYear { "countdown by the big tree — come on!".to_string() } else { self.lines.show_soon() };
+            self.critters.gather(tree, until, t, &mut self.director, &line);
         }
         for k in std::mem::take(&mut self.director.spawn_requests) {
             self.critters.request(k, t);
@@ -1788,10 +2048,14 @@ impl Scene {
         let cur = self.cursor.filter(|_| t - self.cursor_seen < 15.0).map(|(x, y)| (x + cam, y - lift, self.cursor_vel.0, self.cursor_vel.1));
         let snowman = self.village.snowmen.first().map(village::snowman_head);
         self.critters.update(dt, t, &self.ctx, &mut self.director, &mut self.lines, cur, snowman);
+        self.update_builds(dt, t);
         // speech bubbles follow their speakers (the player included)
         let mut who = self.critters.anchors();
         if let (None, Some(p)) = (&self.inside, &self.player) {
             who.push((u64::MAX - 1, p.centre(), p.y));
+        }
+        if let Some((x, y)) = self.sleigh.santa_at(t) {
+            who.push((u64::MAX - 2, x + self.cam, y));
         }
         self.director.track(&who);
         if self.critters.take_hits_on_you() > 0 {
@@ -1802,6 +2066,23 @@ impl Scene {
             }
         }
         self.focus = if self.inside.is_some() { None } else { self.find_focus() };
+        // the conversation: they stay put while it lasts; walking off (or
+        // a moment after goodbye) ends it
+        if let Some(c) = &self.convo {
+            let (id, ended) = (c.id, c.ended_at);
+            let px = self.player.as_ref().map(|p| p.centre());
+            let far = match (px, self.critters.centre_of(id)) {
+                (Some(px), Some(cx)) => (px - cx).abs() > 16.0,
+                _ => true,
+            };
+            if far || self.inside.is_some() || ended.is_some_and(|e| t - e > 2.5) {
+                self.convo = None;
+            } else if let Some(px) = px {
+                if ended.is_none() {
+                    self.critters.hold_talk(id, px, t);
+                }
+            }
+        }
         // passers-by sometimes remark on what's going on
         if self.rng.chance(dt * 0.04) {
             self.critters.chatter(t, &mut self.director);
@@ -1823,19 +2104,212 @@ impl Scene {
                 }
             }
         }
-        // Christmas Eve: Santa is busy tonight
-        let now = Local::now();
-        if now.month() == 12 && now.day() == 24 && now.hour() >= 17 && t > self.next_eve_sleigh {
-            self.sleigh.trigger(t);
-            self.next_eve_sleigh = t + self.rng.range(60.0, 120.0);
-        }
+        self.santa_rounds(dt, t);
+        self.new_year(dt, t);
         if self.cfg.snow > 0.0 {
             let fresh = t - self.cursor_seen < 2.5;
             let cur = self.cursor.filter(|_| fresh).map(|(x, y)| (x, y * 2.0, self.cursor_vel.0, self.cursor_vel.1 * 2.0));
             self.snow.update(dt, t, self.director.gust_wind(t), cur);
         }
         self.village.update(dt, self.snow.wind);
+        self.sleigh.hold = self.rounds.is_some();
         self.sleigh.update(dt, t);
+    }
+
+    /// Santa's rounds: on December nights now and then he drops in on a
+    /// house or two near the view; on Christmas Eve he works his way round
+    /// the whole village, roof by roof, all night. Every delivery puts
+    /// another present under the big tree.
+    fn santa_rounds(&mut self, dt: f32, t: f32) {
+        let special = special_now();
+        let now = crate::clock::now();
+        let december_night = now.month() == 12 && now.day() < 24 && self.daylight.sun < 0.12;
+        let eve = special == Special::EveNight;
+        if self.rounds.is_none() && !self.sleigh.flying() && t > self.next_round && (eve || december_night) && self.inside.is_none() {
+            let mut stops: Vec<santa::Stop> = self
+                .village
+                .houses
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| h.chimney_top().map(|(x, y)| santa::Stop { house: i, chimney: (x, (y / 2.0).floor()) }))
+                .collect();
+            stops.sort_by(|a, b| a.chimney.0.total_cmp(&b.chimney.0));
+            let (l, w) = (self.cam, self.w as f32);
+            if !stops.is_empty() {
+                let stops = if eve {
+                    // the whole village: from the house nearest the middle of
+                    // the view, working right, then back round from the left
+                    let mid = l + w * 0.5;
+                    let k = stops.iter().position(|s| s.chimney.0 >= mid).unwrap_or(0);
+                    stops.rotate_left(k);
+                    stops
+                } else {
+                    // one or two houses in view
+                    let seen: Vec<_> = stops.iter().copied().filter(|s| s.chimney.0 > l + 8.0 && s.chimney.0 < l + w - 30.0).collect();
+                    if seen.is_empty() {
+                        self.next_round = t + 30.0;
+                        vec![]
+                    } else {
+                        let k = self.rng.int(0, seen.len() as i32) as usize;
+                        seen.into_iter().skip(k).take(self.rng.int(1, 3) as usize).collect()
+                    }
+                };
+                if !stops.is_empty() {
+                    let from = l + w + 6.0;
+                    self.rounds = Some(santa::Rounds::new(stops, from, self.rng.next_u32()));
+                    self.director.happenings.push((dialogue::Ev::Sleigh, None));
+                    self.director.sound(Sfx::Magic, from, 0.8);
+                }
+            }
+        }
+        let Some(r) = &mut self.rounds else { return };
+        r.update(dt, t, &mut self.director);
+        self.last_sleigh = t;
+        let delivered = std::mem::take(&mut r.delivered);
+        let done = r.done();
+        let team = r.team();
+        for i in delivered {
+            self.present_from_santa(t);
+            // the reindeer have the carrot left out for them
+            if let Some(h) = self.village.houses.get_mut(i).filter(|h| h.carrot) {
+                h.carrot = false;
+                let dx = h.door() as f32 + 2.0;
+                let by = h.base as f32;
+                self.director.burst(dx, by - 0.5, 6, &[Rgb::hex(0xff8a2a), Rgb::hex(0xffd36b)], 2.0, 1.0);
+                self.director.emote(team.0, team.1 - 2.0, '♥', Rgb::hex(0xff6b8a), 2);
+                self.director.sound(Sfx::Munch, team.0, 0.35);
+            }
+        }
+        if done {
+            self.rounds = None;
+            self.next_round = t + if eve { self.rng.range(25.0, 50.0) } else { self.rng.range(360.0, 840.0) };
+        }
+    }
+
+    /// Christmas Eve: the village goes to bed (dark windows, no traffic, the
+    /// cabin shut), and carrots go out on the steps for the reindeer —
+    /// set out by the kids through the afternoon, the rest by bedtime.
+    fn eve_night(&mut self, t: f32) {
+        let special = special_now();
+        let eve = special == Special::EveNight;
+        self.critters.set_asleep(eve, t, &mut self.director);
+        self.director.quiet = eve;
+        if let Some(s) = &mut self.shop {
+            s.closed = eve;
+            if eve {
+                s.open = false;
+            }
+        }
+        let now = crate::clock::now();
+        let afternoon = now.month() == 12 && now.day() == 24 && now.hour() >= 12 && !eve;
+        let fresh = !self.village.houses.iter().any(|h| h.asleep) && eve;
+        // Christmas morning: everyone's up at once, the bells ring out and
+        // the kids come running to see what Santa left
+        let woke = !eve && self.village.houses.iter().any(|h| h.asleep);
+        if woke {
+            self.director.light_show(t + 2.0, 20.0);
+            if let Some((cx, _)) = self.ctx.church {
+                self.director.sound(Sfx::ChurchPeal, cx as f32, 1.0);
+            }
+            for k in 0..6 {
+                let kind = if k % 2 == 0 { events::Kind::Kid } else { events::Kind::Walker };
+                self.critters.request(kind, t);
+            }
+        }
+        for h in &mut self.village.houses {
+            h.asleep = eve && !h.church;
+            if fresh && !h.church && h.chimney_top().is_some() {
+                h.carrot = true;
+            }
+            if special == Special::XmasDay || (!eve && !afternoon) {
+                h.carrot = false;
+            }
+        }
+        if afternoon {
+            // a kid passing a door leaves a carrot on the step
+            let kids: Vec<(f32, f32)> = self.critters.people().into_iter().filter(|p| p.3).map(|p| (p.1, p.2)).collect();
+            for (kx, ky) in kids {
+                if let Some(h) = self.village.houses.iter_mut().find(|h| !h.church && !h.carrot && h.chimney_top().is_some() && (h.door() as f32 - kx).abs() < 1.5) {
+                    h.carrot = true;
+                    let line = *self.rng.pick(&["a carrot for the reindeer!", "Rudolph gets the biggest one", "for Dasher! and Dancer!", "don't eat it before tonight!"]);
+                    self.director.say(kx.round() as i32, ky as i32 - 4, line, t, 2.6, 6);
+                    self.director.sound(Sfx::Drop, kx, 0.4);
+                }
+            }
+        }
+    }
+
+    /// Kids building snowmen and igloos on the open snow.
+    fn update_builds(&mut self, dt: f32, t: f32) {
+        if self.inside.is_some() {
+            return;
+        }
+        // what's already standing on the snowfield: (columns, bottom row)
+        let mut taken: Vec<(i32, i32, i32)> = self.trees.iter().map(|tr| (tr.cx - tr.hw_base as i32 - 3, tr.cx + tr.hw_base as i32 + 3, tr.base())).collect();
+        if let Some(tr) = self.trees.iter().find(|tr| tr.is_big()) {
+            // the presents (and on New Year's Eve, the mast)
+            let right = if special_now() == Special::NewYear { 22 } else { 12 };
+            taken.push((tr.cx - tr.hw_base as i32 - 12, tr.cx + tr.hw_base as i32 + right, tr.base() + 2));
+        }
+        taken.extend(self.village.snowmen.iter().map(|s| (s.cx - 10, s.cx + 10, s.base)));
+        taken.extend(self.village.lamps.iter().map(|l| (l.x - 2, l.x + 3, l.base)));
+        taken.extend(self.critters.bushes.iter().map(|b| (b.x - 2, b.x + 12, b.base)));
+        if let Some(s) = &self.shop {
+            taken.push((s.x - 3, s.x + shop::SHOP_W + 3, s.base));
+        }
+        // in the way: overlapping columns and not well behind or in front
+        let free = |x0: i32, x1: i32, row: i32| !taken.iter().any(|&(a, b, r)| x1 > a && x0 < b && (r - row).abs() < 8);
+
+        let g = &self.ctx.ground_row;
+        let h = self.h as f32;
+        let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
+        let can = special_now() != Special::EveNight && self.cfg.critters > 0.0;
+        self.builds.update(dt, t, can, (self.cam, self.w as f32), &free, &lo, h - 1.0, &mut self.critters, &mut self.director);
+    }
+
+    /// New Year's Eve: the mast goes up by the big tree for the evening.
+    fn new_year(&mut self, dt: f32, t: f32) {
+        let now = crate::clock::now();
+        let left = newyear::to_midnight(&now);
+        if special_now() != Special::NewYear || self.inside.is_some() {
+            if special_now() != Special::NewYear {
+                self.newyear = None;
+            }
+            return;
+        }
+        let Some(left) = left else { return };
+        if self.newyear.is_none() {
+            let Some(tree) = self.trees.iter().find(|tr| tr.is_big()) else { return };
+            let mx = tree.cx + tree.hw_base as i32 + 16;
+            self.newyear = Some(newyear::NewYear::new((mx, tree.top + 3, tree.base()), self.rng.next_u32()));
+        }
+        let people: Vec<(f32, f32, bool)> = self.critters.people().into_iter().map(|p| (p.1, p.2, p.3)).collect();
+        let view = (self.cam, self.w as f32);
+        let Some(ny) = &mut self.newyear else { return };
+        if ny.update(dt, t, left, &people, view, &mut self.director) {
+            self.director.gather = Some(t + left + 150.0);
+        }
+    }
+
+    /// A new present appears under the big tree (from Santa).
+    fn present_from_santa(&mut self, t: f32) {
+        let Some(tree) = self.trees.iter().find(|tr| tr.is_big()) else { return };
+        if self.presents.len() > 90 {
+            return;
+        }
+        let (cx, base, spread) = (tree.cx, tree.base(), tree.hw_base as i32 + 6);
+        let u = (self.h as f32 / 75.0).clamp(0.45, 1.3);
+        let (w, h) = (((self.rng.int(5, 11) as f32 * u).round() as i32).max(4), ((self.rng.int(2, 4) as f32 * u).round() as i32).max(2));
+        let x = cx + self.rng.int(-spread, spread) - w / 2;
+        let b = base + self.rng.int(0, 4);
+        let mut p = Present::new(x, b, w, h, &mut self.rng);
+        p.jiggle_until = t + 1.2;
+        let (px, py) = p.top_center();
+        self.presents.push(p);
+        // front ones drawn last
+        self.presents.sort_by_key(|p| p.base_row());
+        self.director.burst(px as f32, py as f32, 12, &[Rgb::hex(0xffd36b), Rgb::WHITE, Rgb::hex(0x7fe0a0)], 3.0, 2.0);
+        self.director.sound(Sfx::Present, px as f32, 0.5);
     }
 
     pub fn draw(&self, f: &mut Frame, _app_t: f32) {
@@ -1854,27 +2328,40 @@ impl Scene {
         f.oy = oy;
         // pixel layer (sky things stay on screen, the world scrolls)
         f.ox = 0;
-        self.sky.draw_px(f, t, self.director.flare.value(t));
+        self.sky.draw_px(f, t, self.director.flare.value(t), self.sky_off());
         let dl = self.daylight;
         if oy > 0 {
-            self.high.draw(f, t, glow, self.sky.top_color(), dl.sun);
+            self.high.draw(f, t, glow, self.sky.top_color(), dl.sun, self.sky_off());
         }
         daylight::sky_pass(f, &dl, -2 * oy, self.land.horizon as i32, glow);
+        // clouds drift with the sky (the same slow parallax)
+        f.ox = self.sky_off();
+        let (mx, my, _) = self.sky.moon;
+        self.skylife.draw_clouds(f, t, dl.sun, (mx, my));
+        f.ox = 0;
         (f.day, f.day_warm) = (dl.sun, dl.warm);
         self.director.draw_px(f);
         self.land.draw_px(f, self.cam);
         self.land.draw_lights(f, self.cam, t, glow);
         f.ox = cam;
         self.village.draw_px(f, self.cam);
+        self.builds.draw_px(f, dl.sun);
         // glyph layer, back to front
         f.ox = 0;
         if dl.sun < 0.45 {
             // stars and the moon's glyphs (not in daylight)
-            self.sky.draw_glyphs(f, t);
+            self.sky.draw_glyphs(f, t, self.sky_off());
         }
+        f.ox = self.sky_off();
+        self.skylife.draw_flyers(f, t, glow, dl.sun);
+        f.ox = 0;
         self.sleigh.draw(f, t, glow);
         f.ox = cam;
+        self.skylife.draw_lanterns(f, t, glow);
         self.village.draw_glyphs(f, t, glow);
+        if let Some(r) = &self.rounds {
+            r.draw(f, t, glow);
+        }
         self.land.draw_glints(f, t);
         f.ox = 0;
         if self.cfg.snow > 0.0 {
@@ -1889,11 +2376,20 @@ impl Scene {
         }
         f.ox = cam;
         let show = self.director.show.value(t);
-        for tr in &self.trees {
-            tr.draw(f, t, glow, show);
+        // Christmas Eve: the trees and presents breathe with a soft glow
+        let eve = special_now() == Special::EveNight;
+        for (i, tr) in self.trees.iter().enumerate() {
+            let pulse = if eve { 1.0 + 0.5 * (0.5 + 0.5 * (t * 1.4 + i as f32 * 0.9).sin()) } else { 1.0 };
+            tr.draw(f, t, glow * pulse, show);
         }
+        self.builds.draw_glyphs(f, t, glow);
         for p in &self.presents {
             p.draw(f, t);
+            if eve {
+                let (x, y) = p.top_center();
+                let k = 0.5 + 0.5 * (t * 1.8 + x as f32 * 0.3).sin();
+                f.light_cell(x, y + 1, Rgb::hex(0xffc870) * (1.4 * k * glow));
+            }
         }
         if let Some(s) = &self.shop {
             s.draw(f, t, glow);
@@ -1901,6 +2397,11 @@ impl Scene {
         self.critters.draw(f, t, glow);
         if let Some(p) = &self.player {
             p.draw(f, t, glow);
+        }
+        let ny_left = newyear::to_midnight(&crate::clock::now()).unwrap_or(1e9);
+        let ny_year = crate::clock::now().year() + (ny_left > 0.0) as i32;
+        if let Some(ny) = &self.newyear {
+            ny.draw(f, t, glow, ny_left, ny_year);
         }
         f.ox = 0;
         if self.cfg.snow > 0.0 {
@@ -1928,6 +2429,12 @@ impl Scene {
         }
         f.ox = 0;
         f.oy = 0;
+        if let Some(ny) = &self.newyear {
+            ny.draw_sky(f, t, ny_left, ny_year);
+        }
+        if let Some(c) = &self.convo {
+            c.draw(f, self.convo_hover);
+        }
         if self.show_stats {
             shop::draw_stats(f, &self.pockets);
         } else if self.show_pockets {
@@ -1966,6 +2473,52 @@ mod tests {
 
     fn scene() -> Scene {
         Scene::new(160, 40, 7, &SceneCfg::default())
+    }
+
+    /// Kids out and about now and then have a snowball fight (and it ends).
+    #[test]
+    fn kids_have_snowball_fights() {
+        let mut s = Scene::new(200, 60, 5, &SceneCfg::default());
+        let (mut fought, mut ended) = (false, false);
+        for i in 0..(600.0 / DT) as usize {
+            s.update(DT, 0.0);
+            let n = s.critters.fighting();
+            ended |= fought && n == 0;
+            fought |= n > 0;
+            if i % 200 == 0 && s.critters.people().iter().filter(|p| p.3).count() < 2 {
+                let x = s.cam + 80.0;
+                s.critters.spawn_demo(events::Kind::Kid, x, s.now());
+            }
+        }
+        assert!(fought, "no snowball fight broke out");
+        assert!(ended, "the fight never ended");
+    }
+
+    /// Kids out in the snow build something, and anyone who goes into an
+    /// igloo comes back out.
+    #[test]
+    fn kids_build_snowmen_and_igloos() {
+        let mut s = Scene::new(200, 60, 11, &SceneCfg { critters: 2.0, ..SceneCfg::default() });
+        let mut started = false;
+        let mut went_in = false;
+        for i in 0..(900.0 / DT) as usize {
+            s.update(DT, 0.0);
+            let (n, inside) = s.builds.count();
+            started |= n > 0;
+            went_in |= inside > 0;
+            if i % 300 == 0 && s.critters.people().iter().filter(|p| p.3).count() < 2 {
+                let x = s.cam + 60.0;
+                s.critters.spawn_demo(events::Kind::Kid, x, s.now());
+            }
+        }
+        assert!(started, "nothing got built");
+        assert!(s.builds.made > 0, "nothing was ever finished");
+        let _ = went_in;
+        // nobody's stuck inside forever
+        for _ in 0..(120.0 / DT) as usize {
+            s.update(DT, 0.0);
+        }
+        assert!(s.builds.count().1 == 0 || went_in, "kids lost inside an igloo");
     }
 
     /// A week of uptime: the app's f32 `t` is down to 1/16 s steps there, but
@@ -2040,8 +2593,11 @@ mod tests {
             s.update(DT, 0.0);
         }
         assert!(s.sleigh.audio_x().is_none(), "no scheduled fly-bys when set to never");
+        // (the sky drifts a little with the camera; look away from the big
+        // tree, whose star can sit in front of the moon on a short screen)
+        s.jump(-120.0);
         let (mx, my, _) = s.sky.moon;
-        s.click(mx as i32, (my / 2.0) as i32, 0.0);
+        s.click(mx as i32 - s.sky_off(), (my / 2.0) as i32, 0.0);
         s.update(DT, 0.0);
         assert!(s.sleigh.audio_x().is_some(), "moon click didn't launch the sleigh");
     }

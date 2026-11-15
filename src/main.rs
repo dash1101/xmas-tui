@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod color;
+mod clock;
 mod config;
 mod ctxmenu;
 mod export;
@@ -66,6 +67,8 @@ struct Args {
     time: Option<String>,
     /// --export: at the cocoa cabin with the menu and pockets open.
     shop: bool,
+    /// --export: talking with someone (0 = a grown-up, 1 = a kid).
+    talk: Option<u8>,
     /// --export: the stats card open / a right-click menu at (x, y).
     stats: bool,
     menu: Option<(i32, i32)>,
@@ -99,6 +102,7 @@ fn parse_args() -> Args {
         sky: 0.0,
         time: None,
         shop: false,
+        talk: None,
         stats: false,
         menu: None,
     };
@@ -119,7 +123,13 @@ fn parse_args() -> Args {
             "--raw" => a.raw = true,
             "--clean" => a.clean = true,
             "--time" => a.time = it.next(),
+            "--date" => {
+                if let Some(d) = it.next() {
+                    std::env::set_var("XMAS_NOW", d);
+                }
+            }
             "--shop" => a.shop = true,
+            "--talk" => a.talk = it.next().and_then(|v| v.parse().ok()),
             "--stats" => a.stats = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
@@ -338,6 +348,10 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
     Term::enter()?;
     let (w, h) = crossterm::terminal::size().map(|(w, h)| (w as usize, h as usize))?;
     let mut app = App::new(cfg, seed, path, w, h, wallpaper, true, false);
+    // kitty's keyboard protocol reports releases: keys are held until let go
+    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        app.set_exact_keys();
+    }
     app.start_audio();
     // window snow + lights overlay: only as the actual wallpaper on KDE Wayland
     #[cfg(target_os = "linux")]
@@ -409,10 +423,12 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                     }
                 }
                 Event::Resize(_, _) => term.invalidate(),
+                // releases can go missing while unfocused: let go of everything
+                Event::FocusLost => app.release_all(),
                 _ => {}
             }
         }
-        if app.quit || STOP.load(std::sync::atomic::Ordering::SeqCst) || tray::quit_requested() || update::restart_requested() {
+        if app.quit || STOP.load(std::sync::atomic::Ordering::SeqCst) || tray::quit_requested() || update::restart_requested() || app::RESTART_FOR_SCALE.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
         // tray "Pause effects": hold the last frame, hide window snow/lights
@@ -522,6 +538,13 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     if args.shop {
         scene.preview_shop();
     }
+    if let Some(k) = args.talk {
+        scene.preview_talk(k == 1);
+        for _ in 0..(2.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+    }
     if args.stats {
         scene.act(scene::Do::Stats);
     }
@@ -539,8 +562,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         scene.draw(&mut frame, t);
         if !args.clean {
             widgets.map = Some(scene.minimap());
-            widgets.map = Some(scene.minimap());
-        widgets.draw(&mut frame, t);
+            widgets.draw(&mut frame, t);
             settings.draw_gear(&mut frame, t);
             settings.draw(&mut frame, cfg, t);
         }

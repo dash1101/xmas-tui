@@ -269,7 +269,7 @@ impl Widgets {
 
     /// Returns the next free row.
     fn draw_clock(&self, f: &mut Frame, x: i32, y: i32, t: f32) -> i32 {
-        let now = Local::now();
+        let now = crate::clock::now();
         let (h, ampm) = if self.cfg.clock.hour24 {
             (now.hour(), "")
         } else {
@@ -467,7 +467,7 @@ fn digit(ch: char) -> [u8; 7] {
 }
 
 fn draw_countdown(f: &mut Frame, x: i32, y: i32, t: f32) {
-    let now = Local::now();
+    let now = crate::clock::now();
     let year = now.year();
     let xmas = |y: i32| Local.from_local_datetime(&NaiveDate::from_ymd_opt(y, 12, 25).unwrap().and_hms_opt(0, 0, 0).unwrap()).single();
     let red = pal::CANDY_RED;

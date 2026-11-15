@@ -144,7 +144,8 @@ impl HighSky {
 
     /// Drawn with the frame's `ox = 0` (it stays put as the village scrolls)
     /// and `oy` = how far the view has been lifted.
-    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, bottom: Rgb, day: f32) {
+    /// `off`: the sky's slow drift as the village scrolls.
+    pub fn draw(&self, f: &mut Frame, t: f32, glow: f32, bottom: Rgb, day: f32, off: i32) {
         if f.oy <= 0 {
             return;
         }
@@ -175,6 +176,7 @@ impl HighSky {
             if y < -f.oy {
                 continue;
             }
+            let x = (x - off).rem_euclid(self.w.max(1));
             let tw = 0.6 + 0.4 * (t * 1.7 + ph).sin();
             let ch = if b > 0.85 { '✦' } else if b > 0.6 { '·' } else { '.' };
             f.put_g(x, y, Glyph::new(ch, Rgb::hex(0xe8ecff) * (b * tw)).lit(0.0));

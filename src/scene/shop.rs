@@ -77,6 +77,8 @@ pub struct Pockets {
     pub berries: u32,
     pub gifts: u32,
     pub cocoa: u32,
+    /// Times Santa's sleigh was waved down.
+    pub santa: u32,
     /// Reached the far left / far right end of the village.
     pub ends: (bool, bool),
     /// Christmas-list goals done (bit per goal).
@@ -84,7 +86,7 @@ pub struct Pockets {
 }
 
 /// The Christmas list: (goal, how much cheer it's worth).
-pub const GOALS: [(&str, u32); 9] = [
+pub const GOALS: [(&str, u32); 10] = [
     ("say hello to 5 neighbours", 5),
     ("have 3 proper chats", 4),
     ("feed 3 animals", 4),
@@ -94,6 +96,7 @@ pub const GOALS: [(&str, u32); 9] = [
     ("watch a light show by the big tree", 3),
     ("find 3 constellations", 4),
     ("walk the village from end to end", 5),
+    ("wave down Santa's sleigh", 4),
 ];
 
 impl Pockets {
@@ -108,7 +111,8 @@ impl Pockets {
             5 => (self.hits, 5),
             6 => (self.shows, 1),
             7 => (self.stars, 3),
-            _ => ((self.ends.0 as u32) + (self.ends.1 as u32), 2),
+            8 => ((self.ends.0 as u32) + (self.ends.1 as u32), 2),
+            _ => (self.santa, 1),
         };
         (cur.min(need), need)
     }
@@ -154,7 +158,7 @@ pub fn draw_stats(f: &mut Frame, p: &Pockets) {
     let lines = [
         format!("walked {} steps · met {} · {} chats", (p.steps / 2.0) as u32, p.greeted.len(), p.chats),
         format!("fed {} animals · {} snowballs ({} hits) · {} gifts", p.fed, p.thrown, p.hits, p.gifts),
-        format!("{} homes visited · {} constellations · {} cocoas", p.houses.len(), p.stars, p.cocoa),
+        format!("{} homes visited · {} constellations · {} cocoas · Santa {}", p.houses.len(), p.stars, p.cocoa, p.santa),
     ];
     for (i, l) in lines.iter().enumerate() {
         f.text(x0 + 2, y0 + 1 + i as i32, l, pal::UI_TEXT, bg, 0.0);
@@ -200,6 +204,8 @@ pub struct Shop {
     pub x: i32,
     pub base: i32,
     pub open: bool,
+    /// Closed for the night (Christmas Eve).
+    pub closed: bool,
 }
 
 pub const SHOP_W: i32 = 16;
@@ -244,12 +250,22 @@ impl Shop {
             }
         }
         let kx = self.centre();
+        if self.closed {
+            for i in 1..SHOP_W - 1 {
+                for dy in [3, 2] {
+                    f.put_g(x0 + i, b - dy, Glyph::new(' ', dark).solid(Rgb::hex(0x1a1420)).lit(0.4));
+                }
+            }
+            f.text(kx - 3, b - 3, "CLOSED", Rgb::hex(0xd83a3a), Bg::Solid(Rgb::hex(0xeee4d0)), 0.4);
+            f.text(kx - 5, b - 2, "see you xmas", Rgb::hex(0x8a8070), Bg::Solid(Rgb::hex(0x1a1420)), 0.4);
+        } else {
         f.put_g(kx, b - 3, Glyph::new('●', Rgb::hex(0xe8c39e)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
         f.put_g(kx, b - 2, Glyph::new('█', Rgb::hex(0x2a6a3a)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
         f.put_g(kx - 4, b - 2, Glyph::new('◘', Rgb::hex(0xf0e8d8)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
         let steam = if (t * 2.0) as i32 % 2 == 0 { '∘' } else { '°' };
         f.put_g(kx - 4, b - 3, Glyph::new(steam, Rgb::hex(0xd8dce8)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
         f.put_g(kx + 4, b - 2, Glyph::new('◆', Rgb::hex(0xc8803a)).solid(Rgb::hex(0x8a5a2a)).lit(0.4));
+        }
         // counter and legs
         for i in 0..SHOP_W {
             f.put_g(x0 + i, b - 1, Glyph::new('▀', Rgb::hex(0x8a5a32)).solid(dark).lit(0.6));

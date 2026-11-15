@@ -72,6 +72,8 @@ struct Runner {
     /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
     #[cfg_attr(not(windows), allow(dead_code))]
     keys: [bool; 13],
+    /// The render scale the layout was last made for.
+    scale: f32,
     /// Ctrl is held (Ctrl+wheel looks up into the sky).
     ctrl: bool,
     paused: bool,
@@ -96,16 +98,20 @@ struct Runner {
 }
 
 fn cell_size(height: u32, rows: u32) -> (usize, usize) {
-    let ch = (height / rows.max(10)).clamp(10, 48) as usize;
-    let cw = ((ch as f32 * 0.474).round() as usize).max(5);
+    let ch = (height / rows.max(10)).clamp(6, 64) as usize;
+    let cw = ((ch as f32 * 0.474).round() as usize).max(3);
     (cw, ch)
 }
 
 impl Runner {
     fn layout(&mut self, size: PhysicalSize<u32>) {
+        // the render scale: bigger cells (fewer rows) or smaller
+        let scale = self.app.as_ref().map(|a| a.cfg.scale).unwrap_or(self.cfg.scale).clamp(0.5, 2.0);
+        self.scale = scale;
+        let rows = ((self.opts.rows as f32 / scale).round() as u32).max(10);
         let Some(g) = self.gfx.as_mut() else { return };
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let (cw, ch) = cell_size(h, self.opts.rows);
+        let (cw, ch) = cell_size(h, rows);
         // smaller than one cell (minimized, or dragged tiny): the offset
         // maths below would underflow; just stop drawing until it's back
         g.hidden = (w as usize) < cw || (h as usize) < ch;
@@ -252,6 +258,8 @@ impl Runner {
             KeyIn::Char('4'),
             KeyIn::Char('5'),
         ];
+        // polling sees every release
+        app.set_exact_keys();
         for i in 0..names.len() {
             match (self.keys[i], keys[i]) {
                 (false, true) => app.key(names[i]),
@@ -480,6 +488,11 @@ impl ApplicationHandler for Runner {
                 el.exit();
             }
             WindowEvent::Resized(size) => self.layout(size),
+            WindowEvent::Focused(false) => {
+                if let Some(app) = self.app.as_mut() {
+                    app.release_all();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if !self.paused {
                     self.draw();
@@ -534,6 +547,7 @@ impl ApplicationHandler for Runner {
                     Key::Character(s) => s.chars().map(KeyIn::Char).collect(),
                     _ => vec![],
                 };
+                app.set_exact_keys();
                 for k in keys {
                     match (event.state, event.repeat) {
                         (ElementState::Pressed, false) => app.key(k),
@@ -552,6 +566,10 @@ impl ApplicationHandler for Runner {
             return;
         }
         let now = Instant::now();
+        // render scale changed in settings: lay the grid out again
+        if let Some(size) = self.app.as_ref().filter(|a| (a.cfg.scale - self.scale).abs() > 1e-3).and(self.gfx.as_ref().map(|g| PhysicalSize::new(g.size.0, g.size.1))) {
+            self.layout(size);
+        }
         #[cfg(windows)]
         if self.opts.desktop {
             if self.reattach.is_some() {
@@ -613,6 +631,7 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         #[cfg(windows)]
         polled: (false, false),
         keys: [false; 13],
+        scale: 1.0,
         ctrl: false,
         paused: false,
         #[cfg(windows)]

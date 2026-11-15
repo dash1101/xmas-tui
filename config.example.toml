@@ -3,6 +3,7 @@
 
 fps = 30          # frames per second (lower = less CPU)
 seed = 0          # 0 = new random layout each launch; any other number = fixed layout
+scale = 1.0       # render scale, 0.5..2 (bigger = chunkier pixels, fewer cells)
 
 [scene]
 aurora = true

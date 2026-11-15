@@ -23,6 +23,11 @@ pub struct House {
     eave_colors: Vec<Rgb>,
     /// Lights are off until this time (clicks / random events).
     pub lights_off_until: f32,
+    /// Christmas Eve night: everyone's in bed (windows dark, but for the
+    /// odd night-light).
+    pub asleep: bool,
+    /// A carrot left out on the step for the reindeer.
+    pub carrot: bool,
     /// Cells actually covered by the art (walls, roof, chimney, steeple,
     /// cross), for hit-testing and the train's occlusion. `bounds()` is a
     /// loose rectangle that's mostly empty sky around the roof/steeple.
@@ -106,6 +111,8 @@ impl House {
             chimney,
             eave_colors,
             lights_off_until: 0.0,
+            asleep: false,
+            carrot: false,
             mask: HashSet::new(),
         };
         // a cell counts if either of its half-block pixels is painted
@@ -237,7 +244,8 @@ impl House {
         }
     }
 
-    fn chimney_top(&self) -> Option<(f32, f32)> {
+    /// Top of the chimney: (column, pixel row). None for the church.
+    pub fn chimney_top(&self) -> Option<(f32, f32)> {
         let chx = self.chimney?;
         let c = self.x as f32 + (self.w as f32 - 1.0) / 2.0;
         let half_base = self.w as f32 / 2.0 + 1.5;
@@ -265,7 +273,9 @@ impl House {
         for (i, &(x, y)) in self.windows.iter().enumerate() {
             let pair = (i / 2) as i32;
             let epoch = (t / 90.0) as i32;
-            let on = h01(hash2(pair ^ self.seed as i32, epoch)) > 0.12 && t >= self.lights_off_until;
+            // asleep: dark, but one house in four leaves a night-light on
+            let night_light = pair == 0 && self.seed % 4 == 0;
+            let on = h01(hash2(pair ^ self.seed as i32, epoch)) > 0.12 && t >= self.lights_off_until && (!self.asleep || night_light || self.church);
             if !on {
                 f.put_g(x, y, Glyph::new('┼', Rgb::hex(0x2a2a38)).solid(Rgb::hex(0x141826)).lit(0.5));
                 continue;
@@ -280,6 +290,11 @@ impl House {
             let ch = if self.church { '┃' } else { '┼' };
             f.put_g(x, y, Glyph::new(ch, frame).solid(glowc * flick).lit(0.0));
             f.light_cell(x, y, glowc * (1.6 * flick * glow));
+        }
+        // a carrot on the step for the reindeer
+        if self.carrot {
+            f.put_g(self.door + 2, self.base, Glyph::new('▼', Rgb::hex(0xff8a2a)).lit(0.5));
+            f.put_g(self.door + 3, self.base, Glyph::new('ˬ', Rgb::hex(0x3ad07a)).lit(0.5));
         }
         // door + wreath
         let dt = self.base - 1;

@@ -108,6 +108,28 @@ pub fn random_seed() -> u32 {
     crate::rng::hash((n & 0xffff_ffff) as u32 ^ (n >> 32) as u32) | 1
 }
 
+/// The render scale changed: in the kitty wallpaper, ask kitty (through the
+/// control socket the launcher opened) for the matching font size. If that
+/// doesn't work and the systemd service is running us, exit: the service
+/// starts the wallpaper again, and the launcher reads the new scale.
+fn apply_scale(scale: f32) {
+    let Ok(sock) = std::env::var("XMAS_KITTY_SOCKET") else { return };
+    let base: f32 = std::env::var("XMAS_FONT_BASE").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+    let kitten = std::env::var("XMAS_KITTEN").unwrap_or_else(|_| "kitten".into());
+    let size = format!("{:.2}", base * scale.clamp(0.5, 2.0));
+    std::thread::spawn(move || {
+        let ok = std::process::Command::new(kitten).args(["@", "--to", &sock, "set-font-size", &size]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if !ok && std::env::var_os("INVOCATION_ID").is_some() {
+            // give the config a moment to be saved, then restart
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            RESTART_FOR_SCALE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+
+/// Set when the wallpaper should restart to pick up a new render scale.
+pub static RESTART_FOR_SCALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl App {
     pub fn new(cfg: Config, seed: u32, path: &Path, w: usize, h: usize, wallpaper: bool, keyboard: bool, extras: bool) -> Self {
         let mut frame = Frame::new(w, h);
@@ -219,6 +241,7 @@ impl App {
                     m.hover = m.hit(x, y);
                 }
                 self.scene.set_cursor(Some((x, y)));
+                self.scene.convo_hover(x, y);
                 self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(x, y) };
             }
             MouseIn::Down(Btn::Left) if self.menu.is_some() => {
@@ -246,6 +269,8 @@ impl App {
                 } else if self.settings.open {
                     self.commit_city();
                     self.settings.open = false;
+                } else if self.scene.convo_click(x, y) {
+                    // answered in the dialogue box
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
                     self.settings.open = true;
                 } else if !self.cfg.layout.locked && self.widgets.on_grip(x, y) {
@@ -355,10 +380,32 @@ impl App {
             return;
         }
         if let Some(i) = Self::dir_slot(k) {
-            // with releases reported, a held key is refreshed by its repeats;
-            // the cap only matters if a release goes missing (focus lost)
-            self.held[i] = self.t() + if self.exact_keys { 1.0 } else { 0.6 };
+            // with releases reported a key stays held until it's let go (no
+            // timeout: only the last key pressed auto-repeats, so a key held
+            // under another one — W then D, walking diagonally — never gets
+            // refreshed). Without them a press holds it for a moment and
+            // auto-repeat keeps it going.
+            self.held[i] = if self.exact_keys { f32::INFINITY } else { self.t() + 0.6 };
         }
+    }
+
+    /// The front-end reports releases (winit, the desktop key poll, kitty's
+    /// keyboard protocol): keys are held exactly until let go.
+    pub fn set_exact_keys(&mut self) {
+        if !self.exact_keys {
+            self.exact_keys = true;
+            let t = self.t();
+            for h in &mut self.held {
+                if *h > t {
+                    *h = f32::INFINITY;
+                }
+            }
+        }
+    }
+
+    /// Let go of everything (focus lost: releases may never arrive).
+    pub fn release_all(&mut self) {
+        self.held = [f32::NEG_INFINITY; 4];
     }
 
     /// A key's auto-repeat.
@@ -368,7 +415,7 @@ impl App {
 
     /// A key was let go (front-ends that can tell).
     pub fn key_up(&mut self, k: KeyIn) {
-        self.exact_keys = true;
+        self.set_exact_keys();
         if let Some(i) = Self::dir_slot(k) {
             self.held[i] = f32::NEG_INFINITY;
         }
@@ -552,6 +599,9 @@ impl App {
             } else {
                 self.widgets.apply(&self.cfg);
             }
+            if (self.cfg.scale - old.scale).abs() > 1e-3 {
+                apply_scale(self.cfg.scale);
+            }
             if self.cfg.updates != old.updates {
                 crate::update::configure(self.cfg.updates.check, self.cfg.updates.auto_install);
             }
@@ -571,7 +621,7 @@ impl App {
         self.scene.set_live(self.cfg.scene.walk_speed, left);
         {
             use chrono::Timelike;
-            let now = chrono::Local::now();
+            let now = crate::clock::now();
             let mins = now.hour() as f32 * 60.0 + now.minute() as f32 + now.second() as f32 / 60.0;
             let (rise, set) = crate::widgets::data::sun_times().unwrap_or((450.0, 1020.0));
             self.scene.set_daylight(crate::scene::daylight::compute(&self.cfg.scene.time, mins, rise, set));
@@ -702,6 +752,27 @@ mod tests {
         let x3 = app.scene.player_x().unwrap();
         assert!(x2 > x1 + 2.0, "held walked {x1} → {x2}");
         assert!((x3 - x2).abs() < 0.01, "kept walking after release: {x2} → {x3}");
+        // two keys at once (W then D): only the last one auto-repeats, and
+        // the first stays held anyway — diagonal for as long as both are down
+        let y0 = app.scene.player_y().unwrap();
+        app.key(KeyIn::Char('w'));
+        pause(&mut app, 200);
+        app.key(KeyIn::Char('d'));
+        for _ in 0..12 {
+            pause(&mut app, 150);
+            app.key_repeat(KeyIn::Char('d'));
+        }
+        let (x4, y4) = (app.scene.player_x().unwrap(), app.scene.player_y().unwrap());
+        assert!(x4 > x3 + 3.0 && y4 < y0 - 1.0, "diagonal: ({x3},{y0}) → ({x4},{y4})");
+        // a long hold with slow (or no) repeats keeps walking
+        pause(&mut app, 1500);
+        assert!(app.scene.player_x().unwrap() > x4 + 2.0, "a held key timed out");
+        app.key_up(KeyIn::Char('D'));
+        app.key_up(KeyIn::Char('w'));
+        let x5 = app.scene.player_x().unwrap();
+        pause(&mut app, 300);
+        assert!((app.scene.player_x().unwrap() - x5).abs() < 0.01, "kept walking after both released");
+        let x3 = x5;
         // typing the city in settings never moves anyone
         app.settings.editing = Some(String::new());
         app.key(KeyIn::Char('a'));
