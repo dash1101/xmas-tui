@@ -258,6 +258,9 @@ pub struct Frame {
     /// Set once the widgets are drawn: anything drawn after (the settings,
     /// menus, cards) hides a picture it overlaps.
     pub cover_pictures: bool,
+    /// While the widgets draw: a cell with a background of its own (a
+    /// panel) hides a picture under it (people behind a widget).
+    pub cover_panels: bool,
     /// A cell's height over its width (the front-end sets it), for working
     /// out how many columns a sprite takes.
     pub cell_aspect: f32,
@@ -295,6 +298,7 @@ impl Frame {
             specks: false,
             pictures: vec![],
             cover_pictures: false,
+            cover_panels: false,
             cell_aspect: 2.1,
             pre: vec![],
             pre_on: false,
@@ -335,6 +339,7 @@ impl Frame {
         self.speck.fill(false);
         self.pictures.clear();
         self.cover_pictures = false;
+        self.cover_panels = false;
     }
 
     /// A sprite (a person, a pet): centred on column `cx`, feet on row
@@ -342,9 +347,10 @@ impl Frame {
     /// whole-number scale, over the cells.
     pub fn sprite(&mut self, cx: f32, feet: f32, rows: f32, pic: std::sync::Arc<Picture>) {
         let (cx, feet) = (cx - self.ox as f32, feet + self.oy as f32);
+        // the cells it's on (about: the renderer redraws a cell round it too)
         let wc = pic.w as f32 / pic.h.max(1) as f32 * rows * self.cell_aspect;
-        let (x, y) = ((cx - wc / 2.0).floor() as i32 - 1, (feet - rows).floor() as i32 - 1);
-        let (cols, rws) = (wc.ceil() as i32 + 3, rows.ceil() as i32 + 2);
+        let (x, y) = ((cx - wc / 2.0).floor() as i32, (feet - rows).floor() as i32);
+        let (cols, rws) = ((cx + wc / 2.0).ceil() as i32 - x, feet.ceil() as i32 - y);
         if x + cols < 0 || y + rws < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return;
         }
@@ -496,7 +502,7 @@ impl Frame {
             if self.keep_ui && self.glyph[i].is_some_and(|o| o.ui) {
                 return;
             }
-            if self.cover_pictures && !self.pictures.is_empty() {
+            if (self.cover_pictures || (self.cover_panels && !matches!(g.bg, Bg::Scene))) && !self.pictures.is_empty() {
                 self.pictures.retain(|p| x < p.x || x >= p.x + p.cols || y < p.y || y >= p.y + p.rows);
             }
             let g = if self.ui { Glyph { ui: true, ..g } } else { g };

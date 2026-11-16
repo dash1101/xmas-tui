@@ -33,6 +33,7 @@ impl Chapel {
     }
 
     /// How many are in the church just now.
+    #[cfg(test)]
     pub fn inside(&self) -> usize {
         self.inside.len()
     }

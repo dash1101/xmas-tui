@@ -142,6 +142,13 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - Houses with firelit windows, roofline lights and chimney smoke, plus a church with stained glass. Every one
   can be visited.
 - Lamp posts, fences, berry bushes, a snowman, the Cocoa & Gifts cabin and the railway station.
+- Villagers and pets drawn as detailed pixel-art sprites (in the window, and in kitty through its graphics
+  protocol): faces, mittened hands that swing, wave and pet, scarves and lanterns; dogs, cats and bunnies with
+  their own walk, sit, beg, eat and curled-up sleeping poses. Other terminals show simpler text-character folk.
+- Pets speak in little bubbles: a cat meows, purrs and hisses, a dog woofs, pants and growls, a bunny thumps and
+  sniffs.
+- Every few minutes the church bell rings and a few folk go in for the service, to come out a while later; now
+  and then someone pops in on their own.
 - Three depths of snow in gusty wind, and glinting snowfields.
 - A moon with a halo, an aurora, shooting stars, and Santa's sleigh flying past every few minutes. Higher up:
   the Milky Way, constellations, the North Star, a hot-air balloon and the odd satellite.

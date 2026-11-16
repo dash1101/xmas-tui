@@ -422,7 +422,10 @@ impl Widgets {
     pub fn draw(&mut self, f: &mut Frame, t: f32) {
         // speech bubbles and prompts stay readable on top of the widgets
         f.keep_ui = true;
+        // a panel in front of someone hides them
+        f.cover_panels = true;
         self.draw_all(f, t);
+        f.cover_panels = false;
         f.keep_ui = false;
         // what's drawn after (settings, menus) hides real icons under it
         f.cover_pictures = true;

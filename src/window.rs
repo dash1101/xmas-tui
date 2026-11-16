@@ -223,8 +223,11 @@ impl Runner {
         // last frame too, so a moved picture leaves nothing behind
         let mut under = vec![false; cols * rows];
         for p in pics.iter().chain(g.pics.iter()) {
-            for y in p.y.max(0) as usize..((p.y + p.rows).max(0) as usize).min(rows) {
-                for x in p.x.max(0) as usize..((p.x + p.cols).max(0) as usize).min(cols) {
+            // (a sprite's cells are approximate: a cell more all round)
+            let m = p.sprite.is_some() as i32;
+            let (px, py, pc, pr) = (p.x - m, p.y - m, p.cols + 2 * m, p.rows + 2 * m);
+            for y in py.max(0) as usize..((py + pr).max(0) as usize).min(rows) {
+                for x in px.max(0) as usize..((px + pc).max(0) as usize).min(cols) {
                     under[y * cols + x] = true;
                 }
             }
