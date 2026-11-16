@@ -936,7 +936,8 @@ impl App {
         if self.menu.take().is_some() {
             return true;
         }
-        let ours = self.widgets.hit(x, y).is_some() || settings::gear_rect(self.w as i32).contains(x, y) || {
+        // (the clock is mostly see-through: right-clicks there are the desktop's)
+        let ours = self.widgets.hit(x, y).is_some_and(|i| i != 0) || settings::gear_rect(self.w as i32).contains(x, y) || {
             let (wx, wy) = self.world_pt(x, y);
             let (title, _) = self.scene.menu_at(wx, wy);
             !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village")

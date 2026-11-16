@@ -218,6 +218,14 @@ pub enum Act {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PetAct {
     Fuss,
+    /// Dinner from a bowl; a cuddle in the villager's arms; nap time (and
+    /// waking up); a good brush; the page with the rest.
+    Feed,
+    Cuddle,
+    Nap,
+    Wake,
+    Brush,
+    More,
     /// The play menu; throw a toy (pets::ToyKind as 0 yarn, 1 ball, 2
     /// stick, 3 carrot); a trick; "chase me!"; a dangled scarf.
     Play,

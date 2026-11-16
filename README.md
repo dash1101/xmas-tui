@@ -36,7 +36,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 - **A home and a pet of the villager's own**: a house with a parlour, a kitchen, a bedroom upstairs and an attic with
   a telescope (walk up the stairs and the view follows), a sofa to sit on, a bed to sleep in and an oven that bakes
   gingerbread for the pockets; and a dog, cat or bunny (named, coloured, and remembered) that follows everywhere,
-  fetches, does tricks, naps, and plays with other animals.
+  fetches, does tricks, eats from its bowl, gets cuddled and brushed, naps, and plays with other animals.
 - **Play it like a game**: pop the village out into its own window, or take the wallpaper itself full screen and
   back (nothing restarts); zoom in on the villager with Ctrl +/-.
 - **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
@@ -214,9 +214,12 @@ always be found in Explorer or Dolphin.
     villager in (the room dims, the pet curls up at the foot of the bed) until a direction key gets them up. Each
     window looks out from its own height — the attic's up into the stars;
   - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. Turn to face it
-    and press E (it comes before anything else in reach), or click it, for its box. The first time it asks for a name; after that it can be fussed over, played with (a ball or a stick for a dog, a ball of yarn or
-    the scarf for a cat, a carrot for a bunny, tricks, "chase me!"), renamed, given a new look, or asked to stay
-    home. How a game goes varies: a dog might bring the ball straight back, take a victory lap first, or come back
+    and press E (it comes before anything else in reach), or click it, for its box. The first time it asks for a
+    name. After that it can be fussed over; cuddled (scooped up into the villager's arms, hearts and all, until they
+    walk off); fed (a bowl goes down, it trots over and eats, and it's full for a while after); sent for a nap (it
+    curls up right there, and wakes when the villager moves or is woken from the box); brushed (its coat shines for
+    a while); played with (a ball or a stick for a dog, a ball of yarn or the scarf for a cat, a carrot for a bunny,
+    tricks, "chase me!"); renamed, given a new look, or asked to stay home. How a game goes varies: a dog might bring the ball straight back, take a victory lap first, or come back
     with a stick; a cat bats the yarn about, unravels it, or curls up round it. Left standing about a while, the pet
     naps. Out in the village a dog chases rabbits and foxes, a cat stalks them, a bunny hops along with rabbits, and
     pets meeting other people's pets have a happy bounce together. With a carrot or gingerbread in hand (**Q**), E
@@ -236,8 +239,8 @@ always be found in Explorer or Dolphin.
   villager again, and word gets round.
 - **Right-click** (or **press and hold** the left button for a moment, which works everywhere) shows what can be
   done with whatever's under the pointer, and the villager walks over to do it. On the Windows desktop, right-click
-  works on people, animals, houses, the station, the cabin, widgets and shelves; on open ground, in the sky and on
-  desktop icons it's still Windows' own desktop menu (our menus have a *Windows desktop menu…* item too):
+  works on people, animals, houses, the station, the cabin, widget panels and shelves; on open ground, in the sky and on
+  desktop icons it's still Windows' own desktop menu (xmas-tui's menus have a *Windows desktop menu…* item too):
   - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
   - **the villager:** the stats card and Christmas list, or the pockets;
   - **people:** say hello, invite along or say goodbye, give a gingerbread or candy cane, throw a snowball;
@@ -425,7 +428,7 @@ The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) 
   desktop icons on the main monitor. It pauses during fullscreen games.
 - **Controls:** the **⚙ settings** button (top right) opens settings, which include **Run at startup** and **Quit**.
   **Right-click** on something in the village (or on a widget or shelf) opens its menu; on open ground, in the sky
-  and on icons it's Windows' desktop menu, as usual. **Press and hold** the left button opens our menu anywhere.
+  and on icons it's Windows' desktop menu, as usual. **Press and hold** the left button opens xmas-tui's menu anywhere.
   Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
   scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
 - **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons

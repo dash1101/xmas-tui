@@ -936,6 +936,15 @@ impl Scene {
                 ],
             };
             (format!("{name} looks up at you, all ears. what'll it be?"), v)
+        } else if page == 3 {
+            let mut v = vec![Opt::new(&format!("brush {name}"), Act::Pet(P::Brush))];
+            if at_home && !pet.staying {
+                v.push(Opt::new(&format!("stay here, {name}"), Act::Pet(P::Stay)));
+            }
+            v.push(Opt::new("a new name…", Act::Pet(P::Names(0))));
+            v.push(Opt::new("a new look…", Act::Pet(P::Look)));
+            v.push(Opt::new("that's all", Act::Pet(P::Done)));
+            (format!("{name} tilts their head, listening"), v)
         } else if page == 1 {
             let mut v = vec![];
             for (k, label) in ["a dog", "a cat", "a bunny"].iter().enumerate() {
@@ -952,15 +961,23 @@ impl Scene {
                 pets::PetKind::Cat => "winds round your boots, purring",
                 pets::PetKind::Bunny => "does a happy little hop",
             };
-            let mut v = vec![Opt::new(&format!("give {name} a fuss"), Act::Pet(P::Fuss)), Opt::new("play!", Act::Pet(P::Play))];
+            let mut v = vec![
+                Opt::new(&format!("give {name} a fuss"), Act::Pet(P::Fuss)),
+                Opt::new(&format!("cuddle {name}"), Act::Pet(P::Cuddle)),
+                Opt::new(&format!("feed {name}"), Act::Pet(P::Feed)),
+                Opt::new("play!", Act::Pet(P::Play)),
+            ];
+            if pet.asleep() {
+                v.push(Opt::new(&format!("wake {name} up"), Act::Pet(P::Wake)));
+            } else {
+                v.push(Opt::new("nap time", Act::Pet(P::Nap)));
+            }
             if pet.staying {
                 v.push(Opt::new(&format!("come along, {name}!"), Act::Pet(P::Come)));
-            } else if at_home {
-                v.push(Opt::new(&format!("stay here, {name}"), Act::Pet(P::Stay)));
             }
-            v.push(Opt::new("a new name…", Act::Pet(P::Names(0))));
-            v.push(Opt::new("a new look…", Act::Pet(P::Look)));
-            (format!("{name} {mood}"), v)
+            v.push(Opt::new("more…", Act::Pet(P::More)));
+            let line = if pet.asleep() { format!("{name} is fast asleep, paws twitching") } else { format!("{name} {mood}") };
+            (line, v)
         };
         self.open_pet_box(&name, &line, opts);
     }
@@ -1010,6 +1027,43 @@ impl Scene {
         let you = self.player.as_ref().map(|p| (p.centre(), p.y, p.dir)).unwrap_or((pet.x, pet.y, 1.0));
         match a {
             P::Play => return self.pet_menu(2),
+            P::More => return self.pet_menu(3),
+            P::Feed => {
+                // the bowl goes down just in front of the villager
+                let line = pet.feed(you.0 + you.2 * 4.0 * k, you.1, t);
+                self.convo = None;
+                self.pet_say(&line);
+                return;
+            }
+            P::Cuddle => {
+                let line = pet.cuddle(t);
+                let x = pet.x;
+                self.convo = None;
+                self.pet_say(&line);
+                match self.inside.as_mut() {
+                    Some(inn) => inn.director.sound(sound, x, 0.6),
+                    None => self.director.sound(sound, x, 0.6),
+                }
+                return;
+            }
+            P::Nap => {
+                let line = pet.nap(t);
+                self.convo = None;
+                self.pet_say(&line);
+                return;
+            }
+            P::Wake => {
+                pet.wake(t);
+                pet.happy_until = t + 2.0;
+                let line = format!("{} blinks awake, stretches… and wags", pet.name);
+                say(self, &line);
+            }
+            P::Brush => {
+                let line = pet.brush(t);
+                self.convo = None;
+                self.pet_say(&line);
+                return;
+            }
             P::Throw(i) => {
                 let toy = [pets::ToyKind::Yarn, pets::ToyKind::Ball, pets::ToyKind::Stick, pets::ToyKind::Carrot][i as usize % 4];
                 pet.throw(toy, you.0, you.1, you.2, t, k);
@@ -2157,6 +2211,19 @@ impl Scene {
             "pet" => self.pet_menu(0),
             _ => {}
         }
+    }
+
+    /// Previews: the pet fed / cuddled / napping / brushed.
+    pub fn preview_pet(&mut self, what: &str) {
+        use story::PetAct as P;
+        let a = match what {
+            "feed" => P::Feed,
+            "cuddle" => P::Cuddle,
+            "nap" => P::Nap,
+            "brush" => P::Brush,
+            _ => return,
+        };
+        self.pet_act(a);
     }
 
     /// Previews: people out with their pets near the player.
@@ -3457,10 +3524,15 @@ impl Scene {
         f.day = self.daylight.sun;
         self.critters.draw(f, t, glow, true, Some(v));
         if let (Some(p), None) = (&self.player, &self.inside) {
-            if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying) {
+            let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
+            // (in the villager's arms: drawn in front of them)
+            if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
             }
             p.draw(f, t, glow, Some(v));
+            if let Some(pet) = pet.filter(|pet| pet.held()) {
+                pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
+            }
         }
         f.day = 0.0;
     }
@@ -3613,10 +3685,14 @@ impl Scene {
         let people = !self.zoomed.get();
         self.critters.draw(f, t, glow, people, None);
         if let (Some(p), None, true) = (&self.player, &self.inside, people) {
-            if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying) {
+            let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
+            if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
             p.draw(f, t, glow, None);
+            if let Some(pet) = pet.filter(|pet| pet.held()) {
+                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
+            }
         }
         let ny_left = newyear::to_midnight(&crate::clock::now()).unwrap_or(1e9);
         let ny_year = crate::clock::now().year() + (ny_left > 0.0) as i32;
@@ -4486,6 +4562,68 @@ mod tests {
         s.set_move(1.0, 0.0);
         run(&mut s, 0.2);
         assert!(!s.my_pet.as_ref().unwrap().napping, "slept through the walk");
+    }
+
+    /// The pet's care: fed from a bowl (it trots over and eats, and is full
+    /// for a while after), cuddled in the villager's arms (until they walk
+    /// off), sent for a nap (until they move), and brushed (a shiny coat).
+    #[test]
+    fn the_pet_eats_cuddles_naps_and_shines() {
+        let mut s = walker_scene();
+        let run = |s: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                s.update(DT, 0.0);
+            }
+        };
+        run(&mut s, 1.0);
+        s.pet_act(story::PetAct::Feed);
+        assert!(s.my_pet.as_ref().unwrap().bowl.is_some(), "no bowl");
+        let bowl = s.my_pet.as_ref().unwrap().bowl.unwrap().0;
+        let mut ate = false;
+        for _ in 0..(8.0 / DT) as usize {
+            s.update(DT, 0.0);
+            let pet = s.my_pet.as_ref().unwrap();
+            if matches!(pet.busy, Some(pets::Busy::Eat { eating: true, .. })) {
+                ate = true;
+                assert!((pet.x - bowl).abs() < 4.0, "eating away from the bowl");
+            }
+        }
+        assert!(ate, "never ate");
+        assert!(s.my_pet.as_ref().unwrap().busy.is_none(), "still busy eating");
+        // straight after: full
+        s.pet_act(story::PetAct::Feed);
+        assert!(s.convo.as_ref().is_some_and(|c| c.line.contains("full")), "not full after dinner");
+        run(&mut s, 5.0);
+        // a cuddle: held at the villager, until they walk off
+        s.pet_act(story::PetAct::Cuddle);
+        run(&mut s, 0.5);
+        let px = s.player.as_ref().unwrap().centre();
+        assert!(s.my_pet.as_ref().unwrap().held());
+        assert!((s.my_pet.as_ref().unwrap().x - px).abs() < 2.0, "not in their arms");
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.3);
+        s.set_move(0.0, 0.0);
+        assert!(!s.my_pet.as_ref().unwrap().held(), "still held while walking");
+        // nap time: asleep at once, up when the villager moves
+        run(&mut s, 1.0);
+        s.pet_act(story::PetAct::Nap);
+        assert!(s.my_pet.as_ref().unwrap().asleep());
+        run(&mut s, 2.0);
+        assert!(s.my_pet.as_ref().unwrap().asleep(), "woke by itself");
+        s.set_move(-1.0, 0.0);
+        run(&mut s, 0.2);
+        s.set_move(0.0, 0.0);
+        assert!(!s.my_pet.as_ref().unwrap().asleep());
+        // a brush: shines a while
+        s.pet_act(story::PetAct::Brush);
+        assert!(s.my_pet.as_ref().unwrap().shine_until > s.now() + 5.0);
+        // and the menu offers all of it (once it has a name)
+        s.my_pet.as_mut().unwrap().name = "Biscuit".into();
+        s.pet_menu(0);
+        let labels: Vec<String> = s.convo.as_ref().unwrap().opts.iter().map(|o| o.label.clone()).collect();
+        for want in ["cuddle", "feed", "play!", "nap time", "more…"] {
+            assert!(labels.iter().any(|l| l.contains(want)), "no {want:?} in {labels:?}");
+        }
     }
 
     /// Q: what's in hand cycles through what's in the pockets; E then gives

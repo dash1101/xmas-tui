@@ -175,6 +175,31 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
     }
 }
 
+/// A food bowl with its feet on pixel row `feet`: red, with `left` (0..1)
+/// of the food still in it (kibble, or greens for a bunny).
+fn draw_bowl(f: &mut Frame, kind: PetKind, x: f32, feet: i32, scale: i32, left: f32) {
+    let food = if kind == PetKind::Bunny { Rgb::hex(0x6abf4a) } else { Rgb::hex(0xb07a40) };
+    let (red, dark) = (Rgb::hex(0xd8343c), Rgb::hex(0x8a1c24));
+    // a little bowl: a narrow foot, a wider rim, the food heaped on top
+    let x0 = x.round() as i32 - 2 * scale;
+    let px = |f: &mut Frame, cx: i32, cy: i32, c: Rgb| {
+        for sy in 0..scale {
+            for sx in 0..scale {
+                f.px_set(x0 + cx * scale + sx, feet - cy * scale - sy, c);
+            }
+        }
+    };
+    px(f, 1, 0, dark);
+    px(f, 2, 0, dark);
+    for cx in 0..4 {
+        px(f, cx, 1, red);
+    }
+    let n = (left * 2.0).ceil() as i32;
+    for cx in 1..1 + n {
+        px(f, cx, 2, food);
+    }
+}
+
 /// Half the drawn width, in pixels at scale 1 (for hit tests).
 pub fn half_width(kind: PetKind) -> f32 {
     match kind {
@@ -233,6 +258,11 @@ pub enum Busy {
     Zoom { cx: f32, until: f32 },
     /// A trick: which (0..), until then.
     Trick { which: u8, until: f32 },
+    /// Dinner: off to the bowl at that column, then eating until then
+    /// (`until` is when it gives up getting there, before it starts).
+    Eat { bowl: f32, until: f32, eating: bool },
+    /// Held in the villager's arms until then.
+    Cuddle { until: f32 },
 }
 
 /// Something the pet did, for the scene to show and play.
@@ -271,6 +301,11 @@ pub struct MyPet {
     carrying: bool,
     /// Not before then: chasing / playing with other animals.
     pub social_at: f32,
+    /// The bowl, put down at this column (and row) until then; when it was
+    /// last fed; a freshly brushed coat shines until then.
+    pub bowl: Option<(f32, f32, f32)>,
+    fed_at: f32,
+    pub shine_until: f32,
     events: Vec<PetEv>,
     seed: u32,
 }
@@ -299,6 +334,9 @@ impl MyPet {
             busy: None,
             carrying: false,
             social_at: 20.0,
+            bowl: None,
+            fed_at: f32::NEG_INFINITY,
+            shine_until: 0.0,
             events: vec![],
             seed: crate::rng::hash(x.to_bits() ^ 0x9e37),
         })
@@ -330,9 +368,14 @@ impl MyPet {
             t.rest_at -= s;
         }
         match &mut self.busy {
-            Some(Busy::Fetch { until, .. } | Busy::Chase { until, .. } | Busy::Zoom { until, .. } | Busy::Trick { until, .. }) => *until -= s,
+            Some(Busy::Fetch { until, .. } | Busy::Chase { until, .. } | Busy::Zoom { until, .. } | Busy::Trick { until, .. } | Busy::Eat { until, .. } | Busy::Cuddle { until }) => *until -= s,
             _ => {}
         }
+        if let Some(b) = &mut self.bowl {
+            b.2 -= s;
+        }
+        self.fed_at -= s;
+        self.shine_until -= s;
     }
 
     /// What it did since last asked.
@@ -434,6 +477,84 @@ impl MyPet {
         self.events.push(PetEv::Emote('♥', Rgb::hex(0xff6b8a), (self.x + x) / 2.0, self.y - 2.0));
     }
 
+    /// Dinner: a bowl goes down at column `x` (row `y`) and the pet tucks
+    /// in. Returns the line to say (it may still be full).
+    pub fn feed(&mut self, x: f32, y: f32, t: f32) -> String {
+        self.wake(t);
+        self.toy = None;
+        self.carrying = false;
+        let n = self.name_or();
+        let full = t - self.fed_at < 90.0;
+        self.busy = Some(Busy::Eat { bowl: x, until: t + 6.0, eating: false });
+        self.bowl = Some((x, y, t + 12.0));
+        if full {
+            return format!("{n} sniffs the bowl politely… still full from last time");
+        }
+        let pick = self.roll(2) as usize;
+        match self.kind {
+            PetKind::Dog => [format!("dinner! {n} hoovers it up, tail going the whole time"), format!("{n} sits, waits, waits… and dives in")][pick].clone(),
+            PetKind::Cat => [format!("{n} eats very daintily… then looks at you for seconds"), format!("{n} picks out the best bits first, naturally")][pick].clone(),
+            PetKind::Bunny => [format!("fresh greens! {n} munches, nose going a mile a minute"), format!("{n} nibbles a carrot top, ears twitching happily")][pick].clone(),
+        }
+    }
+
+    /// Picked up for a cuddle (in the villager's arms for a few seconds).
+    pub fn cuddle(&mut self, t: f32) -> String {
+        self.wake(t);
+        self.toy = None;
+        self.carrying = false;
+        self.busy = Some(Busy::Cuddle { until: t + 5.0 });
+        self.happy_until = t + 5.0;
+        let n = self.name_or();
+        let pick = self.roll(2) as usize;
+        match self.kind {
+            PetKind::Dog => [format!("you scoop {n} up — a warm armful of happy, licking your chin"), format!("{n} snuggles in and lets out a big contented sigh")][pick].clone(),
+            PetKind::Cat => [format!("{n} purrs against your scarf, kneading your coat"), format!("{n} puts up with the cuddle for a moment… then melts")][pick].clone(),
+            PetKind::Bunny => [format!("{n} tucks into the crook of your arm, soft as new snow"), format!("{n} goes all floppy in your arms, perfectly content")][pick].clone(),
+        }
+    }
+
+    /// Nap time: curls up right where it is (it wakes when the villager walks off).
+    pub fn nap(&mut self, t: f32) -> String {
+        self.busy = None;
+        self.carrying = false;
+        self.napping = true;
+        self.still_since = t;
+        self.events.push(PetEv::Emote('z', Rgb::hex(0xc8d0e0), self.x, self.y - 2.0));
+        let n = self.name_or();
+        match self.kind {
+            PetKind::Dog => format!("{n} turns round three times and flops down. sweet dreams"),
+            PetKind::Cat => format!("{n} curls up into a perfect little loaf and closes their eyes"),
+            PetKind::Bunny => format!("{n} does a sleepy flop onto their side. out like a light"),
+        }
+    }
+
+    /// A good brush: the coat shines for a while.
+    pub fn brush(&mut self, t: f32) -> String {
+        self.wake(t);
+        self.shine_until = t + 12.0;
+        self.happy_until = t + 2.0;
+        self.events.push(PetEv::Emote('✦', Rgb::hex(0xfff1a0), self.x - 1.5, self.y - 2.0));
+        self.events.push(PetEv::Emote('✧', Rgb::hex(0xfff1a0), self.x + 1.5, self.y - 3.0));
+        self.events.push(PetEv::Sound(crate::audio::Sfx::Sparkle, self.x));
+        let n = self.name_or();
+        match self.kind {
+            PetKind::Dog => format!("you brush {n} till their coat shines like a bauble ✦"),
+            PetKind::Cat => format!("{n} leans into every stroke of the brush, purring loudly ✦"),
+            PetKind::Bunny => format!("a gentle brush, and {n} is the fluffiest bunny in the village ✦"),
+        }
+    }
+
+    /// In the villager's arms right now (drawn in front of them).
+    pub fn held(&self) -> bool {
+        matches!(self.busy, Some(Busy::Cuddle { .. }))
+    }
+
+    /// Asleep now?
+    pub fn asleep(&self) -> bool {
+        self.napping
+    }
+
     /// Free to start something new?
     pub fn idle(&self) -> bool {
         self.busy.is_none() && !self.staying
@@ -449,6 +570,27 @@ impl MyPet {
             self.napping = false;
         }
         self.update_toy(dt, t, k);
+        if self.bowl.is_some_and(|b| t > b.2) {
+            self.bowl = None;
+        }
+        // in the villager's arms: held, hearts now and then; walking off
+        // (or time up) puts it down
+        if let Some(Busy::Cuddle { until }) = self.busy {
+            if moving || t > until {
+                self.busy = None;
+                self.happy_until = t + 1.5;
+                self.x = px - pdir * 2.5 * k;
+            } else {
+                self.x = px;
+                self.y = py;
+                self.dir = pdir;
+                self.walking = false;
+                if self.roll(100) < (dt * 120.0) as u32 {
+                    self.events.push(PetEv::Emote('♥', Rgb::hex(0xff6b8a), self.x, self.y - 5.0 * k));
+                }
+                return;
+            }
+        }
         // a good long while standing about: a nap (wakes when they move off)
         if !moving && self.busy.is_none() && self.sniff.is_none() && t - self.still_since > 22.0 + (self.seed % 9) as f32 {
             if !self.napping {
@@ -548,6 +690,42 @@ impl MyPet {
                 }
                 self.x
             }
+            Some(Busy::Eat { bowl, until, eating }) => {
+                // stand beside the bowl, facing it
+                let side = if self.x <= bowl { -1.0 } else { 1.0 };
+                let spot = bowl + side * 2.5 * k;
+                if !eating && (self.x - spot).abs() < 0.8 * k {
+                    let full = t - self.fed_at < 90.0;
+                    self.busy = Some(Busy::Eat { bowl, until: t + if full { 1.2 } else { 4.0 }, eating: true });
+                    if let Some(b) = &mut self.bowl {
+                        b.2 = t + if full { 3.0 } else { 6.0 };
+                    }
+                } else if t > until {
+                    self.busy = None;
+                    if eating {
+                        if t - self.fed_at >= 90.0 {
+                            self.fed_at = t;
+                            self.happy_until = t + 2.0;
+                            self.events.push(PetEv::Emote('♥', Rgb::hex(0xff6b8a), self.x, self.y - 2.0 * k));
+                            let s = self.sound();
+                            self.events.push(PetEv::Sound(s, self.x));
+                        }
+                        if let Some(b) = &mut self.bowl {
+                            b.2 = t + 2.0;
+                        }
+                    }
+                } else if eating && self.roll(100) < (dt * 180.0) as u32 {
+                    self.events.push(PetEv::Sound(crate::audio::Sfx::Munch, self.x));
+                    let jitter = self.roll(3) as f32 - 1.0;
+                    self.events.push(PetEv::Emote('·', Rgb::hex(0xc8a070), bowl + jitter, self.y - 1.0));
+                }
+                if eating {
+                    self.dir = -side;
+                }
+                ty = self.bowl.map(|b| b.1).unwrap_or(py);
+                if eating { self.x } else { spot }
+            }
+            Some(Busy::Cuddle { .. }) => self.x,
             None => match self.sniff {
                 Some((sx, until)) if t < until => sx,
                 _ => {
@@ -700,8 +878,13 @@ impl MyPet {
             Some(Busy::Trick { which, until }) => Some((which, until)),
             _ => None,
         };
-        let pose = if self.napping {
+        let held = self.held();
+        let eating = matches!(self.busy, Some(Busy::Eat { eating: true, .. }));
+        let pose = if self.napping || held {
             Pose::Sleep
+        } else if eating {
+            // head down to the bowl and up again
+            if (t * 5.0) as i32 % 2 == 0 { Pose::Walk } else { Pose::Sit }
         } else if let Some((which, until)) = tricking {
             // rolling over / playing dead: on its side; spinning; sitting up
             match (self.kind, which) {
@@ -722,7 +905,28 @@ impl MyPet {
             _ => self.dir,
         };
         let feet = (sy * 2.0).round() as i32 + 1;
-        draw(f, self.kind, self.body, self.marks, sx, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
+        // the bowl, on the ground (emptying as it eats)
+        if let Some((bx, by, _)) = self.bowl {
+            let (bxs, bys) = match view {
+                Some(v) => (v.x(bx), v.y(by + 1.0) - 1.0),
+                None => (bx, by),
+            };
+            let left = match self.busy {
+                Some(Busy::Eat { eating: true, until, .. }) => ((until - t) / 4.0).clamp(0.0, 1.0),
+                Some(Busy::Eat { eating: false, .. }) => 1.0,
+                _ => 0.0,
+            };
+            draw_bowl(f, self.kind, bxs, (bys * 2.0).round() as i32 + 1, scale, left);
+        }
+        // held: curled up at the villager's chest
+        // (the villager isn't drawn as much bigger as the pet is when zoomed in)
+        let feet = if held { feet - (1 + 2 * scale) } else { feet };
+        let shine = if t < self.shine_until { 1.25 + 0.1 * (t * 3.0).sin() } else { 1.0 };
+        draw(f, self.kind, self.body * shine, self.marks * shine, sx, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
+        if t < self.shine_until && (t * 2.3).fract() < 0.35 {
+            let k = (t * 7.0) as i32;
+            f.put_g(sx.round() as i32 + (k % 5 - 2) * scale, (feet - 4 * scale) / 2, crate::frame::Glyph::new('✦', Rgb::hex(0xfff1a0)).lit(0.0));
+        }
         if self.napping && (t * 0.8) as i32 % 2 == 0 {
             f.put_g(sx.round() as i32 + 2 * scale, (feet - 7 * scale) / 2, crate::frame::Glyph::new('z', Rgb::hex(0xc8d0e0)).lit(0.0));
         }

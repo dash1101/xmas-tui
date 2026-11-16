@@ -93,6 +93,8 @@ struct Args {
     menu: Option<(i32, i32)>,
     /// --export: the visualizer on, listening for real (frames in real time).
     viz: bool,
+    /// --export: the pet fed / cuddled / napping / brushed.
+    pet_act: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -135,6 +137,7 @@ fn parse_args() -> Args {
         stats: false,
         menu: None,
         viz: false,
+        pet_act: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -166,6 +169,7 @@ fn parse_args() -> Args {
             "--ui" => a.ui = it.next(),
             "--stats" => a.stats = true,
             "--viz" => a.viz = true,
+            "--pet-act" => a.pet_act = it.next(),
             "--controls" => a.controls = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
@@ -690,6 +694,13 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     }
     if args.stats {
         scene.act(scene::Do::Stats);
+    }
+    if let Some(a) = &args.pet_act {
+        scene.preview_pet(a);
+        for _ in 0..(2.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
     }
     let menu = args.menu.map(|(x, y)| {
         let (title, items) = scene.menu_at(x, y);
