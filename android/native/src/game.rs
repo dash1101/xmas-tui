@@ -16,6 +16,7 @@ pub const BTN_POCKETS: i32 = 3; // I
 pub const BTN_INVITE: i32 = 4; // F
 pub const BTN_HELD: i32 = 5; // Q: what's in hand
 pub const BTN_BACK: i32 = 6; // Esc: close what's open
+pub const BTN_CENTRE: i32 = 7; // C: the view back on the villager
 /// 1..5: an answer, or a pocket item (BTN_NUM + n - 1)
 pub const BTN_NUM: i32 = 10;
 
@@ -191,6 +192,10 @@ impl Game {
     }
 
     pub fn button(&mut self, b: i32) {
+        // the villager's buttons: steered by hand again (autopilot stands down)
+        if !matches!(b, BTN_CENTRE | BTN_BACK) {
+            self.scene.woke();
+        }
         match b {
             BTN_E => self.scene.interact(),
             BTN_JUMP => self.scene.jump(),
@@ -201,6 +206,7 @@ impl Game {
             BTN_BACK => {
                 self.scene.close_panels();
             }
+            BTN_CENTRE => self.scene.recenter(),
             n if (BTN_NUM + 1..=BTN_NUM + 5).contains(&n) => self.scene.number((n - BTN_NUM) as usize),
             _ => {}
         }
@@ -218,11 +224,15 @@ impl Game {
                 self.carrying = false;
                 // the dialogue box takes its own taps (answers, moving it)
                 if self.scene.convo_click(c.0, c.1) {
+                    self.scene.woke();
                     self.press = None;
                     return;
                 }
                 self.press = Some(c);
                 self.carrying = self.scene.grab(w.0, w.1);
+                if self.carrying {
+                    self.scene.woke();
+                }
             }
             1 => {
                 if self.press.is_some_and(|p| (p.0 - c.0).abs() > 1 || (p.1 - c.1).abs() > 1) {
@@ -273,6 +283,7 @@ impl Game {
 
     pub fn pick(&mut self, i: usize) {
         if let Some(d) = self.choices.get(i).copied() {
+            self.scene.woke();
             self.scene.act(d);
         }
         self.choices.clear();

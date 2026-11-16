@@ -79,7 +79,7 @@ struct Runner {
     polled: (bool, bool),
     /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
     #[cfg_attr(not(windows), allow(dead_code))]
-    keys: [bool; 17],
+    keys: [bool; 18],
     /// The render scale the layout was last made for.
     scale: f32,
     /// Ctrl is held (Ctrl+wheel looks up into the sky).
@@ -407,7 +407,7 @@ impl Runner {
         let _ = was_r;
         // walking around: keys go to Explorer's desktop window, so read
         // them while it's focused and feed presses / releases through
-        let keys = crate::winsys::desktop_keys().unwrap_or([false; 17]);
+        let keys = crate::winsys::desktop_keys().unwrap_or([false; 18]);
         app.set_shift(keys[13]);
         let names = [
             KeyIn::Left,
@@ -427,6 +427,7 @@ impl Runner {
             KeyIn::Char('q'),
             KeyIn::Char(' '),
             KeyIn::Esc,
+            KeyIn::Char('c'),
         ];
         // polling sees every release
         app.set_exact_keys();
@@ -956,7 +957,7 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         pointer: "",
         #[cfg(windows)]
         polled: (false, false),
-        keys: [false; 17],
+        keys: [false; 18],
         scale: 1.0,
         ctrl: false,
         shift: false,

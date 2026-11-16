@@ -99,6 +99,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         s.append("name = ").append(q(p.getString("name", ""))).append('\n');
         s.append("time = ").append(q(time)).append('\n');
         s.append("snow = ").append(p.getInt("snow", 100) / 100f).append('\n');
+        s.append("autopilot = ").append(p.getBoolean("autopilot", false)).append('\n');
         s.append("[scene.pet]\n");
         s.append("kind = ").append(q(p.getString("pet", "cat"))).append('\n');
         s.append("name = ").append(q(p.getString("pet_name", ""))).append('\n');
@@ -331,11 +332,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     void help() {
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Playing in the village")
-                .setMessage("Joystick (left): walk about; push it all the way to run. Up against a house, a tree or a lamp post, push up to climb it.\n\n"
+                .setMessage("Joystick (left): walk about; push it all the way to run.\n\n"
                         + "E: talk, use, pick up, help build (whatever's in front)\n"
-                        + "Jump: jump (steer in the air with the joystick)\n"
+                        + "Jump: jump (steer in the air with the joystick). Up against a house, a tree or a lamp post, it leaps right up onto it.\n"
                         + "❄: scoop a snowball, then throw it\n"
-                        + "☰: pockets, invite someone along, what's in hand, settings\n\n"
+                        + "☰: pockets, invite someone along, what's in hand, settings\n"
+                        + "◎: the view back on the villager\n\n"
                         + "Tap people, animals and things as on the desktop. Press and hold anywhere for what can be done there. Drag people and animals to carry them. Two fingers look along the village. Back closes what's open, then leaves.")
                 .setPositiveButton("OK", null)
                 .show();
@@ -418,12 +420,13 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 1: return new float[] {w - 170 * d, h - 52 * d, 32 * d};
                 case 2: return new float[] {w - 62 * d, h - 182 * d, 28 * d};
                 case 3: return new float[] {w - 150 * d, h - 150 * d, 26 * d};
-                default: return new float[] {w - 30 * d, 30 * d, 20 * d};
+                case 4: return new float[] {w - 30 * d, 30 * d, 20 * d};
+                default: return new float[] {w - 80 * d, 30 * d, 20 * d};
             }
         }
 
-        private static final int N_BTN = 5;
-        private final String[] labels = {"E", "jump", "❄", "☰", "⚙"};
+        private static final int N_BTN = 6;
+        private final String[] labels = {"E", "jump", "❄", "☰", "⚙", "◎"};
 
         /** The number row (pockets): {x, y, r} for 1..5. */
         private float[] num(int n) {
@@ -461,6 +464,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 2: Native.button(game, Native.SNOWBALL); break;
                 case 3: more(); break;
                 case 4: startActivity(new Intent(GameActivity.this, SettingsActivity.class)); break;
+                case 5: Native.button(game, Native.CENTRE); break;
                 default:
                     if (b > 100) {
                         Native.button(game, Native.NUM + (b - 100));

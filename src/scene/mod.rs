@@ -14,6 +14,7 @@ pub mod ledges;
 pub mod lines;
 pub mod player;
 pub mod sky;
+pub mod autopilot;
 pub mod builds;
 pub mod chapel;
 pub mod newyear;
@@ -123,6 +124,8 @@ pub struct Scene {
     show_pockets: bool,
     show_stats: bool,
     goal: Option<Goal>,
+    /// Autopilot (Settings → You): the villager left to their own devices.
+    auto: autopilot::Auto,
     show_cheered: bool,
     blackout_until: f32,
     power_back: bool,
@@ -591,6 +594,7 @@ impl Scene {
             show_pockets: false,
             show_stats: false,
             goal: None,
+            auto: autopilot::Auto { on: cfg.autopilot, ..Default::default() },
             show_cheered: false,
             blackout_until: 0.0,
             power_back: false,
@@ -1780,6 +1784,7 @@ impl Scene {
             }
             self.cursor_seen -= s;
             self.next_round -= s;
+            self.auto.rebase(s);
             if let Some(n) = &mut self.newyear {
                 n.rebase(s);
             }
@@ -2011,6 +2016,14 @@ impl Scene {
     }
 
     /// Look at world column `x` (the map widget was clicked).
+    /// The view back on the villager (after looking along the village or
+    /// up into the sky).
+    pub fn recenter(&mut self) {
+        let Some(c) = self.player.as_ref().map(|p| p.centre()) else { return };
+        self.look_at(c);
+        self.sky_up_target = 0.0;
+    }
+
     pub fn look_at(&mut self, x: f32) {
         let max = (self.ww - self.w) as f32;
         self.cam_target = (x - self.w as f32 / 2.0).clamp(0.0, max);
@@ -2036,9 +2049,8 @@ impl Scene {
         }
     }
 
-    /// The villager's name (empty: "neighbour"), for what people call them.
-    /// The friends & family list (Settings → You): some newcomers take
-    /// these names.
+    /// The friends & family list (Settings → You): each comes by as a
+    /// villager of their own, dressed as chosen.
     pub fn set_friends(&mut self, list: &[crate::config::FriendCfg]) {
         if self.friends != list {
             self.friends = list.to_vec();
@@ -2046,6 +2058,7 @@ impl Scene {
         }
     }
 
+    /// The villager's name (empty: "neighbour"), for what people call them.
     pub fn set_name(&mut self, name: &str) {
         if self.you_name != name {
             self.you_name = name.to_string();
@@ -2219,14 +2232,16 @@ impl Scene {
             .map(|(i, _)| i)
     }
 
-    /// Space: jump (off the ground, or off whatever the villager's up on).
+    /// Space: jump (off the ground, or off whatever the villager's up on);
+    /// up against a house, a tree, a lamp post…, a leap right up onto it.
     pub fn jump(&mut self) {
         let t = self.now();
         if self.inside.is_some() || self.in_igloo {
             return self.interact();
         }
+        let ground = self.player.as_ref().map(|p| self.lo_at(p.centre())).unwrap_or(0.0);
         if let Some(p) = &mut self.player {
-            p.jump(t, &mut self.director);
+            p.jump(t, &self.ledges, ground, &mut self.director);
         }
     }
 
@@ -2518,7 +2533,7 @@ impl Scene {
                 p.y = f;
                 p.perch = Some(i);
                 if what == "jump" {
-                    p.jump(t, &mut self.director);
+                    p.jump(t, &self.ledges, lo, &mut self.director);
                 }
             }
         }
@@ -3258,8 +3273,11 @@ impl Scene {
         // direction key takes over again
         if self.mv != (0.0, 0.0) {
             self.goal = None;
+            self.woke();
         }
-        let mv = self.steer(t).unwrap_or(self.mv);
+        // (left alone a while, on autopilot: off doing something)
+        let auto = self.autopilot(t);
+        let mv = self.steer(t).or(auto).unwrap_or(self.mv);
         // curled up in an igloo: any direction key crawls back out
         let mv = if self.in_igloo {
             if mv != (0.0, 0.0) {
@@ -4699,6 +4717,66 @@ mod tests {
         }
     }
 
+    /// Autopilot: left alone, the villager gets up to all sorts on their
+    /// own (and goes and does it); a key takes over again at once.
+    #[test]
+    fn on_autopilot_the_villager_goes_about_their_day() {
+        let mut s = scene();
+        s.set_autopilot(true);
+        run(&mut s, autopilot::IDLE - 1.0);
+        assert!(!s.on_autopilot() && s.auto.plan.is_none(), "not till left alone a while");
+        let x0 = s.player.as_ref().unwrap().centre();
+        let mut far = 0.0f32;
+        for _ in 0..300 {
+            run(&mut s, 1.0);
+            far = far.max((s.player.as_ref().unwrap().centre() - x0).abs());
+        }
+        let kinds = s.auto.tried.iter().filter(|&&n| n > 0).count();
+        assert!(kinds >= 4, "a few different things: {:?}", s.auto.tried);
+        assert!(far > 10.0, "and off doing them: {far}");
+        // a key: the villager's steered by hand again, and left be a while
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.1);
+        s.set_move(0.0, 0.0);
+        assert!(s.auto.plan.is_none() && !s.auto.goal_mine && !s.on_autopilot());
+        run(&mut s, autopilot::IDLE - 2.0);
+        assert!(s.auto.plan.is_none(), "still left be");
+        // off again: nothing
+        s.set_autopilot(false);
+        run(&mut s, autopilot::IDLE + 5.0);
+        assert!(s.auto.plan.is_none());
+    }
+
+    /// Tag with a kid: the villager chases, tags them, runs off, and gets
+    /// tagged back.
+    #[test]
+    fn autopilot_tag_goes_back_and_forth() {
+        let mut s = walker_scene();
+        s.set_autopilot(true);
+        run(&mut s, autopilot::IDLE + 0.5);
+        let (px, py) = s.player.as_ref().map(|p| (p.centre(), p.y)).unwrap();
+        s.critters.spawn_demo(events::Kind::Kid, px + 8.0, s.now());
+        let id = s.critters.last_id();
+        let t = s.now();
+        s.auto.plan = None;
+        s.auto.next_at = t + 1e6;
+        s.goal = None;
+        s.critters.tag(id, false, t + 60.0);
+        s.auto.plan = Some(autopilot::Plan::Tag { id, you_it: true, grace: t + 0.5, tire_at: 0.0, until: t + 60.0 });
+        let _ = py;
+        let (mut you_tagged, mut got_tagged) = (false, false);
+        for _ in 0..(50.0 / DT) as usize {
+            s.update(DT, 0.0);
+            match s.auto.plan {
+                Some(autopilot::Plan::Tag { you_it: false, .. }) => you_tagged = true,
+                Some(autopilot::Plan::Tag { you_it: true, .. }) if you_tagged => got_tagged = true,
+                _ => {}
+            }
+        }
+        assert!(you_tagged, "the villager tagged the kid");
+        assert!(got_tagged, "and got tagged back");
+    }
+
     #[test]
     fn climbing_onto_a_roof_walking_it_and_jumping() {
         let mut s = walker_scene();
@@ -4716,12 +4794,12 @@ mod tests {
             p.x = x as f32 - 0.5;
             p.y = lo;
         }
-        s.set_move(0.0, -1.0);
+        // Space at the wall: a leap right up onto the roof
         run(&mut s, 0.1);
-        assert!(s.player.as_ref().unwrap().climbing(), "W at the wall climbs");
-        run(&mut s, 4.0);
-        s.set_move(0.0, 0.0);
-        run(&mut s, 0.5);
+        s.jump();
+        run(&mut s, 0.1);
+        assert!(s.player.as_ref().unwrap().aloft(), "leapt");
+        run(&mut s, 2.5);
         let p = s.player.as_ref().unwrap();
         assert_eq!(p.perch, Some(i), "up on the roof");
         assert!((p.y - f).abs() < 0.01, "on its ridge: {} vs {f}", p.y);
@@ -4773,10 +4851,8 @@ mod tests {
         let win = |dx: f32, dy: f32| vec![(77u64, sx - 10.0 + dx, sx + 20.0 + dx, top + dy, top + dy + 12.0)];
         s.set_window_ledges(win(0.0, 0.0));
         run(&mut s, 0.1);
-        s.set_move(0.0, -1.0);
-        run(&mut s, 3.0);
-        s.set_move(0.0, 0.0);
-        run(&mut s, 0.3);
+        s.jump();
+        run(&mut s, 2.5);
         let p = s.player.as_ref().unwrap();
         let l = p.perch.map(|i| s.ledges[i].kind);
         assert_eq!(l, Some(ledges::Kind::Window), "up on the window");

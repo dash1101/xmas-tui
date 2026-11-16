@@ -297,6 +297,9 @@ pub struct LayoutCfg {
     pub visualizer: Option<[f32; 2]>,
     /// The map widget's size in cells (it can be resized).
     pub map_size: Option<[i32; 2]>,
+    /// The other widgets' sizes (cells) once resized: "system", "music",
+    /// "weather", "visualizer".
+    pub sizes: std::collections::BTreeMap<String, [i32; 2]>,
 }
 
 impl LayoutCfg {
@@ -336,6 +339,8 @@ pub struct SceneCfg {
     pub bushes: bool,
     /// A little villager to walk around with WASD / the arrow keys.
     pub player: bool,
+    /// Left alone a while, the villager goes about their own day.
+    pub autopilot: bool,
     /// How fast the villager walks (multiplier).
     pub walk_speed: f32,
     /// Time of day: "auto" (real sunrise / sunset for the weather city),
@@ -358,13 +363,80 @@ pub struct SceneCfg {
     pub friends: Vec<FriendCfg>,
 }
 
-/// Someone in the friends & family list.
+/// Someone in the friends & family list: a villager of their own.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct FriendCfg {
     pub name: String,
     /// Comes to the village as a kid.
     pub kid: bool,
+    /// Their look: a colour name from FRIEND_COATS, _HATS ("none":
+    /// bare-headed), _HAIRS and _SKINS. Left empty, one's picked from their
+    /// name.
+    pub coat: String,
+    pub hat: String,
+    pub hair: String,
+    pub skin: String,
+    pub scarf: bool,
+}
+
+pub const FRIEND_COATS: [(&str, u32); 8] = [("red", 0xb3202a), ("green", 0x1f6e3a), ("blue", 0x2a4c8a), ("purple", 0x6a3a8a), ("gold", 0xc8862a), ("pink", 0xc8588a), ("grey", 0x5a5e68), ("white", 0xd8d8e0)];
+pub const FRIEND_HATS: [(&str, u32); 7] = [("red", 0xd8283a), ("green", 0x2fae5c), ("blue", 0x4a8dff), ("gold", 0xffc23a), ("pink", 0xff7ae0), ("white", 0xf0f0f4), ("none", 0)];
+pub const FRIEND_HAIRS: [(&str, u32); 5] = [("brown", 0x6a4a2a), ("dark", 0x2a1c14), ("blonde", 0xc89a5a), ("red", 0xa8461e), ("grey", 0xb0b0b8)];
+pub const FRIEND_SKINS: [(&str, u32); 4] = [("light", 0xf0d0b0), ("fair", 0xe8c39e), ("tan", 0xc89a72), ("deep", 0x8a5a3a)];
+
+impl FriendCfg {
+    fn lists(part: u8) -> &'static [(&'static str, u32)] {
+        match part {
+            0 => &FRIEND_COATS,
+            1 => &FRIEND_HATS,
+            2 => &FRIEND_HAIRS,
+            _ => &FRIEND_SKINS,
+        }
+    }
+
+    fn value(&self, part: u8) -> &str {
+        match part {
+            0 => &self.coat,
+            1 => &self.hat,
+            2 => &self.hair,
+            _ => &self.skin,
+        }
+    }
+
+    /// Which entry of a part's list they wear (0 coat, 1 hat, 2 hair, 3
+    /// skin): the one named, or one picked from their name.
+    pub fn pick(&self, part: u8) -> usize {
+        let list = Self::lists(part);
+        list.iter().position(|(n, _)| *n == self.value(part)).unwrap_or_else(|| {
+            let h = self.name.to_lowercase().bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+            (h.rotate_left(part as u32 * 7) % list.len() as u32) as usize
+        })
+    }
+
+    /// A part's name (for the settings).
+    pub fn part_name(&self, part: u8) -> &'static str {
+        Self::lists(part)[self.pick(part)].0
+    }
+
+    /// The next (or previous) colour for a part.
+    pub fn step(&mut self, part: u8, dir: i32) {
+        let list = Self::lists(part);
+        let k = (self.pick(part) as i32 + dir).rem_euclid(list.len() as i32) as usize;
+        let v = list[k].0.to_string();
+        match part {
+            0 => self.coat = v,
+            1 => self.hat = v,
+            2 => self.hair = v,
+            _ => self.skin = v,
+        }
+    }
+
+    /// Their look as colours: coat, hat (None: bare-headed), hair, skin.
+    pub fn colours(&self) -> (u32, Option<u32>, u32, u32) {
+        let hat = FRIEND_HATS[self.pick(1)];
+        (FRIEND_COATS[self.pick(0)].1, (hat.0 != "none").then_some(hat.1), FRIEND_HAIRS[self.pick(2)].1, FRIEND_SKINS[self.pick(3)].1)
+    }
 }
 
 /// The villager's pet: what it is, its colour and its name (empty: not
@@ -487,7 +559,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
     }
 }
 

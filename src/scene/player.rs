@@ -24,6 +24,10 @@ const SPEED_Y: f32 = 5.0;
 /// fast the villager climbs.
 const JUMP: f32 = 26.0;
 const CLIMB: f32 = 9.0;
+/// The highest a leap up onto something reaches (rows, at the 75-row size).
+const LEAP_MAX: f32 = 24.0;
+/// Gravity (rows a second, a second).
+const GRAVITY: f32 = 70.0;
 
 pub struct Player {
     pub x: f32,
@@ -152,10 +156,30 @@ impl Player {
         self.perch.is_some() || self.climb.is_some() || (self.fall.is_some() && self.ledge_fall)
     }
 
-    /// A jump (from the snow, or off a ledge).
-    pub fn jump(&mut self, t: f32, d: &mut Director) {
+    /// A jump (from the snow, or off a ledge). Up against something (a
+    /// house, a tree, a lamp post at the back of the snowfield; a widget or a
+    /// window above), it's a leap right up onto it. `ground`: the first
+    /// snowfield row here.
+    pub fn jump(&mut self, t: f32, ledges: &[Ledge], ground: f32, d: &mut Director) {
         if self.held.is_some() || self.fall.is_some() || self.climb.is_some() || t < self.dizzy_until {
             return;
+        }
+        if self.perch.is_none() {
+            let back = self.y <= ground + 0.5;
+            if let Some((li, f)) = super::ledges::climbable(ledges, self.centre(), self.y, back).filter(|&(_, f)| self.y - f <= LEAP_MAX * self.k) {
+                // just over the top, then down onto it
+                let v = (2.0 * GRAVITY * (self.y - f + 1.5)).sqrt();
+                self.fall = Some((-v, self.y));
+                self.ledge_fall = true;
+                self.aim = Some(li);
+                self.depth = None;
+                self.left = None;
+                self.dropped = false;
+                self.active_at = t;
+                d.sound(Sfx::Pickup, self.centre(), 0.5);
+                d.snow_puff(self.centre(), self.y);
+                return;
+            }
         }
         // from the snow it lands back on the row it left (or on something
         // standing about as far forward); from up on something, back on it
@@ -263,7 +287,7 @@ impl Player {
                 self.x = (self.x + mv.0 * SPEED_X * self.pace() * self.k * dt).clamp(1.0, w - 4.0);
             }
             let prev = self.y;
-            let vy = vy + 70.0 * dt;
+            let vy = vy + GRAVITY * dt;
             self.y += vy * dt;
             // landing on something on the way down
             if self.ledge_fall && vy > 0.0 {
@@ -374,17 +398,6 @@ impl Player {
             return;
         }
         self.moving = mx != 0.0 || my != 0.0;
-        // up against something at the back of the snowfield (or under a
-        // widget): W climbs it
-        if my < 0.0 {
-            let back = self.y <= lo(self.centre()) + 0.5;
-            if let Some((li, f)) = super::ledges::climbable(ledges, self.centre(), self.y, back) {
-                self.climb = Some((li, f));
-                self.active_at = t;
-                d.sound(Sfx::Rustle, self.centre(), 0.4);
-                return;
-            }
-        }
         if self.moving {
             self.active_at = t;
             if mx != 0.0 {

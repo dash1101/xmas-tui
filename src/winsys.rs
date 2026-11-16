@@ -534,9 +534,10 @@ pub fn poll() -> Polled {
 
 /// Walking keys, read only while the desktop itself has keyboard focus
 /// (the user clicked the bare desktop): [left, right, up, down, interact,
-/// invite, snowball, pockets, items 1-5, shift, cycle, jump, esc]. None
-/// while any other window is focused, so typing elsewhere never moves anyone.
-pub fn desktop_keys() -> Option<[bool; 17]> {
+/// invite, snowball, pockets, items 1-5, shift, cycle, jump, esc, centre].
+/// None while any other window is focused, so typing elsewhere never moves
+/// anyone.
+pub fn desktop_keys() -> Option<[bool; 18]> {
     unsafe {
         let fg = GetForegroundWindow();
         let cls = class_of(fg);
@@ -562,6 +563,7 @@ pub fn desktop_keys() -> Option<[bool; 17]> {
             down(b'Q' as u16),
             down(VK_SPACE),
             down(VK_ESCAPE),
+            down(b'C' as u16),
         ])
     }
 }

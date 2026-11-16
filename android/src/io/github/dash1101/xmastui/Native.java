@@ -15,7 +15,7 @@ final class Native {
     private Native() {}
 
     /** Buttons (and what they are on the desktop). */
-    static final int E = 0, JUMP = 1, SNOWBALL = 2, POCKETS = 3, INVITE = 4, HELD = 5, BACK = 6, NUM = 10;
+    static final int E = 0, JUMP = 1, SNOWBALL = 2, POCKETS = 3, INVITE = 4, HELD = 5, BACK = 6, CENTRE = 7, NUM = 10;
 
     /** A village for a w x h screen; size scales it (1 = about 18 px a row); cfg is TOML. */
     static native long create(int w, int h, float size, String cfg);

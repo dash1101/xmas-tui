@@ -54,6 +54,7 @@ pub enum F {
     VizKhz,
     Bushes,
     Player,
+    Autopilot,
     UpdCheck,
     Map,
     UpdAuto,
@@ -130,6 +131,11 @@ pub enum Act {
     /// Friend i: comes as a kid / a grown-up; off the list.
     FriendKid(u8),
     FriendRemove(u8),
+    /// Friend i's look: open (or close) its editor; a part (0 coat, 1 hat,
+    /// 2 hair, 3 skin) one along (or back); the scarf on or off.
+    FriendSel(u8),
+    FriendLook(u8, u8, i8),
+    FriendScarf(u8),
 }
 
 /// The text fields.
@@ -191,6 +197,8 @@ pub struct Settings {
     pub wall_full: bool,
     /// Ask whether to restart for a new resolution.
     pub restart_ask: bool,
+    /// Whose look is being chosen (You tab).
+    pub friend_sel: Option<u8>,
     /// A brief note at the top (zoom / resolution changes): text, until.
     pub toast: Option<(String, f32)>,
     /// Linux, in a window of its own: offer to make it the desktop
@@ -374,6 +382,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::SoundMedia => cfg.sound.pause_for_media ^= true,
                 F::Bushes => cfg.scene.bushes ^= true,
                 F::Player => cfg.scene.player ^= true,
+                F::Autopilot => cfg.scene.autopilot ^= true,
                 F::UpdCheck => cfg.updates.check ^= true,
                 F::Map => cfg.widgets.map ^= true,
                 F::Viz => cfg.widgets.visualizer ^= true,
@@ -407,6 +416,16 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
         Act::FriendKid(i) => {
             let Some(fr) = cfg.scene.friends.get_mut(i as usize) else { return false };
             fr.kid ^= true;
+            true
+        }
+        Act::FriendLook(i, part, d) => {
+            let Some(fr) = cfg.scene.friends.get_mut(i as usize) else { return false };
+            fr.step(part, d as i32);
+            true
+        }
+        Act::FriendScarf(i) => {
+            let Some(fr) = cfg.scene.friends.get_mut(i as usize) else { return false };
+            fr.scarf ^= true;
             true
         }
         Act::FriendRemove(i) => {
@@ -447,7 +466,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw => false,
+        Act::Shuffle | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::FriendSel(_) => false,
     }
 }
 
@@ -508,6 +527,12 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Edit(Field::NewFriend) => return Some("A friend or family member: some visitors take these names and know the villager."),
         Act::FriendKid(_) => return Some("Whether they come to the village as a grown-up or as a kid."),
         Act::FriendRemove(_) => return Some("Take them off the list."),
+        Act::FriendSel(_) => return Some("How they look in the village: click to choose their coat, hat, hair and skin."),
+        Act::FriendLook(_, 0, _) => return Some("Their coat."),
+        Act::FriendLook(_, 1, _) => return Some("Their bobble hat (or none: bare-headed)."),
+        Act::FriendLook(_, 2, _) => return Some("Their hair."),
+        Act::FriendLook(..) => return Some("Their skin."),
+        Act::FriendScarf(_) => return Some("A scarf, to match their hat."),
         Act::Look(..) => return Some("The widget's look: classic, frosted with snow, a wooden frame, or a gift box."),
         Act::ShelfStyle(..) => return Some("The shelf's look: frosted with snow, a wooden shelf, or a gift box."),
         Act::ShelfIcons(_) => return Some("Each item's real icon (album art, thumbnails), or its icon as pixel art."),
@@ -541,6 +566,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Aurora => "The northern lights in the sky.",
         F::Bushes => "Berry bushes to pick berries from (animals love them).",
         F::Player => "The villager: walk about with WASD or the arrow keys.",
+        F::Autopilot => "Left alone a while, the villager goes about their own day: snowmen and igloos, snowballs, feeding the animals, chats, tag with the kids. Any key takes over again.",
         F::WalkSpeed => "How fast the villager walks (Shift runs).",
         F::TalkTime => "How long speech bubbles stay up.",
         F::Chatty => "How often people stop to chat and remark on things.",
@@ -601,19 +627,25 @@ pub fn help_rect(w: i32) -> Rect {
     Rect { x: w - 26, y: 0, w: 11, h: 1 }
 }
 
+/// The re-centre button (back to the villager), left of the controls one.
+pub fn centre_rect(w: i32) -> Rect {
+    Rect { x: w - 36, y: 0, w: 9, h: 1 }
+}
+
 /// The controls card: (keys, what they do).
-const CONTROLS: [(&str, &str); 18] = [
+const CONTROLS: [(&str, &str); 19] = [
     ("W A S D / arrows", "walk about"),
     ("Shift (held)", "run"),
     ("E / Enter", "talk, use, sit, pick up"),
     ("Space", "jump (A / D steer in the air)"),
-    ("W at a wall", "climb a house, a tree, the station, a widget…"),
+    ("Space at a wall", "leap up onto a house, a tree, a widget…"),
     ("F", "invite someone along / send them home"),
     ("R", "scoop a snowball, then throw it"),
     ("Q", "what's in hand: berries, a carrot, cocoa…"),
     ("1 - 5", "use an item (or buy one at the cabin)"),
     ("I", "your pockets and the Christmas list"),
     ("Esc", "close what's open · else the settings"),
+    ("C", "the view back on the villager"),
     ("F11", "full screen / back to the wallpaper"),
     ("Ctrl + / Ctrl -", "zoom in / out (Ctrl 0: back to 1×)"),
     ("Ctrl Shift + / -", "resolution: finer / coarser detail"),
@@ -676,7 +708,7 @@ impl Settings {
             }
             Field::NewFriend => {
                 if !text.is_empty() && cfg.scene.friends.len() < MAX_FRIENDS {
-                    cfg.scene.friends.push(crate::config::FriendCfg { name: short(), kid: false });
+                    cfg.scene.friends.push(crate::config::FriendCfg { name: short(), ..Default::default() });
                 }
             }
         }
@@ -817,6 +849,13 @@ impl Settings {
     /// The settings button (always showing, so the panel's always one
     /// click away — right-click isn't available everywhere).
     pub fn draw_gear(&self, f: &mut Frame, t: f32) {
+        // the re-centre button: back to the villager
+        let r = centre_rect(f.w as i32);
+        let hot = r.contains(self.hover.0, self.hover.1);
+        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
+        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
+        f.put_g(r.x + 1, r.y, Glyph::new('⌖', Rgb::hex(0x9be08a) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
+        f.text(r.x + 2, r.y, " centre", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         // and the controls button beside it
         let r = help_rect(f.w as i32);
         let hot = r.contains(self.hover.0, self.hover.1) || self.help;
@@ -1021,6 +1060,10 @@ impl Settings {
         self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::Edit(Field::Name), t);
         self.check(f, vx + 21, yy, "Walk about (WASD)", Act::Toggle(F::Player), cfg.scene.player);
         yy += 1;
+        f.text(lx, yy, "Autopilot", pal::UI_TEXT, BG, 0.0);
+        self.hints.push((Rect { x: lx, y: yy, w: 9, h: 1 }, Act::Toggle(F::Autopilot)));
+        self.check(f, vx, yy, "left alone, off doing their own thing", Act::Toggle(F::Autopilot), cfg.scene.autopilot);
+        yy += 1;
         self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 6.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
         yy += 1;
         self.slider(f, lx, vx, yy, "Speech bubbles", F::TalkTime, pct(cfg.scene.talk_time, 3.0), &format!("{:.2}× as long", cfg.scene.talk_time), t);
@@ -1046,7 +1089,7 @@ impl Settings {
         yy += 2;
         self.section(f, lx, yy, "FRIENDS & FAMILY");
         yy += 1;
-        f.text(lx, yy, "Some of the folk who come by take these names, and know the villager.", pal::UI_DIM, BG, 0.0);
+        f.text(lx, yy, "Each comes by as a villager of their own, and knows the villager.", pal::UI_DIM, BG, 0.0);
         yy += 1;
         // two columns of five
         let colw = ((right - lx) / 2).max(30);
@@ -1055,7 +1098,14 @@ impl Settings {
         for (k, fr) in cfg.scene.friends.iter().take(MAX_FRIENDS).enumerate() {
             let (x, y) = slot(k);
             let k8 = k as u8;
-            f.put_g(x, y, Glyph::new('♥', Rgb::hex(0xff7a9a)).bg(BG).lit(0.0));
+            // their colours (hat or hair over coat): click to dress them
+            let (coat, hat, hair, _) = fr.colours();
+            let sel = self.friend_sel == Some(k8);
+            let r = Rect { x, y, w: 2, h: 1 };
+            let hot = r.contains(self.hover.0, self.hover.1);
+            f.put_g(x, y, Glyph::new('▀', Rgb::hex(hat.unwrap_or(hair))).bg(Bg::Solid(Rgb::hex(coat))).lit(0.0));
+            f.put_g(x + 1, y, Glyph::new(if sel { '◂' } else if hot { '✎' } else { ' ' }, Rgb::hex(0xffd36b)).bg(BG).lit(0.0));
+            self.regions.push((r, Act::FriendSel(k8)));
             let editing = self.edit == Some(Field::Friend(k8)) && self.editing.is_some();
             let txt = if editing { self.editing.clone().unwrap_or_default() } else { fr.name.clone() };
             self.field(f, Rect { x: x + 2, y, w: 13, h: 1 }, &txt, editing, Act::Edit(Field::Friend(k8)), t);
@@ -1074,6 +1124,31 @@ impl Settings {
                 self.button(f, x, y, "+ add someone", Act::Edit(Field::NewFriend));
             }
         }
+        // the chosen friend's look, and how they'll appear
+        let yy = yy + 7;
+        let Some(i) = self.friend_sel.filter(|&i| (i as usize) < n) else {
+            if n > 0 {
+                f.text(lx, yy, "Click the colours by a name to choose how they look.", pal::UI_DIM, BG, 0.0);
+            }
+            return;
+        };
+        let fr = &cfg.scene.friends[i as usize];
+        let title: String = format!("{}'s look", fr.name).chars().take((vx - lx - 1).max(4) as usize).collect();
+        f.text(lx, yy, &title, Rgb::hex(0xffd36b), BG, 0.0);
+        for (part, label, px, py) in [(0u8, "coat", vx, yy), (1, "hat", vx + 18, yy), (2, "hair", vx, yy + 1), (3, "skin", vx + 18, yy + 1)] {
+            let c = f.text(px, py, label, pal::UI_TEXT, BG, 0.0);
+            self.hints.push((Rect { x: px, y: py, w: label.len() as i32, h: 1 }, Act::FriendLook(i, part, 1)));
+            self.arrow(f, c + 1, py, '◂', Act::FriendLook(i, part, -1));
+            let e = f.text(c + 3, py, fr.part_name(part), pal::UI_TITLE, BG, 0.0);
+            self.arrow(f, e + 1, py, '▸', Act::FriendLook(i, part, 1));
+        }
+        self.check(f, vx + 34, yy, "scarf", Act::FriendScarf(i), fr.scarf);
+        // (drawn as they'll be seen, where pictures can be shown)
+        let fl = crate::scene::critters::FriendLook::of(fr);
+        let look = crate::scene::sprites::Look { kid: fr.kid, coat: fl.coat, hat: fl.hat, hair: fl.hair, scarf: fl.scarf, skin: fl.skin, mittens: fl.hat.unwrap_or(fl.coat * 0.8), holding: None, lantern: false };
+        let pic = crate::scene::sprites::person(&look, crate::scene::sprites::Pose::Wave, 1.0, 1.0);
+        let rows = crate::scene::sprites::rows_of(&pic, 2.5);
+        f.sprite((right - 6) as f32, (yy + 2) as f32, rows, pic);
     }
 
     fn tab_widgets(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
@@ -1603,6 +1678,24 @@ mod tests {
         s.cancel_edit();
         assert!(apply(&mut cfg, Act::FriendKid(0)));
         assert!(cfg.scene.friends[0].kid);
+        // dressed: each part steps round its list, the scarf goes on
+        let coat = cfg.scene.friends[0].part_name(0);
+        assert!(apply(&mut cfg, Act::FriendLook(0, 0, 1)));
+        assert_ne!(cfg.scene.friends[0].part_name(0), coat);
+        assert!(apply(&mut cfg, Act::FriendLook(0, 0, -1)));
+        assert_eq!(cfg.scene.friends[0].part_name(0), coat);
+        for _ in 0..crate::config::FRIEND_HATS.len() {
+            if cfg.scene.friends[0].hat == "none" {
+                break;
+            }
+            apply(&mut cfg, Act::FriendLook(0, 1, 1));
+        }
+        assert_eq!(cfg.scene.friends[0].colours().1, None, "bare-headed");
+        assert!(apply(&mut cfg, Act::FriendScarf(0)));
+        assert!(cfg.scene.friends[0].scarf);
+        let saved: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(saved.scene.friends, cfg.scene.friends, "kept in the config file");
+        assert!(!apply(&mut cfg, Act::FriendLook(5, 0, 1)));
         s.begin_edit(&mut cfg, Field::Friend(0));
         assert_eq!(s.editing.as_deref(), Some("Sam"));
         s.editing = Some(String::new());

@@ -126,14 +126,14 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
 | **E** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
-| **Space** | jump: in the snow, on a roof, up a tree; steer in the air with **A** / **D** |
-| **W** against something | climb it: a house, a tree, a lamp post, the station, the cabin, a present, a widget |
+| **Space** | jump; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the station, the cabin, a present, a widget or a window, a leap right up onto it |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
 | **Q** | what's in hand: berries or something from the pockets (E then gives it, or uses it) |
 | **I** | show or hide the pockets |
 | **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
 | **Esc** | close a menu, conversation or window view; with nothing open, the settings |
+| **C** | the view back on the villager (also the **⌖ centre** button, top right) |
 | **?** / **F1** | the controls card (also the **? controls** button, top right) |
 | **A** / **D** at a window | lean to look further along the street |
 | **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
@@ -164,8 +164,9 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   the Milky Way, constellations, the North Star, a hot-air balloon and the odd satellite.
 - A subtle powerline along the hills. (Click it enough times and see what happens.)
 
-**Widgets** (each can be dragged anywhere, toggled, and locked in place):
-- A big glowing clock with a Christmas countdown.
+**Widgets** (each can be dragged anywhere, toggled, and locked in place; all but the clock can be resized by
+dragging the ◢ in their bottom-right corner):
+- A big glowing clock with a Christmas countdown (and the seconds, in smaller digits beside it, if wanted).
 - A system panel: CPU, GPU, VRAM, RAM, disk and network, with candy-cane bars and sparklines.
 - Now playing, from any MPRIS player (Linux) or media session (Windows).
 - Weather, from Open-Meteo, which needs no API key.
@@ -205,15 +206,23 @@ always be found in Explorer or Dolphin.
 **Walking around** (click the desktop first so it has keyboard focus)
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
   The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the You tab.
-- **Parkour.** **W** at the back of the snowfield, up against a house, a tree, a lamp post, the station, the cocoa
-  cabin, a present or the snowman, climbs it hand over hand. On top, **A** / **D** walk along it, up and down the
-  slopes of a roof (a chimney or the steeple is a wall), and off the end drops back down into the snow. **Space**
-  jumps (from the snow, or off whatever the villager's up on), with **A** / **D** to steer in the air, so it's
-  possible to leap from roof to roof; **S** hops down. The tops of the widgets are ledges too: **W** under a widget
-  climbs up onto it, and it stays put while the village scrolls past below. So are the **open windows** (on Windows,
-  and on KDE Plasma): the villager can climb up onto a window's title bar, or drop in on it from the right-click
-  menu, and rides along when the window's dragged about; closing it drops them back down. The pet waits
-  underneath. A fall from high up ends in a dizzy tumble; a jump or hop down lands on its feet.
+- **Parkour.** **Space** jumps, with **A** / **D** to steer in the air. At the back of the snowfield, up against a
+  house, a tree, a lamp post, the station, the cocoa cabin, a present or the snowman, it's a leap right up onto it.
+  On top, **A** / **D** walk along it, up and down the slopes of a roof (a chimney or the steeple is a wall), and off
+  the end drops back down into the snow; another **Space** jumps from up there, so it's possible to leap from roof to
+  roof; **S** hops down. The tops of the widgets are ledges too: **Space** under a widget leaps up onto it, and it
+  stays put while the village scrolls past below. So are the **open windows** (on Windows, and on KDE Plasma): the
+  villager can leap up onto a window's title bar, or drop in on it from the right-click menu, and rides along when
+  the window's dragged about; closing it drops them back down. The pet waits underneath. A fall from high up ends
+  in a dizzy tumble; a jump or hop down lands on its feet.
+- **Back to the villager.** After looking along the village with the wheel (or the map), **C** or the **⌖ centre**
+  button (top right) brings the view back to the villager.
+- **Autopilot** (You tab, off by default). Left alone for about 20 seconds, the villager goes about a day of their
+  own: lending the kids a hand with a snowman or igloo (or starting one, and sometimes crawling into the finished
+  igloo for a rest), snowballs at the neighbours, berries off a bush for the animals, a chat (answering for
+  themselves), a game with the pet, a game of tag with one of the kids (tag, run off, get tagged back), a look round
+  from a rooftop, or just a wander. A direction key, any of the villager's keys, picking someone up or choosing
+  something from the right-click menu takes over again at once; it waits another 20 seconds before carrying on.
 - **Building with the kids.** Right by a snowman or igloo going up, **E** lends a hand: each press pushes the
   snowball bigger or sets another block, the kids cheer the villager on, and it goes up far faster. Right-click open
   snow for **build a snowman here** or **build an igloo here** to start one; kids nearby come over to help. What the
@@ -432,14 +441,16 @@ Two things in one app: a live wallpaper for the home screen, and the whole villa
 **Playing in the village.** Opening **xmas-tui village** (or **Play in the village** in its settings) opens the
 desktop's own village, full screen and sideways: the same village, people, houses, pets, parkour and building as on
 the desktop, the same code built for Android. A joystick (left) walks the villager about (pushed all the way, they
-run; pushed up against a house, a tree or a lamp post, they climb it), and buttons do what the keys do on the
-desktop: **E** (talk, use, pick up, help build), **jump**, **❄** (scoop a snowball, then throw it), and **☰** (pockets
-and the Christmas list, inviting someone along, what's in hand, settings, the controls). Tapping people, animals and
+run), and buttons do what the keys do on the desktop: **E** (talk, use, pick up, help build), **jump** (up against a
+house, a tree or a lamp post, a leap right up onto it), **❄** (scoop a snowball, then throw it), **☰** (pockets
+and the Christmas list, inviting someone along, what's in hand, settings, the controls) and **◎** (the view back
+on the villager). Tapping people, animals and
 things works as a click does on the desktop, and answers in the dialogue box; pressing and holding anywhere lists what
 can be done there (visit a house, drop in on a roof, build a snowman, say hello…); dragging people and animals carries
 them; two fingers look along the village; Back closes what's open, then leaves. The sound plays too. **Size** in the
-settings makes the village bigger or smaller, and *Playing in the village* there turns the sound off or sets the frame
-rate (30 fps by default).
+settings makes the village bigger or smaller, and *Playing in the village* there turns the sound off, turns on
+**Autopilot** (as on the desktop: left alone a while, the villager goes about their own day until the joystick or a
+button is touched) or sets the frame rate (30 fps by default).
 
 <p align="center"><img src="docs/android-game.png" width="100%" alt="The village on a phone held sideways: the big tree, the station, houses and the snowman, with a joystick on the left and E, jump, snowball and menu buttons on the right"></p>
 
@@ -553,7 +564,7 @@ The Village tab sets how many visitors come by ("Animals & people"), the most ou
 or off.
 
 ## ⚙️ Settings
-<img src="docs/settings.png" align="right" width="360" alt="The settings panel, You tab: the villager, the pet, and friends &amp; family">
+<img src="docs/settings.png" align="right" width="360" alt="The settings panel, You tab: the villager, autopilot, the pet, and friends &amp; family, with one friend's look being chosen">
 
 The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
 window, which shows the live sound levels too) can be dragged anywhere by its title bar. Pointing at any setting
@@ -564,7 +575,8 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
   how many visitors come by and the **most out at once**; and *a new village* (laid out afresh).
 - **You:** the villager (on or off, **their name**, walk speed), **speech bubbles** (how long they stay up; longer
   lines always stay longer) and **chattiness** (how often people stop to talk and remark on things), the
-  villager's **pet** (dog, cat, bunny or none, its colour and its name), and **friends & family**.
+  villager's **pet** (dog, cat, bunny or none, its colour and its name), **autopilot**, and **friends & family**
+  (each one's name, grown-up or kid, and how they look).
 - **Widgets:** the clock, each widget on or off and its **look**, the visualizer's kHz labels, the weather city and
   units, and the widget layout.
 - **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
@@ -592,9 +604,13 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
 bottom) or a **gift box** (a gold ribbon all round and a bow on top). Pick one in the Widgets tab, or right-click a
 widget (*look: … ▸*), whose menu can also hide it or lock the widgets in place.
 
-**Friends & family.** Names added under You → Friends & family (up to ten, each a grown-up or a kid) turn up in
-the village: some of the folk who come by take those names, one of each at a time. They know the villager: they
-call out with a ♥ as they pass, and say hello like old friends.
+**Friends & family.** Each name added under You → Friends & family (up to ten, each a grown-up or a kid) is a
+villager of their own: they come by soon after the village starts (a few seconds apart), wander about like
+everyone else, and some while after they've gone on their way, they come back. They know the villager: they call
+out with a ♥ as they pass, and say hello like old friends. Clicking the little swatch of colours by a name opens
+their look: **coat**, **hat** (or none, bare-headed), **hair**, **skin** and a **scarf**, with a picture of them
+as they'll appear. A change shows on them at once, wherever they are; left as it is, a look is picked from the
+name.
 
 ## 🔁 Staying on
 It runs as a systemd user service (`xmas-tui.service`) that starts with the graphical session.

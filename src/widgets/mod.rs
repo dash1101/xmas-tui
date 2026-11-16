@@ -318,14 +318,17 @@ impl Widgets {
         }
         match i {
             0 => (66, 11),
-            1 => (54, 9),
-            2 => (60, 6),
-            3 => (60, 8),
             4 => match self.cfg.layout.map_size {
                 Some([mw, mh]) => (mw.clamp(24, w.max(24)), mh.clamp(3, 20)),
                 None => Self::map_default(w),
             },
-            _ => (60, 8),
+            _ => {
+                let (name, def, min) = resizable(i);
+                match self.cfg.layout.sizes.get(name) {
+                    Some(&[sw, sh]) => (sw.clamp(min.0, w.max(min.0)), sh.clamp(min.1, 30)),
+                    None => def,
+                }
+            }
         }
     }
 
@@ -371,6 +374,13 @@ impl Widgets {
             let nh = (y - r.y + 1).clamp(3, (h - r.y).clamp(3, 20));
             self.cfg.layout.map_size = Some([nw, nh]);
             self.cfg.layout.map = keep;
+        } else if (1..BUILTIN).contains(&i) {
+            // system, music, weather, the visualizer: by the corner
+            let (name, _, min) = resizable(i);
+            let nw = (x - r.x + 1).clamp(min.0, (w - r.x).max(min.0));
+            let nh = (y - r.y + 1).clamp(min.1, (h - r.y).clamp(min.1, 30));
+            self.cfg.layout.sizes.insert(name.into(), [nw, nh]);
+            set_pos(&mut self.cfg, i, keep);
         } else if let Some(s) = i.checked_sub(BUILTIN).and_then(|j| self.cfg.shelves.get_mut(j)) {
             use shelf::{EDGE_B, EDGE_L, EDGE_R, EDGE_T, MIN_H, MIN_W};
             let (mut x0, mut y0, mut x1, mut y1) = (r.x, r.y, r.x + r.w - 1, r.y + r.h - 1);
@@ -393,8 +403,8 @@ impl Widgets {
 
     /// The widget whose resize grip (its bottom-right corner) is at (x, y).
     pub fn on_grip(&self, x: i32, y: i32) -> Option<usize> {
-        // (shelves resize by any edge: see shelf_hit)
-        self.rects[4].is_some_and(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1).then_some(4)
+        // (shelves resize by any edge: see shelf_hit; the clock doesn't)
+        (1..BUILTIN).rev().find(|&i| self.rects.get(i).copied().flatten().is_some_and(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1))
     }
 
     /// The world column under (x, y) on the map, if it's on the map.
@@ -450,15 +460,15 @@ impl Widgets {
                 }
                 1 => {
                     let s = self.sys.as_ref().and_then(|s| s.lock().ok().map(|g| g.clone())).unwrap_or_default();
-                    draw_system(f, r.x, r.y, &s, t);
+                    draw_system(f, r, &s, t);
                 }
                 2 => {
                     let m = self.music.as_ref().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default();
-                    draw_music(f, r.x, r.y, r.w, &m, t);
+                    draw_music(f, r, &m, t);
                 }
                 3 => {
                     let wx = self.weather.as_ref().and_then(|w| w.lock().ok().map(|g| g.clone())).unwrap_or_default();
-                    draw_weather(f, r.x, r.y, r.w, &wx, t);
+                    draw_weather(f, r, &wx, t);
                 }
                 4 => {
                     if let Some(m) = &self.map {
@@ -506,6 +516,10 @@ impl Widgets {
             let active = self.dragging == Some(i) || (self.dragging.is_none() && self.hover == Some(i));
             if active && !self.cfg.layout.locked {
                 draw_handles(f, r, self.dragging == Some(i), t);
+                // the corner that resizes it (the map draws its own)
+                if (1..BUILTIN).contains(&i) && i != 4 {
+                    f.put_g(r.x + r.w - 1, r.y + r.h - 1, Glyph::new('◢', Rgb::hex(0xffd36b) * 0.9).bg(PANEL).lit(0.0));
+                }
             }
         }
         // an item being carried off a shelf, under the pointer
@@ -567,13 +581,19 @@ impl Widgets {
             }
             cx += wcols as i32 * 2 + 2;
         }
-        let mut tx = cx;
-        if !ampm.is_empty() {
-            f.text(tx, y + 5, ampm, pal::UI_BORDER, Bg::Scene, 0.0);
-            tx += 3;
-        }
+        let tx = cx;
         if self.cfg.clock.seconds {
-            f.text(tx, y + 6, &format!(":{:02}", now.second()), pal::UI_DIM, Bg::Scene, 0.0);
+            // the seconds: small block digits, as warm as the big ones, along
+            // the bottom (AM / PM above them)
+            if !ampm.is_empty() {
+                f.text(tx, y + 1, ampm, warm * 0.8, Bg::Scene, 0.0);
+            }
+            let sec = format!("{:02}", now.second());
+            for (k, ch) in sec.chars().enumerate() {
+                draw_small_digit(f, tx + k as i32 * 4, y + 4, ch, warm);
+            }
+        } else if !ampm.is_empty() {
+            f.text(tx, y + 5, ampm, pal::UI_BORDER, Bg::Scene, 0.0);
         }
         let date = now.format("%A, %B %-d").to_string();
         f.text(x, y + 8, &date, pal::UI_TEXT, Bg::Scene, 0.0);
@@ -590,6 +610,17 @@ impl Widgets {
 /// The village map: mountains along the top, houses and trees along the
 /// bottom, a highlight for what's on screen, the villager (●) and where they
 /// started (⚑). The ◢ corner resizes it.
+/// A resizable widget's name in the config, its usual size and the
+/// smallest it goes.
+fn resizable(i: usize) -> (&'static str, (i32, i32), (i32, i32)) {
+    match i {
+        1 => ("system", (54, 9), (46, 9)),
+        2 => ("music", (60, 6), (30, 6)),
+        3 => ("weather", (60, 8), (44, 8)),
+        _ => ("visualizer", (60, 8), (28, 6)),
+    }
+}
+
 const MAP_BG: Bg = Bg::Mix(pal::UI_PANEL, 0.78);
 
 fn draw_map(f: &mut Frame, r: Rect, m: &crate::scene::MiniMap, t: f32) {
@@ -870,6 +901,39 @@ fn draw_handles(f: &mut Frame, r: Rect, dragging: bool, t: f32) {
     f.text(hx, y1, hint, c, Bg::Mix(pal::UI_PANEL, 0.85), 0.0);
 }
 
+/// A small 3×5 digit drawn in half-block pixels: three cells wide, three
+/// tall (its top at row y).
+fn draw_small_digit(f: &mut Frame, x: i32, y: i32, ch: char, col: Rgb) {
+    const FONT: [[u8; 5]; 10] = [
+        [7, 5, 5, 5, 7],
+        [2, 6, 2, 2, 7],
+        [7, 1, 7, 4, 7],
+        [7, 1, 7, 1, 7],
+        [5, 5, 7, 1, 1],
+        [7, 4, 7, 1, 7],
+        [7, 4, 7, 5, 7],
+        [7, 1, 1, 2, 2],
+        [7, 5, 7, 5, 7],
+        [7, 5, 7, 1, 7],
+    ];
+    let Some(d) = ch.to_digit(10) else { return };
+    let rows = FONT[d as usize];
+    let px = |r: usize, c: i32| r < 5 && rows[r] >> (2 - c) & 1 == 1;
+    for cy in 0..3 {
+        for c in 0..3 {
+            let (top, bot) = (px(cy * 2, c), px(cy * 2 + 1, c));
+            let g = match (top, bot) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                _ => continue,
+            };
+            f.put_g(x + c, y + cy as i32, Glyph::new(g, col).lit(0.0));
+            f.light_cell(x + c, y + cy as i32, Rgb::hex(0xffc878) * 0.1);
+        }
+    }
+}
+
 fn digit(ch: char) -> [u8; 7] {
     match ch {
         '0' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
@@ -1010,9 +1074,8 @@ fn rate(b: f64) -> String {
     }
 }
 
-fn draw_system(f: &mut Frame, x: i32, y: i32, s: &SysStats, t: f32) -> i32 {
-    let w = 54;
-    let h = 9;
+fn draw_system(f: &mut Frame, r: Rect, s: &SysStats, t: f32) -> i32 {
+    let (x, y, w, h) = (r.x, r.y, r.w, r.h);
     panel(f, x, y, w, h, '❄', "system");
     let lbl = |f: &mut Frame, yy: i32, l: &str| txt(f, x + 2, yy, l, Rgb::hex(0xffd36b));
     let mut yy = y + 1;
@@ -1021,7 +1084,8 @@ fn draw_system(f: &mut Frame, x: i32, y: i32, s: &SysStats, t: f32) -> i32 {
         return y + h;
     }
     let bx = x + 8;
-    let bw = 16;
+    // the bars stretch with the panel (16 at the usual 54 wide)
+    let bw = (w - 38).clamp(6, 60);
     // CPU
     lbl(f, yy, "CPU");
     bar(f, bx, yy, bw, s.cpu / 100.0, t);
@@ -1094,8 +1158,8 @@ fn marquee(s: &str, w: usize, t: f32) -> String {
     (0..w).map(|i| padded[(off + i) % n]).collect()
 }
 
-fn draw_music(f: &mut Frame, x: i32, y: i32, w: i32, m: &Music, t: f32) -> i32 {
-    let h = 6;
+fn draw_music(f: &mut Frame, r: Rect, m: &Music, t: f32) -> i32 {
+    let (x, y, w, h) = (r.x, r.y, r.w, r.h);
     panel(f, x, y, w, h, '♫', "now playing");
     let inner = (w - 6) as usize;
     if !m.present {
@@ -1210,8 +1274,8 @@ fn draw_icon(f: &mut Frame, x: i32, y: i32, s: Sky, day: bool, t: f32) {
     }
 }
 
-fn draw_weather(f: &mut Frame, x: i32, y: i32, w: i32, wx: &Weather, t: f32) -> i32 {
-    let h = 8;
+fn draw_weather(f: &mut Frame, r: Rect, wx: &Weather, t: f32) -> i32 {
+    let (x, y, w, h) = (r.x, r.y, r.w, r.h);
     let title = if wx.place.is_empty() { "weather".to_string() } else { format!("weather · {}", wx.place) };
     // the title starts at x + 5; leave the corner and one ─ before it
     panel(f, x, y, w, h, '☃', &clip(&title, (w - 8).max(0) as usize));
@@ -1239,14 +1303,17 @@ fn draw_weather(f: &mut Frame, x: i32, y: i32, w: i32, wx: &Weather, t: f32) -> 
     txt(f, tx, y + 3, &format!("wind {:.0} {}  ·  humidity {:.0}%", wx.wind, wx.wind_unit, wx.humidity), pal::UI_DIM);
     // forecast row
     let mut fx = x + 2;
-    for (i, (day, code, mx, mn)) in wx.daily.iter().enumerate().take(4) {
+    // as many days as fit (four at the usual width)
+    let days = (((w - 4) / 14).max(1)) as usize;
+    for (i, (day, code, mx, mn)) in wx.daily.iter().enumerate().take(days) {
         let name = NaiveDate::parse_from_str(day, "%Y-%m-%d").map(|d| d.format("%a").to_string()).unwrap_or_default();
         let (s, _) = wmo(*code);
         let nc = if i == 0 { Rgb::hex(0xffd36b) } else { pal::UI_TEXT };
-        let c = txt(f, fx, y + 6, &format!("{name} "), nc);
-        f.put_g(c, y + 6, Glyph::new(small_icon(s, true), Rgb::hex(0xffd36b)).bg(PANEL).lit(0.0));
-        let c = txt(f, c + 2, y + 6, &format!("{:.0}°", mx), pal::UI_TEXT);
-        txt(f, c, y + 6, &format!("/{:.0}°", mn), pal::UI_DIM);
+        let fy = y + h - 2;
+        let c = txt(f, fx, fy, &format!("{name} "), nc);
+        f.put_g(c, fy, Glyph::new(small_icon(s, true), Rgb::hex(0xffd36b)).bg(PANEL).lit(0.0));
+        let c = txt(f, c + 2, fy, &format!("{:.0}°", mx), pal::UI_TEXT);
+        txt(f, c, fy, &format!("/{:.0}°", mn), pal::UI_DIM);
         fx += 14;
     }
     y + h

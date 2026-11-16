@@ -465,7 +465,10 @@ impl App {
                         self.acts.push(Act::Toggle(f));
                     }
                     Some(crate::ctxmenu::MenuAct::LockWidgets) => self.acts.push(Act::Toggle(settings::F::Locked)),
-                    Some(crate::ctxmenu::MenuAct::Scene(d)) => self.scene.act(d),
+                    Some(crate::ctxmenu::MenuAct::Scene(d)) => {
+                        self.scene.woke();
+                        self.scene.act(d);
+                    }
                     Some(crate::ctxmenu::MenuAct::Shelf(a)) => self.shelf_act(a),
                     Some(crate::ctxmenu::MenuAct::Desktop) => self.desktop_menu = true,
                     None => {}
@@ -501,10 +504,13 @@ impl App {
                 } else if self.settings.help {
                     // any click closes the controls card
                     self.settings.help = false;
+                } else if settings::centre_rect(self.w as i32).contains(x, y) {
+                    self.scene.recenter();
                 } else if settings::help_rect(self.w as i32).contains(x, y) {
                     self.settings.help = true;
                 } else if self.scene.convo_click(x, y) {
-                    // answered in the dialogue box
+                    // answered in the dialogue box (by hand: autopilot stands down)
+                    self.scene.woke();
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
                     self.settings.open = true;
                 } else if let Some(i) = self.widgets.on_grip(x, y).filter(|_| !self.cfg.layout.locked) {
@@ -522,7 +528,9 @@ impl App {
                 } else {
                     self.press = Some((x, y, self.t()));
                     let (wx, wy) = self.world_pt(x, y);
-                    if !self.scene.grab(wx, wy) {
+                    if self.scene.grab(wx, wy) {
+                        self.scene.woke();
+                    } else {
                         // nobody to pick up here: an ordinary click on the scene
                         self.scene.click(wx, wy, t);
                     }
@@ -643,6 +651,10 @@ impl App {
                 if i == 4 {
                     self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
                     self.cfg.layout.map = self.widgets.cfg.layout.map;
+                } else if i < crate::widgets::BUILTIN {
+                    // system, music, weather, the visualizer
+                    self.cfg.layout.sizes = self.widgets.cfg.layout.sizes.clone();
+                    self.cfg.layout.set(i, self.widgets.cfg.layout.get(i));
                 } else if let (Some(c), Some(w)) = (self.cfg.shelves.get_mut(i - crate::widgets::BUILTIN), self.widgets.cfg.shelves.get(i - crate::widgets::BUILTIN)) {
                     (c.size, c.pos) = (w.size, w.pos);
                 }
@@ -767,6 +779,10 @@ impl App {
     pub fn key(&mut self, k: KeyIn) {
         self.hold(k);
         if self.settings.editing.is_none() && !self.settings.open && self.scene.has_player() {
+            // the villager's keys: steered by hand again (autopilot stands down)
+            if matches!(k, KeyIn::Char('e' | 'E' | ' ' | 'f' | 'F' | 'r' | 'R' | 'i' | 'I' | 'q' | 'Q' | '1'..='5') | KeyIn::Enter) {
+                self.scene.woke();
+            }
             match k {
                 KeyIn::Char('e' | 'E') | KeyIn::Enter => self.scene.interact(),
                 KeyIn::Char(' ') => self.scene.jump(),
@@ -774,6 +790,7 @@ impl App {
                 KeyIn::Char('r' | 'R') => self.scene.snowball(),
                 KeyIn::Char('i' | 'I') => self.scene.toggle_pockets(),
                 KeyIn::Char('q' | 'Q') => self.scene.cycle_held(),
+                KeyIn::Char('c' | 'C') => self.scene.recenter(),
                 KeyIn::Char(c @ '1'..='5') => self.scene.number(c as usize - '0' as usize),
                 _ => {}
             }
@@ -833,7 +850,7 @@ impl App {
                 Some(_) => "pointer",
                 None => "default",
             }
-        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) {
+        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
             "grab"
@@ -1302,6 +1319,7 @@ impl App {
                 }
                 Act::RestartLater => self.settings.restart_ask = false,
                 Act::Tab(i) => self.settings.tab = i as usize,
+                Act::FriendSel(i) => self.settings.friend_sel = if self.settings.friend_sel == Some(i) { None } else { Some(i) },
                 Act::CheckUpdate => crate::update::check_now(),
                 Act::InstallUpdate => crate::update::install_now(),
                 Act::DismissUpdate => crate::update::dismiss(),
@@ -1333,6 +1351,9 @@ impl App {
                         self.cfg.fps = f;
                     }
                     settings::apply(&mut self.cfg, a);
+                    if let Act::FriendRemove(_) = a {
+                        self.settings.friend_sel = None;
+                    }
                     // let the new level be heard
                     if let Act::Inc(f) | Act::Dec(f) = a {
                         if matches!(f, F::SoundMaster | F::SoundSfx) {
@@ -1422,6 +1443,7 @@ impl App {
         self.scene.set_pet(&self.cfg.scene.pet);
         self.scene.set_name(&self.cfg.scene.name);
         self.scene.set_friends(&self.cfg.scene.friends);
+        self.scene.set_autopilot(self.cfg.scene.autopilot);
         if let Some((sc, at)) = self.scale_pending {
             if t - at > 0.6 {
                 self.scale_pending = None;
@@ -1539,6 +1561,30 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_widget_resizes_by_its_corner() {
+        let dir = std::env::temp_dir().join(format!("xmas-widget-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.scene.critters = 0.0;
+        cfg.sound.enabled = false;
+        (cfg.widgets.music, cfg.widgets.weather, cfg.widgets.map, cfg.clock.enabled) = (false, false, false, false);
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.step();
+        let r = app.widgets.rects[1].expect("the system widget");
+        let (cx, cy) = (r.x + r.w - 1, r.y + r.h - 1);
+        app.mouse(MouseIn::Move, cx, cy);
+        app.mouse(MouseIn::Down(Btn::Left), cx, cy);
+        app.mouse(MouseIn::Drag, cx + 12, cy + 3);
+        app.mouse(MouseIn::Up(Btn::Left), cx + 12, cy + 3);
+        app.step();
+        assert_eq!(app.cfg.layout.sizes.get("system"), Some(&[r.w + 12, r.h + 3]));
+        let r2 = app.widgets.rects[1].unwrap();
+        assert_eq!((r2.x, r2.y, r2.w, r2.h), (r.x, r.y, r.w + 12, r.h + 3), "same place, bigger");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_widget_has_its_own_menu_with_its_look() {

@@ -100,6 +100,8 @@ public class SettingsActivity extends Activity {
 
         section("PLAYING IN THE VILLAGE");
         toggle("Sound", "game_sound", true);
+        toggle("Autopilot", "autopilot", false);
+        col.addView(note("Left alone a while, the villager goes about their own day: snowmen and igloos, snowballs, feeding the animals, chats, tag with the kids. Touch the joystick or a button to take over."));
         choiceInt("Frames per second", "game_fps", new int[] {20, 24, 30, 45, 60}, 30);
 
         section("SNOWY DOCK");

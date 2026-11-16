@@ -57,6 +57,8 @@ struct Args {
     wallpaper: bool,
     settings: bool,
     tab: usize,
+    /// (previews) `--tab 1:0`: the You tab, friend 0's look being chosen
+    friend: Option<u8>,
     demo: bool,
     windowed: bool,
     /// A normal window, full screen (like a game).
@@ -118,6 +120,7 @@ fn parse_args() -> Args {
         wallpaper: false,
         settings: false,
         tab: 0,
+        friend: None,
         demo: false,
         windowed: false,
         fullscreen: false,
@@ -156,7 +159,12 @@ fn parse_args() -> Args {
             "--at" => a.at = it.next().and_then(|v| v.parse().ok()).unwrap_or(12.0),
             "--sleigh" => a.sleigh = true,
             "--settings" => a.settings = true,
-            "--tab" => a.tab = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--tab" => {
+                let v = it.next().unwrap_or_default();
+                let mut p = v.split(':');
+                a.tab = p.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                a.friend = p.next().and_then(|v| v.parse().ok());
+            }
             "--demo" => a.demo = true,
             "--update" => {}
             "--raw" => a.raw = true,
@@ -669,6 +677,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     settings.open = args.settings;
     settings.help = args.controls;
     settings.tab = args.tab;
+    settings.friend_sel = args.friend;
     settings.window_fx = true;
     // previews: plausible levels for the meters
     if args.settings {

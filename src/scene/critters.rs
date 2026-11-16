@@ -31,6 +31,9 @@ enum St {
     Greet { until: f32 },
     Flee { until: f32 },
     Chase { target: u64, until: f32 },
+    /// Playing tag with the villager: "it" (running after them), or running
+    /// off from them.
+    Tag { it: bool, until: f32 },
     Curious { until: f32 },
     Throw { until: f32 },
     /// Walking along behind the player (`moving`: catching up right now).
@@ -69,8 +72,10 @@ struct Critter {
     /// People have names; `met`: has said hello to the player; `chat`: a
     /// chat with the player in progress (topic, next step).
     name: &'static str,
-    /// One of the villager's friends or family (by name).
+    /// One of the villager's friends or family (by name), and how they
+    /// look: coat, hat, hair, skin, scarf.
     friend: bool,
+    look: Option<FriendLook>,
     met: bool,
     chat: Option<(usize, usize)>,
     /// A pet out for a walk with them.
@@ -114,7 +119,7 @@ impl Critter {
     }
     /// Sprite rows (right-facing) for the current state.
     fn sprite(&self, t: f32) -> Vec<&'static str> {
-        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = match self.kind {
             Kind::Fox => 10.0,
             Kind::Kid => 9.0,
@@ -260,8 +265,10 @@ pub struct Critters {
     startle_cd: f32,
     /// What people talk about: what's going on, and what's been said.
     talk: Talk,
-    /// The villager's friends and family (name, comes as a kid).
-    friends: Vec<(&'static str, bool)>,
+    /// The villager's friends and family, each a villager of their own.
+    friends: Vec<Friend>,
+    /// The next spawn is this friend.
+    forced: Option<usize>,
     tctx: TalkCtx,
     /// Conversations under way, for passers-by to chime in on:
     /// (participants, centre column, row, until, joined yet).
@@ -272,6 +279,8 @@ pub struct Critters {
     revenge: Vec<(u64, f32)>,
     /// Snowballs that hit the player since the scene last asked.
     hits_on_you: u32,
+    /// A kid "it" in tag caught the villager.
+    tagged_you: bool,
     /// The player's snowballs that hit someone, since last asked.
     your_hits: u32,
     /// The player character: (x, baseline row, facing, walking).
@@ -335,11 +344,13 @@ impl Critters {
             startle_cd: 0.0,
             talk: Talk::new(seed),
             friends: vec![],
+            forced: None,
             tctx: TalkCtx::default(),
             convs: vec![],
             react_cd: 0.0,
             revenge: vec![],
             hits_on_you: 0,
+            tagged_you: false,
             your_hits: 0,
             player: None,
             still: 0.0,
@@ -487,19 +498,21 @@ impl Critters {
         };
         let id = self.next_id;
         self.next_id += 1;
-        // people have names: now and then one of the villager's friends
-        // or family (one of each at a time), else a village name
-        let (name, friend) = match kind {
-            Kind::Walker | Kind::Kid => {
-                let kid = kind == Kind::Kid;
-                let free: Vec<&'static str> = self.friends.iter().filter(|f| f.1 == kid && !self.list.iter().any(|c| c.friend && c.name == f.0)).map(|f| f.0).collect();
-                if !free.is_empty() && self.rng.chance(0.4) {
-                    (*self.rng.pick(&free), true)
-                } else {
-                    (dialogue::name(&mut self.rng, kid), false)
-                }
+        // people have names: a friend (when it's their turn to come by), or
+        // a village name
+        let (name, look) = match (kind, self.forced.take()) {
+            (Kind::Walker | Kind::Kid, Some(fi)) if fi < self.friends.len() => {
+                let f = &mut self.friends[fi];
+                f.present = true;
+                f.seen_at = t;
+                (f.name, Some(f.look))
             }
-            _ => ("", false),
+            (Kind::Walker | Kind::Kid, _) => (dialogue::name(&mut self.rng, kind == Kind::Kid), None),
+            _ => ("", None),
+        };
+        let (color, hat) = match look {
+            Some(l) => (l.coat, l.hat.unwrap_or(l.hair)),
+            None => (color, hat),
         };
         self.list.push(Critter {
             id,
@@ -519,7 +532,8 @@ impl Critters {
             gap: 0.0,
             dodge: 0.0,
             name,
-            friend,
+            friend: look.is_some(),
+            look,
             met: false,
             chat: None,
             pet: None,
@@ -606,7 +620,8 @@ impl Critters {
                 | St::Follow { until, .. }
                 | St::Talk { until, .. }
                 | St::Gather { until, .. }
-                | St::Chase { until, .. } => *until -= s,
+                | St::Chase { until, .. }
+                | St::Tag { until, .. } => *until -= s,
                 St::Munch { until, bite, .. } => {
                     *until -= s;
                     *bite -= s;
@@ -758,6 +773,7 @@ impl Critters {
         }
 
         // ---- per-critter movement and timers
+        let mut caught = false;
         let ids: Vec<u64> = self.list.iter().map(|c| c.id).collect();
         let player = self.player;
         // where each group's leader is and whether they're walking on
@@ -921,6 +937,31 @@ impl Critters {
                         c.st = St::Walk;
                     }
                 }
+                St::Tag { it, until } => {
+                    // after the villager (or away from them), along the
+                    // snowfield and up and down it
+                    if let Some((px, py, ..)) = player {
+                        let (dx, dy) = (px + 1.0 - c.centre(), py - c.y);
+                        c.dir = if it { dx.signum() } else { -dx.signum() };
+                        if (it && dx.abs() > 1.0) || (!it && dx.abs() < 30.0) {
+                            mv(c, if it { 1.25 } else { 1.35 });
+                        }
+                        let vy = if it { dy.signum() } else { -dy.signum() * 0.5 };
+                        c.y = (c.y + vy * dt * 3.0).clamp(lo, h);
+                        if it && dx.abs() < 2.0 && dy.abs() < 1.5 {
+                            caught = true;
+                        }
+                    }
+                    // (not off the end of the world)
+                    if c.x < 2.0 {
+                        c.dir = 1.0;
+                    } else if c.x > w - 8.0 {
+                        c.dir = -1.0;
+                    }
+                    if t > until {
+                        c.st = St::Idle { until: t + 2.0 };
+                    }
+                }
                 St::Chase { target, until } => {
                     mv(c, 1.6);
                     if t > until || !ids.contains(&target) {
@@ -962,16 +1003,23 @@ impl Critters {
                     }
                 }
             }
-            if matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. }) && rng.chance(dt * 1.5) {
+            if matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. }) && rng.chance(dt * 1.5) {
                 self.prints.push((c.centre() as i32, c.y as i32, t));
             }
         }
+        self.tagged_you |= caught;
         self.avoid(dt);
         let held = self.held;
-        // gone: off the world, or passers-by wandered well out of view
-        self.list.retain(|c| {
-            Some(c.id) == held || (c.x > -40.0 && c.x < w + 40.0 && !(t > c.leave_at && (c.x < v0 - vw * 1.2 || c.x > v0 + vw * 2.2)))
-        });
+        // gone: off the world, or passers-by wandered well out of view (a
+        // friend comes back a while later)
+        let stays = |c: &Critter| Some(c.id) == held || (c.x > -40.0 && c.x < w + 40.0 && !(t > c.leave_at && (c.x < v0 - vw * 1.2 || c.x > v0 + vw * 2.2)));
+        let gone: Vec<&'static str> = self.list.iter().filter(|c| c.friend && !stays(c)).map(|c| c.name).collect();
+        for f in self.friends.iter_mut().filter(|f| gone.contains(&f.name)) {
+            f.present = false;
+            f.back_at = t + self.rng.range(30.0, 90.0);
+        }
+        self.list.retain(stays);
+        self.friends_come_by(t);
         self.prints.retain(|p| t - p.2 < 30.0);
 
         self.meetings(t, d, lines, snowman);
@@ -1251,7 +1299,7 @@ impl Critters {
     fn avoid(&mut self, dt: f32) {
         let h = (self.h - 1) as f32;
         let you = self.player.map(|p| (u64::MAX, p.0 + 1.0, p.1, 0u64, false));
-        let walking = |c: &Critter| matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let walking = |c: &Critter| matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let others: Vec<(u64, f32, f32, u64, bool)> = self
             .list
             .iter()
@@ -1637,10 +1685,51 @@ impl Critters {
         }
     }
 
-    /// The villager's friends and family (name, kid): some newcomers take
-    /// these names.
+    /// The villager's friends and family: each comes to the village as a
+    /// villager of their own (one of each), dressed as chosen, and comes
+    /// back a while after wandering off.
     pub fn set_friends(&mut self, list: &[crate::config::FriendCfg]) {
-        self.friends = list.iter().filter(|f| !f.name.trim().is_empty()).map(|f| (leak_name(f.name.trim()), f.kid)).collect();
+        let old = std::mem::take(&mut self.friends);
+        for (k, f) in list.iter().filter(|f| !f.name.trim().is_empty()).enumerate() {
+            let name = leak_name(f.name.trim());
+            let look = FriendLook::of(f);
+            let was = old.iter().find(|o| o.name == name && o.kid == f.kid);
+            self.friends.push(Friend { name, kid: f.kid, look, present: was.is_some_and(|o| o.present), seen_at: was.map(|o| o.seen_at).unwrap_or(0.0), back_at: was.map(|o| o.back_at).unwrap_or(-1.0 - k as f32) });
+            // whoever's about already wears the new look
+            for c in self.list.iter_mut().filter(|c| c.friend && c.name == name) {
+                c.look = Some(look);
+                c.color = look.coat;
+                c.hat = look.hat.unwrap_or(look.hair);
+            }
+        }
+    }
+
+    /// Friends who aren't about come by (one at a time, room allowing), and
+    /// those who've gone are noted.
+    fn friends_come_by(&mut self, t: f32) {
+        for f in &mut self.friends {
+            if f.back_at < 0.0 {
+                // (first time: a few seconds apart)
+                f.back_at = t + 4.0 + (-f.back_at - 1.0) * 10.0;
+            }
+            let here = self.list.iter().any(|c| c.friend && c.name == f.name);
+            if here {
+                f.seen_at = t;
+            } else if f.present && t - f.seen_at > 240.0 {
+                // (taken in somewhere and not back out: gone after all)
+                f.present = false;
+                f.back_at = t + 20.0;
+            }
+        }
+        if self.asleep || self.room() == 0 {
+            return;
+        }
+        if let Some(fi) = self.friends.iter().position(|f| !f.present && t > f.back_at) {
+            self.forced = Some(fi);
+            let kind = if self.friends[fi].kid { Kind::Kid } else { Kind::Walker };
+            self.spawn(kind, t, None);
+            self.forced = None;
+        }
     }
 
     /// One of the villager's friends or family?
@@ -1720,6 +1809,17 @@ impl Critters {
             return;
         }
         let mut c = h.0;
+        // (a friend who was given up on and has come by again meanwhile
+        // stays in: only one of each)
+        if c.friend {
+            if self.list.iter().any(|o| o.friend && o.name == c.name) {
+                return;
+            }
+            if let Some(f) = self.friends.iter_mut().find(|f| f.name == c.name) {
+                f.present = true;
+                f.seen_at = t;
+            }
+        }
         c.x = x - c.centre() + c.x;
         c.y = y;
         c.st = St::Walk;
@@ -2127,6 +2227,48 @@ impl Critters {
         d.sound(Sfx::Snowball, sx, 0.6);
     }
 
+    /// A kid plays tag with the villager: "it" (after them) or running off,
+    /// until `until`.
+    pub fn tag(&mut self, id: u64, it: bool, until: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && c.kind == Kind::Kid && !c.held()) {
+            c.st = St::Tag { it, until };
+            c.leave_at = c.leave_at.max(until + 30.0);
+            c.social_at = c.social_at.max(until + 5.0);
+        }
+        self.tagged_you = false;
+    }
+
+    /// The game's over (a ♥ for it).
+    pub fn tag_over(&mut self, id: u64, t: f32, d: &mut Director) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id && matches!(c.st, St::Tag { .. })) {
+            c.st = St::Idle { until: t + 2.5 };
+            d.emote(c.centre(), c.y - 3.0, '♥', Rgb::hex(0xff9ab0), 1);
+        }
+    }
+
+    /// Still playing tag (and who's it).
+    pub fn tag_state(&self, id: u64) -> Option<bool> {
+        self.list.iter().find(|c| c.id == id).and_then(|c| match c.st {
+            St::Tag { it, .. } => Some(it),
+            _ => None,
+        })
+    }
+
+    /// The kid who's "it" caught the villager, since last asked.
+    pub fn take_tagged(&mut self) -> bool {
+        std::mem::take(&mut self.tagged_you)
+    }
+
+    /// Animals about and free: (id, centre column, row).
+    pub fn animals(&self) -> Vec<(u64, f32, f32)> {
+        self.list.iter().filter(|c| c.animal() && c.free()).map(|c| (c.id, c.centre(), c.y)).collect()
+    }
+
+    /// Bushes with ripe berries: (centre column, base row).
+    pub fn ripe_bushes(&self, t: f32) -> Vec<(f32, f32)> {
+        self.bushes.iter().filter(|b| b.berries.iter().any(|br| t >= br.2)).map(|b| (b.centre(), b.base as f32)).collect()
+    }
+
     /// Snowballs that hit the player since last asked.
     pub fn take_hits_on_you(&mut self) -> u32 {
         std::mem::take(&mut self.hits_on_you)
@@ -2350,7 +2492,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     // people: the detailed sprite, where the front-end can show pictures
     if c.person() && crate::frame::pictures_ok() {
         use super::sprites::{self, Look, Pose};
-        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
         let pose = if c.held() || matches!(c.st, St::Fall { .. }) {
             Pose::ArmsUp
@@ -2368,16 +2510,20 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
         let kid = c.kind == Kind::Kid;
         // grown-ups carry a lantern after dark
         let lantern = !kid && f.day < 0.45;
-        let look = Look {
-            kid,
-            coat: c.color,
-            hat: Some(c.hat),
-            hair: if c.id % 3 == 0 { Rgb::hex(0x6a4a2a) } else if c.id % 3 == 1 { Rgb::hex(0x2a1c14) } else { Rgb::hex(0xc89a5a) },
-            scarf: (c.id % 2 == 0).then_some(c.hat * 0.85),
-            skin: [Rgb::hex(0xe8c39e), Rgb::hex(0xc89a72), Rgb::hex(0x8a5a3a), Rgb::hex(0xf0d0b0)][(c.id % 4) as usize],
-            mittens: c.hat,
-            holding: None,
-            lantern,
+        let look = match c.look {
+            // a friend, dressed as chosen
+            Some(fl) => Look { kid, coat: fl.coat, hat: fl.hat, hair: fl.hair, scarf: fl.scarf, skin: fl.skin, mittens: fl.hat.unwrap_or(fl.coat * 0.8), holding: None, lantern },
+            None => Look {
+                kid,
+                coat: c.color,
+                hat: Some(c.hat),
+                hair: if c.id % 3 == 0 { Rgb::hex(0x6a4a2a) } else if c.id % 3 == 1 { Rgb::hex(0x2a1c14) } else { Rgb::hex(0xc89a5a) },
+                scarf: (c.id % 2 == 0).then_some(c.hat * 0.85),
+                skin: [Rgb::hex(0xe8c39e), Rgb::hex(0xc89a72), Rgb::hex(0x8a5a3a), Rgb::hex(0xf0d0b0)][(c.id % 4) as usize],
+                mittens: c.hat,
+                holding: None,
+                lantern,
+            },
         };
         let light = 0.9 + 0.25 * f.day.max(0.0);
         let pic = sprites::person(&look, pose, c.dir, light);
@@ -2392,7 +2538,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     }
     // people, on a screen tall enough: the same pixel-art folk as indoors
     if k >= 1.75 && c.person() && !c.held() && !matches!(c.st, St::Fall { .. }) {
-        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
         let kid = c.kind == Kind::Kid;
         let wave = matches!(c.st, St::Greet { .. } | St::Throw { .. } | St::Petting { .. });
@@ -2488,6 +2634,34 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     }
 }
 
+/// A friend's look, as colours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FriendLook {
+    pub coat: Rgb,
+    pub hat: Option<Rgb>,
+    pub hair: Rgb,
+    pub skin: Rgb,
+    pub scarf: Option<Rgb>,
+}
+
+impl FriendLook {
+    pub fn of(f: &crate::config::FriendCfg) -> Self {
+        let (coat, hat, hair, skin) = f.colours();
+        let hat = hat.map(Rgb::hex);
+        FriendLook { coat: Rgb::hex(coat), hat, hair: Rgb::hex(hair), skin: Rgb::hex(skin), scarf: f.scarf.then(|| hat.unwrap_or(Rgb::hex(0xd8283a)) * 0.9) }
+    }
+}
+
+/// A friend: who, and whether they're in the village (or due back).
+struct Friend {
+    name: &'static str,
+    kid: bool,
+    look: FriendLook,
+    present: bool,
+    seen_at: f32,
+    back_at: f32,
+}
+
 /// A name from the friends list, kept for the rest of the run (people's
 /// names are `&'static str`; the list is short and rarely changes).
 fn leak_name(s: &str) -> &'static str {
@@ -2506,23 +2680,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn friends_and_family_come_by_one_of_each_at_a_time() {
-        let (w, h) = (300, 40);
-        let ctx = Ctx { w, h, ground_row: vec![24; w as usize], track_row: 20, occluded: vec![false; (w * h) as usize], church: None, sky_rows: 10, station: None, cam: 0.0, vw: w };
+    fn friends_and_family_come_by_one_of_each_dressed_as_chosen() {
+        let (ctx, mut d, mut l) = world();
         let mut c = Critters::new(&ctx, 5, 0.0, false, &[]);
         c.set_max(100);
-        c.set_friends(&[crate::config::FriendCfg { name: "Sam".into(), kid: false }, crate::config::FriendCfg { name: "Bea".into(), kid: true }, crate::config::FriendCfg { name: " ".into(), kid: false }]);
+        let sam = crate::config::FriendCfg { name: "Sam".into(), coat: "purple".into(), hat: "none".into(), hair: "red".into(), skin: "deep".into(), scarf: true, ..Default::default() };
+        c.set_friends(&[sam.clone(), crate::config::FriendCfg { name: "Bea".into(), kid: true, ..Default::default() }, crate::config::FriendCfg { name: " ".into(), ..Default::default() }]);
+        // random newcomers never take a friend's name
         for k in 0..40 {
-            c.spawn_demo(Kind::Walker, 10.0 + k as f32 * 6.0, 0.0);
-            c.spawn_demo(Kind::Kid, 12.0 + k as f32 * 6.0, 0.0);
+            c.spawn_demo(Kind::Walker, 10.0 + k as f32 * 4.0, 0.0);
+            c.spawn_demo(Kind::Kid, 12.0 + k as f32 * 4.0, 0.0);
         }
-        let named = |n: &str| c.list.iter().filter(|x| x.name == n).count();
-        assert_eq!(named("Sam"), 1, "Sam, once");
-        assert_eq!(named("Bea"), 1, "Bea, once");
-        let sam = c.list.iter().find(|x| x.name == "Sam").unwrap();
-        assert!(sam.kind == Kind::Walker && c.is_friend(sam.id), "a grown-up, and a friend");
+        assert!(!c.list.iter().any(|x| x.friend), "nobody came as a friend by chance");
+        c.list.clear();
+        let t = run(&mut c, &ctx, &mut d, &mut l, 0.0, 30.0);
+        let named = |c: &Critters, n: &str| c.list.iter().filter(|x| x.name == n).count();
+        assert_eq!(named(&c, "Sam"), 1, "Sam came by, once");
+        assert_eq!(named(&c, "Bea"), 1, "Bea came by, once");
+        let s = c.list.iter().find(|x| x.name == "Sam").unwrap();
+        assert!(s.kind == Kind::Walker && c.is_friend(s.id), "a grown-up, and a friend");
+        let look = s.look.expect("dressed as chosen");
+        assert_eq!(look, FriendLook::of(&sam));
+        assert_eq!(look.coat, Rgb::hex(0x6a3a8a));
+        assert!(look.hat.is_none() && look.scarf.is_some(), "bare-headed, in a scarf");
         assert!(c.list.iter().find(|x| x.name == "Bea").unwrap().kind == Kind::Kid);
-        assert_eq!(c.friends_about().len(), 2);
+        assert_eq!(c.list.iter().filter(|x| x.friend).count(), 2, "two friends about");
+        // a change of look: whoever's out wears it at once
+        let mut red = sam.clone();
+        red.coat = "red".into();
+        c.set_friends(&[red, crate::config::FriendCfg { name: "Bea".into(), kid: true, ..Default::default() }]);
+        assert_eq!(c.list.iter().find(|x| x.name == "Sam").unwrap().look.unwrap().coat, Rgb::hex(0xb3202a));
+        // Sam wanders off for good: back again a while later (still once)
+        let id = c.list.iter().find(|x| x.name == "Sam").unwrap().id;
+        c.list.iter_mut().find(|x| x.id == id).unwrap().x = -100.0;
+        let t = run(&mut c, &ctx, &mut d, &mut l, t, 1.0);
+        assert_eq!(named(&c, "Sam"), 0, "gone");
+        let mut back = false;
+        for k in 0..400 {
+            run(&mut c, &ctx, &mut d, &mut l, t + k as f32 * 0.25, 0.25);
+            assert!(named(&c, "Sam") <= 1, "only one Sam");
+            back |= named(&c, "Sam") == 1;
+        }
+        assert!(back, "Sam came back");
     }
 
     fn world() -> (Ctx, Director, Lines) {
