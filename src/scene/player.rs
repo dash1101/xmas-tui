@@ -52,6 +52,9 @@ pub struct Player {
     /// Carrying a lit lantern / warm from cocoa (set by the scene).
     pub lantern: bool,
     pub cozy: bool,
+    /// Petting the pet until then; holding it in their arms (a cuddle).
+    pub petting_until: f32,
+    pub cuddling: bool,
     /// Dropping in from the sky (right-click → drop in here): the row to
     /// land on; drawn shimmering on the way down.
     pub drop_to: Option<f32>,
@@ -59,7 +62,7 @@ pub struct Player {
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, drop_to: None }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, drop_to: None }
     }
 
     /// How fast to go: the walk speed, doubled while running.
@@ -227,6 +230,53 @@ impl Player {
             [" ▲", " ●", "~█", if self.moving && step { " ╨" } else { " ║" }]
         };
         let wave = !self.moving && !up && !scooping && !throwing && (t * 0.5).sin() > 0.97;
+        // the detailed sprite, where the front-end can show pictures
+        if crate::frame::pictures_ok() {
+            use super::sprites::{self, Look, Pose};
+            let pose = if up {
+                Pose::ArmsUp
+            } else if scooping {
+                Pose::Scoop
+            } else if throwing {
+                Pose::Throw
+            } else if self.cuddling {
+                Pose::Hold
+            } else if t < self.petting_until && !self.moving {
+                Pose::Pet
+            } else if self.moving {
+                Pose::Walk(step as u8)
+            } else if wave {
+                Pose::Wave
+            } else {
+                Pose::Stand
+            };
+            let holding = if self.snowball && !throwing { Some(Rgb::hex(0xf2f6ff)) } else { self.hold.map(|(_, c)| c) };
+            let look = Look { kid: false, coat: COAT, hat: Some(HAT), hair: Rgb::hex(0x3a2a1a), scarf: Some(SCARF), skin: Rgb::hex(0xe8c39e), mittens: SCARF, holding: if self.lantern { None } else { holding }, lantern: self.lantern };
+            let light = 0.9 + 0.25 * f.day.max(0.0);
+            let pic = sprites::person(&look, pose, self.dir, light);
+            let rows = sprites::rows_of(&pic, sk);
+            f.sprite(sc, sy + 1.0, rows, pic);
+            let (bx, by) = (sc, sy * 2.0 - 4.0 * sk);
+            if self.lantern {
+                let fl = 0.85 + 0.15 * (t * 9.0).sin();
+                f.light_px(bx + self.dir * 2.0 * sk, sy * 2.0 - 2.0 * sk, Rgb::hex(0xffb050) * (7.0 * fl * glow));
+            }
+            if t < self.dizzy_until {
+                for k in 0..3 {
+                    let a = t * 5.0 + k as f32 * 2.09;
+                    let (x, y) = (bx + a.cos() * 3.0, (by - 6.0 * sk) / 2.0 + a.sin() * 0.6);
+                    f.put_g(x.round() as i32, y.round() as i32, Glyph::new(if k % 2 == 0 { '✦' } else { '✧' }, Rgb::hex(0xffe08a)).lit(0.0));
+                }
+            }
+            if self.drop_to.is_some() {
+                f.light_px(bx, by, Rgb::hex(0x9fd8ff) * (5.0 * glow));
+            }
+            f.light_px(bx, by, Rgb::hex(0xffc878) * (1.6 * glow));
+            if self.cozy {
+                f.light_px(bx, by - 2.0, Rgb::hex(0xff9a7a) * (1.4 * glow));
+            }
+            return;
+        }
         // on a screen tall enough: the pixel-art villager, as indoors
         if sk >= 1.75 && !up && !scooping {
             let b = super::interior::Big {

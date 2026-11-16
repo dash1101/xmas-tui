@@ -54,6 +54,55 @@ impl Picture {
         Picture { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), w, h, rgba }
     }
 
+    /// Blit at a whole-number scale `s`, crisp (nearest pixel), with its
+    /// top-left at (x, y) (may be partly off the buffer).
+    pub fn blit_scaled(&self, buf: &mut [u32], stride: usize, x: i32, y: i32, s: usize) {
+        let rows = (buf.len() / stride.max(1)) as i32;
+        for sy in 0..self.h {
+            for sx in 0..self.w {
+                let i = (sy * self.w + sx) * 4;
+                let a = self.rgba[i + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let (r, g, b) = (self.rgba[i] as u32, self.rgba[i + 1] as u32, self.rgba[i + 2] as u32);
+                for dy in 0..s as i32 {
+                    let py = y + sy as i32 * s as i32 + dy;
+                    if py < 0 || py >= rows {
+                        continue;
+                    }
+                    for dx in 0..s as i32 {
+                        let px = x + sx as i32 * s as i32 + dx;
+                        if px < 0 || px >= stride as i32 {
+                            continue;
+                        }
+                        let o = &mut buf[py as usize * stride + px as usize];
+                        *o = if a == 255 {
+                            r << 16 | g << 8 | b
+                        } else {
+                            let m = |c: u32, d: u32| (c * a + d * (255 - a)) / 255;
+                            m(r, (*o >> 16) & 255) << 16 | m(g, (*o >> 8) & 255) << 8 | m(b, *o & 255)
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same picture scaled up `s` times (nearest pixel), for a terminal
+    /// that shows images at their own size.
+    pub fn scaled(&self, s: usize) -> Picture {
+        let (w, h) = (self.w * s, self.h * s);
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y / s) * self.w + x / s) * 4;
+                out[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&self.rgba[i..i + 4]);
+            }
+        }
+        Picture { id: 0, w, h, rgba: out }
+    }
+
     /// Blit into a 0RGB pixel buffer, scaled to fit `bw`×`bh` at (x, y)
     /// (centred, aspect kept; bilinear; alpha-blended over what's there).
     pub fn blit(&self, buf: &mut [u32], stride: usize, x: usize, y: usize, bw: usize, bh: usize) {
@@ -105,11 +154,28 @@ impl Picture {
 /// A picture placed over cells.
 #[derive(Clone)]
 pub struct Placed {
+    /// The cells it covers (a sprite: about; enough to redraw under it).
     pub x: i32,
     pub y: i32,
     pub cols: i32,
     pub rows: i32,
     pub pic: std::sync::Arc<Picture>,
+    /// A sprite (people, pets): its centre column and feet row (both
+    /// fractional, on the grid) and how many rows tall it's meant to be.
+    /// It's drawn at the biggest whole-number scale that fits, crisp, with
+    /// its feet on that row. None: fitted into its cells (an icon).
+    pub sprite: Option<(f32, f32, f32)>,
+}
+
+impl Placed {
+    /// A sprite's top-left (pixels, from the grid's corner) and scale, for
+    /// cells `cw`×`ch` pixels.
+    pub fn sprite_px(&self, cw: usize, ch: usize) -> Option<(i32, i32, usize)> {
+        let (cx, feet, rows) = self.sprite?;
+        let s = ((rows * ch as f32 / self.pic.h.max(1) as f32).floor() as usize).max(1);
+        let (pw, ph) = ((self.pic.w * s) as f32, (self.pic.h * s) as f32);
+        Some(((cx * cw as f32 - pw / 2.0).round() as i32, (feet * ch as f32 - ph).round() as i32, s))
+    }
 }
 
 impl Glyph {
@@ -192,6 +258,9 @@ pub struct Frame {
     /// Set once the widgets are drawn: anything drawn after (the settings,
     /// menus, cards) hides a picture it overlaps.
     pub cover_pictures: bool,
+    /// A cell's height over its width (the front-end sets it), for working
+    /// out how many columns a sprite takes.
+    pub cell_aspect: f32,
     /// Light already bloomed (and magnified) by `zoom`, added at compose.
     pre: Vec<Rgb>,
     pre_on: bool,
@@ -226,6 +295,7 @@ impl Frame {
             specks: false,
             pictures: vec![],
             cover_pictures: false,
+            cell_aspect: 2.1,
             pre: vec![],
             pre_on: false,
             glow_near: 1.0,
@@ -267,6 +337,20 @@ impl Frame {
         self.cover_pictures = false;
     }
 
+    /// A sprite (a person, a pet): centred on column `cx`, feet on row
+    /// `feet` (grid coordinates, fractional), `rows` tall. Drawn crisp at a
+    /// whole-number scale, over the cells.
+    pub fn sprite(&mut self, cx: f32, feet: f32, rows: f32, pic: std::sync::Arc<Picture>) {
+        let (cx, feet) = (cx - self.ox as f32, feet + self.oy as f32);
+        let wc = pic.w as f32 / pic.h.max(1) as f32 * rows * self.cell_aspect;
+        let (x, y) = ((cx - wc / 2.0).floor() as i32 - 1, (feet - rows).floor() as i32 - 1);
+        let (cols, rws) = (wc.ceil() as i32 + 3, rows.ceil() as i32 + 2);
+        if x + cols < 0 || y + rws < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        self.pictures.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((cx, feet, rows)) });
+    }
+
     /// A picture over `cols`×`rows` cells at (x, y) (the cells under it are
     /// whatever was drawn there; the picture goes on top).
     pub fn picture(&mut self, x: i32, y: i32, cols: i32, rows: i32, pic: std::sync::Arc<Picture>) {
@@ -276,7 +360,7 @@ impl Frame {
             let w = self.w;
             let ui = (y..y + rows).any(|yy| (x..x + cols).any(|xx| self.glyph[yy as usize * w + xx as usize].is_some_and(|g| g.ui)));
             if !ui {
-                self.pictures.push(Placed { x, y, cols, rows, pic });
+                self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None });
             }
         }
     }

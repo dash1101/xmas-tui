@@ -237,6 +237,14 @@ fn main() {
         winshelf::probe(&std::env::args().skip(2).collect::<Vec<_>>());
         return;
     }
+    // look the people and pet sprites over: --sprite-sheet OUT.png
+    if std::env::args().nth(1).as_deref() == Some("--sprite-sheet") {
+        let out = std::env::args().nth(2).unwrap_or_else(|| "sprites.png".into());
+        if let Err(e) = scene::sprites::sheet(std::path::Path::new(&out)) {
+            eprintln!("{e}");
+        }
+        return;
+    }
     let args = parse_args();
     if std::env::args().any(|a| a == "--update") {
         std::process::exit(update::cli());
@@ -579,6 +587,7 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             Term::pointer(want);
         }
         let (w, h) = (app.w, app.h);
+        app.frame.cell_aspect = term.cell_aspect();
         app.step();
         let (cells, pics) = app.output();
         term.pictures = pics.to_vec();
@@ -610,6 +619,8 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     let mut frame = Frame::new(w, h);
     frame.glow_near = cfg.scene.glow;
     frame.glow_far = cfg.scene.glow;
+    // the exporter's cells are 9×19 pixels
+    frame.cell_aspect = 19.0 / 9.0;
     let mut scene = Scene::new(w, h, seed, &cfg.scene);
     let mut widgets = Widgets::new(cfg);
     // give the data threads a moment to report

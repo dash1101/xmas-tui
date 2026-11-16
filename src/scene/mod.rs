@@ -14,12 +14,14 @@ pub mod lines;
 pub mod player;
 pub mod sky;
 pub mod builds;
+pub mod chapel;
 pub mod newyear;
 pub mod pets;
 pub mod santa;
 pub mod story;
 pub mod sleigh;
 pub mod snow;
+pub mod sprites;
 pub mod tree;
 pub mod village;
 
@@ -129,6 +131,7 @@ pub struct Scene {
     newyear: Option<newyear::NewYear>,
     /// Snowmen and igloos the kids are building.
     builds: builds::Builds,
+    chapel: chapel::Chapel,
     /// A conversation with someone (the dialogue box), its own way of
     /// picking topics, and which answer the pointer's over.
     convo: Option<story::Convo>,
@@ -581,6 +584,7 @@ impl Scene {
             next_round,
             newyear: None,
             builds: builds::Builds::new(h, seed),
+            chapel: chapel::Chapel::new(seed),
             convo: None,
             story_talk: dialogue::Talk::new(seed ^ 0x570),
             convo_hover: None,
@@ -1113,6 +1117,12 @@ impl Scene {
             }
             P::Fuss => {
                 pet.happy_until = t + 3.0;
+                pet.voice(pets::Voice::Purr, t);
+                if let Some(p) = self.player.as_mut() {
+                    // a hand down to the pet
+                    p.petting_until = t + 2.4;
+                    p.dir = if pet.x >= p.centre() { 1.0 } else { -1.0 };
+                }
                 pet.wake(t);
                 let (x, y) = (pet.x, pet.y);
                 let name = pet.name.clone();
@@ -3035,6 +3045,11 @@ impl Scene {
             }
         }
         // the pet keeps up (or pootles about at home)
+        // the villager holds the pet while it's cuddled
+        let cuddled = self.my_pet.as_ref().is_some_and(|pet| pet.held());
+        if let Some(p) = self.player.as_mut() {
+            p.cuddling = cuddled;
+        }
         if let (Some(pet), Some(p)) = (self.my_pet.as_mut(), self.player.as_ref()) {
             match &self.inside {
                 None if !pet.staying => {
@@ -3085,7 +3100,8 @@ impl Scene {
                 };
                 match ev {
                     pets::PetEv::Emote(ch, c, x, y) => d.emote(x, y, ch, c, 1),
-                    pets::PetEv::Say(line, x, y) => d.say(x.round() as i32, y.round() as i32, &line, t, 3.4, 40),
+                    // (a narrow reach: a pet's sounds don't cut off people's lines)
+                    pets::PetEv::Say(line, x, y) => d.say(x.round() as i32, y.round() as i32, &line, t, 2.6, 2),
                     pets::PetEv::Sound(s, x) => d.sound(s, x, 0.6),
                 }
             }
@@ -3438,6 +3454,9 @@ impl Scene {
         let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
         let can = special_now() != Special::EveNight && self.cfg.critters > 0.0;
         self.builds.update(dt, t, can, (self.cam, self.w as f32), &free, &lo, h - 1.0, &mut self.critters, &mut self.director);
+        // folk going in and out of the church
+        let door = self.village.houses.iter().find(|h| h.church).map(|h| (h.door() as f32, h.base as f32));
+        self.chapel.update(dt, t, door, special_now() == Special::EveNight || self.cfg.critters <= 0.0, &mut self.critters, &mut self.director);
     }
 
     /// New Year's Eve: the mast goes up by the big tree for the evening.
@@ -3641,6 +3660,11 @@ impl Scene {
         f.ox = cam;
         self.skylife.draw_lanterns(f, t, glow);
         self.village.draw_glyphs(f, t, glow);
+        if self.chapel.door_glow > 0.0 {
+            if let Some(h) = self.village.houses.iter().find(|h| h.church) {
+                f.light_cell(h.door(), h.base - 1, Rgb::hex(0xffc878) * (2.5 * self.chapel.door_glow.min(1.0) * glow));
+            }
+        }
         if let Some(r) = &self.rounds {
             r.draw(f, t, glow);
         }

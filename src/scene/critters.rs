@@ -2311,6 +2311,49 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
         Some(v) => (v.x(c.centre()), v.y(c.y + 1.0) - 1.0, k * v.z),
         None => (c.centre(), c.y, k),
     };
+    // people: the detailed sprite, where the front-end can show pictures
+    if c.person() && crate::frame::pictures_ok() {
+        use super::sprites::{self, Look, Pose};
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
+        let pose = if c.held() || matches!(c.st, St::Fall { .. }) {
+            Pose::ArmsUp
+        } else if matches!(c.st, St::Throw { .. }) {
+            Pose::Throw
+        } else if matches!(c.st, St::Petting { .. }) {
+            Pose::Pet
+        } else if matches!(c.st, St::Greet { .. }) {
+            Pose::Wave
+        } else if moving {
+            Pose::Walk(((c.age * rate) as i32 % 2) as u8)
+        } else {
+            Pose::Stand
+        };
+        let kid = c.kind == Kind::Kid;
+        // grown-ups carry a lantern after dark
+        let lantern = !kid && f.day < 0.45;
+        let look = Look {
+            kid,
+            coat: c.color,
+            hat: Some(c.hat),
+            hair: if c.id % 3 == 0 { Rgb::hex(0x6a4a2a) } else if c.id % 3 == 1 { Rgb::hex(0x2a1c14) } else { Rgb::hex(0xc89a5a) },
+            scarf: (c.id % 2 == 0).then_some(c.hat * 0.85),
+            skin: [Rgb::hex(0xe8c39e), Rgb::hex(0xc89a72), Rgb::hex(0x8a5a3a), Rgb::hex(0xf0d0b0)][(c.id % 4) as usize],
+            mittens: c.hat,
+            holding: None,
+            lantern,
+        };
+        let light = 0.9 + 0.25 * f.day.max(0.0);
+        let pic = sprites::person(&look, pose, c.dir, light);
+        let rows = sprites::rows_of(&pic, k);
+        let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { 0.2 } else { 0.0 };
+        f.sprite(cx_, cy_ + 1.0 - bob, rows, pic);
+        if lantern {
+            let fl = 0.85 + 0.15 * (t * 8.0 + c.id as f32).sin();
+            f.light_px(cx_ + c.dir * 2.0 * k, (cy_ + 1.0) * 2.0 - 4.0 * k, Rgb::hex(0xffb050) * (4.0 * fl * glow));
+        }
+        return;
+    }
     // people, on a screen tall enough: the same pixel-art folk as indoors
     if k >= 1.75 && c.person() && !c.held() && !matches!(c.st, St::Fall { .. }) {
         let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });

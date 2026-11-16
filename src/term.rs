@@ -30,6 +30,12 @@ pub struct Term {
     kitty: bool,
     sent: std::collections::HashSet<u64>,
     placed: Vec<(u64, i32, i32, i32, i32)>,
+    /// When each image kitty holds was last shown (frame number), to free
+    /// the ones not seen for a while (people who've walked off).
+    used: std::collections::HashMap<u64, u64>,
+    frames: u64,
+    /// A cell's size in pixels (from the terminal), for crisp sprites.
+    cell_px: (usize, usize),
 }
 
 /// How a cell looks: half-block cells are just two colours, whichever of
@@ -105,7 +111,7 @@ impl Term {
     pub fn new() -> Self {
         let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some() || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
         crate::frame::set_pictures_ok(kitty);
-        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![] }
+        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![], used: Default::default(), frames: 0, cell_px: (9, 19) }
     }
 
     pub fn enter() -> io::Result<()> {
@@ -153,6 +159,12 @@ impl Term {
     /// Build the escape-sequence update for this frame into `self.buf`.
     pub fn render(&mut self, cells: &[Cell], w: usize, h: usize) -> usize {
         if w != self.w || h != self.h {
+            // the cell size, from the window's size in pixels (kitty reports it)
+            if let Ok(ws) = crossterm::terminal::window_size() {
+                if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 {
+                    self.cell_px = ((ws.width / ws.columns).max(1) as usize, (ws.height / ws.rows).max(1) as usize);
+                }
+            }
             self.w = w;
             self.h = h;
             self.prev = vec![Cell::default(); w * h];
@@ -270,23 +282,59 @@ impl Term {
 
     /// kitty's graphics protocol: each image sent once (by id), then placed
     /// over its cells; any change re-places them all (a handful of icons).
+    /// A cell's height over its width (for laying sprites out).
+    pub fn cell_aspect(&self) -> f32 {
+        self.cell_px.1 as f32 / self.cell_px.0.max(1) as f32
+    }
+
     fn place_pictures(&mut self) {
-        let now: Vec<(u64, i32, i32, i32, i32)> = self.pictures.iter().map(|p| (p.pic.id, p.x, p.y, p.cols, p.rows)).collect();
-        if now == self.placed && !self.force {
+        let (cw, ch) = self.cell_px;
+        // sprites: at their exact pixel spot and scale (an image per scale)
+        let spots: Vec<(u64, i32, i32, i32, i32)> = self
+            .pictures
+            .iter()
+            .map(|p| match p.sprite_px(cw, ch) {
+                Some((x, y, k)) => (p.pic.id << 4 | k.min(15) as u64, x, y, -1, k as i32),
+                None => (p.pic.id << 4, p.x, p.y, p.cols, p.rows),
+            })
+            .collect();
+        self.frames += 1;
+        for s in &spots {
+            self.used.insert(s.0, self.frames);
+        }
+        // now and then, free images not shown for a while
+        if self.frames % 300 == 0 {
+            let old: Vec<u64> = self.used.iter().filter(|(_, &f)| self.frames - f > 900).map(|(&id, _)| id).collect();
+            for id in old {
+                self.used.remove(&id);
+                if self.sent.remove(&id) {
+                    self.buf.extend_from_slice(format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", id as u32).as_bytes());
+                }
+            }
+        }
+        if spots == self.placed && !self.force {
             return;
         }
         let b = &mut self.buf;
         // take down every placement (the images stay loaded)
         b.extend_from_slice(b"\x1b_Ga=d,d=a,q=2\x1b\\");
-        for p in &self.pictures {
-            let id = p.pic.id as u32;
-            if self.sent.insert(p.pic.id) {
-                let data = base64(&p.pic.rgba);
+        for (p, spot) in self.pictures.iter().zip(&spots) {
+            let id = spot.0 as u32;
+            if self.sent.insert(spot.0) {
+                // (a sprite is sent already scaled: kitty shows it 1:1)
+                let scaled;
+                let img = if spot.3 < 0 {
+                    scaled = p.pic.scaled(spot.4 as usize);
+                    &scaled
+                } else {
+                    &*p.pic
+                };
+                let data = base64(&img.rgba);
                 let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
                 for (k, c) in chunks.iter().enumerate() {
                     let more = (k + 1 < chunks.len()) as u8;
                     if k == 0 {
-                        b.extend_from_slice(format!("\x1b_Ga=t,f=32,s={},v={},i={id},q=2,m={more};", p.pic.w, p.pic.h).as_bytes());
+                        b.extend_from_slice(format!("\x1b_Ga=t,f=32,s={},v={},i={id},q=2,m={more};", img.w, img.h).as_bytes());
                     } else {
                         b.extend_from_slice(format!("\x1b_Gm={more};").as_bytes());
                     }
@@ -294,9 +342,20 @@ impl Term {
                     b.extend_from_slice(b"\x1b\\");
                 }
             }
-            b.extend_from_slice(format!("\x1b[{};{}H\x1b_Ga=p,i={id},c={},r={},C=1,z=1,q=2\x1b\\", p.y + 1, p.x + 1, p.cols, p.rows).as_bytes());
+            if spot.3 < 0 {
+                // a sprite: its own pixel size, offset within its first cell
+                let (x, y) = (spot.1, spot.2);
+                let (cx, cy) = (x.div_euclid(cw as i32), y.div_euclid(ch as i32));
+                if cx < 0 || cy < 0 || cx >= self.w as i32 || cy >= self.h as i32 {
+                    continue;
+                }
+                let (ox, oy) = (x - cx * cw as i32, y - cy * ch as i32);
+                b.extend_from_slice(format!("\x1b[{};{}H\x1b_Ga=p,i={id},X={ox},Y={oy},C=1,z=1,q=2\x1b\\", cy + 1, cx + 1).as_bytes());
+            } else {
+                b.extend_from_slice(format!("\x1b[{};{}H\x1b_Ga=p,i={id},c={},r={},C=1,z=1,q=2\x1b\\", p.y + 1, p.x + 1, p.cols, p.rows).as_bytes());
+            }
         }
-        self.placed = now;
+        self.placed = spots;
     }
 }
 

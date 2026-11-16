@@ -87,6 +87,8 @@ pub enum Pose {
     Sleep,
     /// Begging / excited (on its hind legs, or a bunny's binky).
     Up,
+    /// Head down to the bowl.
+    Eat,
 }
 
 // Right-facing pixel art, one char per pixel: b body, m markings, d dark
@@ -116,6 +118,31 @@ const BUNNY: [&[&str]; 4] = [
 /// and the tail.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i32, dir: f32, pose: Pose, t: f32, scale: i32, collar: Option<Rgb>) {
+    // the detailed sprite, where the front-end can show pictures
+    if crate::frame::pictures_ok() {
+        use super::sprites::{self, PetKind as K, PetPose as P};
+        let k = match kind {
+            PetKind::Dog => K::Dog,
+            PetKind::Cat => K::Cat,
+            PetKind::Bunny => K::Bunny,
+        };
+        let p = match pose {
+            Pose::Walk => P::Walk(((t * 7.0) as i32 % 2) as u8),
+            Pose::Sit => P::Sit,
+            Pose::Sleep => P::Sleep,
+            Pose::Up => P::Up,
+            Pose::Eat => P::Eat,
+        };
+        let wag = pose != Pose::Sleep && (t * if pose == Pose::Up { 7.0 } else { 3.0 }) as i32 % 2 == 0;
+        let light = 0.9 + 0.25 * f.day.max(0.0);
+        let pic = sprites::pet(k, body, marks, collar, p, wag, dir, light);
+        let rows = sprites::rows_of(&pic, scale as f32);
+        // a little hop when excited
+        let hop = if pose == Pose::Up && (t * 6.0).sin() > 0.0 { 0.25 * scale as f32 } else { 0.0 };
+        f.sprite(x, (feet + 1) as f32 / 2.0 - hop, rows, pic);
+        return;
+    }
+    let pose = if pose == Pose::Eat { if (t * 5.0) as i32 % 2 == 0 { Pose::Walk } else { Pose::Sit } } else { pose };
     let art = match kind {
         PetKind::Dog => &DOG,
         PetKind::Cat => &CAT,
@@ -123,7 +150,7 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
     };
     let frame = match pose {
         Pose::Walk => ((t * 7.0) as i32 % 2) as usize,
-        Pose::Sit | Pose::Up => 2,
+        Pose::Sit | Pose::Up | Pose::Eat => 2,
         Pose::Sleep => 3,
     };
     let rows = art[frame];
@@ -265,6 +292,50 @@ pub enum Busy {
     Cuddle { until: f32 },
 }
 
+/// What the pet says (in a little bubble, and heard).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Voice {
+    /// Just chatting: a meow, a woof, a sniff.
+    Hello,
+    /// Petted, brushed, cuddled: a purr, a happy pant.
+    Purr,
+    /// Excited (a toy thrown, a game): a bark, a mrrp, a binky.
+    Excited,
+    /// At a fox or another animal: a growl, a hiss, a thump.
+    Growl,
+    Eat,
+    Yawn,
+    Snore,
+}
+
+/// The words for a pet's voice (`pick` chooses among a few).
+pub fn words(kind: PetKind, v: Voice, pick: u32) -> &'static str {
+    let one = |w: &[&'static str]| w[pick as usize % w.len()];
+    match (kind, v) {
+        (PetKind::Cat, Voice::Hello) => one(&["meow!", "mrrp?", "mew", "mrow"]),
+        (PetKind::Cat, Voice::Purr) => one(&["prrrrr…", "purrr ♥", "prrrp"]),
+        (PetKind::Cat, Voice::Excited) => one(&["mrrp!", "MEOW!", "ek-ek-ek"]),
+        (PetKind::Cat, Voice::Growl) => one(&["hsssss!", "grrrr…", "mrrrOW!"]),
+        (PetKind::Cat, Voice::Eat) => one(&["nom nom", "*crunch*", "mmmrrp"]),
+        (PetKind::Cat, Voice::Yawn) => one(&["*big yawn*", "mrrm…"]),
+        (PetKind::Cat, Voice::Snore) => one(&["prrr… zz", "*twitch*"]),
+        (PetKind::Dog, Voice::Hello) => one(&["woof!", "arf!", "boof", "hmm?"]),
+        (PetKind::Dog, Voice::Purr) => one(&["hah hah hah", "*happy pant*", "awoo ♥"]),
+        (PetKind::Dog, Voice::Excited) => one(&["WOOF!", "arf arf!", "ruff!"]),
+        (PetKind::Dog, Voice::Growl) => one(&["grrrr…", "RUFF!", "grr-woof!"]),
+        (PetKind::Dog, Voice::Eat) => one(&["*chomp chomp*", "nom nom nom", "*slurp*"]),
+        (PetKind::Dog, Voice::Yawn) => one(&["*yaaawn*", "hmmf…"]),
+        (PetKind::Dog, Voice::Snore) => one(&["*snore*", "*wuf* (dreaming)"]),
+        (PetKind::Bunny, Voice::Hello) => one(&["*sniff sniff*", "*nose wiggle*", "hrr?"]),
+        (PetKind::Bunny, Voice::Purr) => one(&["*teeth purr*", "*happy flop*"]),
+        (PetKind::Bunny, Voice::Excited) => one(&["binky!", "*zoom*", "*hop hop*"]),
+        (PetKind::Bunny, Voice::Growl) => one(&["*THUMP*", "*thump thump*", "hrrr!"]),
+        (PetKind::Bunny, Voice::Eat) => one(&["*munch munch*", "*crunch*"]),
+        (PetKind::Bunny, Voice::Yawn) => one(&["*tiny yawn*", "*flop*"]),
+        (PetKind::Bunny, Voice::Snore) => one(&["*ear twitch*", "zz…"]),
+    }
+}
+
 /// Something the pet did, for the scene to show and play.
 pub enum PetEv {
     Emote(char, Rgb, f32, f32),
@@ -306,6 +377,10 @@ pub struct MyPet {
     pub bowl: Option<(f32, f32, f32)>,
     fed_at: f32,
     pub shine_until: f32,
+    /// Not before then: something to say unprompted (or a snore).
+    chat_at: f32,
+    /// How big it's drawn (1 outdoors, 2 indoors), for placing its bubbles.
+    k: f32,
     events: Vec<PetEv>,
     seed: u32,
 }
@@ -337,6 +412,8 @@ impl MyPet {
             bowl: None,
             fed_at: f32::NEG_INFINITY,
             shine_until: 0.0,
+            chat_at: 30.0,
+            k: 1.0,
             events: vec![],
             seed: crate::rng::hash(x.to_bits() ^ 0x9e37),
         })
@@ -400,6 +477,18 @@ impl MyPet {
         }
     }
 
+    /// Say something (in a little bubble over its head, and heard).
+    pub fn voice(&mut self, v: Voice, t: f32) {
+        let pick = self.roll(12);
+        let w = words(self.kind, v, pick);
+        self.events.push(PetEv::Say(w.to_string(), self.x, self.y - 2.0 * self.k));
+        if !matches!(v, Voice::Snore | Voice::Eat) {
+            let s = self.sound();
+            self.events.push(PetEv::Sound(s, self.x));
+        }
+        self.chat_at = self.chat_at.max(t + 25.0);
+    }
+
     /// Wake up (and forget any nap).
     pub fn wake(&mut self, t: f32) {
         self.napping = false;
@@ -416,8 +505,7 @@ impl MyPet {
         let how = self.roll(4) as u8;
         self.busy = Some(Busy::Fetch { how, step: 0, until: t + 12.0 });
         self.carrying = false;
-        let s = self.sound();
-        self.events.push(PetEv::Sound(s, self.x));
+        self.voice(Voice::Excited, t);
     }
 
     /// "Chase me!": zoomies round the villager.
@@ -425,6 +513,7 @@ impl MyPet {
         self.wake(t);
         self.busy = Some(Busy::Zoom { cx, until: t + 4.0 });
         self.happy_until = t + 4.0;
+        self.voice(Voice::Excited, t);
     }
 
     /// A trick (which one depends on the pet, and on its mood).
@@ -456,9 +545,8 @@ impl MyPet {
         self.wake(t);
         let stalk = self.kind == PetKind::Cat;
         self.busy = Some(Busy::Chase { x, until: t + if stalk { 4.0 } else { 2.6 }, stalk });
-        if !stalk {
-            let s = self.sound();
-            self.events.push(PetEv::Sound(s, self.x));
+        if !stalk || self.roll(2) == 0 {
+            self.voice(Voice::Growl, t);
         }
     }
 
@@ -505,6 +593,7 @@ impl MyPet {
         self.carrying = false;
         self.busy = Some(Busy::Cuddle { until: t + 5.0 });
         self.happy_until = t + 5.0;
+        self.voice(Voice::Purr, t);
         let n = self.name_or();
         let pick = self.roll(2) as usize;
         match self.kind {
@@ -520,7 +609,7 @@ impl MyPet {
         self.carrying = false;
         self.napping = true;
         self.still_since = t;
-        self.events.push(PetEv::Emote('z', Rgb::hex(0xc8d0e0), self.x, self.y - 2.0));
+        self.voice(Voice::Yawn, t);
         let n = self.name_or();
         match self.kind {
             PetKind::Dog => format!("{n} turns round three times and flops down. sweet dreams"),
@@ -537,6 +626,7 @@ impl MyPet {
         self.events.push(PetEv::Emote('✦', Rgb::hex(0xfff1a0), self.x - 1.5, self.y - 2.0));
         self.events.push(PetEv::Emote('✧', Rgb::hex(0xfff1a0), self.x + 1.5, self.y - 3.0));
         self.events.push(PetEv::Sound(crate::audio::Sfx::Sparkle, self.x));
+        self.voice(Voice::Purr, t);
         let n = self.name_or();
         match self.kind {
             PetKind::Dog => format!("you brush {n} till their coat shines like a bauble ✦"),
@@ -570,6 +660,16 @@ impl MyPet {
             self.napping = false;
         }
         self.update_toy(dt, t, k);
+        self.k = k;
+        // now and then, something to say (or a snore, asleep)
+        if t > self.chat_at {
+            self.chat_at = t + 40.0 + self.roll(50) as f32;
+            if self.napping {
+                self.voice(Voice::Snore, t);
+            } else if self.busy.is_none() {
+                self.voice(Voice::Hello, t);
+            }
+        }
         if self.bowl.is_some_and(|b| t > b.2) {
             self.bowl = None;
         }
@@ -595,7 +695,7 @@ impl MyPet {
         if !moving && self.busy.is_none() && self.sniff.is_none() && t - self.still_since > 22.0 + (self.seed % 9) as f32 {
             if !self.napping {
                 self.napping = true;
-                self.events.push(PetEv::Emote('z', Rgb::hex(0xc8d0e0), self.x, self.y - 2.0 * k));
+                self.voice(Voice::Yawn, t);
             }
         }
         if self.napping {
@@ -696,6 +796,9 @@ impl MyPet {
                 let spot = bowl + side * 2.5 * k;
                 if !eating && (self.x - spot).abs() < 0.8 * k {
                     let full = t - self.fed_at < 90.0;
+                    if !full {
+                        self.voice(Voice::Eat, t);
+                    }
                     self.busy = Some(Busy::Eat { bowl, until: t + if full { 1.2 } else { 4.0 }, eating: true });
                     if let Some(b) = &mut self.bowl {
                         b.2 = t + if full { 3.0 } else { 6.0 };
@@ -883,8 +986,7 @@ impl MyPet {
         let pose = if self.napping || held {
             Pose::Sleep
         } else if eating {
-            // head down to the bowl and up again
-            if (t * 5.0) as i32 % 2 == 0 { Pose::Walk } else { Pose::Sit }
+            Pose::Eat
         } else if let Some((which, until)) = tricking {
             // rolling over / playing dead: on its side; spinning; sitting up
             match (self.kind, which) {
@@ -920,15 +1022,30 @@ impl MyPet {
         }
         // held: curled up at the villager's chest
         // (the villager isn't drawn as much bigger as the pet is when zoomed in)
-        let feet = if held { feet - (1 + 2 * scale) } else { feet };
-        let shine = if t < self.shine_until { 1.25 + 0.1 * (t * 3.0).sin() } else { 1.0 };
+        let feet = if !held {
+            feet
+        } else if crate::frame::pictures_ok() {
+            // (the detailed villager's chest is a little lower)
+            feet - 2 * scale
+        } else {
+            feet - (1 + 2 * scale)
+        };
+        // (one brightness while it shines: each shade is a sprite of its own)
+        let shine = if t < self.shine_until { 1.3 } else { 1.0 };
         draw(f, self.kind, self.body * shine, self.marks * shine, sx, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
         if t < self.shine_until && (t * 2.3).fract() < 0.35 {
             let k = (t * 7.0) as i32;
             f.put_g(sx.round() as i32 + (k % 5 - 2) * scale, (feet - 4 * scale) / 2, crate::frame::Glyph::new('✦', Rgb::hex(0xfff1a0)).lit(0.0));
         }
-        if self.napping && (t * 0.8) as i32 % 2 == 0 {
-            f.put_g(sx.round() as i32 + 2 * scale, (feet - 7 * scale) / 2, crate::frame::Glyph::new('z', Rgb::hex(0xc8d0e0)).lit(0.0));
+        if self.napping {
+            // z's drifting up, one after another
+            let ph = (t * 0.6).fract();
+            let (zx, zy) = (sx.round() as i32 + 2 * scale + (ph * 2.0) as i32, (feet - 6 * scale) / 2 - (ph * 3.0) as i32);
+            let c = Rgb::hex(0xdfe7f4) * (1.0 - ph * 0.6);
+            f.put_g(zx, zy, crate::frame::Glyph::new(if ph < 0.5 { 'z' } else { 'Z' }, c).lit(0.0));
+            if ph > 0.35 {
+                f.put_g(zx - 1, zy + 2, crate::frame::Glyph::new('z', Rgb::hex(0xdfe7f4) * 0.6).lit(0.0));
+            }
         }
         // not named yet: a little "?" asking for one
         if self.name.is_empty() && (t * 1.5) as i32 % 2 == 0 {

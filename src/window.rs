@@ -211,6 +211,7 @@ impl Runner {
         // the grid on screen, for putting a file dragged off a shelf where
         // it was let go (Windows desktop: the window is at the monitor's origin)
         app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, g.raster.cw as i32, g.raster.ch as i32));
+        app.frame.cell_aspect = g.raster.ch as f32 / g.raster.cw.max(1) as f32;
         app.step();
         let (cells, pics) = app.output();
         let pics = pics.to_vec();
@@ -241,7 +242,10 @@ impl Runner {
         }
         g.prev = cells.to_vec();
         for p in &pics {
-            p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch);
+            match p.sprite_px(cw, ch) {
+                Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
+                None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),
+            }
         }
         g.pics = pics;
         let Ok(mut buf) = g.surface.buffer_mut() else { return };
