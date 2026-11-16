@@ -6,6 +6,8 @@
 //!   low. No ALSA headers or audio crates needed.
 //! - Windows: the classic waveOut API (winmm.dll ships with Windows), eight
 //!   10 ms buffers in flight.
+//! - Android (the app's game screen): a short queue that the app's
+//!   AudioTrack drains (`android::take`), its pace setting ours.
 
 use std::io;
 
@@ -41,6 +43,58 @@ impl Dev {
 pub use linux::Output;
 #[cfg(windows)]
 pub use win::Output;
+#[cfg(target_os = "android")]
+pub use android::Output;
+
+#[cfg(target_os = "android")]
+pub mod android {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    /// Samples waiting for the app (interleaved stereo s16): 80 ms at most.
+    static QUEUE: Mutex<VecDeque<i16>> = Mutex::new(VecDeque::new());
+    static ROOM: Condvar = Condvar::new();
+    const MAX: usize = RATE as usize * 2 * 80 / 1000;
+
+    pub struct Output {
+        pub name: &'static str,
+    }
+
+    impl Output {
+        pub fn open(_which: usize, _dev: &Dev) -> io::Result<Output> {
+            QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            Ok(Output { name: "android" })
+        }
+
+        /// Wait for room (the app taking samples paces us); if the app
+        /// isn't taking any (in the background), the oldest go.
+        pub fn write(&mut self, pcm: &[i16]) -> io::Result<()> {
+            let mut q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            if q.len() + pcm.len() > MAX {
+                q = ROOM.wait_timeout(q, Duration::from_millis(60)).map(|r| r.0).unwrap_or_else(|e| e.into_inner().0);
+            }
+            while q.len() + pcm.len() > MAX && !q.is_empty() {
+                q.pop_front();
+            }
+            q.extend(pcm.iter().copied());
+            Ok(())
+        }
+    }
+
+    /// The app's AudioTrack: what's ready into `out` (silence after it).
+    pub fn take(out: &mut [i16]) -> usize {
+        let mut q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let n = out.len().min(q.len());
+        for (o, s) in out.iter_mut().zip(q.drain(..n)) {
+            *o = s;
+        }
+        out[n..].fill(0);
+        ROOM.notify_all();
+        n
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -259,12 +313,12 @@ mod win {
 }
 
 /// No sound output on other platforms (macOS etc.) — yet.
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "android")))]
 pub struct Output {
     pub name: &'static str,
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "android")))]
 impl Output {
     pub fn open(_which: usize, _dev: &Dev) -> io::Result<Output> {
         Err(io::Error::from(io::ErrorKind::Unsupported))

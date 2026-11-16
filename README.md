@@ -91,7 +91,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
-| **Android** 7+ | `xmas-tui-android.apk` | A live wallpaper: a cut-down village that lives its own life on the home screen. See [Android](#-android-live-wallpaper). |
+| **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons), plus a live wallpaper for the home screen. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
 have a one-line installer straight from the repo. On **Linux** (no sudo):
@@ -423,11 +423,27 @@ Debugging: running with `XMAS_SNOW_DEBUG=1` writes `snow-debug.txt` and `snow-ca
 On Windows the status line also has per-phase timings. `XMAS_WINFX=1 xmas-tui --windowed` starts the Windows overlay
 next to a normal window, for testing (e.g. under Wine).
 
-## 📱 Android live wallpaper
+## 📱 Android: the live wallpaper, and the village to play in
 
 <img src="docs/android.png" align="right" width="320" alt="The phone wallpaper at night and at dusk: cottages, the big tree, villagers in bobble hats, and a snowy shelf at the bottom with snow piled on it">
 
-A cut-down village for the phone's home screen, made to be watched rather than played:
+Two things in one app: a live wallpaper for the home screen, and the whole village to play in.
+
+**Playing in the village.** Opening **xmas-tui village** (or **Play in the village** in its settings) opens the
+desktop's own village, full screen and sideways: the same village, people, houses, pets, parkour and building as on
+the desktop, the same code built for Android. A joystick (left) walks the villager about (pushed all the way, they
+run; pushed up against a house, a tree or a lamp post, they climb it), and buttons do what the keys do on the
+desktop: **E** (talk, use, pick up, help build), **jump**, **❄** (scoop a snowball, then throw it), and **☰** (pockets
+and the Christmas list, inviting someone along, what's in hand, settings, the controls). Tapping people, animals and
+things works as a click does on the desktop, and answers in the dialogue box; pressing and holding anywhere lists what
+can be done there (visit a house, drop in on a roof, build a snowman, say hello…); dragging people and animals carries
+them; two fingers look along the village; Back closes what's open, then leaves. The sound plays too. **Size** in the
+settings makes the village bigger or smaller, and *Playing in the village* there turns the sound off or sets the frame
+rate (30 fps by default).
+
+<p align="center"><img src="docs/android-game.png" width="100%" alt="The village on a phone held sideways: the big tree, the station, houses and the snowman, with a joystick on the left and E, jump, snowball and menu buttons on the right"></p>
+
+**The live wallpaper** is a cut-down village for the phone's home screen, made to be watched rather than played:
 - **The village lives its own life.** Folk wander, stop to chat in speech bubbles, pop into each other's
   houses and gather by the tree. The villager (green bobble hat) is out among them: greeting everyone by name,
   playing with their pet, feeding the deer. Deer and rabbits wander through, kids end a chat with a snowball,
@@ -447,11 +463,14 @@ A cut-down village for the phone's home screen, made to be watched rather than p
 **Install:** on the phone, download `xmas-tui-android.apk` from the newest
 [release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or
 file manager when asked), then open **xmas-tui village** and tap **Set as live wallpaper**. Android 7 or newer. The APK
-is attached only to releases that change the Android app, so desktop-only releases don't offer phones an identical
-update. [Orbit](https://github.com/dash1101/orbit) on Android finds the newest one, installs it, and keeps it updated.
+is attached only to releases that change the Android app or the village it plays, so other releases don't offer phones
+an identical update. [Orbit](https://github.com/dash1101/orbit) on Android finds the newest one, installs it, and keeps it updated.
 
-**Build:** `android/build.sh` (a JDK 17 and the Android SDK; no Gradle). The village itself is plain Java in
-`android/src/.../core`, and `android/preview/Preview.java` renders it to PNGs on the desktop.
+**Build:** `android/build.sh` (a JDK 17, the Android SDK and NDK, and Rust with the Android targets; no Gradle). The
+wallpaper's village is plain Java in `android/src/.../core`, and `android/preview/Preview.java` renders it to PNGs on
+the desktop. The village to play in is `android/native`: the desktop's own source files (`src/scene`, `src/frame.rs`,
+the renderer and the sound), built as `libxmas.so` for each Android ABI (arm64, 32-bit ARM and x86_64; `XMAS_ABIS`
+picks fewer) and driven through JNI, drawing straight onto the game screen's surface.
 
 **Signing:** releases are signed with xmas-tui's own release key, and Android only installs an update signed with
 the same key. Its certificate's SHA-256 is in `android/release-cert.sha256`. The release workflow signs the APK with

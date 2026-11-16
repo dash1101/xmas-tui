@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the Android live wallpaper (no Gradle): android/build.sh [VERSION] [OUT.apk]
-# Needs a JDK 17 and the Android SDK (platform + build-tools): JAVA_HOME and
-# ANDROID_HOME, or ~/.local/jdk17 and ~/.local/android-sdk. Signs with the
+# Needs a JDK 17, the Android SDK (platform + build-tools) and NDK: JAVA_HOME,
+# ANDROID_HOME and ANDROID_NDK_HOME, or ~/.local/jdk17 and ~/.local/android-sdk
+# (with ndk/<version> in it); and Rust with the Android targets (rustup
+# target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android). Signs with the
 # release key in ~/.local/share/xmas-tui-signing/ (or XMAS_KEYSTORE and
 # XMAS_KEYPASS); keep it: Android only updates the app from the same key.
 # XMAS_NEW_KEY=1 makes a new key where none is (for a fork or a test build).
@@ -26,8 +28,29 @@ rm -rf "$B" && mkdir -p "$B/gen" "$B/classes" "$B/dex"
 javac -nowarn -Xlint:-options --release 8 -classpath "$PLAT" -d "$B/classes" \
   $(find src "$B/gen" -name '*.java')
 "$BT/d8" --release --min-api 24 --lib "$PLAT" --output "$B/dex" $(find "$B/classes" -name '*.class')
+# the village to play in (android/native: the desktop's own village, as
+# libxmas.so for each ABI; XMAS_ABIS picks which, e.g. "x86_64" for the emulator)
+NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -n1)}}"
+NDKBIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+[[ -x "$NDKBIN/clang" ]] || { echo "error: no Android NDK at $NDK (set ANDROID_NDK_HOME)" >&2; exit 1; }
+for abi in ${XMAS_ABIS:-arm64-v8a armeabi-v7a x86_64}; do
+  case "$abi" in
+    arm64-v8a) T=aarch64-linux-android; CC=aarch64-linux-android24-clang ;;
+    armeabi-v7a) T=armv7-linux-androideabi; CC=armv7a-linux-androideabi24-clang ;;
+    x86_64) T=x86_64-linux-android; CC=x86_64-linux-android24-clang ;;
+    *) echo "error: unknown ABI $abi" >&2; exit 1 ;;
+  esac
+  U="$(echo "$T" | tr 'a-z-' 'A-Z_')"
+  # (16 KB pages: newer phones need the library laid out for them)
+  env "CARGO_TARGET_${U}_LINKER=$NDKBIN/$CC" "CC_${T//-/_}=$NDKBIN/$CC" "AR_${T//-/_}=$NDKBIN/llvm-ar" \
+      "CARGO_TARGET_${U}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" \
+      cargo build --quiet --release --manifest-path native/Cargo.toml --target "$T"
+  mkdir -p "$B/lib/$abi"
+  cp "native/target/$T/release/libxmas.so" "$B/lib/$abi/"
+done
 cp "$B/base.apk" "$B/unsigned.apk"
 (cd "$B/dex" && zip -q ../unsigned.apk classes.dex)
+(cd "$B" && zip -q -r unsigned.apk lib)
 "$BT/zipalign" -p -f 4 "$B/unsigned.apk" "$B/aligned.apk"
 KEYDIR="${XDG_DATA_HOME:-$HOME/.local/share}/xmas-tui-signing"
 KS="${XMAS_KEYSTORE:-$KEYDIR/xmas-tui.jks}"

@@ -69,6 +69,14 @@ public class SettingsActivity extends Activity {
         col.addView(head);
         col.addView(note("A snowy village on the home screen. Folk go about their evening on their own; tap someone to say hi, tap the sky for a shooting star, tap the dock to knock the snow off."));
 
+        Button play = new Button(this);
+        play.setText("▶  Play in the village");
+        play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class)));
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pl.topMargin = dp(12);
+        col.addView(play, pl);
+        col.addView(note("Walk the villager about the whole village, as on the desktop: talk to folk, climb roofs, build snowmen with the kids, visit the houses."));
+
         Button set = new Button(this);
         set.setText("Set as live wallpaper");
         set.setOnClickListener(v -> setWallpaper());
@@ -89,6 +97,10 @@ public class SettingsActivity extends Activity {
         section("FRAME RATE");
         choiceInt("Frames per second", "fps", new int[] {10, 15, 20, 24, 30, 45, 60}, 24);
         col.addView(note("Lower saves battery. It only runs while the home screen is showing."));
+
+        section("PLAYING IN THE VILLAGE");
+        toggle("Sound", "game_sound", true);
+        choiceInt("Frames per second", "game_fps", new int[] {20, 24, 30, 45, 60}, 30);
 
         section("SNOWY DOCK");
         toggle("Show a shelf under the dock", "dock", true);

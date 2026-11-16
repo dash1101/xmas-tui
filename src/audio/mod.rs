@@ -259,6 +259,12 @@ impl Drop for Audio {
     }
 }
 
+/// Android: the app's AudioTrack takes what's been made (see `out::android`).
+#[cfg(target_os = "android")]
+pub fn take_android(out: &mut [i16]) -> usize {
+    out::android::take(out)
+}
+
 fn audible(c: &SoundCfg) -> bool {
     c.enabled && c.master > 0.0 && (c.music > 0.0 || c.sfx > 0.0 || c.ambience > 0.0)
 }

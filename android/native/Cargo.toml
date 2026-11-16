@@ -1,0 +1,29 @@
+# The village as a native library for the Android app (libxmas.so): the
+# desktop's own scene, frame, renderer and sound (the same source files, see
+# src/lib.rs), driven by the app's game screen through JNI.
+# Built by android/build.sh for each Android ABI.
+[package]
+name = "xmas-android"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "xmas"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+fontdue = "0.9"
+png = "0.17"
+jni = { version = "0.21", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true

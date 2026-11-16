@@ -2,9 +2,10 @@
 # publish a GitHub release with them and SHA256SUMS (what the in-app updater
 # and Orbit download). The APK is signed with the release key from the
 # repository's secrets; without them the release has no APK. It's attached
-# only when android/ changed since the newest release that has it (so phones
-# aren't offered an identical update), or when none of the last 7 releases
-# has it: Orbit takes the newest release with the APK, looking back 10.
+# only when android/ or src/ (the village the app plays, built into it)
+# changed since the newest release that has it (so phones aren't offered an
+# identical update), or when none of the last 7 releases has it: Orbit takes
+# the newest release with the APK, looking back 10.
 name: release
 on:
   push:
@@ -92,15 +93,22 @@ jobs:
           if [ -z "$last" ]; then
             echo "no APK in the last 7 releases: building it"
             echo "due=1" >> "$GITHUB_OUTPUT"
-          elif ! git diff --quiet "$last" "$GITHUB_REF_NAME" -- android/; then
-            echo "android/ changed since $last (the newest release with the APK): building it"
+          elif ! git diff --quiet "$last" "$GITHUB_REF_NAME" -- android/ src/ assets/; then
+            echo "android/ or the village (src/) changed since $last (the newest release with the APK): building it"
             echo "due=1" >> "$GITHUB_OUTPUT"
           else
-            echo "android/ unchanged since $last, which has the APK: none in this release"
+            echo "android/ and src/ unchanged since $last, which has the APK: none in this release"
           fi
       - uses: actions/setup-java@v5
         if: steps.due.outputs.due == '1'
         with: { distribution: temurin, java-version: '17' }
+      # the village to play in is the desktop's own, built for each Android ABI
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.due.outputs.due == '1'
+        with: { targets: "aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android" }
+      - uses: Swatinem/rust-cache@v2
+        if: steps.due.outputs.due == '1'
+        with: { workspaces: android/native }
       - name: signing key (repository secrets)
         id: key
         if: steps.due.outputs.due == '1'

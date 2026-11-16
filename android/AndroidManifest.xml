@@ -21,6 +21,19 @@
         </service>
 
         <activity
+            android:name=".GameActivity"
+            android:label="@string/game_title"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".SettingsActivity"
             android:label="@string/settings_title"
             android:theme="@android:style/Theme.Material.NoActionBar"
