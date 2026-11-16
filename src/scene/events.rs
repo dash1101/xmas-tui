@@ -132,6 +132,8 @@ struct Bubble {
     owner: u64,
     dy: i32,
     matched: bool,
+    /// The speaker's name, shown on the bubble's top edge.
+    name: String,
 }
 
 /// A car (or now and then a little bus) on the distant road.
@@ -201,6 +203,55 @@ pub fn read_time(text: &str, min: f32) -> f32 {
     min.max(1.4 + n * 0.065) * talk_time()
 }
 
+/// How long everyone gets to gather round the big tree before a light show.
+pub const SHOW_LEAD: f32 = 25.0;
+
+/// How long a snow angel lasts before the snow fills it in (s).
+const ANGEL_LIFE: f32 = 240.0;
+
+/// A snow angel in the snow (head to the left, or right), seen from above
+/// and a little squashed by the low view: the hollow pressed in by the
+/// head, the arms swept into wings and the legs into a skirt, shadowed, with
+/// a bright rim of pushed-up snow, fading as it fills in. One pixel a
+/// column, two a row.
+const ANGEL: [&str; 6] = [
+    "...##.....###..",
+    "..####...#####.",
+    ".######.#######",
+    "##.#############",
+    ".######.#######",
+    "..####...#####.",
+];
+
+fn draw_angel(f: &mut Frame, x: f32, y: f32, k: f32, left: bool, fade: f32) {
+    if fade <= 0.0 {
+        return;
+    }
+    let shade = Rgb::hex(0x7d90bc);
+    let rim = Rgb::hex(0xf8fbff);
+    let k = k.max(0.6);
+    let (w, h) = (16.0 * k, ANGEL.len() as f32 * k);
+    let x0 = (x - w / 2.0).round() as i32;
+    let y0 = ((y + 1.0) * 2.0 - h).round() as i32;
+    let at = |u: i32, v: i32| -> bool {
+        if u < 0 || v < 0 {
+            return false;
+        }
+        let (c, r) = ((u as f32 / k) as usize, (v as f32 / k) as usize);
+        let c = if left { c } else { 15usize.saturating_sub(c) };
+        ANGEL.get(r).and_then(|row| row.as_bytes().get(c)).is_some_and(|&b| b == b'#')
+    };
+    for v in -1..h.ceil() as i32 {
+        for u in 0..w.ceil() as i32 {
+            if at(u, v) {
+                f.px_blend(x0 + u, y0 + v, shade, 0.68 * fade);
+            } else if at(u, v + 1) {
+                f.px_blend(x0 + u, y0 + v, rim, 0.55 * fade);
+            }
+        }
+    }
+}
+
 pub struct Director {
     /// Rows to lift speech bubbles and little emotes by, over people and
     /// animals drawn bigger (0 at the usual size).
@@ -225,6 +276,10 @@ pub struct Director {
     show_at: Option<(f32, f32)>,
     /// The village should gather round the big tree until this time.
     pub gather: Option<f32>,
+    /// Rockets to go up: (when, column).
+    rockets_due: Vec<(f32, f32)>,
+    /// How high the sun is (from the scene's daylight: 0 night .. 1 day).
+    pub sun: f32,
     /// Passengers off a train at the station (columns), for the scene to
     /// send walking into the village.
     pub arrivals: Vec<f32>,
@@ -235,6 +290,9 @@ pub struct Director {
     pub drive_left: bool,
     next_train: f32,
     prints: Vec<(i32, i32, f32)>,
+    /// Snow angels pressed into the snow: (centre column, row, made at,
+    /// size, head to the left); slowly snowed over.
+    angels: Vec<(f32, f32, f32, f32, bool)>,
     pub gust: Env,
     gust_dir: f32,
     pub flare: Env,
@@ -276,12 +334,15 @@ impl Director {
             train_glow: -1.0,
             show_at: None,
             gather: None,
+            rockets_due: vec![],
+            sun: 0.0,
             arrivals: vec![],
             happenings: vec![],
             car_cd: 0.0,
             drive_left: false,
             next_train: 20.0,
             prints: vec![],
+            angels: vec![],
             gust: Env::default(),
             gust_dir: 1.0,
             flare: Env::default(),
@@ -312,11 +373,17 @@ impl Director {
         }
         self.bells_until -= s;
         self.next_train -= s;
+        for r in &mut self.rockets_due {
+            r.0 -= s;
+        }
         if let Some(sa) = &mut self.show_at {
             sa.0 -= s;
         }
         self.next_firework -= s;
         self.next_strike -= s;
+        for a in &mut self.angels {
+            a.2 -= s;
+        }
         for p in &mut self.prints {
             p.2 -= s;
         }
@@ -329,6 +396,29 @@ impl Director {
     pub fn sound(&mut self, sfx: Sfx, x: f32, gain: f32) {
         if self.sounds.len() < 64 {
             self.sounds.push(SoundEvent { sfx, pan: x, gain });
+        }
+    }
+
+    /// A light show in `lead` seconds, `dur` long: everyone's called to
+    /// gather round the big tree first. False if one's already on (or on
+    /// its way).
+    pub fn plan_light_show(&mut self, t: f32, lead: f32, dur: f32) -> bool {
+        if self.show_at.is_some() || self.show.active(t) {
+            return false;
+        }
+        self.show_at = Some((t + lead, dur));
+        self.gather = Some(t + lead + dur);
+        true
+    }
+
+
+    /// Fireworks: `n` rockets launched one after another from around
+    /// column `x`.
+    pub fn fireworks(&mut self, t: f32, n: usize, x: f32) {
+        for i in 0..n {
+            let at = t + i as f32 * self.rng.range(0.35, 0.9);
+            let dx = self.rng.range(-28.0, 28.0);
+            self.rockets_due.push((at, x + dx));
         }
     }
 
@@ -370,28 +460,32 @@ impl Director {
         let y = y - self.lift;
         self.bubbles.retain(|b| (b.x - x).abs() > 4 || (b.y - y).abs() > 2);
         let life = read_time(text, 3.8);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new() });
     }
 
     /// Keep speech bubbles over whoever's speaking. `who`: (id, centre
     /// column, baseline row) of everyone who might be talking. A new bubble
     /// is matched to the speaker it was placed over; after that it follows
     /// them.
-    pub fn track(&mut self, who: &[(u64, f32, f32)]) {
+    pub fn track(&mut self, who: &[(u64, f32, f32, String)]) {
+        // (people are drawn bigger indoors: their bubbles sit higher)
+        let indoor = self.indoor;
+        let reach = if indoor { 14 } else { 6 };
         for b in &mut self.bubbles {
             if !b.matched {
                 b.matched = true;
                 let best = who
                     .iter()
-                    .filter(|(_, x, y)| (x.round() as i32 - b.x).abs() <= 1 && b.y >= *y as i32 - 6 - self.lift && b.y <= *y as i32)
-                    .min_by_key(|(_, x, _)| (x.round() as i32 - b.x).abs());
-                if let Some(&(id, _, y)) = best {
-                    b.owner = id;
+                    .filter(|(_, x, y, _)| (x.round() as i32 - b.x).abs() <= if indoor { 2 } else { 1 } && b.y >= *y as i32 - reach - self.lift && b.y <= *y as i32)
+                    .min_by_key(|(_, x, _, _)| (x.round() as i32 - b.x).abs());
+                if let Some((id, _, y, name)) = best {
+                    b.owner = *id;
                     b.dy = b.y - y.round() as i32;
+                    b.name = name.clone();
                 }
             }
             if b.owner != 0 {
-                if let Some(&(_, x, y)) = who.iter().find(|w| w.0 == b.owner) {
+                if let Some(&(_, x, y, _)) = who.iter().find(|w| w.0 == b.owner) {
                     b.x = x.round() as i32;
                     b.y = y.round() as i32 + b.dy;
                 }
@@ -410,11 +504,31 @@ impl Director {
             }
         }
         let life = read_time(text, life);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new() });
     }
 
     pub fn footprint(&mut self, x: i32, y: i32, t: f32) {
         self.prints.push((x, y, t));
+    }
+
+    /// After dark (the sun well down).
+    pub fn night(&self) -> bool {
+        self.sun < 0.25
+    }
+
+    /// A snow angel pressed into the snow, centred on column `x` with its
+    /// lowest edge on row `y`, `k` big (the head to the left, or right).
+    pub fn snow_angel(&mut self, x: f32, y: f32, t: f32, k: f32, head_left: bool) {
+        if self.angels.len() >= 24 {
+            self.angels.remove(0);
+        }
+        self.angels.push((x, y, t, k, head_left));
+    }
+
+    /// How many snow angels are about (tests).
+    #[cfg(test)]
+    pub fn angel_count(&self) -> usize {
+        self.angels.len()
     }
 
     pub fn burst(&mut self, x: f32, y: f32, n: usize, colors: &[Rgb], speed: f32, grav: f32) {
@@ -493,9 +607,14 @@ impl Director {
     }
 
     pub fn firework(&mut self, ctx: &Ctx) {
+        let x = ctx.cam + self.rng.range(ctx.vw as f32 * 0.15, ctx.vw as f32 * 0.85);
+        self.firework_at(ctx, x);
+    }
+
+    /// A rocket from column `x`.
+    pub fn firework_at(&mut self, ctx: &Ctx, x: f32) {
         self.happenings.push((super::dialogue::Ev::Fireworks, None));
         let colors = [pal::RED, pal::GOLD, pal::GREEN, pal::BLUE, Rgb::hex(0xff7ae0), Rgb::WHITE];
-        let x = ctx.cam + self.rng.range(ctx.vw as f32 * 0.15, ctx.vw as f32 * 0.85);
         let color = *self.rng.pick(&colors);
         self.sound(Sfx::Launch, x, 1.0);
         self.rockets.push(Rocket { x, y: ctx.h as f32 * 0.7, vy: -self.rng.range(14.0, 20.0), burst_y: self.rng.range(4.0, ctx.sky_rows as f32 * 0.6), color });
@@ -664,8 +783,7 @@ impl Director {
                 // announced: everyone gathers round the big tree first
                 if self.show_at.is_none() && !self.show.active(t) {
                     let dur = self.rng.range(14.0, 22.0);
-                    self.show_at = Some((t + 10.0, dur));
-                    self.gather = Some(t + 10.0 + dur);
+                    self.plan_light_show(t, SHOW_LEAD, dur);
                 }
             }
             89..=94 => self.house_toggle = Some(self.rng.int(0, 64) as usize),
@@ -702,6 +820,14 @@ impl Director {
             if t >= start {
                 self.show_at = None;
                 self.light_show(t, dur);
+            }
+        }
+        // fireworks set off by hand, one after another
+        if !self.rockets_due.is_empty() {
+            let due: Vec<f32> = self.rockets_due.iter().filter(|r| t >= r.0).map(|r| r.1).collect();
+            self.rockets_due.retain(|r| t < r.0);
+            for x in due {
+                self.firework_at(ctx, x);
             }
         }
         // (a room indoors has no bells, trains or traffic of its own)
@@ -826,6 +952,7 @@ impl Director {
             }
         }
         self.prints.retain(|p| t - p.2 < 30.0);
+        self.angels.retain(|a| t - a.2 < ANGEL_LIFE);
 
         for p in &mut self.parts {
             p.age += dt;
@@ -997,6 +1124,9 @@ impl Director {
             if !f.has_g(x, y) {
                 f.put_g(x, y, Glyph::new('·', Rgb::hex(0x56607f)).alpha(0.8 * k).lit(0.5));
             }
+        }
+        for &(x, y, born, k, left) in &self.angels {
+            draw_angel(f, x, y, k, left, (1.0 - (t - born) / ANGEL_LIFE).clamp(0.0, 1.0));
         }
         // the railway station, by the tracks
         if let Some((sx, sw)) = ctx.station {
@@ -1179,7 +1309,8 @@ impl Director {
             let age = t - b.born;
             let shown = ((age * 40.0) as usize).min(b.text.chars().count());
             let text: String = b.text.chars().take(shown).collect();
-            let w = b.text.chars().count() as i32 + 4;
+            let named = b.name.chars().count() as i32;
+            let w = (b.text.chars().count() as i32 + 4).max(if named > 0 { named + 6 } else { 0 });
             // keep the box on screen (its tail still points at b.x)
             let x0 = (b.x - w / 2).min(f.ox + f.w as i32 - w).max(f.ox);
             let mut y0 = b.y - 3;
@@ -1204,6 +1335,10 @@ impl Director {
             f.put_g(x0, y0 + 1, Glyph::new('│', fg).bg(bg).lit(0.0));
             f.put_g(x0 + w - 1, y0 + 1, Glyph::new('│', fg).bg(bg).lit(0.0));
             f.text(x0 + 2, y0 + 1, &text, fg, bg, 0.0);
+            // who's speaking, on the top edge
+            if named > 0 {
+                f.text(x0 + 2, y0, &format!(" {} ", b.name), Rgb::hex(0x9a4a1a), bg, 0.0);
+            }
             let tail = Rgb::hex(0xf4efe6) * fade;
             for y in y0 + 3..b.y {
                 f.put_g(b.x, y, Glyph::new('│', tail * 0.8).lit(0.0));

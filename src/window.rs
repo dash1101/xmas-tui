@@ -177,6 +177,9 @@ impl Runner {
                 let mut app = App::new(self.cfg.clone(), self.seed, &self.path, cols, rows, desktop, !desktop, true);
                 app.set_windowed(!desktop);
                 app.start_audio();
+                if crate::save::on() {
+                    app.keep_saves();
+                }
                 self.app = Some(app);
             }
         }
@@ -752,13 +755,39 @@ impl ApplicationHandler for Runner {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let up = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
-                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
-                };
+                let (cx, cy) = self.to_cell(self.cursor.0, self.cursor.1);
+                let cell = self.gfx.as_ref().map(|g| (g.raster.cw.max(1) as f32, g.raster.ch.max(1) as f32)).unwrap_or((8.0, 16.0));
+                let Some(app) = self.app.as_mut() else { return };
+                match delta {
+                    // a trackpad: smooth, both ways at once (along the
+                    // village, and up into the sky); with Ctrl (how a pinch
+                    // arrives on many desktops), zoom
+                    MouseScrollDelta::PixelDelta(p) if !self.ctrl => app.mouse(MouseIn::Pad(p.x as f32 / cell.0, p.y as f32 / cell.1), cx, cy),
+                    MouseScrollDelta::PixelDelta(p) => app.mouse(MouseIn::Zoom((p.y as f32 * 0.006).exp()), cx, cy),
+                    // a wheel (a tilt sideways too); Ctrl: zoom; Shift: up
+                    // into the sky
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        if x.abs() > y.abs() {
+                            app.mouse(MouseIn::ScrollSide(x < 0.0), cx, cy);
+                        } else if y != 0.0 {
+                            let up = y > 0.0;
+                            let ev = if self.ctrl {
+                                MouseIn::Zoom(if up { 1.12 } else { 1.0 / 1.12 })
+                            } else if self.shift {
+                                MouseIn::ScrollSky(up)
+                            } else {
+                                MouseIn::Scroll(up)
+                            };
+                            app.mouse(ev, cx, cy);
+                        }
+                    }
+                }
+            }
+            // a pinch (macOS): zoom
+            WindowEvent::PinchGesture { delta, .. } if delta.is_finite() => {
                 let (cx, cy) = self.to_cell(self.cursor.0, self.cursor.1);
                 if let Some(app) = self.app.as_mut() {
-                    app.mouse(if self.ctrl { MouseIn::ScrollSky(up) } else { MouseIn::Scroll(up) }, cx, cy);
+                    app.mouse(MouseIn::Zoom((1.0 + delta as f32).clamp(0.5, 2.0)), cx, cy);
                 }
             }
             WindowEvent::ModifiersChanged(m) => {

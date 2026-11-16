@@ -17,6 +17,8 @@ pub const BTN_INVITE: i32 = 4; // F
 pub const BTN_HELD: i32 = 5; // Q: what's in hand
 pub const BTN_BACK: i32 = 6; // Esc: close what's open
 pub const BTN_CENTRE: i32 = 7; // C: the view back on the villager
+pub const BTN_JUMP_UP: i32 = 8; // Space let go (a held jump stops rising)
+pub const BTN_REST: i32 = 9; // Z: lie down in the snow
 /// 1..5: an answer, or a pocket item (BTN_NUM + n - 1)
 pub const BTN_NUM: i32 = 10;
 
@@ -46,6 +48,13 @@ pub struct Game {
     moved: bool,
     /// The long-press menu's choices, waiting for a pick.
     choices: Vec<Do>,
+    /// The save file (shared by the game screen and the wallpaper), and
+    /// when it was last written.
+    save: Option<std::path::PathBuf>,
+    saved_at: f32,
+    /// The joystick's last up/down (a push, not a hold, steps through a
+    /// conversation's answers).
+    stick_y: f32,
 }
 
 /// Cells for a screen: rows from the short side (about 18 px a row at
@@ -58,11 +67,25 @@ fn grid(pw: usize, ph: usize, size: f32) -> (usize, usize, usize, usize) {
 }
 
 impl Game {
-    pub fn new(pw: usize, ph: usize, size: f32, cfg: Config) -> Game {
+    pub fn new(pw: usize, ph: usize, size: f32, cfg: Config, save: Option<std::path::PathBuf>) -> Game {
+        let saved = save.as_deref().and_then(crate::save::read);
+        Game::new_saved(pw, ph, size, cfg, saved, save)
+    }
+
+    /// From a save already read (the web page keeps its own); `save`: where
+    /// to write it (none: `save_text` hands it back instead).
+    pub fn new_saved(pw: usize, ph: usize, size: f32, cfg: Config, saved: Option<crate::save::Save>, save: Option<std::path::PathBuf>) -> Game {
         crate::frame::set_pictures_ok(true);
         let (cw, ch, cols, rows) = grid(pw, ph, size);
-        let seed = if cfg.seed == 0 { crate::app::random_seed() } else { cfg.seed as u32 };
+        // the same village each time (and the same in the game and on the
+        // wallpaper): the save's
+        let seed = if cfg.seed != 0 { cfg.seed as u32 } else { saved.as_ref().map(|s| s.seed).unwrap_or_else(crate::app::random_seed) };
         let mut scene = Scene::new(cols, rows, seed, &cfg.scene);
+        if let Some(s) = saved.filter(|s| s.seed == seed) {
+            scene.set_pockets(s.pockets);
+            scene.place_player(s.player);
+        }
+        scene.set_autopilot(cfg.scene.autopilot);
         scene.set_live(cfg.scene.walk_speed, false, cfg.scene.most_at_once);
         scene.set_pet(&cfg.scene.pet);
         scene.set_name(&cfg.scene.name);
@@ -93,8 +116,38 @@ impl Game {
             carrying: false,
             moved: false,
             choices: vec![],
+            save,
+            saved_at: 0.0,
+            stick_y: 0.0,
             cfg,
         }
+    }
+
+    /// Write the save file (every minute, when paused, and at the end).
+    pub fn save(&mut self) {
+        self.saved_at = self.t;
+        let Some(p) = self.save.clone() else { return };
+        let _ = crate::save::write(&p, &self.saved());
+    }
+
+    /// The save as text (the web page keeps it in the browser).
+    pub fn save_text(&self) -> String {
+        toml::to_string(&self.saved()).unwrap_or_default()
+    }
+
+    fn saved(&self) -> crate::save::Save {
+        crate::save::Save {
+            version: 1,
+            seed: self.scene_seed(),
+            name: self.cfg.scene.name.clone(),
+            saved: crate::clock::now().format("%Y-%m-%d %H:%M").to_string(),
+            player: self.scene.player_at(),
+            pockets: self.scene.pockets().clone(),
+        }
+    }
+
+    fn scene_seed(&self) -> u32 {
+        self.scene.seed()
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -113,6 +166,9 @@ impl Game {
             self.scene.set_daylight(daylight::compute(&self.cfg.scene.time, mins, 450.0, 1020.0));
         }
         self.scene.update(dt, t);
+        if t - self.saved_at > 60.0 {
+            self.save();
+        }
         let sounds = self.scene.take_sounds();
         if let Some(a) = &self.audio {
             a.frame(sounds, self.scene.audio_state(t));
@@ -187,6 +243,25 @@ impl Game {
 
     /// The joystick: -1..1 each way; pushed all the way, a run.
     pub fn steer(&mut self, mx: f32, my: f32, run: bool) {
+        // a conversation's answers: the joystick pushed up or down steps
+        // through them (the E button picks)
+        if self.scene.convo_choosing() || self.scene.at_table() {
+            if my != 0.0 && my != self.stick_y {
+                self.scene.woke();
+                if self.scene.at_table() {
+                    self.scene.table_key(Some(if my < 0.0 { crate::scene::games::Key::Up } else { crate::scene::games::Key::Down }));
+                } else {
+                    self.scene.convo_step(my.signum() as i32);
+                }
+            }
+            if self.scene.at_table() && mx != 0.0 && my == 0.0 && self.stick_y == 0.0 {
+                self.scene.table_key(Some(if mx < 0.0 { crate::scene::games::Key::Left } else { crate::scene::games::Key::Right }));
+            }
+            self.stick_y = if my != 0.0 { my } else if mx != 0.0 { 1e-3 } else { 0.0 };
+            self.scene.set_move(0.0, 0.0);
+            return;
+        }
+        self.stick_y = my;
         self.scene.set_move(mx, my);
         self.scene.set_sprint(run);
     }
@@ -197,12 +272,20 @@ impl Game {
             self.scene.woke();
         }
         match b {
+            // (at the table: E plays; in a conversation, the answer the
+            // joystick picked out)
+            BTN_E if self.scene.at_table() => self.scene.table_key(Some(crate::scene::games::Key::Pick)),
+            BTN_E if self.scene.convo_pick() => {}
             BTN_E => self.scene.interact(),
+            BTN_JUMP if self.scene.at_table() => self.scene.table_key(Some(crate::scene::games::Key::Other)),
             BTN_JUMP => self.scene.jump(),
+            BTN_JUMP_UP => self.scene.release_jump(),
+            BTN_REST => self.scene.rest(),
             BTN_SNOWBALL => self.scene.snowball(),
             BTN_POCKETS => self.scene.toggle_pockets(),
             BTN_INVITE => self.scene.invite(),
             BTN_HELD => self.scene.cycle_held(),
+            BTN_BACK if self.scene.at_table() => self.scene.table_key(None),
             BTN_BACK => {
                 self.scene.close_panels();
             }
@@ -281,17 +364,39 @@ impl Game {
         Some((title, items.into_iter().map(|(l, _)| l).collect()))
     }
 
-    pub fn pick(&mut self, i: usize) {
-        if let Some(d) = self.choices.get(i).copied() {
-            self.scene.woke();
-            self.scene.act(d);
+    /// Things to do here (the ✦ button; T on the desktop).
+    pub fn todo(&mut self) -> Option<(String, Vec<String>)> {
+        let (title, items) = self.scene.todo_menu();
+        if items.is_empty() {
+            return None;
         }
+        self.choices = items.iter().map(|(_, d)| *d).collect();
+        Some((title, items.into_iter().map(|(l, _)| l).collect()))
+    }
+
+    /// One of the choices: done, or (a "▸") a further list to choose from.
+    pub fn pick(&mut self, i: usize) -> Option<(String, Vec<String>)> {
+        let d = self.choices.get(i).copied();
         self.choices.clear();
+        match d {
+            Some(Do::More(k)) => {
+                let (title, items) = self.scene.more_menu(k);
+                self.choices = items.iter().map(|(_, d)| *d).collect();
+                Some((title, items.into_iter().map(|(l, _)| l).collect()))
+            }
+            Some(d) => {
+                self.scene.woke();
+                self.scene.act(d);
+                None
+            }
+            None => None,
+        }
     }
 
     /// Paused (the app's in the background): the sound goes quiet.
     pub fn pause(&mut self, on: bool) {
         if on {
+            self.save();
             self.audio = None;
         } else if self.audio.is_none() && self.cfg.sound.enabled {
             self.audio = Audio::start(&self.cfg.sound);
@@ -301,6 +406,13 @@ impl Game {
 
 /// The app's AudioTrack: as many samples (48 kHz stereo s16) as the sound
 /// thread has made, into `out`; silence for the rest.
+#[cfg(target_os = "android")]
 pub fn audio_take(out: &mut [i16]) -> usize {
     audio::take_android(out)
+}
+
+impl Drop for Game {
+    fn drop(&mut self) {
+        self.save();
+    }
 }

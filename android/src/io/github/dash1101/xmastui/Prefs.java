@@ -15,6 +15,42 @@ final class Prefs {
         return c.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
+    /**
+     * The settings the native village takes (the game screen's, and the
+     * wallpaper's), as TOML; the save file (the same village, and the
+     * villager's things, in both) goes beside the app's other files. On the
+     * wallpaper the villager's always on autopilot, and it's quiet.
+     */
+    static String toml(Context c, boolean wallpaper) {
+        SharedPreferences p = get(c);
+        String time = p.getString("time", "auto");
+        if (time.equals("day")) {
+            time = "noon";
+        }
+        StringBuilder s = new StringBuilder();
+        s.append("save_path = ").append(q(new java.io.File(c.getFilesDir(), "save.toml").getAbsolutePath())).append('\n');
+        s.append("[scene]\n");
+        s.append("name = ").append(q(p.getString("name", ""))).append('\n');
+        s.append("time = ").append(q(time)).append('\n');
+        s.append("snow = ").append(p.getInt("snow", 100) / 100f).append('\n');
+        s.append("autopilot = ").append(wallpaper || p.getBoolean("autopilot", false)).append('\n');
+        s.append("[scene.pet]\n");
+        s.append("kind = ").append(q(p.getString("pet", "cat"))).append('\n');
+        s.append("name = ").append(q(p.getString("pet_name", ""))).append('\n');
+        s.append("[sound]\n");
+        s.append("enabled = ").append(!wallpaper && p.getBoolean("game_sound", true)).append('\n');
+        return s.toString();
+    }
+
+    static String q(String v) {
+        return "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** The wallpaper is the game's own village, on autopilot (or the classic one, with the snowy dock). */
+    static boolean nativeWallpaper(Context c) {
+        return !get(c).getString("wall_style", "village").equals("classic");
+    }
+
     static Config load(Context c) {
         SharedPreferences p = get(c);
         Config cfg = new Config();

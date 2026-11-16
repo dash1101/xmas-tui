@@ -35,6 +35,84 @@ public class VillageWallpaper extends WallpaperService {
     }
 
     final class VillageEngine extends Engine implements SharedPreferences.OnSharedPreferenceChangeListener {
+        /**
+         * The game's own village (the native one), the villager on
+         * autopilot: the same village and the same save as the game screen,
+         * so one carries on from the other. (Or the classic wallpaper.)
+         */
+        private long game;
+        private boolean nat;
+        private volatile boolean running;
+        private Thread loop;
+        private long savedAt;
+        private String cfgUsed = "";
+        private float lastOffset = 0.5f;
+
+        private java.io.File saveFile() {
+            return new java.io.File(getFilesDir(), "save.toml");
+        }
+
+        private void natStart() {
+            if (game == 0 || running || !visible) {
+                return;
+            }
+            running = true;
+            final long g = game;
+            final int fps = Math.max(10, Math.min(60, Prefs.get(VillageWallpaper.this).getInt("fps", 24)));
+            loop = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    long last = System.nanoTime();
+                    long step = 1_000_000_000L / fps;
+                    while (running) {
+                        long now = System.nanoTime();
+                        Native.frame(g, (now - last) / 1e9f);
+                        last = now;
+                        long wait = step - (System.nanoTime() - now);
+                        if (wait > 0) {
+                            try {
+                                Thread.sleep(wait / 1_000_000L, (int) (wait % 1_000_000L));
+                            } catch (InterruptedException e) {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }, "village-wallpaper");
+            loop.start();
+        }
+
+        private void natStop() {
+            running = false;
+            if (loop != null) {
+                try {
+                    loop.join(1000);
+                } catch (InterruptedException ignored) {
+                }
+                loop = null;
+            }
+        }
+
+        /** The native village for the screen (anew if the settings or the save changed). */
+        private void natBuild(boolean fresh) {
+            if (sw <= 0 || sh <= 0) {
+                return;
+            }
+            String cfg = Prefs.toml(VillageWallpaper.this, true);
+            boolean newer = saveFile().lastModified() > savedAt + 500;
+            if (game != 0 && (fresh || newer || !cfg.equals(cfgUsed))) {
+                natStop();
+                Native.destroy(game);
+                game = 0;
+            }
+            if (game == 0) {
+                float size = Math.max(40, Math.min(250, Prefs.get(VillageWallpaper.this).getInt("size", 100))) / 100f;
+                game = Native.create(sw, sh, size, cfg);
+                cfgUsed = cfg;
+                savedAt = saveFile().lastModified();
+                Native.attach(game, getSurfaceHolder().getSurface());
+            }
+        }
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final Runnable tick = this::frame;
         private Config cfg;
@@ -67,6 +145,11 @@ public class VillageWallpaper extends WallpaperService {
         @Override
         public void onDestroy() {
             handler.removeCallbacks(tick);
+            natStop();
+            if (game != 0) {
+                Native.destroy(game);
+                game = 0;
+            }
             Prefs.get(VillageWallpaper.this).unregisterOnSharedPreferenceChangeListener(this);
             super.onDestroy();
         }
@@ -74,8 +157,19 @@ public class VillageWallpaper extends WallpaperService {
         @Override
         public void onSurfaceChanged(SurfaceHolder holder, int format, int width, int height) {
             super.onSurfaceChanged(holder, format, width, height);
+            boolean resized = width != sw || height != sh;
             sw = width;
             sh = height;
+            nat = Prefs.nativeWallpaper(VillageWallpaper.this);
+            if (nat) {
+                natStop();
+                natBuild(resized);
+                if (game != 0) {
+                    Native.attach(game, holder.getSurface());
+                }
+                natStart();
+                return;
+            }
             build(false);
             frame();
         }
@@ -104,6 +198,24 @@ public class VillageWallpaper extends WallpaperService {
         public void onVisibilityChanged(boolean v) {
             visible = v;
             handler.removeCallbacks(tick);
+            if (nat) {
+                if (v) {
+                    // the game screen may have moved things on meanwhile
+                    natBuild(false);
+                    if (game != 0) {
+                        Native.pause(game, false);
+                    }
+                    natStart();
+                } else {
+                    natStop();
+                    if (game != 0) {
+                        Native.save(game);
+                        Native.pause(game, true);
+                        savedAt = saveFile().lastModified();
+                    }
+                }
+                return;
+            }
             if (v) {
                 last = 0;
                 frame();
@@ -114,6 +226,10 @@ public class VillageWallpaper extends WallpaperService {
         public void onSurfaceDestroyed(SurfaceHolder holder) {
             visible = false;
             handler.removeCallbacks(tick);
+            natStop();
+            if (game != 0) {
+                Native.detach(game);
+            }
             super.onSurfaceDestroyed(holder);
         }
 
@@ -121,12 +237,22 @@ public class VillageWallpaper extends WallpaperService {
         public void onOffsetsChanged(float xOffset, float yOffset, float xStep, float yStep, int xPixels, int yPixels) {
             pan = xOffset;
             if (village != null) village.setPan(xOffset);
+            // the home screen's pages: a look along the village
+            if (nat && game != 0) {
+                Native.pan(game, (lastOffset - xOffset) * sw * 1.5f);
+            }
+            lastOffset = xOffset;
         }
 
         @Override
         public Bundle onCommand(String action, int x, int y, int z, Bundle extras, boolean resultRequested) {
-            if (WallpaperManager.COMMAND_TAP.equals(action) && village != null) {
-                village.tap(x / (float) scale, y / (float) scale);
+            if (WallpaperManager.COMMAND_TAP.equals(action)) {
+                if (nat && game != 0) {
+                    Native.touch(game, 0, x, y);
+                    Native.touch(game, 2, x, y);
+                } else if (village != null) {
+                    village.tap(x / (float) scale, y / (float) scale);
+                }
             }
             return null;
         }
@@ -135,6 +261,25 @@ public class VillageWallpaper extends WallpaperService {
         public void onSharedPreferenceChanged(SharedPreferences p, String key) {
             Config old = cfg;
             cfg = Prefs.load(VillageWallpaper.this);
+            boolean wantNat = Prefs.nativeWallpaper(VillageWallpaper.this);
+            if (wantNat != nat || nat) {
+                nat = wantNat;
+                if (!nat) {
+                    natStop();
+                    if (game != 0) {
+                        Native.destroy(game);
+                        game = 0;
+                    }
+                    build(true);
+                    frame();
+                } else {
+                    handler.removeCallbacks(tick);
+                    natStop();
+                    natBuild(false);
+                    natStart();
+                }
+                return;
+            }
             if (village == null) return;
             if (old.detail != cfg.detail) build(true);
             else village.setConfig(cfg);

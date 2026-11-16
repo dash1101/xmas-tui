@@ -939,10 +939,16 @@ impl Convo {
         x >= x0 && x < x0 + bw && y >= y0 && y < y0 + bh
     }
 
-    pub fn draw(&self, f: &mut Frame, hover: Option<usize>) {
+    pub fn draw(&self, f: &mut Frame, hover: Option<usize>, look: &str) {
         let (w, h) = (f.w as i32, f.h as i32);
         let (x0, y0, bw, bh, said) = self.layout(w, h);
         let bg = Bg::Mix(pal::UI_PANEL, 0.94);
+        self.draw_box(f, hover, x0, y0, bw, bh, &said, bg);
+        crate::widgets::looks::apply(f, crate::widgets::Rect { x: x0, y: y0, w: bw, h: bh }, look, bg, 9);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_box(&self, f: &mut Frame, hover: Option<usize>, x0: i32, y0: i32, bw: i32, bh: i32, said: &[String], bg: Bg) {
         let border = Rgb::hex(0xffd36b) * 0.8;
         for y in y0..y0 + bh {
             for x in x0..x0 + bw {
@@ -970,12 +976,15 @@ impl Convo {
             let y = first + i as i32;
             let hot = hover == Some(i + 1);
             let fg = if hot { Rgb::hex(0xffd36b) } else { pal::UI_TEXT };
+            if hot {
+                f.text(x0 + 1, y, "▸", Rgb::hex(0xffd36b), bg, 0.0);
+            }
             f.text(x0 + 2, y, &format!("{}", i + 1), Rgb::hex(0xffd36b), bg, 0.0);
             let label: String = o.label.chars().take((bw - 8) as usize).collect();
             f.text(x0 + 5, y, &label, fg, bg, 0.0);
         }
         if !self.opts.is_empty() {
-            let foot = " 1-5 or click to answer · drag to move · Esc to leave ";
+            let foot = " ↑↓ Enter · 1-5 · click to answer · Esc to leave ";
             f.text(x0 + bw - 2 - foot.chars().count() as i32, y0 + bh - 1, foot, pal::UI_DIM, bg, 0.0);
         }
     }

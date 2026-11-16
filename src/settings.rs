@@ -99,6 +99,9 @@ pub enum Act {
     RestartNow,
     RestartLater,
     Shuffle,
+    /// The save file: a copy out (to Documents), or one in.
+    ExportSave,
+    ImportSave,
     Quit,
     Autostart,
     /// Switch the panel to another tab (UI state only, not config).
@@ -126,6 +129,10 @@ pub enum Act {
     LockScreen,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     LockRedraw,
+    /// Install ffmpeg (through the system's password prompt): the lock
+    /// screen moves. (Linux)
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    InstallFfmpeg,
     /// Widget i's look, one along (or back).
     Look(u8, i8),
     /// Friend i: comes as a kid / a grown-up; off the list.
@@ -158,6 +165,9 @@ pub struct Settings {
     pub open: bool,
     /// Some(text) while a text field is being typed in, and which one.
     pub editing: Option<String>,
+    /// Waiting for a key to set for one of the villager's actions (an
+    /// index into `config::KEY_ACTIONS`).
+    pub binding: Option<usize>,
     pub edit: Option<Field>,
     regions: Vec<(Rect, Act)>,
     /// Labels (not clickable): hovering one explains its setting.
@@ -408,6 +418,10 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             *v = new;
             true
         }
+        Act::Look(9, d) => {
+            cfg.ui.look = crate::widgets::looks::step(&cfg.ui.look, d as i32).into();
+            true
+        }
         Act::Look(i, d) => {
             let Some(l) = cfg.widgets.looks.get_mut(i as usize) else { return false };
             *l = crate::widgets::looks::step(l, d as i32).into();
@@ -466,7 +480,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::FriendSel(_) => false,
+        Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
 }
 
@@ -533,6 +547,7 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::FriendLook(_, 2, _) => return Some("Their hair."),
         Act::FriendLook(..) => return Some("Their skin."),
         Act::FriendScarf(_) => return Some("A scarf, to match their hat."),
+        Act::Look(9, _) => return Some("How this panel, the menus, conversations and the controls card look: classic, frosted with snow, a wooden frame, or a gift box."),
         Act::Look(..) => return Some("The widget's look: classic, frosted with snow, a wooden frame, or a gift box."),
         Act::ShelfStyle(..) => return Some("The shelf's look: frosted with snow, a wooden shelf, or a gift box."),
         Act::ShelfIcons(_) => return Some("Each item's real icon (album art, thumbnails), or its icon as pixel art."),
@@ -541,6 +556,8 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::ShelfRemove(_) => return Some("Take the shelf away (its folder and files stay)."),
         Act::ShelfNew | Act::ShelfNewFrom => return Some("A new shelf: in its own new folder, or showing a folder picked now."),
         Act::Shuffle => return Some("A new village: the houses, trees and folk are laid out afresh."),
+        Act::ExportSave => return Some("A copy of the save (this village, your pockets, stats and scorecard) in Documents: to keep, or to take to another computer."),
+        Act::ImportSave => return Some("Load a save: its village (houses where they were) and its pockets, stats and scorecard."),
         Act::ResetLayout => return Some("Put the widgets back where they started."),
         Act::PopOut => return Some("Open the village in a window of its own, to play in."),
         Act::FullScreen => return Some("The village full screen, to play in (F11 again comes back)."),
@@ -549,6 +566,7 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Quit => return Some("Stop the wallpaper (the desktop goes back to normal)."),
         Act::SetWallpaper => return Some("Make the village the desktop wallpaper (sets up the service that keeps it running)."),
         Act::LockScreen | Act::LockRedraw => return Some("Show a looping video of the village on KDE's lock screen."),
+        Act::InstallFfmpeg => return Some("Install ffmpeg with the system's package manager (it asks for your password first). Then redraw the lock screen and it moves."),
         Act::CheckUpdate | Act::InstallUpdate => return Some("Look for a newer xmas-tui on GitHub (downloads are checked before installing)."),
         _ => return None,
     };
@@ -632,28 +650,49 @@ pub fn centre_rect(w: i32) -> Rect {
     Rect { x: w - 36, y: 0, w: 9, h: 1 }
 }
 
-/// The controls card: (keys, what they do).
-const CONTROLS: [(&str, &str); 19] = [
-    ("W A S D / arrows", "walk about"),
-    ("Shift (held)", "run"),
-    ("E / Enter", "talk, use, sit, pick up"),
-    ("Space", "jump (A / D steer in the air)"),
-    ("Space at a wall", "leap up onto a house, a tree, a widget…"),
-    ("F", "invite someone along / send them home"),
-    ("R", "scoop a snowball, then throw it"),
-    ("Q", "what's in hand: berries, a carrot, cocoa…"),
-    ("1 - 5", "use an item (or buy one at the cabin)"),
-    ("I", "your pockets and the Christmas list"),
-    ("Esc", "close what's open · else the settings"),
-    ("C", "the view back on the villager"),
-    ("F11", "full screen / back to the wallpaper"),
-    ("Ctrl + / Ctrl -", "zoom in / out (Ctrl 0: back to 1×)"),
-    ("Ctrl Shift + / -", "resolution: finer / coarser detail"),
-    ("click", "people, animals, the sky, the train…"),
-    ("drag", "pick up people & animals; move widgets"),
-    ("wheel · Ctrl wheel", "look along the village · up into the sky"),
-    ("hold a click", "the right-click menu"),
-];
+/// The zoom buttons (out, in), left of the re-centre one.
+pub fn zoom_rects(w: i32) -> (Rect, Rect) {
+    (Rect { x: w - 43, y: 0, w: 3, h: 1 }, Rect { x: w - 40, y: 0, w: 3, h: 1 })
+}
+
+/// The controls card: (keys, what they do, which of the villager's keys
+/// it is: those can be clicked to change them).
+fn controls(k: &crate::config::KeysCfg) -> Vec<(String, &'static str, Option<usize>)> {
+    use crate::config::KeysCfg as K;
+    let key = |i: usize| K::label(k.get(i));
+    vec![
+        ("W A S D / arrows".into(), "walk about", None),
+        ("Shift (held)".into(), "run", None),
+        (format!("{} / Enter", key(0)), "talk, use, sit, pick up", Some(0)),
+        (key(1), "jump: hold it to go higher (up to 4×)", Some(1)),
+        (format!("{} at a wall", key(1)), "leap up onto a house, a tree, a widget…", None),
+        ("W up on something".into(), "on up it (a roof's ridge, a tree's star)", None),
+        (key(7), "lie down in the snow (then jump: a snow angel)", Some(7)),
+        (key(8), "things to do: build, sing, tag, lights…", Some(8)),
+        (key(3), "invite someone along / send them home", Some(3)),
+        (key(2), "scoop a snowball, then throw it", Some(2)),
+        (key(5), "what's in hand: berries, a carrot, cocoa…", Some(5)),
+        ("1 - 5".into(), "use an item (or buy one at the cabin)", None),
+        (key(4), "your pockets, scorecard and Christmas list", Some(4)),
+        ("↑ ↓ Enter".into(), "choose in menus and conversations", None),
+        ("Esc".into(), "close what's open · else the settings", None),
+        (key(6), "the view back on the villager", Some(6)),
+        ("F11".into(), "full screen / back to the wallpaper", None),
+        ("Ctrl + / -, Ctrl wheel".into(), "zoom in / out, or pinch (Ctrl 0: back)", None),
+        ("Ctrl Shift + / -".into(), "resolution: finer / coarser detail", None),
+        ("click".into(), "people, animals, the sky, the train…", None),
+        ("drag".into(), "pick up people & animals; move widgets", None),
+        ("wheel · Shift wheel".into(), "look along the village · up into the sky", None),
+        ("trackpad".into(), "two fingers: along, and up into the sky", None),
+        ("hold a click".into(), "the right-click menu", None),
+    ]
+}
+
+/// Where the controls card sits on a `w`×`h` screen: (x, y, w, h).
+fn help_box(w: i32, h: i32, rows: usize) -> (i32, i32, i32, i32) {
+    let (bw, bh) = (72, rows as i32 + 6);
+    ((w - bw) / 2, ((h - bh) / 2).max(1), bw, bh)
+}
 
 impl Settings {
     /// Start typing in `which` (whatever was being typed elsewhere is put
@@ -816,12 +855,12 @@ impl Settings {
     }
 
     /// The controls card (? button, F1, or "?").
-    pub fn draw_help(&mut self, f: &mut Frame) {
+    pub fn draw_help(&mut self, f: &mut Frame, keys: &crate::config::KeysCfg, look: &str) {
         if !self.help {
             return;
         }
-        let (w, h) = (70, CONTROLS.len() as i32 + 5);
-        let (x, y) = ((f.w as i32 - w) / 2, ((f.h as i32 - h) / 2).max(1));
+        let rows = controls(keys);
+        let (x, y, w, h) = help_box(f.w as i32, f.h as i32, rows.len());
         for yy in y..y + h {
             for xx in x..x + w {
                 let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + h - 1) {
@@ -838,17 +877,51 @@ impl Settings {
         }
         f.text(x + 2, y, " ⌨ controls ", pal::UI_TITLE, BG, 0.0);
         f.text(x + w - 5, y, " ✕ ", pal::UI_TEXT, BG, 0.0);
-        for (i, (k, what)) in CONTROLS.iter().enumerate() {
+        for (i, (k, what, slot)) in rows.iter().enumerate() {
             let yy = y + 2 + i as i32;
-            f.text(x + 3, yy, k, Rgb::hex(0xffd36b), BG, 0.0);
-            f.text(x + 24, yy, what, pal::UI_TEXT, BG, 0.0);
+            let waiting = slot.is_some() && *slot == self.binding;
+            let hot = slot.is_some() && self.hover.1 == yy && self.hover.0 >= x + 2 && self.hover.0 < x + 24;
+            let (txt, bg) = if waiting { ("press a key…".to_string(), Bg::Mix(Rgb::hex(0x34406a), 0.95)) } else { (k.clone(), if hot { Bg::Mix(Rgb::hex(0x34406a), 0.95) } else { BG }) };
+            if slot.is_some() {
+                f.text(x + 2, yy, &format!("[{txt}]"), Rgb::hex(0xffd36b), bg, 0.0);
+            } else {
+                f.text(x + 3, yy, &txt, Rgb::hex(0xffd36b), BG, 0.0);
+            }
+            f.text(x + 25, yy, what, pal::UI_TEXT, BG, 0.0);
         }
-        f.text(x + 3, y + h - 2, "click anywhere to close", pal::UI_DIM, BG, 0.0);
+        let foot = if self.binding.is_some() { "press the new key · Esc: keep the old one" } else { "click a [key] to change it · anywhere else to close" };
+        f.text(x + 3, y + h - 2, foot, pal::UI_DIM, BG, 0.0);
+        crate::widgets::looks::apply(f, Rect { x, y, w, h }, look, BG, 13);
+    }
+
+    /// A click on the controls card: on one of the villager's [keys], wait
+    /// for a new one (true); anywhere else, close it (false).
+    pub fn help_click(&mut self, x: i32, y: i32, w: i32, h: i32, keys: &crate::config::KeysCfg) -> bool {
+        let rows = controls(keys);
+        let (bx, by, _, _) = help_box(w, h, rows.len());
+        let i = y - by - 2;
+        if x >= bx + 2 && x < bx + 24 && i >= 0 {
+            if let Some((_, _, Some(slot))) = rows.get(i as usize) {
+                self.binding = Some(*slot);
+                return true;
+            }
+        }
+        self.binding = None;
+        false
     }
 
     /// The settings button (always showing, so the panel's always one
     /// click away — right-click isn't available everywhere).
     pub fn draw_gear(&self, f: &mut Frame, t: f32) {
+        // zoom out / in
+        let (zo, zi) = zoom_rects(f.w as i32);
+        for (r, ch) in [(zo, '−'), (zi, '+')] {
+            let hot = r.contains(self.hover.0, self.hover.1);
+            let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
+            f.put_g(r.x, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+            f.put_g(r.x + 1, r.y, Glyph::new(ch, if hot { pal::UI_TITLE } else { Rgb::hex(0xbfe4ff) * 0.9 }).bg(bg).lit(0.0));
+            f.put_g(r.x + 2, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        }
         // the re-centre button: back to the villager
         let r = centre_rect(f.w as i32);
         let hot = r.contains(self.hover.0, self.hover.1);
@@ -873,6 +946,14 @@ impl Settings {
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
+        self.draw_panel(f, cfg, t);
+        // dressed in the look chosen for the app's own panels
+        if let Some(r) = self.rect {
+            crate::widgets::looks::apply(f, r, &cfg.ui.look, BG, 11);
+        }
+    }
+
+    fn draw_panel(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
         self.regions.clear();
         self.hints.clear();
         self.rect = None;
@@ -1048,6 +1129,9 @@ impl Settings {
         f.text(lx, yy, "(friends & family, who visit too, are in the You tab)", pal::UI_DIM, BG, 0.0);
         yy += 2;
         self.button(f, lx, yy, "↻ a new village", Act::Shuffle);
+        self.button(f, lx + 19, yy, "⇩ export save", Act::ExportSave);
+        self.button(f, lx + 36, yy, "⇧ import save", Act::ImportSave);
+        f.text(lx + 53, yy, "(saves itself)", pal::UI_DIM, BG, 0.0);
     }
 
     fn tab_you(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, t: f32) {
@@ -1182,7 +1266,21 @@ impl Settings {
             }
             yy += 1;
         }
-        f.text(lx, yy, "(the shelves' looks are in the Shelves tab)", pal::UI_DIM, BG, 0.0);
+        // the app's own panels and menus, in the same looks
+        let name = match cfg.ui.look.as_str() {
+            "frosted" => "frosted",
+            "wood" => "wooden",
+            "gift" => "gift box",
+            _ => "classic",
+        };
+        f.text(lx, yy, "Panels & menus", pal::UI_TEXT, BG, 0.0);
+        let r = Rect { x: vx, y: yy, w: 4, h: 1 };
+        f.text(vx, yy, "look", pal::UI_TEXT, BG, 0.0);
+        self.hints.push((r, Act::Look(9, 1)));
+        self.arrow(f, vx + 5, yy, '◂', Act::Look(9, -1));
+        let e = f.text(vx + 7, yy, &format!("{name:<8}"), pal::UI_TITLE, BG, 0.0);
+        self.arrow(f, e + 1, yy, '▸', Act::Look(9, 1));
+        f.text(e + 4, yy, "(shelves: Shelves tab)", pal::UI_DIM, BG, 0.0);
         yy += 2;
         self.section(f, lx, yy, "WEATHER");
         yy += 1;
@@ -1339,6 +1437,10 @@ impl Settings {
                 let note = if info.ffmpeg { "a looping video of the village (KDE Plasma's lock screen)" } else { "a still of the village (with ffmpeg installed, it moves)" };
                 f.text(lx, yy, &clip(note), pal::UI_DIM, BG, 0.0);
                 yy += 1;
+                if !info.ffmpeg {
+                    self.button(f, lx, yy, "⇩ install ffmpeg (asks for your password)", Act::InstallFfmpeg);
+                    yy += 1;
+                }
             }
         }
         yy += 1;

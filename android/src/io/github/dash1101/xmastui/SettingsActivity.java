@@ -102,7 +102,13 @@ public class SettingsActivity extends Activity {
         toggle("Sound", "game_sound", true);
         toggle("Autopilot", "autopilot", false);
         col.addView(note("Left alone a while, the villager goes about their own day: snowmen and igloos, snowballs, feeding the animals, chats, tag with the kids. Touch the joystick or a button to take over."));
+        toggle("Hide the controls when not in use", "hide_controls", false);
+        col.addView(note("They fade away after a few seconds untouched; touch the screen and they're back. A game controller works too."));
         choiceInt("Frames per second", "game_fps", new int[] {20, 24, 30, 45, 60}, 30);
+
+        section("THE WALLPAPER");
+        choice("The wallpaper shows", "wall_style", new String[] {"village", "classic"}, "village");
+        col.addView(note("village: the game's own village, the villager off on autopilot — the same village and the same pockets as in the game, so one carries on from the other. classic: the older wallpaper, with the snowy dock below."));
 
         section("SNOWY DOCK");
         toggle("Show a shelf under the dock", "dock", true);

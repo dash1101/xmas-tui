@@ -393,6 +393,8 @@ fn run(shared: Arc<Mutex<FxCfg>>, mon: Rect, skip: HWND, stop: &AtomicBool) -> R
             let fp = fingerprint(&wins);
             let moving = fp != layout;
             layout = fp;
+            // (the button held: snow rolls up into snowballs)
+            fx.button = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON as i32) as u16 & 0x8000 != 0;
             fx.set_windows(wins, &away, cursor(), t);
             // fullscreen game / presentation (the shell's own verdict);
             // asked twice a second, it isn't free

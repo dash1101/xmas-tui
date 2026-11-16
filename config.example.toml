@@ -2,7 +2,7 @@
 # Every field is optional; these are the defaults.
 
 fps = 30          # frames per second (lower = less CPU)
-seed = 0          # 0 = new random layout each launch; any other number = fixed layout
+seed = 0          # 0 = the save file's village (a new one the first time); any other number = that layout
 scale = 1.0       # cell size, 0.5..2: smaller = more cells, finer detail, everything the
                   # same size (Settings shows it as resolution = 1 / scale)
 zoom = 1.0        # 1..3: magnify the view, centred on the villager (Ctrl +/-)
@@ -119,8 +119,24 @@ dock_rows = 1.5       # max pile height on the taskbar / panels
 fall = 1.0            # how fast the flakes fall
 wind = 1.0            # how much the wind blows them about
 shake = 1.0           # how easily shaking a window throws its snow off (0: never)
-brush = true          # sweeping the cursor through a pile brushes it away
+brush = true          # sweeping the cursor through a pile brushes it away (on Windows, the
+                      # button held down rolls the snow up into a snowball instead)
 melt = 0.0            # piles slowly melt away (0: never)
+
+[keys]                # the villager's keys: a letter or digit, or "space" / "enter"
+interact = "e"        # (walking is always WASD and the arrows; the controls card,
+jump = "space"        #  "?", changes them too: click a [key] there)
+snowball = "r"
+invite = "f"
+pockets = "i"
+held = "q"
+centre = "c"
+rest = "z"            # lie down in the snow (then jump: a snow angel)
+todo = "t"            # things to do right here
+
+[ui]
+look = "classic"      # the app's own panels, menus and conversations: "classic",
+                      # "frosted", "wood" or "gift" (the widgets' looks)
 
 [updates]             # release builds only
 check = true          # look for a new version now and then

@@ -121,6 +121,8 @@ pub enum RoomKind {
     Bedroom,
     Attic,
     Church,
+    /// Inside a snow igloo: a dome of snow blocks, furs, a little lamp.
+    Igloo,
 }
 
 impl RoomKind {
@@ -130,6 +132,7 @@ impl RoomKind {
             RoomKind::Kitchen => "the kitchen",
             RoomKind::Bedroom => "the bedroom",
             RoomKind::Attic => "the attic",
+            RoomKind::Igloo => "the igloo",
             RoomKind::Church => "the church",
         }
     }
@@ -523,6 +526,44 @@ impl Interior {
         room
     }
 
+    /// Inside the igloo at world column `outside.0`: just the villager (and
+    /// whoever's in there already: `guests`, (name, kid, coat)).
+    pub fn igloo(w: usize, h: usize, seed: u32, outside: (f32, f32), t: f32, guests: &[(&'static str, bool, Rgb)]) -> Self {
+        let mut inn = Interior::new(usize::MAX, false, false, Rgb::hex(0xdfe8f6), w, h, seed, outside, t);
+        inn.pet = None;
+        inn.rooms = vec![RoomKind::Igloo];
+        let floor = inn.floor;
+        inn.residents = guests
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(k, (name, kid, coat))| {
+                let id = hash(seed ^ (k as u32 + 1) * 7919) as u64;
+                Resident {
+                    name,
+                    kid: *kid,
+                    temper: temper_of(id, *kid),
+                    coat: *coat,
+                    hair: Rgb::hex([0x3a2a1a, 0x8a5a2a, 0xa8462a, 0xe0c080][k % 4]),
+                    x: w as f32 * (0.42 + 0.14 * k as f32),
+                    feet: floor / 2 + 5 + (k as i32 % 2) * 2,
+                    target: 0.0,
+                    then: Doing::Stand,
+                    doing: Doing::Stand,
+                    until: t + 1.0 + k as f32 * 2.0,
+                    dir: -1.0,
+                }
+            })
+            .collect();
+        inn.build();
+        inn
+    }
+
+    /// The igloo (not a house).
+    pub fn is_igloo(&self) -> bool {
+        self.rooms.first() == Some(&RoomKind::Igloo)
+    }
+
     pub fn kind(&self) -> RoomKind {
         self.rooms[self.room_i]
     }
@@ -584,8 +625,9 @@ impl Interior {
             RoomKind::Kitchen => self.build_kitchen(),
             RoomKind::Bedroom => self.build_bedroom(),
             RoomKind::Attic => self.build_attic(),
+            RoomKind::Igloo => self.build_igloo(),
         }
-        if kind != RoomKind::Church {
+        if !matches!(kind, RoomKind::Church | RoomKind::Igloo) {
             self.decorate(kind);
         }
         for (i, r) in self.residents.iter().enumerate() {
@@ -796,6 +838,9 @@ impl Interior {
 
     /// Walls, floor, skirting, and (on the ground floor) the front door.
     fn build_shell(&mut self, kind: RoomKind) {
+        if kind == RoomKind::Igloo {
+            return self.igloo_shell();
+        }
         let (w, ph, floor) = (self.w, self.h * 2, self.floor);
         let seed = self.seed;
         let church = kind == RoomKind::Church;
@@ -944,6 +989,167 @@ impl Interior {
         if matches!(kind, RoomKind::Parlour | RoomKind::Church) {
             self.front_door();
         }
+    }
+
+    /// Inside the igloo: the far side of the dome, its courses of snow
+    /// blocks curving up and over and lit warm by the lamp in the middle;
+    /// the dome's thick wall at the corners; a packed snow floor; and the
+    /// low tunnel out on the left, the night beyond it.
+    fn igloo_shell(&mut self) {
+        let (w, ph, floor) = (self.w, self.h * 2, self.floor);
+        let seed = self.seed as i32;
+        let l = &mut self.room;
+        let (cx, rx, ry) = (w as f32 / 2.0, w as f32 * 0.56, floor as f32 * 1.02);
+        for y in 0..floor {
+            for x in 0..w {
+                let (u, v) = ((x as f32 + 0.5 - cx) / rx, (floor as f32 - y as f32) / ry);
+                let d = (u * u + v * v).sqrt();
+                let c = if d < 1.0 {
+                    // courses of blocks, bending down towards the sides
+                    let up = (floor - y) as f32 + u * u * 26.0;
+                    let course = (up / 9.0) as i32;
+                    let along = x + if course % 2 == 0 { 0 } else { 8 } + (course * 5) % 7;
+                    let seam = (up % 9.0) < 1.0 || along.rem_euclid(17) == 0;
+                    let block = 0.92 + 0.12 * h01(hash3(along.div_euclid(17), course, seed));
+                    let lit = 0.5 + 0.55 * (1.0 - d).powf(0.6);
+                    let base = Rgb::hex(0xd8e2f2).lerp(Rgb::hex(0xffe2b8), 0.25 * (1.0 - d));
+                    let c = base * (block * lit);
+                    if seam {
+                        c * 0.78
+                    } else {
+                        c
+                    }
+                } else if d < 1.035 {
+                    // the inner edge of the wall, catching the light
+                    Rgb::hex(0xeef4ff) * 0.8
+                } else {
+                    // the dome's wall, in shadow
+                    Rgb::hex(0x2a3656) * (0.75 + 0.15 * h01(hash2(x / 6, y / 5 + seed)))
+                };
+                l.set(x, y, c);
+            }
+        }
+        // packed snow underfoot, sparkling a little
+        for y in floor..ph {
+            for x in 0..w {
+                let depth = (y - floor) as f32 / (ph - floor).max(1) as f32;
+                let mid = 1.0 - ((x as f32 - cx) / (w as f32 * 0.6)).abs().min(1.0);
+                let mut c = Rgb::hex(0xc4d0e6) * (0.62 + 0.25 * mid + 0.18 * depth);
+                if hash2(x, y + seed) % 211 == 0 {
+                    c = c.lerp(Rgb::hex(0xf4f8ff), 0.6);
+                }
+                l.set(x, y, c);
+            }
+        }
+        for x in 0..w {
+            l.set(x, floor - 1, Rgb::hex(0x9aa8c4));
+        }
+        // the tunnel out: a low dark arch, the blue night beyond
+        let (dx0, dx1, dh) = (4, 26, 22);
+        for x in dx0..dx1 {
+            let u = (x - dx0) as f32 / (dx1 - dx0) as f32 * 2.0 - 1.0;
+            let top = floor - (dh as f32 * (1.0 - u * u).max(0.0).sqrt()) as i32;
+            for y in top - 2..floor {
+                let c = if y < top {
+                    Rgb::hex(0xeef4ff) * 0.85
+                } else {
+                    let k = (y - top) as f32 / (floor - top).max(1) as f32;
+                    Rgb::hex(0x060a1a).lerp(Rgb::hex(0x1a2a52), k * 0.8)
+                };
+                l.set(x, y, c);
+            }
+        }
+        for k in 0..6 {
+            let (sx, sy) = (dx0 + 3 + (hash2(k, seed) % 16) as i32, floor - 4 - (hash2(k, seed + 1) % 12) as i32);
+            l.set(sx, sy, Rgb::hex(0xbfd4ff));
+        }
+        self.things.push((Thing::Door, (dx0 + dx1) / 2, (floor - dh) / 2 - 1));
+    }
+
+    /// The igloo's furnishings: a snow bench with a fur on it, a raised
+    /// sleeping ledge heaped with furs, the lamp on a little snow shelf at
+    /// the back, a flask of cocoa, and a clear ice block for a window.
+    fn build_igloo(&mut self) {
+        let (w, floor) = (self.w, self.floor);
+        let fx = |f: f32| (w as f32 * f) as i32;
+        let snow = Rgb::hex(0xe4ecf8);
+        let fur = |x: i32, y: i32, c: u32| Rgb::hex(c) * (0.82 + 0.3 * h01(hash2(x / 2, y)));
+        // the bench, a fur thrown over it
+        let sx = fx(0.30);
+        {
+            let l = &mut self.room;
+            for y in floor - 7..floor {
+                for x in sx - 7..sx + 8 {
+                    l.set(x, y, snow * (0.8 + 0.06 * (y - floor + 7) as f32));
+                }
+            }
+            for x in sx - 7..sx + 8 {
+                l.set(x, floor - 7, fur(x, 0, 0x8a6a4a));
+                l.set(x, floor - 8, fur(x, 1, 0x9a7a58));
+            }
+        }
+        let n = self.seats.len();
+        self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 7, by: None });
+        self.things.push((Thing::Seat(n), sx, (floor - 16) / 2 - 1));
+        self.spots.push((sx as f32, Doing::Sit(n)));
+        // the sleeping ledge and its furs
+        let bx = fx(0.56);
+        {
+            let l = &mut self.room;
+            for y in floor - 8..floor + 2 {
+                for x in bx..bx + 44 {
+                    l.set(x, y, snow * (0.78 + 0.05 * ((y - floor + 8) % 5) as f32));
+                }
+            }
+            for y in floor - 12..floor - 7 {
+                for x in bx + 1..bx + 43 {
+                    let c = if x < bx + 11 { 0xd8d0c0 } else if (x / 9) % 2 == 0 { 0x7a5a3a } else { 0x5a5650 };
+                    l.set(x, y, fur(x, y, c));
+                }
+            }
+            // a rolled fur for a pillow
+            for y in floor - 14..floor - 11 {
+                for x in bx + 3..bx + 10 {
+                    l.set(x, y, fur(x, y, 0xe8e0d0));
+                }
+            }
+        }
+        self.things.push((Thing::Bed, bx + 22, (floor - 12) / 2 - 1));
+        self.bed = Some((bx, floor));
+        // the lamp on its shelf at the back, middle of the dome
+        let (lx, ly) = (fx(0.5), (floor as f32 * 0.55) as i32);
+        {
+            let l = &mut self.room;
+            for x in lx - 6..lx + 7 {
+                l.set(x, ly, snow);
+                l.set(x, ly + 1, snow * 0.8);
+            }
+            for x in lx - 2..lx + 3 {
+                l.set(x, ly - 1, Rgb::hex(0x6a5a4a));
+            }
+        }
+        self.candles.push((lx, ly - 2));
+        self.lamps.push((lx, ly - 3));
+        self.things.push((Thing::Candles, lx, ly / 2 - 3));
+        // a flask of cocoa by the bench
+        self.mug_at(sx + 11, floor - 1);
+        // the ice window, up on the right of the dome
+        let (wx, wy, r) = (fx(0.76), (floor as f32 * 0.34) as i32, (floor as f32 * 0.09).max(3.0) as i32);
+        {
+            let l = &mut self.room;
+            for y in wy - r - 2..=wy + r + 2 {
+                for x in wx - r * 2 - 4..=wx + r * 2 + 4 {
+                    let d = (((x - wx) as f32 / 2.0).powi(2) + ((y - wy) as f32).powi(2)).sqrt();
+                    if d <= r as f32 + 2.0 {
+                        l.set(x, y, Rgb::hex(0xbfe0ff) * 0.9);
+                    }
+                }
+            }
+        }
+        let k = self.windows.len();
+        let (sw, sh) = (w as f32, (self.h * 2) as f32);
+        self.windows.push(((wx - r * 2, wy - r, r * 4, r * 2), Look { dx: 0.0, lift: 0.0, hole: Hole::Round(wx as f32 / sw, wy as f32 / sh, (r as f32 / sh * 3.5).min(0.4)), telescope: false }));
+        self.things.push((Thing::Window(k), wx, (wy - r) / 2 - 1));
     }
 
     fn front_door(&mut self) {
@@ -1947,9 +2153,13 @@ impl Interior {
                 }
             }
         }
+        // speech bubbles follow (and are named for) whoever's speaking
+        let mut who: Vec<(u64, f32, f32, String)> = self.residents.iter().enumerate().map(|(i, r)| (i as u64 + 1, r.x + 1.0, r.feet as f32, r.name.to_string())).collect();
+        who.push((u64::MAX - 1, p.centre(), p.y, String::new()));
+        self.director.track(&who);
         self.director.update(dt, t, &self.ctx);
         // walking back out through the front door
-        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church) && mx < 0.0 && p.x <= 1.5
+        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church | RoomKind::Igloo) && mx < 0.0 && p.x <= 1.5
     }
 
     /// Into another room of the home (`from_left`: walked in from its left).
@@ -2675,7 +2885,13 @@ impl Interior {
         }
         people.sort_by_key(|(feet, _)| *feet);
         for (_, b) in &people {
-            b.draw(f, t);
+            if crate::frame::pictures_ok() {
+                // the same detailed people as out in the village (drawn at
+                // the room's size)
+                b.draw_sprite(f, t);
+            } else {
+                b.draw(f, t);
+            }
         }
         // tucked up in bed: head on the pillow, a bump under the quilt
         if let (Some(since), Some((bx, floor)), Some(_)) = (self.you_lie, self.bed, you) {
@@ -2879,6 +3095,30 @@ pub(crate) struct Big {
 }
 
 impl Big {
+    /// As the village draws people (the detailed sprite), at the room's
+    /// size: twice the village's.
+    pub(crate) fn draw_sprite(&self, f: &mut Frame, t: f32) {
+        use super::sprites::{self, Look, Pose};
+        let pose = if self.sit.is_some() {
+            Pose::Sit
+        } else if self.arms_up {
+            Pose::ArmsUp
+        } else if self.step {
+            Pose::Walk(((t * 6.0) as i32 % 2) as u8)
+        } else {
+            Pose::Stand
+        };
+        let look = Look { kid: self.kid, coat: self.coat, hat: self.hat, hair: self.hair, scarf: self.scarf, skin: Rgb::hex(0xe8c39e), mittens: self.scarf.unwrap_or(self.coat * 0.8), holding: None, lantern: false };
+        let pic = sprites::person(&look, pose, self.dir, 1.0);
+        let rows = sprites::rows_of(&pic, 2.0);
+        // feet on the floor (a sitter: on the seat's cushion, feet down)
+        let feet = match self.sit {
+            Some(top) => (top as f32 + 6.0) / 2.0,
+            None => self.feet as f32 + 1.0,
+        };
+        f.sprite(self.x, feet, rows, pic);
+    }
+
     /// A person in pixel art, 16 pixels tall, feet on row `feet`.
     pub(crate) fn draw(&self, f: &mut Frame, t: f32) {
         let skin = Rgb::hex(0xe8c39e);

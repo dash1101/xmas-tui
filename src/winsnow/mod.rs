@@ -234,6 +234,11 @@ pub struct Fx {
     cursor: Option<(f32, f32)>,
     cursor_t: f32,
     cursor_v: (f32, f32),
+    /// The mouse button's held down (front-ends that can tell: Windows).
+    pub button: bool,
+    /// Snowballs rolled up out of the piles: (window, centre x from the
+    /// window's left edge, radius, still being rolled).
+    balls: Vec<(String, f32, f32, bool)>,
     rng: Rng,
     melt_acc: f32,
     pub hidden: bool,
@@ -279,6 +284,8 @@ impl Fx {
             parts: vec![],
             cursor: None,
             cursor_t: 0.0,
+            button: false,
+            balls: vec![],
             melt_acc: 0.0,
             cursor_v: (0.0, 0.0),
             rng: Rng::new(0x5a0b),
@@ -496,11 +503,68 @@ impl Fx {
         }
         self.wins = wins;
         self.brush();
+        self.roll();
+    }
+
+    /// The button held down over a pile: the snow there gathers into a
+    /// snowball, and dragged along the window's top it rolls, picking up
+    /// the snow it passes over and growing. Let go, it stays sitting there
+    /// (until the window moves, or goes).
+    fn roll(&mut self) {
+        let k = self.scale;
+        // the windows' balls go with them (a window gone: its ball too)
+        let ids: Vec<String> = self.wins.iter().map(|w| w.id.clone()).collect();
+        self.balls.retain(|b| ids.contains(&b.0));
+        let Some((cx, cy)) = self.cursor.filter(|_| self.button) else {
+            for b in &mut self.balls {
+                b.3 = false;
+            }
+            return;
+        };
+        let rolling = self.balls.iter().position(|b| b.3);
+        // which pile is under the pointer (or the one being rolled along)
+        let target = match rolling {
+            Some(i) => self.wins.iter().find(|w| w.id == self.balls[i].0).cloned(),
+            None => self.wins.iter().rev().find(|w| {
+                let Some(p) = self.piles.get(&w.id) else { return false };
+                if cx < w.x || cx >= w.x + w.w {
+                    return false;
+                }
+                let col = (((cx - w.x) / self.col) as usize).min(p.cols.len().saturating_sub(1));
+                let top = p.cols.get(col).copied().unwrap_or(0.0);
+                top > 1.0 && cy > w.y - top - 14.0 * k && cy < w.y + 4.0 * k && !self.covered(cx, w.y - 1.0, w.z)
+            }).cloned(),
+        };
+        let Some(w) = target else { return };
+        let Some(p) = self.piles.get_mut(&w.id) else { return };
+        let i = match rolling {
+            Some(i) => i,
+            None => {
+                self.balls.push((w.id.clone(), cx - w.x, 2.0 * k, true));
+                self.balls.len() - 1
+            }
+        };
+        let r = self.balls[i].2;
+        let x = cx.clamp(w.x + r, w.x + w.w - r);
+        // the snow under the ball, gathered into it
+        let col = self.col;
+        let (c0, c1) = (((x - r - w.x) / col).floor().max(0.0) as usize, (((x + r - w.x) / col).ceil() as usize).min(p.cols.len()));
+        let mut got = 0.0;
+        for h in &mut p.cols[c0..c1] {
+            let take = (*h * 0.25).min(*h);
+            *h -= take;
+            got += take * col;
+        }
+        // area in, radius up (a little at a time)
+        let area = std::f32::consts::PI * r * r + got * 0.8;
+        let r2 = (area / std::f32::consts::PI).sqrt().min(40.0 * k);
+        self.balls[i] = (w.id.clone(), x - w.x, r2, true);
     }
 
     /// Sweeping the cursor through a pile knocks the snow away.
     fn brush(&mut self) {
-        if !self.cfg.brush {
+        // (the button held: rolling a snowball, not sweeping)
+        if !self.cfg.brush || self.button {
             return;
         }
         let Some((cx, cy)) = self.cursor else { return };
@@ -717,6 +781,28 @@ impl Fx {
                     c.fill(x0 + 3.0, y0 + 1.0, gw, gh, argb(0xff, 0xff, 0xff, 0xff));
                 }
             }
+            c.rec = true;
+        }
+        // snowballs rolled up out of the piles
+        for (id, dx, r, _) in &self.balls {
+            let Some(w) = self.wins.iter().find(|w| &w.id == id) else { continue };
+            let x = &(w.x + dx);
+            if self.covered(*x, w.y - 1.0, w.z) {
+                continue;
+            }
+            let cy = w.y - r;
+            c.rec = false;
+            c.touch(x - r - 1.0, cy - r - 1.0, r * 2.0 + 2.0, r * 2.0 + 3.0);
+            let ri = r.ceil() as i32;
+            for dy in -ri..=ri {
+                let half = (r * r - (dy * dy) as f32).max(0.0).sqrt();
+                let shade = 0.82 + 0.18 * (-(dy as f32) / r).clamp(-1.0, 1.0);
+                let g = (0xe6 as f32 * shade) as u8;
+                c.fill(x - half, cy + dy as f32, half * 2.0, 1.0, argb(0xff, g, g.saturating_add(6), 0xff));
+            }
+            // a highlight, and a soft shadow underneath
+            c.fill(x - r * 0.45, cy - r * 0.55, r * 0.35, r * 0.2, argb(0xff, 0xff, 0xff, 0xff));
+            c.fill(x - r * 0.8, w.y - 2.0, r * 1.6, 2.0, argb(0x60, 0x50, 0x5a, 0x80));
             c.rec = true;
         }
         // light strings around the topmost few normal windows
@@ -1086,6 +1172,28 @@ mod tests {
         let mut m = win("m", 0.0, 0.0, 1000.0, 1000.0, 3);
         m.kind = 3;
         assert!(visible_tops(&[m], 1000.0, 1000.0).is_empty());
+    }
+
+    #[test]
+    fn holding_the_button_rolls_the_snow_into_a_snowball() {
+        let mut fx = Fx::new(1920.0, 1080.0, FxCfg::default(), 1.0);
+        let w = win("a", 400.0, 300.0, 600.0, 400.0, 1);
+        fx.set_windows(vec![w.clone()], &[], (0.0, 0.0), 0.0);
+        if let Some(p) = fx.piles.get_mut("a") {
+            p.cols.iter_mut().for_each(|h| *h = 12.0);
+        }
+        let before: f32 = fx.piles["a"].cols.iter().sum();
+        fx.button = true;
+        for k in 0..30 {
+            fx.set_windows(vec![w.clone()], &[], (500.0 + k as f32 * 8.0, 292.0), 0.1 * k as f32);
+        }
+        let (r, rolling) = fx.balls.first().map(|b| (b.2, b.3)).expect("no snowball");
+        assert!(rolling && r > 6.0, "radius {r}");
+        assert!(fx.piles["a"].cols.iter().sum::<f32>() < before, "no snow picked up");
+        // let go: it stays put, done rolling
+        fx.button = false;
+        fx.set_windows(vec![w], &[], (900.0, 292.0), 4.0);
+        assert!(!fx.balls[0].3);
     }
 
     fn win(id: &str, x: f32, y: f32, w: f32, h: f32, z: i64) -> Win {

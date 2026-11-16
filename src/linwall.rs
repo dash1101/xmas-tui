@@ -98,6 +98,42 @@ pub fn refresh_launcher() {
     }
 }
 
+/// The `xmas-tui` command on PATH (~/.local/bin/xmas-tui) for an app
+/// installed into ~/.local/share/xmas-tui (older installs, and installers
+/// that only unpack it there, left it off): a link to the app, unless
+/// something else already goes by that name.
+pub fn ensure_command() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let ours = data_home().join("xmas-tui/bin/xmas-tui");
+    if exe.canonicalize().ok() != ours.canonicalize().ok() {
+        return;
+    }
+    let link = home().join(".local/bin/xmas-tui");
+    if link.symlink_metadata().is_err() {
+        let _ = std::fs::create_dir_all(home().join(".local/bin"));
+        let _ = std::os::unix::fs::symlink(&ours, &link);
+    }
+}
+
+/// ffmpeg, from the system's package manager, through pkexec (the system
+/// asks for the password; nothing runs as root without it). Blocks.
+pub fn install_ffmpeg() -> Result<String, String> {
+    let pms: [(&str, &[&str]); 4] = [("apt-get", &["install", "-y", "ffmpeg"]), ("dnf", &["install", "-y", "ffmpeg-free"]), ("pacman", &["-S", "--needed", "--noconfirm", "ffmpeg"]), ("zypper", &["install", "-y", "ffmpeg"])];
+    let Some((pm, args)) = pms.iter().find_map(|(pm, a)| on_path(pm).map(|p| (p, *a))) else {
+        return Err("no package manager found: install ffmpeg by hand".into());
+    };
+    if on_path("pkexec").is_none() {
+        return Err(format!("needs pkexec — or run: sudo {} {}", pm.display(), args.join(" ")));
+    }
+    let ok = std::process::Command::new("pkexec").arg(&pm).args(args).status().map(|s| s.success()).unwrap_or(false);
+    stale();
+    if ok && on_path("ffmpeg").is_some() {
+        Ok("ffmpeg's in: redraw the lock screen and it moves".into())
+    } else {
+        Err("ffmpeg wasn't installed".into())
+    }
+}
+
 pub fn wall_job() -> Job {
     WALL.lock().map(|g| g.clone()).unwrap_or_default()
 }

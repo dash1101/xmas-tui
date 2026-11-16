@@ -34,6 +34,13 @@ enum St {
     /// Playing tag with the villager: "it" (running after them), or running
     /// off from them.
     Tag { it: bool, until: f32 },
+    /// Done for now: off home, in at the door at this column.
+    Home { x: f32 },
+    /// Lying back in the snow until then (watching the sky); making a snow
+    /// angel until `flap` (pressed into the snow when it's done).
+    Lie { until: f32, flap: f32 },
+    /// Tag with another kid: "it" (after them) or running off.
+    Play { other: u64, it: bool, until: f32 },
     Curious { until: f32 },
     Throw { until: f32 },
     /// Walking along behind the player (`moving`: catching up right now).
@@ -46,6 +53,8 @@ enum St {
 }
 
 struct Critter {
+    /// Gone in at a door (home for now): taken out of the village.
+    gone_in: bool,
     id: u64,
     kind: Kind,
     x: f32,
@@ -119,7 +128,7 @@ impl Critter {
     }
     /// Sprite rows (right-facing) for the current state.
     fn sprite(&self, t: f32) -> Vec<&'static str> {
-        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(self.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = match self.kind {
             Kind::Fox => 10.0,
             Kind::Kid => 9.0,
@@ -141,6 +150,10 @@ impl Critter {
             Kind::Rabbit if head_down => vec![" ╻", if chew { "▗█▙" } else { "▗█▟" }],
             Kind::Rabbit => vec![" ‖", "▗█▙"],
             Kind::Walker if held => vec![" ▲ ", "╲●╱", " █ ", if kick { " ╱ " } else { " ╲ " }],
+            Kind::Walker | Kind::Kid if matches!(self.st, St::Lie { .. }) => {
+                let flapping = matches!(self.st, St::Lie { flap, .. } if t < flap) && kick;
+                vec!["", "", if flapping { " ╲╱ " } else { "" }, "▲●▬▀"]
+            }
             Kind::Walker => match self.st {
                 St::Petting { .. } => vec![" ▲ ", " ● ", "◘█╲", " ╨ "],
                 St::Greet { .. } => vec![" ▲╱", " ● ", "◘█ ", " ╨ "],
@@ -188,6 +201,13 @@ impl Critter {
 /// A snow-capped holly-ish bush with berries that animals snack on.
 /// Someone out of the scene for a while (inside an igloo).
 pub struct Hidden(Critter);
+
+impl Hidden {
+    /// Who it is: (name, a kid, coat).
+    pub fn about(&self) -> (&'static str, bool, Rgb) {
+        (self.0.name, self.0.kind == Kind::Kid, self.0.color)
+    }
+}
 
 pub struct Bush {
     pub x: i32,
@@ -267,6 +287,9 @@ pub struct Critters {
     talk: Talk,
     /// The villager's friends and family, each a villager of their own.
     friends: Vec<Friend>,
+    /// The houses' front doors (column, row): people come out of them, and
+    /// go in at them when they're done (rather than off out of the village).
+    doors: Vec<(f32, f32)>,
     /// The next spawn is this friend.
     forced: Option<usize>,
     tctx: TalkCtx,
@@ -279,6 +302,9 @@ pub struct Critters {
     revenge: Vec<(u64, f32)>,
     /// Snowballs that hit the player since the scene last asked.
     hits_on_you: u32,
+    /// Team fights the villager was in that have ended: (won, their hits,
+    /// the other side's).
+    pub fight_results: Vec<(bool, u32, u32)>,
     /// A kid "it" in tag caught the villager.
     tagged_you: bool,
     /// The player's snowballs that hit someone, since last asked.
@@ -294,6 +320,8 @@ pub struct Critters {
     /// Who the player's snowballs hit (for what they say about it).
     your_hit_ids: Vec<u64>,
     next_fight: f32,
+    /// When someone in view next takes up a pastime of their own.
+    next_pastime: f32,
 }
 
 /// Two sides of kids pelting each other from where they've dug in.
@@ -304,6 +332,11 @@ struct Fight {
     mid: f32,
     until: f32,
     next_line: f32,
+    /// The villager's team fight (they're on side 0, with whoever came
+    /// along): hits landed by each side, and who was walking along before.
+    yours: bool,
+    score: [u32; 2],
+    along: Vec<u64>,
 }
 
 const FIGHT_START: &[&str] = &["SNOWBALL FIGHT!!", "you're going DOWN!", "snowball fight! you vs us!", "ready… aim…"];
@@ -344,12 +377,14 @@ impl Critters {
             startle_cd: 0.0,
             talk: Talk::new(seed),
             friends: vec![],
+            doors: vec![],
             forced: None,
             tctx: TalkCtx::default(),
             convs: vec![],
             react_cd: 0.0,
             revenge: vec![],
             hits_on_you: 0,
+            fight_results: vec![],
             tagged_you: false,
             your_hits: 0,
             player: None,
@@ -358,6 +393,7 @@ impl Critters {
             fights: vec![],
             your_hit_ids: vec![],
             next_fight: rng.range(40.0, 120.0),
+            next_pastime: rng.range(15.0, 40.0),
         };
         if bushes && ctx.h >= 20 {
             let u = (ctx.h as f32 / 75.0).max(0.5);
@@ -469,6 +505,11 @@ impl Critters {
         // the village is in bed: only the animals are out
         let kind = if self.asleep && at.is_none() && matches!(kind, Kind::Walker | Kind::Kid) { *self.rng.pick(&[Kind::Deer, Kind::Fox, Kind::Rabbit]) } else { kind };
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
+        // people now and then step out of a front door in view
+        let (v0, vw) = self.view;
+        let doors: Vec<(f32, f32)> = self.doors.iter().copied().filter(|d| d.0 > v0 + 4.0 && d.0 < v0 + vw - 4.0).collect();
+        let door = (at.is_none() && matches!(kind, Kind::Walker | Kind::Kid) && !doors.is_empty() && self.rng.chance(0.5)).then(|| *self.rng.pick(&doors));
+        let at = at.or(door);
         let x = match at {
             Some((x, _)) => x,
             // just off the edge of the view (people walk in from the sides)
@@ -477,7 +518,7 @@ impl Critters {
         };
         let lo = self.lo_at(x.clamp(0.0, self.w as f32 - 1.0));
         let y = match at {
-            Some((_, y)) => y,
+            Some((_, y)) => y.max(lo),
             None => self.rng.range(lo, (self.h - 1) as f32).round(),
         };
         let coats = [Rgb::hex(0xb3202a), Rgb::hex(0x1f6e3a), Rgb::hex(0x2a4c8a), Rgb::hex(0x6a3a8a), Rgb::hex(0xc8862a)];
@@ -491,10 +532,12 @@ impl Critters {
         let hat = *self.rng.pick(&[pal::CANDY_RED, Rgb::hex(0x2fae5c), Rgb::hex(0x4a8dff), Rgb::hex(0xffc23a), Rgb::hex(0xff7ae0)]);
         // animals linger (turning back at the edges) for a while; people
         // pass through unless something catches their eye
+        // people stay about the village a good while (and then go home, in
+        // at a door, rather than off out of the village)
         let stay = match kind {
             Kind::Deer | Kind::Fox | Kind::Rabbit => self.rng.range(70.0, 220.0),
-            Kind::Kid => self.rng.range(25.0, 70.0),
-            _ => 0.0,
+            Kind::Kid => self.rng.range(180.0, 420.0),
+            _ => self.rng.range(240.0, 600.0),
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -537,6 +580,7 @@ impl Critters {
             met: false,
             chat: None,
             pet: None,
+            gone_in: false,
         });
         // some folk bring their pet along
         let p = match kind {
@@ -621,13 +665,18 @@ impl Critters {
                 | St::Talk { until, .. }
                 | St::Gather { until, .. }
                 | St::Chase { until, .. }
+                | St::Play { until, .. }
                 | St::Tag { until, .. } => *until -= s,
+                St::Lie { until, flap } => {
+                    *until -= s;
+                    *flap -= s;
+                }
                 St::Munch { until, bite, .. } => {
                     *until -= s;
                     *bite -= s;
                 }
                 St::Held { since, .. } => *since -= s,
-                St::Walk | St::Fall { .. } => {}
+                St::Walk | St::Fall { .. } | St::Home { .. } => {}
             }
         }
         for p in &mut self.prints {
@@ -772,8 +821,23 @@ impl Critters {
             }
         }
 
+        // people whose time's up go home (in at the nearest front door),
+        // rather than off out of the village
+        if !self.doors.is_empty() {
+            let held = self.held;
+            for c in &mut self.list {
+                if c.person() && t > c.leave_at && matches!(c.st, St::Walk | St::Idle { .. }) && Some(c.id) != held {
+                    let near = self.doors.iter().min_by(|a, b| (a.0 - c.centre()).abs().total_cmp(&(b.0 - c.centre()).abs()));
+                    if let Some(&(x, _)) = near {
+                        c.st = St::Home { x };
+                    }
+                }
+            }
+        }
         // ---- per-critter movement and timers
         let mut caught = false;
+        let mut angels: Vec<(f32, f32, bool)> = vec![];
+        let mut tagged: Vec<(u64, u64)> = vec![];
         let ids: Vec<u64> = self.list.iter().map(|c| c.id).collect();
         let player = self.player;
         // where each group's leader is and whether they're walking on
@@ -942,7 +1006,17 @@ impl Critters {
                     // snowfield and up and down it
                     if let Some((px, py, ..)) = player {
                         let (dx, dy) = (px + 1.0 - c.centre(), py - c.y);
-                        c.dir = if it { dx.signum() } else { -dx.signum() };
+                        if it {
+                            c.dir = dx.signum();
+                        } else {
+                            // away from them; cornered near the end of the
+                            // world, a dodge past them back the open way
+                            // (kept to, not flipped about every step)
+                            let away = -dx.signum();
+                            let room = if away < 0.0 { c.x } else { w - c.x };
+                            let dodging = (c.x < 16.0 && c.dir > 0.0) || (c.x > w - 22.0 && c.dir < 0.0);
+                            c.dir = if room < 16.0 { -away } else if dodging && dx.abs() < 12.0 { c.dir } else { away };
+                        }
                         if (it && dx.abs() > 1.0) || (!it && dx.abs() < 30.0) {
                             mv(c, if it { 1.25 } else { 1.35 });
                         }
@@ -953,13 +1027,54 @@ impl Critters {
                         }
                     }
                     // (not off the end of the world)
-                    if c.x < 2.0 {
-                        c.dir = 1.0;
-                    } else if c.x > w - 8.0 {
-                        c.dir = -1.0;
-                    }
+                    c.x = c.x.clamp(1.0, w - 7.0);
                     if t > until {
                         c.st = St::Idle { until: t + 2.0 };
+                    }
+                }
+                St::Lie { until, flap } => {
+                    if flap > 0.0 && t >= flap {
+                        // the angel's done: pressed into the snow
+                        c.st = St::Lie { until, flap: 0.0 };
+                        angels.push((c.centre(), c.y, c.dir > 0.0));
+                    } else if t > until {
+                        c.st = St::Walk;
+                    }
+                }
+                St::Play { other, it, until } => {
+                    match leaders.iter().find(|l| l.0 == other) {
+                        Some(&(_, ox, ..)) if t < until => {
+                            let dx = ox - c.x;
+                            if it {
+                                c.dir = dx.signum();
+                                if dx.abs() < 1.5 {
+                                    tagged.push((c.id, other));
+                                } else {
+                                    mv(c, 1.3);
+                                }
+                            } else {
+                                // away (cornered at an end: back past them)
+                                let away = -dx.signum();
+                                let room = if away < 0.0 { c.x } else { w - c.x };
+                                c.dir = if room < 14.0 { -away } else { away };
+                                if dx.abs() < 26.0 {
+                                    mv(c, 1.2);
+                                }
+                            }
+                            c.x = c.x.clamp(1.0, w - 7.0);
+                        }
+                        _ => c.st = St::Walk,
+                    }
+                }
+                St::Home { x } => {
+                    let dx = x - c.centre();
+                    c.dir = dx.signum();
+                    if dx.abs() < 1.0 {
+                        c.gone_in = true;
+                    } else {
+                        mv(c, 1.15);
+                        // up the snowfield to the doorstep
+                        c.y = (c.y - dt * 2.0).max(lo);
                     }
                 }
                 St::Chase { target, until } => {
@@ -1003,16 +1118,43 @@ impl Critters {
                     }
                 }
             }
-            if matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. }) && rng.chance(dt * 1.5) {
+            if matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. }) && rng.chance(dt * 1.5) {
                 self.prints.push((c.centre() as i32, c.y as i32, t));
             }
         }
         self.tagged_you |= caught;
+        for (x, y, left) in angels {
+            d.snow_angel(x, y, t, self.k, left);
+            d.emote(x, y - 2.0, '✦', Rgb::hex(0xbfe4ff), 2);
+        }
+        // tag between kids: "it" changes hands
+        for (a, b) in tagged {
+            let mut said = None;
+            for c in &mut self.list {
+                if let St::Play { other, until, .. } = c.st {
+                    if c.id == a {
+                        c.st = St::Play { other, it: false, until };
+                        said = Some((c.centre(), c.y));
+                    } else if c.id == b {
+                        c.st = St::Play { other, it: true, until: until + 0.0 };
+                        c.social_at = c.social_at.max(t + 1.2);
+                    }
+                }
+            }
+            if let Some((x, y)) = said {
+                d.say(x.round() as i32, y as i32 - 4, "tag! you're it!", t, 1.6, 6);
+            }
+        }
+        self.pastimes(t, d);
         self.avoid(dt);
         let held = self.held;
         // gone: off the world, or passers-by wandered well out of view (a
         // friend comes back a while later)
-        let stays = |c: &Critter| Some(c.id) == held || (c.x > -40.0 && c.x < w + 40.0 && !(t > c.leave_at && (c.x < v0 - vw * 1.2 || c.x > v0 + vw * 2.2)));
+        let homes = !self.doors.is_empty();
+        let stays = |c: &Critter| Some(c.id) == held || (!c.gone_in && c.x > -40.0 && c.x < w + 40.0 && !(t > c.leave_at && !(homes && c.person()) && (c.x < v0 - vw * 1.2 || c.x > v0 + vw * 2.2)));
+        for c in self.list.iter().filter(|c| c.gone_in && c.x > v0 - 4.0 && c.x < v0 + vw + 4.0) {
+            d.sound(Sfx::Click, c.centre(), 0.35);
+        }
         let gone: Vec<&'static str> = self.list.iter().filter(|c| c.friend && !stays(c)).map(|c| c.name).collect();
         for f in self.friends.iter_mut().filter(|f| gone.contains(&f.name)) {
             f.present = false;
@@ -1090,6 +1232,15 @@ impl Critters {
             d.sound(Sfx::Snowball, x, 0.5);
         }
         self.hits_on_you += on_you;
+        // the villager's team fight: who's landed the most
+        for f in self.fights.iter_mut().filter(|f| f.yours) {
+            f.score[1] += on_you;
+            for &(_, _, id, _) in &hits {
+                if let Some(side) = (0..2).find(|&s| f.sides[s].iter().any(|m| m.0 == id)) {
+                    f.score[1 - side] += 1;
+                }
+            }
+        }
         for (x, y, id, yours) in hits {
             d.snow_puff(x, y);
             d.sound(Sfx::Snowball, x, 0.9);
@@ -1299,7 +1450,7 @@ impl Critters {
     fn avoid(&mut self, dt: f32) {
         let h = (self.h - 1) as f32;
         let you = self.player.map(|p| (u64::MAX, p.0 + 1.0, p.1, 0u64, false));
-        let walking = |c: &Critter| matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let walking = |c: &Critter| matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let others: Vec<(u64, f32, f32, u64, bool)> = self
             .list
             .iter()
@@ -1466,8 +1617,10 @@ impl Critters {
     // ------------------------------------------------------------ the player
 
     /// (id, centre column, baseline row) of everyone, for speech bubbles.
-    pub fn anchors(&self) -> Vec<(u64, f32, f32)> {
-        self.list.iter().map(|c| (c.id, c.centre(), c.y)).collect()
+    /// Everyone about, for speech bubbles to follow: (id, centre column,
+    /// row, name: people's, or empty).
+    pub fn anchors(&self) -> Vec<(u64, f32, f32, String)> {
+        self.list.iter().map(|c| (c.id, c.centre(), c.y, if c.person() { c.name.to_string() } else { String::new() })).collect()
     }
 
     /// Whose pet is at (x, y) (world column, row), if any.
@@ -1567,6 +1720,145 @@ impl Critters {
         }
     }
 
+    /// Now and then someone in view takes up a pastime of their own: a snow
+    /// angel, lying back to watch the sky (after dark), or two kids playing
+    /// tag.
+    fn pastimes(&mut self, t: f32, d: &mut Director) {
+        if self.asleep || t < self.next_pastime {
+            return;
+        }
+        self.next_pastime = t + self.rng.range(18.0, 45.0);
+        let (v0, vw) = self.view;
+        let free: Vec<usize> = (0..self.list.len()).filter(|&i| {
+            let c = &self.list[i];
+            c.person() && matches!(c.st, St::Walk | St::Idle { .. }) && c.x > v0 && c.x < v0 + vw && t < c.leave_at && c.pet.is_none()
+        }).collect();
+        if free.is_empty() {
+            return;
+        }
+        let kids: Vec<usize> = free.iter().copied().filter(|&i| self.list[i].kind == Kind::Kid).collect();
+        let r = self.rng.f();
+        if kids.len() >= 2 && r < 0.4 {
+            let (a, b) = (kids[0], kids[1]);
+            let until = t + self.rng.range(20.0, 35.0);
+            let (ia, ib) = (self.list[a].id, self.list[b].id);
+            self.list[a].st = St::Play { other: ib, it: true, until };
+            self.list[b].st = St::Play { other: ia, it: false, until };
+            let c = &self.list[a];
+            d.say(c.centre().round() as i32, c.y as i32 - 4, "tag! you're it — no, I'm it!", t, 2.2, 6);
+            return;
+        }
+        let i = *self.rng.pick(&free);
+        let night = d.night();
+        let c = &mut self.list[i];
+        if night && r > 0.65 {
+            c.st = St::Lie { until: t + self.rng.range(14.0, 28.0), flap: 0.0 };
+            let line = *self.rng.pick(&["look at all the stars…", "a minute to look at the sky", "the snow's lovely and soft"]);
+            d.say(c.centre().round() as i32, c.y as i32 - 3, line, t + 0.5, 2.6, 6);
+        } else {
+            c.st = St::Lie { until: t + self.rng.range(4.5, 7.0), flap: t + 2.4 };
+            let line = *self.rng.pick(&["snow angel time!", "watch this!", "the perfect spot for an angel"]);
+            d.say(c.centre().round() as i32, c.y as i32 - 3, line, t, 2.0, 6);
+        }
+    }
+
+    /// The villager's lying down in the snow at (x, y): a kid or two near
+    /// by joins in with snow angels of their own; a friend after dark lies
+    /// back beside them to look at the stars. Who joined in.
+    pub fn join_lying(&mut self, x: f32, _y: f32, angel: bool, night: bool, t: f32, d: &mut Director) -> usize {
+        let mut n = 0;
+        let mut spots = [x - 9.0, x + 9.0, x - 17.0, x + 17.0].into_iter();
+        for i in 0..self.list.len() {
+            let c = &self.list[i];
+            let ok = c.person() && matches!(c.st, St::Walk | St::Idle { .. } | St::Follow { .. }) && (c.centre() - x).abs() < 22.0;
+            let wants = if angel { c.kind == Kind::Kid || c.friend } else { night && (c.friend || matches!(c.st, St::Follow { .. })) };
+            if !ok || !wants || n >= 2 {
+                continue;
+            }
+            // where they are (a step aside, if right on top of the villager)
+            let cx = self.list[i].centre();
+            let sx = if (cx - x).abs() < 7.0 {
+                let Some(sx) = spots.next() else { break };
+                sx
+            } else {
+                cx
+            };
+            let lo = self.lo_at(sx);
+            let c = &mut self.list[i];
+            c.x = sx - (c.centre() - c.x);
+            c.y = c.y.max(lo);
+            c.dir = if sx < x { 1.0 } else { -1.0 };
+            let follow = matches!(c.st, St::Follow { .. });
+            c.st = if angel { St::Lie { until: t + 7.0, flap: t + 2.6 } } else { St::Lie { until: t + 25.0, flap: 0.0 } };
+            if follow {
+                c.leave_at = c.leave_at.max(t + 60.0);
+            }
+            let line = if angel { *self.rng.pick(&["me too!", "angels everywhere!", "mine's going to be the biggest"]) } else { *self.rng.pick(&["room for one more?", "that one's the North Star", "make a wish if one falls"]) };
+            d.say(c.centre().round() as i32, c.y as i32 - 3, line, t + 0.8 + n as f32, 2.4, 6);
+            n += 1;
+        }
+        n
+    }
+
+    /// Whoever's walking along with the villager.
+    pub fn follower_ids(&self) -> Vec<u64> {
+        self.list.iter().filter(|c| matches!(c.st, St::Follow { .. })).map(|c| c.id).collect()
+    }
+
+    /// A team snowball fight: the villager and whoever's walking along
+    /// with them against as many from round about (at least two). False if
+    /// there's nobody about to take them on.
+    pub fn team_fight(&mut self, t: f32, d: &mut Director) -> bool {
+        let Some((px, py, ..)) = self.player else { return false };
+        if self.fights.iter().any(|f| f.yours) {
+            return false;
+        }
+        let along = self.follower_ids();
+        let mut foes: Vec<(u64, f32)> = self.list.iter().filter(|c| c.person() && c.free() && !along.contains(&c.id) && (c.centre() - px).abs() < 50.0).map(|c| (c.id, c.centre())).collect();
+        foes.sort_by(|a, b| (a.1 - px).abs().total_cmp(&(b.1 - px).abs()));
+        foes.truncate((along.len() + 1).clamp(2, 4));
+        if foes.is_empty() {
+            return false;
+        }
+        // the other side over that way, the villager's team round them
+        let away = foes.iter().map(|f| f.1).sum::<f32>() / foes.len() as f32;
+        let dir = if away >= px { 1.0 } else { -1.0 };
+        let mid = (px + dir * 12.0).clamp(14.0, self.w as f32 - 14.0);
+        let h = (self.h - 1) as f32;
+        let mut sides: [Vec<(u64, f32, f32)>; 2] = [vec![], vec![]];
+        for (k, &id) in along.iter().enumerate() {
+            let x = px - dir * (2.0 + k as f32 * 3.0);
+            let y = (py + if k % 2 == 0 { 2.0 } else { -2.0 }).clamp(self.lo_at(x), h).round();
+            sides[0].push((id, x, y));
+        }
+        for (k, &(id, _)) in foes.iter().enumerate() {
+            let x = mid + dir * (12.0 + k as f32 * 3.0);
+            let lo = self.lo_at(x);
+            let y = (py + (k as f32 - 1.0) * 2.0).clamp(lo, h).round();
+            sides[1].push((id, x, y));
+        }
+        let until = t + 40.0;
+        for side in &sides {
+            for &(id, x, y) in side {
+                self.work_at(id, x, y, mid, until);
+            }
+        }
+        if let Some(&(id, ..)) = sides[1].first() {
+            if let Some((x, y)) = self.position(id) {
+                let line = *self.rng.pick(&["a TEAM snowball fight? you're on!", "us against you lot!", "ready… aim…", "you'll regret this!"]);
+                d.say(x.round() as i32, y as i32 - 4, line, t + 0.6, 2.4, 6);
+                d.sound(Sfx::Laugh, x, 0.6);
+            }
+        }
+        self.fights.push(Fight { sides, mid, until, next_line: t + 4.0, yours: true, score: [0, 0], along });
+        true
+    }
+
+    /// The villager's team fight going on: (your side's hits, theirs).
+    pub fn team_score(&self) -> Option<(u32, u32)> {
+        self.fights.iter().find(|f| f.yours).map(|f| (f.score[0], f.score[1]))
+    }
+
     /// Kids having snowball fights: now and then a few in view square off
     /// in two sides and pelt each other for half a minute or so.
     fn fights_update(&mut self, dt: f32, t: f32, d: &mut Director) {
@@ -1605,7 +1897,7 @@ impl Critters {
                         d.sound(Sfx::Laugh, x, 0.6);
                     }
                 }
-                self.fights.push(Fight { sides, mid, until, next_line: t + 4.0 });
+                self.fights.push(Fight { sides, mid, until, next_line: t + 4.0, yours: false, score: [0, 0], along: vec![] });
             }
         }
         let mut fights = std::mem::take(&mut self.fights);
@@ -1614,10 +1906,17 @@ impl Critters {
             for side in &mut f.sides {
                 side.retain(|&(id, ..)| self.list.iter().any(|c| c.id == id && !c.held()));
             }
-            let over = t > f.until || f.sides.iter().any(|s| s.is_empty());
+            let over = t > f.until || f.sides[1].is_empty() || (!f.yours && f.sides[0].is_empty());
             if over {
                 let all: Vec<u64> = f.sides.iter().flatten().map(|m| m.0).collect();
-                if let Some((x, y)) = all.first().and_then(|&id| self.position(id)) {
+                if f.yours {
+                    let won = f.score[0] >= f.score[1];
+                    self.fight_results.push((won, f.score[0], f.score[1]));
+                    if let Some((x, y)) = f.sides[1].first().and_then(|m| self.position(m.0)) {
+                        let line = if won { *self.rng.pick(&["okay, okay — you win!", "your team's too good!", "we surrender!"]) } else { *self.rng.pick(&["we win! we win!", "ha! better luck next time!", "victory is ours!"]) };
+                        d.say(x.round() as i32, y as i32 - 4, line, t, 2.6, 6);
+                    }
+                } else if let Some((x, y)) = all.first().and_then(|&id| self.position(id)) {
                     let line = *self.rng.pick(FIGHT_END);
                     d.say(x.round() as i32, y as i32 - 4, line, t, 2.6, 6);
                 }
@@ -1626,6 +1925,10 @@ impl Critters {
                     if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
                         if matches!(c.st, St::Dizzy { .. } | St::Throw { .. }) {
                             c.st = St::Walk;
+                        }
+                        // whoever came along walks on with the villager again
+                        if f.along.contains(&id) {
+                            c.st = St::Follow { until: c.leave_at.max(t + 90.0), moving: false };
                         }
                     }
                 }
@@ -1643,8 +1946,26 @@ impl Critters {
                     if !matches!(self.list[i].st, St::Gather { moving: false, .. }) || !self.rng.chance(dt * 0.55) {
                         continue;
                     }
-                    // throw at someone on the other side
+                    // throw at someone on the other side (the villager too,
+                    // in their own team fight)
+                    if f.yours && s == 1 && self.rng.chance(0.4) {
+                        if let Some((px, py, ..)) = self.player {
+                            let (ax, ay) = (self.list[i].centre(), self.list[i].y);
+                            let dist = px + 1.0 - ax;
+                            if dist.abs() < 45.0 {
+                                let flight = (dist.abs() / 30.0).clamp(0.35, 0.9);
+                                self.list[i].dir = dist.signum();
+                                self.list[i].st = St::Throw { until: t + 0.6 };
+                                self.balls.push(Snowball { x: ax, y: ay - 2.0, vx: dist / flight, vy: (py - ay) / flight - 15.0 * flight, target: AT_YOU, age: 0.0, yours: false, land: py + 0.5 });
+                                d.sound(Sfx::Snowball, ax, 0.4);
+                                continue;
+                            }
+                        }
+                    }
                     let foes = &f.sides[1 - s];
+                    if foes.is_empty() {
+                        continue;
+                    }
                     let (fid, ..) = foes[self.rng.int(0, foes.len() as i32) as usize];
                     let Some(j) = self.list.iter().position(|c| c.id == fid) else { continue };
                     let (ax, ay) = (self.list[i].centre(), self.list[i].y);
@@ -1844,12 +2165,19 @@ impl Critters {
 
     /// The nearest character the player could talk to / pet: within `rx`
     /// columns and a few rows of (x, y).
-    pub fn nearest(&self, x: f32, y: f32, rx: f32) -> Option<u64> {
+    /// Everyone and everything within `rx` columns (and a few rows) of
+    /// (x, y): (id, centre column, row, a friend, walking on by).
+    pub fn around(&self, x: f32, y: f32, rx: f32) -> Vec<(u64, f32, f32, bool, bool)> {
         self.list
             .iter()
             .filter(|c| !c.held() && !matches!(c.st, St::Fall { .. }) && (c.centre() - x).abs() <= rx && (c.y - y).abs() <= 3.5)
-            .min_by(|a, b| (a.centre() - x).abs().partial_cmp(&(b.centre() - x).abs()).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|c| c.id)
+            .map(|c| (c.id, c.centre(), c.y, c.friend, matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. })))
+            .collect()
+    }
+
+    /// The houses' front doors (column, the row in front of them).
+    pub fn set_doors(&mut self, doors: Vec<(f32, f32)>) {
+        self.doors = doors;
     }
 
     /// Who's at (x, y), if anyone.
@@ -2492,10 +2820,16 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     // people: the detailed sprite, where the front-end can show pictures
     if c.person() && crate::frame::pictures_ok() {
         use super::sprites::{self, Look, Pose};
-        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
         let pose = if c.held() || matches!(c.st, St::Fall { .. }) {
             Pose::ArmsUp
+        } else if let St::Lie { flap, .. } = c.st {
+            if t < flap {
+                Pose::Angel(((t * 3.0) as i32 % 2) as u8)
+            } else {
+                Pose::Lie
+            }
         } else if matches!(c.st, St::Throw { .. }) {
             Pose::Throw
         } else if matches!(c.st, St::Petting { .. }) {
@@ -2538,7 +2872,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     }
     // people, on a screen tall enough: the same pixel-art folk as indoors
     if k >= 1.75 && c.person() && !c.held() && !matches!(c.st, St::Fall { .. }) {
-        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
         let rate = if c.kind == Kind::Kid { 9.0 } else { 6.0 };
         let kid = c.kind == Kind::Kid;
         let wave = matches!(c.st, St::Greet { .. } | St::Throw { .. } | St::Petting { .. });

@@ -1,9 +1,10 @@
 //! The player: a little bundled-up villager walked around with WASD / the arrow
 //! keys. They crunch through the snow, leave footprints, and can say hello
 //! to people, pet and feed the animals, pick berries, knock on doors and
-//! poke at things (E / Enter), or ask someone to walk along (F). They climb
-//! (W against a house, a tree, a widget…), walk along the tops of things and
-//! jump (Space).
+//! poke at things (E / Enter), or ask someone to walk along (F). They jump
+//! (Space: held, higher, up to four times as high), leap up onto houses,
+//! trees and widgets, walk along the tops of things (W heads up to the top),
+//! and lie down in the snow to rest or make a snow angel (Z).
 
 use super::events::Director;
 use super::ledges::Ledge;
@@ -28,6 +29,11 @@ const CLIMB: f32 = 9.0;
 const LEAP_MAX: f32 = 24.0;
 /// Gravity (rows a second, a second).
 const GRAVITY: f32 = 70.0;
+/// Space held: the jump keeps rising this long (as a share of the time a
+/// plain jump takes to its top) — up to four times as high.
+const BOOST: f32 = 1.5;
+/// How long a snow angel takes (s).
+pub const ANGEL_TIME: f32 = 2.4;
 
 pub struct Player {
     pub x: f32,
@@ -86,11 +92,28 @@ pub struct Player {
     /// Dropping in from the sky (right-click → drop in here): the row to
     /// land on; drawn shimmering on the way down.
     pub drop_to: Option<f32>,
+    /// Space still held: a jump keeps rising for as long as this lasts (s).
+    pub jump_held: bool,
+    boost: f32,
+    /// Leaping onto a foothold a step or two along: the column to drift to.
+    glide: Option<f32>,
+    /// Scrambling up (or down) a steep bit of a tree, until then.
+    scramble_until: f32,
+    /// Lying in the snow, resting (since when).
+    pub lie: Option<f32>,
+    /// Making a snow angel, lying there (since when).
+    pub angel_at: Option<f32>,
+    /// A snow angel just finished (the scene presses it into the snow).
+    pub angel_made: bool,
+    /// Drawn this far along from where they are (the camera's part of a
+    /// cell, so they hold still on the screen while the village scrolls by
+    /// a cell at a time).
+    pub shift: f32,
 }
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0 }
     }
 
     /// How fast to go: the walk speed, doubled while running.
@@ -104,11 +127,65 @@ impl Player {
         self.dizzy_until -= s;
         self.scoop_until -= s;
         self.throw_until -= s;
+        self.scramble_until -= s;
+        self.lie = self.lie.map(|l| l - s);
+        self.angel_at = self.angel_at.map(|a| a - s);
+    }
+
+    /// How the villager looks (for drawing them elsewhere: on a trip).
+    pub fn look() -> super::sprites::Look {
+        super::sprites::Look { kid: false, coat: COAT, hat: Some(HAT), hair: Rgb::hex(0x3a2a1a), scarf: Some(SCARF), skin: SKIN, mittens: SCARF, holding: None, lantern: false }
     }
 
     /// Can walk / act right now (not carried, falling, dizzy or busy)?
     pub fn free(&self, t: f32) -> bool {
-        self.held.is_none() && self.fall.is_none() && t >= self.dizzy_until && t >= self.scoop_until
+        self.held.is_none() && self.fall.is_none() && t >= self.dizzy_until && t >= self.scoop_until && self.lie.is_none()
+    }
+
+    /// Down into the snow on their back, for a rest (on a roof or a branch
+    /// too).
+    pub fn lie_down(&mut self, t: f32, d: &mut Director) -> bool {
+        if !self.free(t) || self.climb.is_some() || self.cuddling {
+            return false;
+        }
+        self.lie = Some(t);
+        self.angel_at = None;
+        self.moving = false;
+        self.snowball = false;
+        self.active_at = t;
+        d.snow_puff(self.centre(), self.y);
+        d.sound(Sfx::Rustle, self.centre(), 0.5);
+        true
+    }
+
+    /// Up again, brushing the snow off.
+    pub fn get_up(&mut self, t: f32, d: &mut Director) {
+        if self.lie.take().is_some() {
+            self.angel_at = None;
+            self.active_at = t;
+            d.snow_puff(self.centre(), self.y - 1.0);
+            d.sound(Sfx::Rustle, self.centre(), 0.4);
+        }
+    }
+
+    /// Lying there: arms and legs swept out and back, a snow angel.
+    pub fn flap(&mut self, t: f32, d: &mut Director) {
+        if self.lie.is_some() && self.angel_at.is_none() {
+            self.angel_at = Some(t);
+            self.active_at = t;
+            d.sound(Sfx::Rustle, self.centre(), 0.6);
+        }
+    }
+
+    /// Lying in the snow (for drawing, and what the keys do).
+    pub fn lying(&self) -> bool {
+        self.lie.is_some()
+    }
+
+    /// Space let go: the jump stops rising (and falls as usual).
+    pub fn release_jump(&mut self) {
+        self.jump_held = false;
+        self.boost = 0.0;
     }
 
     /// (x, top, w, h) of the sprite, in cells.
@@ -160,21 +237,30 @@ impl Player {
     /// house, a tree, a lamp post at the back of the snowfield; a widget or a
     /// window above), it's a leap right up onto it. `ground`: the first
     /// snowfield row here.
-    pub fn jump(&mut self, t: f32, ledges: &[Ledge], ground: f32, d: &mut Director) {
+    pub fn jump(&mut self, t: f32, ledges: &[Ledge], d: &mut Director) {
         if self.held.is_some() || self.fall.is_some() || self.climb.is_some() || t < self.dizzy_until {
             return;
         }
+        if self.lie.is_some() {
+            // lying down: arms and legs out, a snow angel
+            self.flap(t, d);
+            return;
+        }
         if self.perch.is_none() {
-            let back = self.y <= ground + 0.5;
-            if let Some((li, f)) = super::ledges::climbable(ledges, self.centre(), self.y, back).filter(|&(_, f)| self.y - f <= LEAP_MAX * self.k) {
+            if let Some((li, f, cx)) = super::ledges::climbable(ledges, self.centre(), self.y, LEAP_MAX * self.k) {
                 // just over the top, then down onto it
                 let v = (2.0 * GRAVITY * (self.y - f + 1.5)).sqrt();
                 self.fall = Some((-v, self.y));
                 self.ledge_fall = true;
                 self.aim = Some(li);
+                self.glide = ((cx - self.centre()).abs() > 0.4).then_some(cx);
+                if let Some(g) = self.glide {
+                    self.dir = (g - self.centre()).signum();
+                }
                 self.depth = None;
                 self.left = None;
                 self.dropped = false;
+                self.boost = 0.0;
                 self.active_at = t;
                 d.sound(Sfx::Pickup, self.centre(), 0.5);
                 d.snow_puff(self.centre(), self.y);
@@ -183,12 +269,15 @@ impl Player {
         }
         // from the snow it lands back on the row it left (or on something
         // standing about as far forward); from up on something, back on it
-        // (or on whatever it's steered over to)
+        // (or on whatever it's steered over to). Held, it goes on up.
         self.depth = self.perch.take().is_none().then_some(self.y);
         self.left = None;
-        self.fall = Some((-JUMP * self.k.sqrt(), self.y));
+        let v = JUMP * self.k.sqrt();
+        self.fall = Some((-v, self.y));
         self.ledge_fall = true;
         self.dropped = false;
+        self.jump_held = true;
+        self.boost = BOOST * v / GRAVITY;
         self.active_at = t;
         d.sound(Sfx::Pickup, self.centre(), 0.35);
     }
@@ -196,6 +285,8 @@ impl Player {
     /// What was underfoot has gone (a window closed or moved off): down.
     pub fn lose_footing(&mut self) {
         self.perch = None;
+        self.lie = None;
+        self.angel_at = None;
         self.climb = None;
         self.fall = Some((0.0, self.y));
         self.ledge_fall = true;
@@ -207,6 +298,11 @@ impl Player {
     /// Climbing (for drawing): hand over hand.
     pub fn climbing(&self) -> bool {
         self.climb.is_some()
+    }
+
+    /// Scrambling up a steep bit of a tree (for drawing).
+    fn scrambling(&self, t: f32) -> bool {
+        t < self.scramble_until && self.perch.is_some()
     }
 
     /// In the air from a jump or a step off an edge (for drawing).
@@ -265,6 +361,29 @@ impl Player {
         let ground = lo(self.centre()).max(0.0);
         if self.held.is_some() {
             self.moving = false;
+            self.lie = None;
+            return;
+        }
+        // lying in the snow: still, but for a snow angel; a direction key
+        // gets up
+        if self.lie.is_some() {
+            self.moving = false;
+            if let Some(a) = self.angel_at {
+                if t - a >= ANGEL_TIME {
+                    self.angel_at = None;
+                    self.angel_made = self.perch.is_none();
+                    d.snow_puff(self.centre(), self.y);
+                } else if (t * 4.0).fract() < dt * 4.0 {
+                    d.sound(Sfx::Crunch, self.centre(), 0.12);
+                }
+            }
+            if mv != (0.0, 0.0) && self.angel_at.is_none() {
+                self.get_up(t, d);
+            }
+            if t > self.breath_at {
+                self.breath_at = t + 3.0 + (t * 7.3).sin().abs() * 2.5;
+                d.emote(self.centre() - self.dir * 1.5, self.y - 1.6, '∘', Rgb::hex(0xc8d0e0), 1);
+            }
             return;
         }
         // climbing up onto something, hand over hand
@@ -282,12 +401,27 @@ impl Player {
         }
         if let Some((vy, from)) = self.fall {
             // in a jump (or off an edge) the arrows still steer a little
-            if self.ledge_fall && self.drop_to.is_none() && mv.0 != 0.0 {
+            if let Some(g) = self.glide {
+                // drifting over to the foothold being leapt for
+                let dx = g - self.centre();
+                let step = (24.0 * self.k * dt).min(dx.abs());
+                self.x += step * dx.signum();
+                if dx.abs() <= step + 0.01 {
+                    self.glide = None;
+                }
+            } else if self.ledge_fall && self.drop_to.is_none() && mv.0 != 0.0 {
                 self.dir = mv.0.signum();
                 self.x = (self.x + mv.0 * SPEED_X * self.pace() * self.k * dt).clamp(1.0, w - 4.0);
             }
             let prev = self.y;
-            let vy = vy + GRAVITY * dt;
+            // Space held: still rising, for a while
+            let rising = self.ledge_fall && self.jump_held && self.boost > 0.0 && vy < 0.0;
+            let vy = if rising {
+                self.boost -= dt;
+                vy
+            } else {
+                vy + GRAVITY * dt
+            };
             self.y += vy * dt;
             // landing on something on the way down
             if self.ledge_fall && vy > 0.0 {
@@ -298,6 +432,7 @@ impl Player {
                 if let Some((li, f)) = found {
                     self.depth = None;
                     self.aim = None;
+                    self.glide = None;
                     self.y = f;
                     self.fall = None;
                     self.perch = Some(li);
@@ -326,6 +461,7 @@ impl Player {
                 self.fall = None;
                 self.depth = None;
                 self.aim = None;
+                self.glide = None;
                 d.snow_puff(self.centre(), self.y);
                 // a jump or a hop down lands on its feet; dropped from a
                 // height, it's a bit of a tumble
@@ -356,7 +492,6 @@ impl Player {
                 self.ledge_fall = true;
                 return;
             };
-            self.moving = mx != 0.0;
             if my > 0.0 {
                 self.perch = None;
                 self.left = Some(li);
@@ -364,13 +499,27 @@ impl Player {
                 self.ledge_fall = true;
                 return;
             }
+            // W: up towards the top of it (the ridge, the star)
+            let mx = if mx == 0.0 && my < 0.0 {
+                l.peak(self.centre()).map(|px| px - self.centre()).filter(|dx| dx.abs() > 0.6).map(f32::signum).unwrap_or(0.0)
+            } else {
+                mx
+            };
+            self.moving = mx != 0.0;
+            let tree = l.kind == super::ledges::Kind::Tree;
+            let step = if tree { super::ledges::TREE_STEP * self.k.max(1.0) } else { super::ledges::STEP };
             if mx != 0.0 {
                 self.active_at = t;
                 self.dir = mx.signum();
-                let nx = (self.x + mx * SPEED_X * self.pace() * self.k * dt).clamp(1.0, w - 4.0);
+                // slower, scrambling up through the branches
+                let pace = if t < self.scramble_until { 0.55 } else { 1.0 };
+                let nx = (self.x + mx * SPEED_X * self.pace() * pace * self.k * dt).clamp(1.0, w - 4.0);
                 match l.feet(nx + 1.0) {
-                    // a step up or down the slope
-                    Some(f) if (f - self.y).abs() <= super::ledges::STEP => {
+                    // a step up or down the slope (a scramble, on a tree)
+                    Some(f) if (f - self.y).abs() <= step => {
+                        if (f - self.y).abs() > super::ledges::STEP * 0.6 {
+                            self.scramble_until = t + 0.3;
+                        }
                         self.x = nx;
                         self.y = f;
                     }
@@ -429,8 +578,10 @@ impl Player {
         // (centre column, feet row, scale) on screen
         let (sc, sy, sk) = match view {
             Some(v) => (v.x(self.centre()), v.y(self.y + 1.0) - 1.0, self.k * v.z),
-            None => (self.centre(), self.y, self.k),
+            None => (self.centre() - self.shift, self.y, self.k),
         };
+        let lying = self.lie.is_some();
+        let flap = self.angel_at.map(|a| ((t - a) * 3.0) as i32 % 2 == 0);
         let step = (self.phase as i32) % 2 == 0;
         let kick = (t * 7.0) as i32 % 2 == 0;
         let up = self.held.is_some() || self.fall.is_some();
@@ -450,7 +601,12 @@ impl Player {
         // the detailed sprite, where the front-end can show pictures
         if crate::frame::pictures_ok() {
             use super::sprites::{self, Look, Pose};
-            let pose = if self.climbing() {
+            let pose = if lying {
+                match flap {
+                    Some(out) => Pose::Angel(out as u8),
+                    None => Pose::Lie,
+                }
+            } else if self.climbing() || self.scrambling(t) {
                 Pose::Climb(step as u8)
             } else if self.leaping() {
                 Pose::Jump
@@ -496,6 +652,23 @@ impl Player {
             if self.cozy {
                 f.light_px(bx, by - 2.0, Rgb::hex(0xff9a7a) * (1.4 * glow));
             }
+            return;
+        }
+        // lying in the snow: flat out, arms and legs swept out and in
+        if lying {
+            let feet = sy.round() as i32;
+            let x0 = (sc - 2.0).round() as i32;
+            let cells: [(i32, char, Rgb); 5] = [(0, '•', Rgb::hex(0xf4f0ea)), (1, '●', SKIN), (2, '▬', COAT), (3, '▬', COAT), (4, '▀', BOOTS)];
+            for (dx, ch, c) in cells {
+                let x = if self.dir > 0.0 { x0 + dx } else { x0 + 4 - dx };
+                f.put_g(x, feet, Glyph::new(ch, c).bg(Bg::Scene).lit(0.6));
+            }
+            if flap == Some(true) {
+                let (a, b) = if self.dir > 0.0 { (x0 + 2, x0 + 3) } else { (x0 + 2, x0 + 1) };
+                f.put_g(a, feet - 1, Glyph::new('╲', COAT).lit(0.6));
+                f.put_g(b, feet - 1, Glyph::new('╱', COAT).lit(0.6));
+            }
+            f.light_cell(x0 + 2, feet, Rgb::hex(0xffc878) * (1.6 * glow));
             return;
         }
         // on a screen tall enough: the pixel-art villager, as indoors

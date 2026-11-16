@@ -11,7 +11,7 @@ pub struct Config {
     pub scale: f32,
     /// Magnify the view (1 = the whole scene), centred on the villager.
     pub zoom: f32,
-    /// 0 = random seed each launch.
+    /// 0: the save file's village (a new one the first time).
     pub seed: u64,
     pub scene: SceneCfg,
     pub clock: ClockCfg,
@@ -21,8 +21,94 @@ pub struct Config {
     pub windows: WindowsCfg,
     pub sound: SoundCfg,
     pub updates: UpdatesCfg,
+    /// The villager's keys (each can be changed).
+    pub keys: KeysCfg,
+    /// How the app's own windows and panels look (the settings, menus,
+    /// conversations): the same looks as the widgets.
+    pub ui: UiCfg,
     /// Shelves: widgets that each show a folder's files and shortcuts.
     pub shelves: Vec<ShelfCfg>,
+}
+
+/// The villager's keys: a letter or digit, or "space", "enter", "tab".
+/// Walking is always WASD and the arrows.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct KeysCfg {
+    pub interact: String,
+    pub jump: String,
+    pub snowball: String,
+    pub invite: String,
+    pub pockets: String,
+    pub held: String,
+    pub centre: String,
+    pub rest: String,
+    pub todo: String,
+}
+
+impl Default for KeysCfg {
+    fn default() -> Self {
+        let k = |s: &str| s.to_string();
+        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t") }
+    }
+}
+
+/// What each key does, in the order the settings list them: (name, what
+/// it does).
+pub const KEY_ACTIONS: [(&str, &str); 9] = [
+    ("interact", "talk, use, pick up, help build"),
+    ("jump", "jump (hold: higher), leap up onto things"),
+    ("snowball", "scoop a snowball, then throw it"),
+    ("invite", "ask someone along / say goodbye"),
+    ("pockets", "pockets & Christmas list"),
+    ("held", "what's in hand"),
+    ("centre", "the view back on the villager"),
+    ("rest", "lie down in the snow (Space: a snow angel)"),
+    ("todo", "things to do here"),
+];
+
+impl KeysCfg {
+    pub fn get(&self, i: usize) -> &str {
+        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo][i.min(8)]
+    }
+
+    pub fn set(&mut self, i: usize, v: String) {
+        let slot = match i {
+            0 => &mut self.interact,
+            1 => &mut self.jump,
+            2 => &mut self.snowball,
+            3 => &mut self.invite,
+            4 => &mut self.pockets,
+            5 => &mut self.held,
+            6 => &mut self.centre,
+            7 => &mut self.rest,
+            _ => &mut self.todo,
+        };
+        *slot = v;
+    }
+
+    /// How a key's shown ("Space", "E").
+    pub fn label(spec: &str) -> String {
+        match spec.to_ascii_lowercase().as_str() {
+            "space" | " " => "Space".into(),
+            "enter" => "Enter".into(),
+            "tab" => "Tab".into(),
+            s => s.to_uppercase(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct UiCfg {
+    /// "classic", "frosted", "wood" or "gift".
+    pub look: String,
+}
+
+impl Default for UiCfg {
+    fn default() -> Self {
+        UiCfg { look: "classic".into() }
+    }
 }
 
 /// A shelf: a widget showing a folder's files and shortcuts (a tidier
@@ -552,6 +638,8 @@ impl Default for Config {
             windows: WindowsCfg::default(),
             sound: SoundCfg::default(),
             updates: UpdatesCfg::default(),
+            keys: KeysCfg::default(),
+            ui: UiCfg::default(),
             shelves: vec![],
         }
     }

@@ -43,6 +43,29 @@ impl CtxMenu {
         m
     }
 
+    /// A menu of just these (no settings at the bottom), the first one
+    /// picked out for the keys.
+    pub fn plain(x: i32, y: i32, title: String, items: Vec<(String, MenuAct)>, w: i32, h: i32) -> Self {
+        let mut m = CtxMenu { x, y, title, items, hover: Some(0) };
+        let (mw, mh) = m.size();
+        m.x = x.min(w - mw - 1).max(0);
+        m.y = y.min(h - mh - 1).max(0);
+        m
+    }
+
+    /// The arrow keys: the next (or previous) item, round and round.
+    pub fn step(&mut self, d: i32) {
+        let n = self.items.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.hover = Some(match self.hover {
+            Some(i) => (i as i32 + d).rem_euclid(n) as usize,
+            None if d > 0 => 0,
+            None => (n - 1) as usize,
+        });
+    }
+
     /// Keep clear of the open windows (x0, y0, x1, y1 in cells): the menu
     /// is drawn on the wallpaper, under them. Below the click if that's
     /// clear, else above it, else to the left; failing all of those, where
@@ -71,7 +94,7 @@ impl CtxMenu {
     }
 
     fn size(&self) -> (i32, i32) {
-        let w = self.items.iter().map(|i| i.0.chars().count()).chain(std::iter::once(self.title.chars().count() + 2)).max().unwrap_or(10) as i32 + 6;
+        let w = self.items.iter().map(|i| i.0.chars().count()).chain(std::iter::once(self.title.chars().count() + 2)).max().unwrap_or(10) as i32 + 8;
         (w, self.items.len() as i32 + 2)
     }
 
@@ -85,6 +108,12 @@ impl CtxMenu {
         let (w, _) = self.size();
         let i = y - self.y - 1;
         (x > self.x && x < self.x + w - 1 && i >= 0 && (i as usize) < self.items.len()).then_some(i as usize)
+    }
+
+    /// Its outline on screen.
+    pub fn rect(&self) -> crate::widgets::Rect {
+        let (w, h) = self.size();
+        crate::widgets::Rect { x: self.x, y: self.y, w, h }
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -118,7 +147,11 @@ impl CtxMenu {
                 _ if hot => Rgb::hex(0xffd36b),
                 _ => pal::UI_TEXT,
             };
-            f.text(self.x + 3, y, label, fg, ibg, 0.0);
+            // 1-9: picked with the number keys (or the arrows and Enter)
+            if i < 9 {
+                f.text(self.x + 2, y, &format!("{}", i + 1), Rgb::hex(0xffd36b) * if hot { 1.0 } else { 0.55 }, ibg, 0.0);
+            }
+            f.text(self.x + 4, y, label, fg, ibg, 0.0);
         }
     }
 }

@@ -15,6 +15,7 @@ mod linwall;
 mod platform;
 mod raster;
 mod rng;
+mod save;
 mod scene;
 mod setwin;
 mod settings;
@@ -284,7 +285,15 @@ fn main() {
         // config the app saves (see `app::set_fps_override`)
         app::set_fps_override(f);
     }
-    let seed = if cfg.seed == 0 { app::random_seed() } else { cfg.seed as u32 };
+    // a real session keeps a save file: the same village (from its seed)
+    // each time, unless one's been set in the config
+    let session = args.export.is_none() && args.bench == 0 && !args.settings_window && args.export_audio.is_none() && args.audio_test <= 0.0;
+    save::set_on(session);
+    let seed = if cfg.seed != 0 {
+        cfg.seed as u32
+    } else {
+        session.then(save::load).flatten().map(|s| s.seed).unwrap_or_else(app::random_seed)
+    };
     let path = config::resolve(args.config.as_deref());
     // the icon and launchers the Linux desktop looks windows up by
     #[cfg(target_os = "linux")]
@@ -294,6 +303,7 @@ fn main() {
         if args.wallpaper {
             linwall::refresh_launcher();
         }
+        linwall::ensure_command();
     }
     if args.settings_window {
         let res = match &args.export {
@@ -487,6 +497,9 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
         app.set_exact_keys();
     }
     app.start_audio();
+    if save::on() {
+        app.keep_saves();
+    }
     // window snow + lights overlay: only as the actual wallpaper on KDE Wayland
     #[cfg(target_os = "linux")]
     let mut fx_handle = None;
@@ -524,10 +537,14 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                         MouseEventKind::Down(MouseButton::Right) => MouseIn::Down(Btn::Right),
                         MouseEventKind::Drag(MouseButton::Left) => MouseIn::Drag,
                         MouseEventKind::Up(MouseButton::Left) => MouseIn::Up(Btn::Left),
-                        MouseEventKind::ScrollUp if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::ScrollSky(true),
-                        MouseEventKind::ScrollDown if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::ScrollSky(false),
+                        MouseEventKind::ScrollUp if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::Zoom(1.12),
+                        MouseEventKind::ScrollDown if m.modifiers.contains(KeyModifiers::CONTROL) => MouseIn::Zoom(1.0 / 1.12),
+                        MouseEventKind::ScrollUp if m.modifiers.contains(KeyModifiers::SHIFT) => MouseIn::ScrollSky(true),
+                        MouseEventKind::ScrollDown if m.modifiers.contains(KeyModifiers::SHIFT) => MouseIn::ScrollSky(false),
                         MouseEventKind::ScrollUp => MouseIn::Scroll(true),
                         MouseEventKind::ScrollDown => MouseIn::Scroll(false),
+                        MouseEventKind::ScrollLeft => MouseIn::ScrollSide(false),
+                        MouseEventKind::ScrollRight => MouseIn::ScrollSide(true),
                         _ => continue,
                     };
                     app.mouse(ev, x, y);
@@ -760,6 +777,15 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         let (title, items) = scene.menu_at(x, y);
         ctxmenu::CtxMenu::new(x, y, title, items, w as i32, h as i32)
     });
+    // (--perch todo: the things-to-do list by the villager)
+    let menu = if args.perch.as_deref() == Some("todo") {
+        let (title, items) = scene.todo_menu();
+        let (x, y) = scene.zoom_focus();
+        let items = items.into_iter().map(|(l, d)| (l, ctxmenu::MenuAct::Scene(d))).collect();
+        Some(ctxmenu::CtxMenu::plain(x as i32 + 4, y as i32 - 6, title, items, w as i32, h as i32))
+    } else {
+        menu
+    };
     if args.clean {
         scene.quiet_player();
     }
@@ -774,7 +800,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             widgets.draw(&mut frame, t);
             settings.draw_gear(&mut frame, t);
             settings.draw(&mut frame, cfg, t);
-            settings.draw_help(&mut frame);
+            settings.draw_help(&mut frame, &cfg.keys, &cfg.ui.look);
         }
         if let Some(m) = &menu {
             m.draw(&mut frame);

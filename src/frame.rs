@@ -595,6 +595,33 @@ impl Frame {
     /// the cell → source-cell transform (x0, y0): source = (x0 + x / z,
     /// y0 + y / z). Only `bounds` (cells from the top left) of the drawing
     /// is ever shown.
+    /// Pictures placed before a zoom, moved and grown with it (the view's
+    /// left column `x0` and top row `y0`, `z` times bigger).
+    pub fn zoom_pictures(&mut self, z: f32, x0: f32, y0: f32) {
+        let aspect = self.cell_aspect;
+        for p in &mut self.pictures {
+            match p.sprite {
+                Some((cx, feet, rows)) => {
+                    let (cx, feet, rows) = ((cx - x0) * z, (feet - y0) * z, rows * z);
+                    let wc = p.pic.w as f32 / p.pic.h.max(1) as f32 * rows * aspect;
+                    let (x, y) = ((cx - wc / 2.0).floor() as i32, (feet - rows).floor() as i32);
+                    p.cols = (cx + wc / 2.0).ceil() as i32 - x;
+                    p.rows = feet.ceil() as i32 - y;
+                    (p.x, p.y) = (x, y);
+                    p.sprite = Some((cx, feet, rows));
+                }
+                None => {
+                    let (x, y) = (((p.x as f32 - x0) * z).floor() as i32, ((p.y as f32 - y0) * z).floor() as i32);
+                    p.cols = (p.cols as f32 * z).round() as i32;
+                    p.rows = (p.rows as f32 * z).round() as i32;
+                    (p.x, p.y) = (x, y);
+                }
+            }
+        }
+        let (w, h) = (self.w as i32, self.h as i32);
+        self.pictures.retain(|p| p.x + p.cols > 0 && p.y + p.rows > 0 && p.x < w && p.y < h);
+    }
+
     pub fn zoom(&mut self, z: f32, fx: f32, fy: f32, bounds: (f32, f32), spare: &mut Frame) -> (f32, f32) {
         if z <= 1.001 {
             return (0.0, 0.0);

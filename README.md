@@ -19,8 +19,17 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 
 ## ✨ Highlights
 
-- **A whole village to explore**: about 3½ screens wide, with parallax mountains, lit cabins on the slopes, a
-  cobbled sidewalk, two-lane traffic, a railway with a station, and a sky above the sky.
+- **A whole village to explore**: about five screens wide, with open stretches of snow between the houses, parallax
+  mountains, lit cabins on the slopes, a cobbled sidewalk, two-lane traffic, a railway with a station, and a sky
+  above the sky.
+- **Things to do** (**T**): snowmen and igloos (and inside the igloos, a room of their own), snow angels, a rest in the
+  snow under the stars, carols the neighbours join in with, tag, team snowball fights with whoever's tagging along,
+  a light show of any length, fireworks, and a game of chess, checkers, Snowflakes or Twenty-One at the table in
+  someone's home. A scorecard keeps count.
+- **Trips out**: the train from the station up to a ski lodge (skis from the shop, the chairlift, then a run down
+  the mountain through the flags), and a night drive in the car parked by home.
+- **Play in a browser**: the same village on the web at **[dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/)**,
+  with touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
   along, step inside houses, and spend "cheer" at the cocoa cabin.
 - **Townsfolk and wildlife**: named neighbours who hold real back-and-forth conversations about what's going
@@ -91,7 +100,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
-| **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons), plus a live wallpaper for the home screen. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
+| **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons, or a game controller); the live wallpaper is the same village on autopilot. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
+| **Web** | [dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone). Saves in the browser; no sound yet. |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
 have a one-line installer straight from the repo. On **Linux** (no sudo):
@@ -102,6 +112,8 @@ On **Windows**, in PowerShell (per-user, no admin; installs the latest release w
 ```powershell
 irm https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.ps1 | iex
 ```
+The Linux one-liner also puts the `xmas-tui` command in `~/.local/bin`, and offers (asking first) to install kitty
+when it's missing and ffmpeg for the moving lock screen (that one through the system's package manager, with sudo).
 Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) (0.34 or newer on Wayland, 0.42 or newer on X11; Debian 13's
 0.41 works) and a layer-shell compositor such as KDE Plasma 6, Sway or Hyprland (GNOME isn't supported). Without a
 suitable kitty, *set as the desktop wallpaper* (Settings → Desktop, or `xmas-tui --set-wallpaper` in a terminal)
@@ -110,9 +122,16 @@ needed. Settings live in `~/.config/xmas-tui/config.toml` (Linux) or `%APPDATA%\
 Remove the Linux install with the same command plus `-s -- --remove`.
 
 **Lock screen (KDE Plasma 6):** Settings → Desktop → *The village on the lock screen* renders a seamless looping
-video of the village (a still image when ffmpeg isn't installed) and makes it the lock screen's wallpaper through a
+video of the village (a still image when ffmpeg isn't installed: *install ffmpeg* there fetches it through the
+system's password prompt) and makes it the lock screen's wallpaper through a
 small Plasma wallpaper plugin. Unticking it puts the previous lock screen wallpaper back; `xmas-tui --lock-screen
 on|off` does the same from a terminal.
+
+**The save file:** the village (the seed it's laid out from, so the houses, and home, stay put from one start to the
+next) and the villager's pockets, stats and scorecard, kept in `~/.local/share/xmas-tui/save.toml`
+(`%APPDATA%\xmas-tui\save.toml` on Windows), written every minute and on the way out. Settings → Village → *export
+save* puts a copy in Documents; *import save* loads one (from another computer, say). A `seed` set in the config
+still wins.
 
 **Updates:** when a new version is out, a small banner asks whether to install it. **Install automatically** under
 Settings → Desktop → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
@@ -126,23 +145,27 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
 | **E** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
-| **Space** | jump; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the station, the cabin, a present, a widget or a window, a leap right up onto it |
+| **Space** | jump; held, higher (up to four times as high); steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
+| **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
+| **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
+| **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
 | **Q** | what's in hand: berries or something from the pockets (E then gives it, or uses it) |
 | **I** | show or hide the pockets |
-| **1**–**5** | answer in a conversation, use an item, or buy one while the cabin's menu is open |
+| **1**–**5**, or **↑ ↓** and **Enter** | answer in a conversation (or choose in any menu), use an item, or buy one while the cabin's menu is open |
 | **Esc** | close a menu, conversation or window view; with nothing open, the settings |
 | **C** | the view back on the villager (also the **⌖ centre** button, top right) |
-| **?** / **F1** | the controls card (also the **? controls** button, top right) |
+| **?** / **F1** | the controls card (also the **? controls** button, top right); click a **[key]** on it to change that key |
 | **A** / **D** at a window | lean to look further along the street |
-| **mouse wheel** / **Ctrl+wheel** | look along the village / up into the sky |
+| **mouse wheel** / **Shift+wheel** | look along the village / up into the sky |
+| **trackpad** | two fingers up and down: up into the sky and back; sideways: along the village; a pinch (or Ctrl + two fingers): zoom |
 | **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
-| **drag** anyone (the villager too) | carry them about, then drop them in the snow |
+| **drag** anyone (the villager and the pet too) | carry them about, then drop them in the snow |
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
 | **⚙ settings** (top right) | the settings panel; drag its title bar to move it |
 | **F11** | full screen and back: the wallpaper itself, or a popped-out window |
-| **Ctrl +** / **Ctrl -** / **Ctrl 0** | zoom in, out, back to 1× |
+| **Ctrl +** / **Ctrl -** / **Ctrl 0**, **Ctrl+wheel**, the **− +** buttons | zoom in (up to 4×), out, back to 1× (it eases in) |
 | **Ctrl Shift +** / **Ctrl Shift -** | resolution: finer or coarser detail, everything the same size |
 
 ## 🌟 What's in the scene
@@ -441,10 +464,15 @@ Two things in one app: a live wallpaper for the home screen, and the whole villa
 **Playing in the village.** Opening **xmas-tui village** (or **Play in the village** in its settings) opens the
 desktop's own village, full screen and sideways: the same village, people, houses, pets, parkour and building as on
 the desktop, the same code built for Android. A joystick (left) walks the villager about (pushed all the way, they
-run), and buttons do what the keys do on the desktop: **E** (talk, use, pick up, help build), **jump** (up against a
-house, a tree or a lamp post, a leap right up onto it), **❄** (scoop a snowball, then throw it), **☰** (pockets
-and the Christmas list, inviting someone along, what's in hand, settings, the controls) and **◎** (the view back
-on the villager). Tapping people, animals and
+run), and pixel-art buttons do what the keys do on the desktop: **E** (talk, use, pick up, help build; in a
+conversation, the joystick up and down picks the answer and E says it), **jump** (held, higher; up against a house,
+a tree or a lamp post, a leap right up onto it), **❄** (scoop a snowball, then throw it), **✦** (things to do here:
+building, snow angels, carols, tag, light shows, fireworks, the ski trip, a drive, games indoors…), **☰** (pockets,
+the scorecard and the Christmas list, inviting someone along, what's in hand, lying down in the snow, settings, set as
+the wallpaper, the controls) and **◎** (the view back on the villager). *Hide the controls when not in use* in the
+settings fades them away when they're left alone. A game controller works too: the stick or d-pad walks, **A**
+jumps, **X** talks and uses, **Y** throws snowballs, **B** goes back, **Start** is ☰, **Select** is ✦, **L1** is ◎
+and **R1** lies down. Tapping people, animals and
 things works as a click does on the desktop, and answers in the dialogue box; pressing and holding anywhere lists what
 can be done there (visit a house, drop in on a roof, build a snowman, say hello…); dragging people and animals carries
 them; two fingers look along the village; Back closes what's open, then leaves. The sound plays too. **Size** in the
@@ -454,7 +482,13 @@ button is touched) or sets the frame rate (30 fps by default).
 
 <p align="center"><img src="docs/android-game.png" width="100%" alt="The village on a phone held sideways: the big tree, the station, houses and the snowman, with a joystick on the left and E, jump, snowball and menu buttons on the right"></p>
 
-**The live wallpaper** is a cut-down village for the phone's home screen, made to be watched rather than played:
+**The live wallpaper** is the game's own village, the villager on autopilot: the same village and the same save
+as the game, so opening the game carries on from what the wallpaper's villager was up to, and the wallpaper carries
+on from the game. Swiping between home screens looks along the village; a tap does what a tap does in the game.
+(*The wallpaper shows → classic* in the settings brings back the older wallpaper, with the snowy dock, described
+below.)
+
+**The classic wallpaper** is a cut-down village for the phone's home screen, made to be watched rather than played:
 - **The village lives its own life.** Folk wander, stop to chat in speech bubbles, pop into each other's
   houses and gather by the tree. The villager (green bobble hat) is out among them: greeting everyone by name,
   playing with their pet, feeding the deer. Deer and rabbits wander through, kids end a chat with a snowball,
@@ -473,7 +507,7 @@ button is touched) or sets the frame rate (30 fps by default).
 
 **Install:** on the phone, download `xmas-tui-android.apk` from the newest
 [release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or
-file manager when asked), then open **xmas-tui village** and tap **Set as live wallpaper**. Android 7 or newer. The APK
+file manager when asked), then open **xmas-tui village** and choose ☰ → **Set as the live wallpaper**. Android 7 or newer. The APK
 is attached only to releases that change the Android app or the village it plays, so other releases don't offer phones
 an identical update. [Orbit](https://github.com/dash1101/orbit) on Android finds the newest one, installs it, and keeps it updated.
 
@@ -645,12 +679,21 @@ A build from source never updates itself; pull and rebuild instead. The installe
 Config lives at `~/.config/xmas-tui/config.toml`. See `config.example.toml`
 for every option, including the weather city.
 
+The web version is `web/`: the same source files built for WebAssembly (no bindings generator, so nothing beyond
+the `wasm32-unknown-unknown` target), and a hand-written page in `web/site`. The `pages` workflow builds it and
+publishes it to GitHub Pages:
+```bash
+cd web && cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/xmas_web.wasm site/xmas.wasm   # then serve web/site
+```
+
 Developer tools:
 ```bash
 xmas-tui --export DIR --size 568x75 --frames 1 --at 20 --sleigh   # render frames to PNG (--pan CELLS to look around)
 xmas-tui --export X --frames 720 --fps 24 --clean --raw | ffmpeg -f rawvideo -pix_fmt rgb24 -s 5112x1425 -r 24 -i - out.mp4  # a video
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame
 xmas-tui --settings-window --export DIR                            # settings window + tray icons to PNG
+xmas-tui --export DIR --perch todo|rest|angel|igloo|chess|trip-ski|trip-drive …  # preview a new pass's scenes
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame (+ window fx on Linux)
 ```
 

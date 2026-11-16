@@ -349,6 +349,10 @@ pub enum PetEv {
 /// fetches (or bats about, or nibbles) what's thrown, does tricks, and
 /// plays with other animals.
 pub struct MyPet {
+    /// Picked up with the pointer (grab offset), or dropped and falling
+    /// (speed, the row it lands on).
+    pub carried: Option<(f32, f32)>,
+    fall: Option<(f32, f32)>,
     pub kind: PetKind,
     pub coat: String,
     pub name: String,
@@ -391,6 +395,8 @@ impl MyPet {
         let kind = PetKind::from_str(&cfg.kind)?;
         let (body, marks) = kind.coat(&cfg.coat);
         Some(MyPet {
+            carried: None,
+            fall: None,
             kind,
             coat: cfg.coat.clone(),
             name: cfg.name.clone(),
@@ -635,6 +641,38 @@ impl MyPet {
         }
     }
 
+    /// Picked up with the pointer, held `(ox, oy)` from where it's grabbed.
+    pub fn carry(&mut self, ox: f32, oy: f32, t: f32) {
+        self.carried = Some((ox, oy));
+        self.fall = None;
+        self.busy = None;
+        self.napping = false;
+        self.walking = false;
+        self.sniff = None;
+        self.happy_until = t + 1e6;
+    }
+
+    /// Carried along to (x, y) (where the pointer is).
+    pub fn carry_to(&mut self, x: f32, y: f32) {
+        if let Some((ox, oy)) = self.carried {
+            self.x = x - ox;
+            self.y = y - oy;
+        }
+    }
+
+    /// Let go: down onto row `land` (from up high, a little drop).
+    pub fn put_down(&mut self, land: f32, t: f32) {
+        if self.carried.take().is_some() {
+            self.happy_until = t + 1.2;
+            self.still_since = t;
+            if self.y < land - 0.5 {
+                self.fall = Some((0.0, land));
+            } else {
+                self.y = land;
+            }
+        }
+    }
+
     /// In the villager's arms right now (drawn in front of them).
     pub fn held(&self) -> bool {
         matches!(self.busy, Some(Busy::Cuddle { .. }))
@@ -654,6 +692,25 @@ impl MyPet {
     /// `k` scales distances (2 indoors, where everything's drawn bigger).
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, dt: f32, t: f32, px: f32, py: f32, pdir: f32, moving: bool, lo: f32, hi: f32, k: f32) {
+        // in the pointer's grip: dangling, happily
+        if self.carried.is_some() {
+            self.walking = false;
+            return;
+        }
+        // let go of up high: down it comes, onto its feet
+        if let Some((vy, land)) = self.fall {
+            let vy = vy + 70.0 * dt;
+            self.y += vy * dt;
+            if self.y >= land {
+                self.y = land;
+                self.fall = None;
+                self.happy_until = t + 1.0;
+                self.voice(Voice::Hello, t);
+            } else {
+                self.fall = Some((vy, land));
+            }
+            return;
+        }
         if moving {
             self.still_since = t;
             self.sniff = None;

@@ -33,15 +33,12 @@
             </intent-filter>
         </activity>
 
+        <!-- (one app on the home screen: the settings open from the game's ⚙,
+             and from the wallpaper picker) -->
         <activity
             android:name=".SettingsActivity"
             android:label="@string/settings_title"
             android:theme="@android:style/Theme.Material.NoActionBar"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="true" />
     </application>
 </manifest>

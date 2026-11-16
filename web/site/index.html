@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#03050f">
+<title>xmas-tui village</title>
+<meta name="description" content="A snowy Christmas village to walk about in: talk to the neighbours, build snowmen and igloos, snowball fights, a ski trip, games by the fire.">
+<style>
+  :root { --gold: #ffd36b; --panel: rgba(16, 20, 40, 0.94); --text: #f4ecd8; --dim: #8a90a8; }
+  html, body { margin: 0; height: 100%; background: #03050f; overflow: hidden; touch-action: none; overscroll-behavior: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; image-rendering: pixelated; }
+  #pad { pointer-events: none; }
+  body.touch #pad { pointer-events: auto; }
+  .box { position: fixed; background: var(--panel); color: var(--text); border: 2px solid var(--gold); font: 16px/1.5 ui-monospace, "DejaVu Sans Mono", Menlo, monospace; box-shadow: 0 6px 0 rgba(0,0,0,.4); }
+  #menu { left: 50%; top: 50%; transform: translate(-50%, -50%); min-width: 260px; max-width: min(92vw, 520px); max-height: 80vh; overflow: auto; display: none; }
+  #menu h2 { margin: 0; padding: 6px 12px; font-size: 16px; color: var(--gold); border-bottom: 2px solid var(--gold); }
+  #menu div { padding: 6px 12px; cursor: pointer; }
+  #menu div.hot, #menu div:hover { background: #34406a; color: var(--gold); }
+  #menu div b { color: var(--gold); opacity: .6; margin-right: 8px; font-weight: normal; }
+  #bar { top: 8px; right: 8px; display: flex; gap: 6px; padding: 3px 6px; font-size: 14px; }
+  #bar span { cursor: pointer; padding: 0 6px; }
+  #bar span:hover { color: var(--gold); }
+  #opts { right: 8px; top: 44px; padding: 10px 14px; display: none; width: min(88vw, 320px); }
+  #opts label { display: block; margin: 6px 0; }
+  #opts input[type=text], #opts select { width: 100%; background: #0b1020; color: var(--text); border: 1px solid var(--dim); font: inherit; }
+  #opts button { margin: 4px 4px 0 0; background: #24305a; color: var(--text); border: 1px solid var(--gold); font: inherit; cursor: pointer; padding: 2px 8px; }
+  #help { left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 12px 16px; display: none; width: min(92vw, 560px); font-size: 14px; }
+  #help h2 { margin: 0 0 6px; color: var(--gold); font-size: 16px; }
+  #help kbd { color: var(--gold); }
+  #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--gold); font: 18px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<canvas id="village"></canvas>
+<canvas id="pad"></canvas>
+<div id="loading">❄ the village is waking up…</div>
+<div id="bar" class="box"><span id="b-todo" title="things to do (T)">✦ do</span><span id="b-centre" title="back to the villager (C)">⌖</span><span id="b-help" title="controls (?)">?</span><span id="b-opts" title="settings">⚙</span></div>
+<div id="menu" class="box"></div>
+<div id="opts" class="box">
+  <label>Your name <input id="o-name" type="text" maxlength="24" placeholder="neighbour"></label>
+  <label>Pet <select id="o-pet"><option>cat</option><option>dog</option><option>bunny</option><option>none</option></select></label>
+  <label>Pet's name <input id="o-petname" type="text" maxlength="24"></label>
+  <label><input id="o-auto" type="checkbox"> Autopilot (left alone, off doing their own thing)</label>
+  <label>Size <select id="o-size"><option value="0.8">smaller</option><option value="1" selected>normal</option><option value="1.3">bigger</option><option value="1.7">biggest</option></select></label>
+  <button id="o-apply">apply</button><button id="o-export">export save</button><button id="o-import">import save</button><button id="o-new">a new village</button>
+  <input id="o-file" type="file" accept=".toml,text/plain" hidden>
+  <p style="color:var(--dim);font-size:13px;margin:8px 0 0">Saved in this browser as you go. The desktop app and the Android app read the same save files: <a style="color:var(--gold)" href="https://github.com/dash1101/xmas-tui">get them here</a>.</p>
+</div>
+<div id="help" class="box">
+  <h2>⌨ playing in the village</h2>
+  <div><kbd>WASD</kbd>/<kbd>arrows</kbd> walk · <kbd>Shift</kbd> run · <kbd>Space</kbd> jump (hold: higher; at a wall, up onto it) · <kbd>W</kbd> up on a roof or tree: climb on up</div>
+  <div><kbd>E</kbd>/<kbd>Enter</kbd> talk, use, help build · <kbd>R</kbd> snowball · <kbd>F</kbd> ask along · <kbd>Z</kbd> lie in the snow (then Space: a snow angel)</div>
+  <div><kbd>T</kbd> things to do (snowmen, igloos, carols, tag, light shows, fireworks, a ski trip, a drive, games by the fire) · <kbd>I</kbd> pockets &amp; scorecard · <kbd>Q</kbd> what's in hand · <kbd>C</kbd> back to the villager · <kbd>Esc</kbd> close</div>
+  <div>Click people, animals, the sky, Santa. Drag to carry them (the pet too). Right-click (or hold a finger) for what can be done there. The wheel looks along the village.</div>
+  <div>On a phone: the joystick and buttons, the same as the Android app.</div>
+  <p style="color:var(--dim)">click anywhere to close</p>
+</div>
+<script src="xmas.js"></script>
+</body>
+</html>

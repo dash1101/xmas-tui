@@ -55,8 +55,9 @@ impl Item {
     }
 }
 
-/// What the player carries.
-#[derive(Clone, Debug, Default)]
+/// What the player carries (and has been up to: kept in the save file).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Pockets {
     pub cheer: u32,
     pub items: [u32; 5],
@@ -83,6 +84,28 @@ pub struct Pockets {
     pub ends: (bool, bool),
     /// Christmas-list goals done (bit per goal).
     pub done: u32,
+    // ---- the scorecard
+    /// Team snowball fights won and lost.
+    pub fights_won: u32,
+    pub fights_lost: u32,
+    /// Games of tag; times "it" changed hands in them.
+    pub tag_games: u32,
+    pub tags: u32,
+    pub angels: u32,
+    pub carols: u32,
+    pub fireworks: u32,
+    pub light_shows: u32,
+    /// Snowmen and igloos built (or helped with) to the end.
+    pub built: u32,
+    /// Santa, clicked out of his sleigh and chased (never caught).
+    pub santa_chases: u32,
+    /// Games at the table (chess, checkers, cards) won and lost.
+    pub games_won: u32,
+    pub games_lost: u32,
+    /// Runs down the mountain; the quickest (s); kilometres driven.
+    pub ski_runs: u32,
+    pub ski_best: Option<f32>,
+    pub km: f32,
 }
 
 /// The Christmas list: (goal, how much cheer it's worth).
@@ -134,7 +157,7 @@ impl Pockets {
 /// The stats card: what the player's been up to, and the Christmas list.
 pub fn draw_stats(f: &mut Frame, p: &Pockets) {
     let w = 58;
-    let h = GOALS.len() as i32 + 8;
+    let h = GOALS.len() as i32 + 13;
     let (x0, y0) = (3, (f.h as i32 - h - 4).max(0));
     let bg = Bg::Mix(pal::UI_PANEL, 0.92);
     let border = Rgb::hex(0xffd36b) * 0.8;
@@ -163,9 +186,20 @@ pub fn draw_stats(f: &mut Frame, p: &Pockets) {
     for (i, l) in lines.iter().enumerate() {
         f.text(x0 + 2, y0 + 1 + i as i32, l, pal::UI_TEXT, bg, 0.0);
     }
-    f.text(x0 + 2, y0 + 5, "CHRISTMAS LIST", Rgb::hex(0xffd36b), bg, 0.0);
+    // the scorecard
+    f.text(x0 + 2, y0 + 5, "SCORECARD", Rgb::hex(0xffd36b), bg, 0.0);
+    let score = [
+        format!("snowball fights won {} · lost {} · tag games {} ({} tags)", p.fights_won, p.fights_lost, p.tag_games, p.tags),
+        format!("{} snow angels · {} carols · {} built · {} light shows", p.angels, p.carols, p.built, p.light_shows),
+        format!("games won {} · lost {} · {} fireworks · Santa chased {}×", p.games_won, p.games_lost, p.fireworks, p.santa_chases),
+        format!("{} ski runs (best {}) · {:.1} km driven", p.ski_runs, p.ski_best.map(|b| format!("{b:.1}s")).unwrap_or_else(|| "—".into()), p.km),
+    ];
+    for (i, l) in score.iter().enumerate() {
+        f.text(x0 + 2, y0 + 6 + i as i32, l, pal::UI_TEXT, bg, 0.0);
+    }
+    f.text(x0 + 2, y0 + 10, "CHRISTMAS LIST", Rgb::hex(0xffd36b), bg, 0.0);
     for (i, (goal, reward)) in GOALS.iter().enumerate() {
-        let y = y0 + 6 + i as i32;
+        let y = y0 + 11 + i as i32;
         let done = p.done & (1 << i) != 0;
         let (cur, need) = p.goal(i);
         let (mark, fg) = if done { ('✓', Rgb::hex(0x5adf8a)) } else { ('○', pal::UI_DIM) };

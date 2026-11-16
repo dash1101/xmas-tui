@@ -36,6 +36,8 @@ pub struct Sleigh {
     pace: f32,
     /// Santa's busy on his rounds: no fly-bys start meanwhile.
     pub hold: bool,
+    /// Santa's fallen out (and is off running about): the seat's empty.
+    pub santa_out: bool,
 }
 
 const DEER: usize = 4;
@@ -65,6 +67,7 @@ impl Sleigh {
             halt_until: -1.0,
             pace: 1.0,
             hold: false,
+            santa_out: false,
         }
     }
 
@@ -106,7 +109,7 @@ impl Sleigh {
     /// Santa's face (screen column, row) while flying.
     pub fn santa_at(&self, t: f32) -> Option<(f32, f32)> {
         let sx = self.x + (DEER * 5) as f32;
-        self.active.then(|| (sx + 3.0, self.y_at(sx, t).round() - 1.0))
+        (self.active && !self.santa_out).then(|| (sx + 3.0, self.y_at(sx, t).round() - 1.0))
     }
 
     /// Centre column of the team + sleigh while flying (for the bells).
@@ -175,7 +178,7 @@ impl Sleigh {
         if !self.active {
             return;
         }
-        draw_team(f, self.x, |x| self.y_at(x, t), t, glow, true);
+        draw_team(f, self.x, |x| self.y_at(x, t), t, glow, !self.santa_out);
     }
 }
 

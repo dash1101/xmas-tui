@@ -23,6 +23,11 @@ pub mod raster;
 pub mod rng;
 #[path = "../../../src/scene/mod.rs"]
 pub mod scene;
+#[path = "../../../src/save.rs"]
+pub mod save;
+
+/// The widgets' looks (the scene's panels are drawn in them too).
+pub mod widgets;
 
 /// What the shared files expect of the desktop app.
 pub mod app {

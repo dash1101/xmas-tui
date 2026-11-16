@@ -23,7 +23,7 @@ pub(super) struct Auto {
     pub goal_mine: bool,
     /// How many times each kind of thing was taken up (tests).
     #[cfg(test)]
-    pub tried: [u32; 9],
+    pub tried: [u32; 13],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,9 +40,10 @@ pub(super) enum Plan {
     Chat { id: u64, next: f32, until: f32 },
     /// A game with the pet, once alongside.
     Pet { act: PetAct, until: f32 },
-    /// Tag with a kid: the villager's "it" (or running off, flagging after
-    /// a while); no tagging back till `grace`.
-    Tag { id: u64, you_it: bool, grace: f32, tire_at: f32, until: f32 },
+    /// Tag with a kid (the game itself is the scene's `tag`): `swaps` seen
+    /// so far; running off, out of puff after `tire_at`; dodging back past
+    /// them (`dodge`, until `commit`) when cornered at the end of the world.
+    Tag { swaps: u32, tire_at: f32, dodge: f32, commit: f32 },
     /// A roof: walking under it (0), leapt (1, landing by `at`), up there
     /// till `at` (2).
     Roof { stage: u8, at: f32 },
@@ -60,7 +61,7 @@ impl Auto {
             Some(Plan::Snowballs { id, left, next, until }) => Some(Plan::Snowballs { id, left, next: next - s, until: until - s }),
             Some(Plan::Chat { id, next, until }) => Some(Plan::Chat { id, next: if next == 0.0 { 0.0 } else { next - s }, until: until - s }),
             Some(Plan::Pet { act, until }) => Some(Plan::Pet { act, until: until - s }),
-            Some(Plan::Tag { id, you_it, grace, tire_at, until }) => Some(Plan::Tag { id, you_it, grace: grace - s, tire_at: tire_at - s, until: until - s }),
+            Some(Plan::Tag { swaps, tire_at, dodge, commit }) => Some(Plan::Tag { swaps, tire_at: tire_at - s, dodge, commit: commit - s }),
             Some(Plan::Roof { stage, at }) => Some(Plan::Roof { stage, at: at - s }),
             Some(Plan::Linger { until }) => Some(Plan::Linger { until: until - s }),
             None => None,
@@ -98,8 +99,8 @@ impl Scene {
     }
 
     fn auto_stop(&mut self, t: f32) {
-        if let Some(Plan::Tag { id, .. }) = self.auto.plan {
-            self.critters.tag_over(id, t, &mut self.director);
+        if let (Some(Plan::Tag { .. }), Some(g)) = (self.auto.plan, self.tag.take()) {
+            self.critters.tag_over(g.id, t, &mut self.director);
         }
         if self.auto.goal_mine {
             self.goal = None;
@@ -135,7 +136,21 @@ impl Scene {
     /// A frame of autopilot (before the villager moves): the direction keys
     /// it holds, if any (walking to a goal steers itself).
     pub(super) fn autopilot(&mut self, t: f32) -> Option<(f32, f32)> {
-        if !self.auto.on || self.player.is_none() || self.inside.is_some() || t - self.auto.touched < IDLE {
+        if !self.auto.on || self.player.is_none() || t - self.auto.touched < IDLE {
+            return None;
+        }
+        // inside an igloo for a rest: back out when it's time
+        if self.inside.is_some() {
+            if self.inside.as_ref().is_some_and(|i| i.is_igloo()) {
+                match self.auto.plan {
+                    Some(Plan::Linger { until }) if t < until => {}
+                    Some(Plan::Linger { .. }) => {
+                        self.leave();
+                        self.auto_done(t, 2.0, 5.0);
+                    }
+                    _ => self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(10.0, 18.0) }),
+                }
+            }
             return None;
         }
         if self.goal.is_none() {
@@ -219,7 +234,7 @@ impl Scene {
                 }
                 self.auto_done(t, 4.0, 9.0);
             }
-            Plan::Tag { id, you_it, grace, tire_at, until } => return self.auto_tag(t, (px, py), id, you_it, grace, tire_at, until),
+            Plan::Tag { swaps, tire_at, dodge, commit } => return self.auto_tag(t, (px, py), swaps, tire_at, dodge, commit),
             Plan::Roof { stage, at } => {
                 let perched = self.player.as_ref().is_some_and(|p| p.perch.is_some());
                 match stage {
@@ -247,6 +262,10 @@ impl Scene {
                     if self.in_igloo {
                         self.leave_igloo();
                     }
+                    // up out of the snow
+                    if self.player.as_ref().is_some_and(|p| p.lying()) {
+                        self.rest();
+                    }
                     self.auto_done(t, 2.0, 5.0);
                 }
             }
@@ -258,56 +277,47 @@ impl Scene {
         self.rng.pick(lines)
     }
 
-    /// Tag: after the kid (who runs off), or away from them; tagged, the
-    /// other's "it". After a while it's a good game, and over.
-    #[allow(clippy::too_many_arguments)]
-    fn auto_tag(&mut self, t: f32, (px, py): (f32, f32), id: u64, you_it: bool, grace: f32, tire_at: f32, until: f32) -> Option<(f32, f32)> {
-        let caught = self.critters.take_tagged();
-        let kid = self.critters.position(id);
-        let (Some((kx, ky)), Some(_)) = (kid, self.critters.tag_state(id)) else {
+    /// Tag: after the kid (who runs off), or away from them (the game
+    /// itself, tags and the end of it, is the scene's). Cornered at either
+    /// end of the world, a dodge back past them the open way, kept to for a
+    /// moment rather than flipped about.
+    fn auto_tag(&mut self, t: f32, (px, py): (f32, f32), swaps: u32, tire_at: f32, dodge: f32, commit: f32) -> Option<(f32, f32)> {
+        let Some(g) = self.tag else {
             self.auto_done(t, 3.0, 6.0);
             return None;
         };
-        if t > until {
-            self.critters.tag_over(id, t, &mut self.director);
-            let line = self.rng_line(&["good game!", "phew, you win!", "that was fun!", "you're fast!"]);
-            self.auto_say(line, t);
-            self.auto_done(t, 4.0, 8.0);
+        let Some((kx, ky)) = self.critters.position(g.id) else {
+            self.auto_done(t, 3.0, 6.0);
             return None;
-        }
+        };
+        let tire_at = if g.swaps != swaps && !g.you_it { t + self.rng.range(4.0, 7.0) } else { tire_at };
         let (dx, dy) = (kx - px, ky - py);
         if let Some(p) = &mut self.player {
             p.sprint = true;
         }
-        if you_it {
-            if t > grace && dx.abs() < 2.5 && dy.abs() < 1.5 {
-                self.auto_say("tag! you're it!", t);
-                self.director.sound(crate::audio::Sfx::Pickup, px, 0.5);
-                self.critters.tag(id, true, until);
-                let tire = t + self.rng.range(4.0, 7.0);
-                self.auto.plan = Some(Plan::Tag { id, you_it: false, grace: t + 1.5, tire_at: tire, until });
-                return Some((-dx.signum(), 0.0));
-            }
+        if g.you_it {
+            self.auto.plan = Some(Plan::Tag { swaps: g.swaps, tire_at, dodge: 0.0, commit: 0.0 });
             let my = if dy.abs() > 0.6 { dy.signum() } else { 0.0 };
             return Some((if dx.abs() > 1.0 { dx.signum() } else { 0.0 }, my));
-        }
-        if caught && t > grace {
-            self.director.say(kx.round() as i32, ky as i32 - 4, "tag! you're it!", t, 2.2, 6);
-            self.critters.tag(id, false, until);
-            self.auto.plan = Some(Plan::Tag { id, you_it: true, grace: t + 1.5, tire_at, until });
-            return Some((0.0, 0.0));
         }
         // running off (out of puff after a while: caught soon enough)
         if t > tire_at {
             if let Some(p) = &mut self.player {
                 p.sprint = false;
             }
+            self.auto.plan = Some(Plan::Tag { swaps: g.swaps, tire_at, dodge, commit });
             return Some((0.0, 0.0));
         }
-        let mut mx = -dx.signum();
-        if (px < 6.0 && mx < 0.0) || (px > self.ww as f32 - 10.0 && mx > 0.0) {
-            mx = -mx;
-        }
+        let away = -dx.signum();
+        let room = if away < 0.0 { px } else { self.ww as f32 - px };
+        let (mx, dodge, commit) = if t < commit {
+            (dodge, dodge, commit)
+        } else if room < 26.0 {
+            (-away, -away, t + 1.6)
+        } else {
+            (away, 0.0, 0.0)
+        };
+        self.auto.plan = Some(Plan::Tag { swaps: g.swaps, tire_at, dodge, commit });
         let my = if dy.abs() < 2.0 { -dy.signum() } else { 0.0 };
         Some((mx, my))
     }
@@ -353,6 +363,26 @@ impl Scene {
         }
         if !roofs.is_empty() {
             opts.push((1.0, 8));
+        }
+        let night = self.daylight.sun < 0.25;
+        let on_snow = self.player.as_ref().is_some_and(|p| p.perch.is_none());
+        if on_snow {
+            opts.push((1.2, 9));
+            opts.push((if night { 1.2 } else { 0.4 }, 10));
+        }
+        if !people.is_empty() && self.carol.is_none() {
+            opts.push((0.8, 11));
+        }
+        let mut igloo = None;
+        let mut k = 0;
+        while let Some((bx, _, _, ig)) = self.builds.spot(k) {
+            if ig && near(bx) && self.builds.about(k).is_some_and(|(_, p)| p >= 1.0) {
+                igloo = Some(bx);
+            }
+            k += 1;
+        }
+        if igloo.is_some() {
+            opts.push((1.0, 12));
         }
         let sum: f32 = opts.iter().map(|o| o.0).sum();
         let mut r = self.rng.range(0.0, sum);
@@ -440,17 +470,37 @@ impl Scene {
             // tag with a kid
             7 => {
                 let id = *self.rng.pick(&kids);
-                let until = t + self.rng.range(25.0, 40.0);
-                self.critters.tag(id, false, until);
-                let line = self.rng_line(&["tag! bet I can catch you!", "let's play tag!", "ready or not — tag!"]);
-                self.auto_say(line, t);
-                self.auto.plan = Some(Plan::Tag { id, you_it: true, grace: t + 1.0, tire_at: 0.0, until });
+                let secs = self.rng.range(25.0, 40.0);
+                self.start_tag(id, secs);
+                self.auto.plan = Some(Plan::Tag { swaps: 0, tire_at: 0.0, dodge: 0.0, commit: 0.0 });
             }
             // up on a roof for a look round
             8 => {
                 let x = *self.rng.pick(&roofs);
                 self.auto_goal(Do::WalkTo(x, lo(self, x)));
                 self.auto.plan = Some(Plan::Roof { stage: 0, at: t + 30.0 });
+            }
+            // a snow angel, right here
+            9 => {
+                self.snow_angel();
+                self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(4.0, 6.0) });
+            }
+            // a rest in the snow (looking up at the stars, after dark)
+            10 => {
+                self.rest();
+                self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(10.0, 22.0) });
+            }
+            // a carol (the neighbours gather round)
+            11 => {
+                self.sing();
+                self.auto.plan = Some(Plan::Linger { until: t + 13.0 });
+            }
+            // into an igloo for a sit by the lamp
+            12 => {
+                if let Some(bx) = igloo {
+                    self.auto_goal(Do::Crawl(bx));
+                    self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(14.0, 24.0) });
+                }
             }
             // a wander
             _ => {

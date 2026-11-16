@@ -242,9 +242,13 @@ impl Builds {
         b.helped = true;
         let half = b.half();
         let busy = self.busy();
-        let mut kids: Vec<(u64, f32, f32)> = c.people().into_iter().filter(|p| p.3 && !busy.contains(&p.0) && (p.1 - x).abs() < 60.0).map(|p| (p.0, p.1, p.2)).collect();
-        kids.sort_by(|a, b2| (a.1 - x).abs().total_cmp(&(b2.1 - x).abs()));
-        for (k, &(id, kx, ky)) in kids.iter().take(2).enumerate() {
+        // whoever's walking along with the villager pitches in first; then
+        // a kid or two from round about
+        let mut kids: Vec<(u64, f32, f32)> = c.follower_ids().into_iter().filter_map(|id| c.position(id).map(|(px, py)| (id, px, py))).collect();
+        let mut more: Vec<(u64, f32, f32)> = c.people().into_iter().filter(|p| p.3 && !busy.contains(&p.0) && (p.1 - x).abs() < 60.0).map(|p| (p.0, p.1, p.2)).collect();
+        more.sort_by(|a, b2| (a.1 - x).abs().total_cmp(&(b2.1 - x).abs()));
+        kids.extend(more);
+        for (k, &(id, kx, ky)) in kids.iter().take(3).enumerate() {
             let side = if k % 2 == 0 { -1.0 } else { 1.0 };
             c.work_at(id, x + side * (half + 2.0), base as f32, x, t + 90.0);
             b.kids.push(id);
@@ -265,6 +269,33 @@ impl Builds {
         b.you_inside = true;
         b.next_line = 0.0;
         Some((b.door(), b.base as f32 + 1.0))
+    }
+
+    /// Who's inside igloo `i` (name, a kid, coat).
+    pub fn guests(&self, i: usize) -> Vec<(&'static str, bool, crate::color::Rgb)> {
+        self.list.get(i).map(|b| b.inside.iter().map(|h| h.about()).collect()).unwrap_or_default()
+    }
+
+    /// Knock build `i` down (no hard feelings): whoever's in an igloo
+    /// tumbles out. Its column and row, and whether it was an igloo.
+    pub fn knock_down(&mut self, i: usize, t: f32, h: f32, c: &mut Critters, d: &mut Director) -> Option<(f32, i32, bool)> {
+        if i >= self.list.len() {
+            return None;
+        }
+        let mut b = self.list.remove(i);
+        for id in b.kids.drain(..) {
+            c.stop_work(id, t);
+        }
+        let (n, door, base) = (b.inside.len(), b.door(), b.base);
+        for (k, hd) in b.inside.drain(..).enumerate() {
+            let x = door + (k as f32 - n as f32 / 2.0) * 3.0;
+            c.put_back(hd, x, (base + 1).min(h as i32) as f32, t);
+        }
+        let half = b.half();
+        for k in 0..5 {
+            d.snow_puff(b.x - half + half * 0.5 * k as f32, b.base as f32 - 1.0);
+        }
+        Some((b.x, b.base, b.what == What::Igloo))
     }
 
     /// Previews: build `i` at progress p (helped by the villager).

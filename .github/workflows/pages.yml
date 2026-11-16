@@ -1,0 +1,48 @@
+# The village on the web (GitHub Pages): web/ built for WebAssembly, the
+# page in web/site, published on every push to main that touches it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "web/**", "android/native/src/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+      - name: Build the village for the web
+        working-directory: web
+        run: cargo build --release --target wasm32-unknown-unknown
+      - run: cp web/target/wasm32-unknown-unknown/release/xmas_web.wasm web/site/xmas.wasm
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

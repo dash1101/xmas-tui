@@ -15,7 +15,7 @@ final class Native {
     private Native() {}
 
     /** Buttons (and what they are on the desktop). */
-    static final int E = 0, JUMP = 1, SNOWBALL = 2, POCKETS = 3, INVITE = 4, HELD = 5, BACK = 6, CENTRE = 7, NUM = 10;
+    static final int E = 0, JUMP = 1, SNOWBALL = 2, POCKETS = 3, INVITE = 4, HELD = 5, BACK = 6, CENTRE = 7, JUMP_UP = 8, REST = 9, NUM = 10;
 
     /** A village for a w x h screen; size scales it (1 = about 18 px a row); cfg is TOML. */
     static native long create(int w, int h, float size, String cfg);
@@ -43,7 +43,14 @@ final class Native {
     /** A long press: {title, choice, ...}, or null. */
     static native String[] menu(long game, float x, float y);
 
-    static native void pick(long game, int i);
+    /** A choice from the menu shown: null, or a further menu {title, choice, ...}. */
+    static native String[] pick(long game, int i);
+
+    /** Things to do right here: {title, choice, ...}, or null. */
+    static native String[] todo(long game);
+
+    /** Write the save file now (shared by the game and the wallpaper). */
+    static native void save(long game);
 
     static native void pause(long game, boolean on);
 

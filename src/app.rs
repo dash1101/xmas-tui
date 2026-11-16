@@ -50,6 +50,14 @@ pub enum MouseIn {
     Scroll(bool),
     /// Ctrl+wheel: look up into the sky (true) or back down.
     ScrollSky(bool),
+    /// Scrolled sideways (true: to the right): a trackpad, or a tilting
+    /// wheel.
+    ScrollSide(bool),
+    /// A trackpad's smooth scrolling: cells along (positive: the view moves
+    /// left) and rows (positive: up into the sky).
+    Pad(f32, f32),
+    /// Zoom in (> 1) or out (< 1) by this much (Ctrl+wheel, a pinch).
+    Zoom(f32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -130,6 +138,24 @@ pub struct App {
     /// The front-end reports key releases (otherwise a press holds a key
     /// for a moment and auto-repeat keeps it held).
     exact_keys: bool,
+    /// The jump key's held (a jump keeps rising): until let go, or (without
+    /// releases) until auto-repeat stops refreshing it.
+    jump_down: bool,
+    jump_until: f32,
+    /// Where the last menu opened (a further list opens there too).
+    last_menu_at: (i32, i32),
+    /// Keeping the save file (a real session, not a tool or a test); when
+    /// it was last written; a save being imported (picked, then applied).
+    saves: bool,
+    saved_at: f32,
+    import_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// ffmpeg being installed (Settings → Desktop): its result.
+    ffmpeg_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    importing_save: Option<crate::save::Save>,
+    /// Scrolling's come from a trackpad (sideways scrolling seen): up and
+    /// down look into the sky, sideways along the village.
+    trackpad: bool,
+    pad_acc: f32,
     #[cfg(any(target_os = "linux", windows))]
     fx: Option<std::sync::Arc<std::sync::Mutex<crate::winsnow::FxCfg>>>,
     /// The sound thread (None until `start_audio`, e.g. in tools).
@@ -162,6 +188,8 @@ pub struct App {
     /// where it centres (eased), and a scratch frame for it.
     zoom_xf: (f32, f32, f32),
     zoom_focus: Option<(f32, f32)>,
+    /// The zoom as shown (easing toward the setting).
+    zoom_now: f32,
     spare: Frame,
     /// The wallpaper is showing full screen; and a change the front-end
     /// should make (Some(true): go full screen, Some(false): back).
@@ -293,6 +321,16 @@ impl App {
             press_at: (0, 0),
             held: [f32::NEG_INFINITY; 4],
             exact_keys: false,
+            jump_down: false,
+            jump_until: 0.0,
+            last_menu_at: (0, 0),
+            saves: false,
+            saved_at: 0.0,
+            import_pick: None,
+            ffmpeg_job: None,
+            importing_save: None,
+            trackpad: false,
+            pad_acc: 0.0,
             #[cfg(any(target_os = "linux", windows))]
             fx: None,
             audio: None,
@@ -303,6 +341,7 @@ impl App {
             scale_pending: None,
             zoom_xf: (1.0, 0.0, 0.0),
             zoom_focus: None,
+            zoom_now: 1.0,
             spare: Frame::new(1, 1),
             wall_full: false,
             wall_full_req: None,
@@ -350,13 +389,53 @@ impl App {
             settings::apply(&mut self.cfg, if up { Act::Inc(F::Scale) } else { Act::Dec(F::Scale) });
             self.settings.toast = Some((format!("resolution {:.2}× detail", settings::resolution(self.cfg.scale)), t + 1.4));
         } else if up || down {
-            let z = ((self.cfg.zoom + if up { 0.1 } else { -0.1 }) * 20.0).round() / 20.0;
-            self.cfg.zoom = z.clamp(1.0, 3.0);
-            self.settings.toast = Some((format!("zoom {:.2}×", self.cfg.zoom), t + 1.4));
+            self.zoom_by(if up { 1.15 } else { 1.0 / 1.15 });
         } else if c == '0' {
             self.cfg.zoom = 1.0;
             self.settings.toast = Some(("zoom 1.00×".into(), t + 1.4));
         }
+    }
+
+    /// The save as things stand.
+    fn current_save(&self) -> crate::save::Save {
+        crate::save::Save {
+            version: 1,
+            seed: self.seed,
+            name: self.cfg.scene.name.clone(),
+            saved: crate::clock::now().format("%Y-%m-%d %H:%M").to_string(),
+            player: self.scene.player_at(),
+            pockets: self.scene.pockets().clone(),
+        }
+    }
+
+    /// Write the save file (a real session only).
+    fn write_save(&mut self) {
+        self.saved_at = self.t();
+        if self.saves {
+            let _ = crate::save::write(&crate::save::path(), &self.current_save());
+        }
+    }
+
+    /// Keep the save file from now on, picking up where the last one left
+    /// off (its things, if it's this village).
+    pub fn keep_saves(&mut self) {
+        self.saves = true;
+        self.saved_at = self.t();
+        if let Some(s) = crate::save::load().filter(|s| s.seed == self.seed) {
+            self.scene.set_pockets(s.pockets);
+            self.scene.place_player(s.player);
+        }
+    }
+
+    /// Zoom in (k > 1) or out, centred on the villager; eased into on screen.
+    pub fn zoom_by(&mut self, k: f32) {
+        let t = self.t();
+        let mut z = (self.cfg.zoom * k).clamp(1.0, 4.0);
+        if z < 1.04 {
+            z = 1.0;
+        }
+        self.cfg.zoom = (z * 100.0).round() / 100.0;
+        self.settings.toast = Some((format!("zoom {:.1}×  (Ctrl+wheel or pinch · Ctrl 0: back)", self.cfg.zoom), t + 1.4));
     }
 
     /// The wallpaper itself goes full screen (or back behind the desktop):
@@ -457,21 +536,8 @@ impl App {
             MouseIn::Down(Btn::Left) if self.menu.is_some() => {
                 // a click picks from the menu (or, outside it, just closes it)
                 let m = self.menu.take().unwrap();
-                match m.hit(x, y).map(|i| m.items[i].1) {
-                    Some(crate::ctxmenu::MenuAct::Settings) => self.settings.open = true,
-                    Some(crate::ctxmenu::MenuAct::Look(i)) => self.acts.push(Act::Look(i, 1)),
-                    Some(crate::ctxmenu::MenuAct::Hide(i)) => {
-                        let f = [settings::F::Clock, settings::F::System, settings::F::Music, settings::F::Weather, settings::F::Map, settings::F::Viz][(i as usize).min(5)];
-                        self.acts.push(Act::Toggle(f));
-                    }
-                    Some(crate::ctxmenu::MenuAct::LockWidgets) => self.acts.push(Act::Toggle(settings::F::Locked)),
-                    Some(crate::ctxmenu::MenuAct::Scene(d)) => {
-                        self.scene.woke();
-                        self.scene.act(d);
-                    }
-                    Some(crate::ctxmenu::MenuAct::Shelf(a)) => self.shelf_act(a),
-                    Some(crate::ctxmenu::MenuAct::Desktop) => self.desktop_menu = true,
-                    None => {}
+                if let Some(a) = m.hit(x, y).map(|i| m.items[i].1) {
+                    self.menu_do(a);
                 }
             }
             MouseIn::Down(Btn::Left) => {
@@ -502,12 +568,22 @@ impl App {
                     self.commit_city();
                     self.settings.open = false;
                 } else if self.settings.help {
-                    // any click closes the controls card
-                    self.settings.help = false;
+                    // a click on one of the villager's [keys] changes it;
+                    // anywhere else closes the controls card
+                    let (w, h) = (self.w as i32, self.h as i32);
+                    if !self.settings.help_click(x, y, w, h, &self.cfg.keys) {
+                        self.settings.help = false;
+                    }
+                } else if settings::zoom_rects(self.w as i32).0.contains(x, y) {
+                    self.zoom_by(1.0 / 1.25);
+                } else if settings::zoom_rects(self.w as i32).1.contains(x, y) {
+                    self.zoom_by(1.25);
                 } else if settings::centre_rect(self.w as i32).contains(x, y) {
                     self.scene.recenter();
                 } else if settings::help_rect(self.w as i32).contains(x, y) {
                     self.settings.help = true;
+                } else if self.scene.at_table() {
+                    self.scene.table_click(x, y);
                 } else if self.scene.convo_click(x, y) {
                     // answered in the dialogue box (by hand: autopilot stands down)
                     self.scene.woke();
@@ -697,10 +773,48 @@ impl App {
                     }
                 } else if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
                     self.widgets.shelf_scroll(s, if up { -1 } else { 1 });
+                } else if self.trackpad {
+                    // a trackpad: up and down look up into the sky and back
+                    self.scene.pan_up(up);
                 } else {
                     // the wheel looks around the village
                     let step = (self.w as f32 * 0.06).max(4.0);
                     self.scene.pan(if up { -step } else { step });
+                }
+            }
+            MouseIn::ScrollSide(right) => {
+                // sideways scrolling: a trackpad (from now on, up and down
+                // look into the sky)
+                self.trackpad = true;
+                if !self.settings.open {
+                    let step = (self.w as f32 * 0.03).max(2.0);
+                    self.scene.pan(if right { step } else { -step });
+                }
+            }
+            MouseIn::Pad(dx, dy) => {
+                self.trackpad = true;
+                if self.settings.open {
+                    self.pad_acc += dy;
+                    if self.pad_acc.abs() >= 1.0 {
+                        if let Some(a) = self.settings.scroll(x, y, self.pad_acc > 0.0) {
+                            self.acts.push(a);
+                        }
+                        self.pad_acc = 0.0;
+                    }
+                } else if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
+                    self.pad_acc += dy;
+                    if self.pad_acc.abs() >= 1.0 {
+                        self.widgets.shelf_scroll(s, if self.pad_acc > 0.0 { -1 } else { 1 });
+                        self.pad_acc = 0.0;
+                    }
+                } else {
+                    self.scene.pan(-dx);
+                    self.scene.lift_by(dy);
+                }
+            }
+            MouseIn::Zoom(k) => {
+                if !self.settings.open {
+                    self.zoom_by(k);
                 }
             }
             MouseIn::ScrollSky(up) => {
@@ -758,7 +872,13 @@ impl App {
 
     /// A key's auto-repeat.
     pub fn key_repeat(&mut self, k: KeyIn) {
+        if self.menu.is_some() || self.scene.convo_choosing() {
+            return self.key(k);
+        }
         self.hold(k);
+        if self.key_action(k) == Some(1) && !self.exact_keys {
+            self.jump_until = self.t() + 0.25;
+        }
     }
 
     /// A key was let go (front-ends that can tell).
@@ -766,6 +886,10 @@ impl App {
         self.set_exact_keys();
         if let Some(i) = Self::dir_slot(k) {
             self.held[i] = f32::NEG_INFINITY;
+        }
+        if self.key_action(k) == Some(1) && self.jump_down {
+            self.jump_down = false;
+            self.scene.release_jump();
         }
     }
 
@@ -777,22 +901,116 @@ impl App {
     }
 
     pub fn key(&mut self, k: KeyIn) {
+        // a key being set for something (Settings → You → Keys)
+        if let Some(i) = self.settings.binding {
+            match k {
+                KeyIn::Esc => self.settings.binding = None,
+                KeyIn::Char(c) if !c.is_control() && !"wasdWASD?".contains(c) => {
+                    let spec = if c == ' ' { "space".to_string() } else { c.to_ascii_lowercase().to_string() };
+                    self.cfg.keys.set(i, spec);
+                    self.settings.binding = None;
+                }
+                KeyIn::Enter => {
+                    self.cfg.keys.set(i, "enter".into());
+                    self.settings.binding = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+        // a menu open: the arrows (or W/S) go up and down it, Enter (or
+        // Space, or E) picks, 1-9 picks straight off
+        if self.menu.is_some() && self.settings.editing.is_none() {
+            let act = self.key_action(k);
+            let m = self.menu.as_mut().unwrap();
+            let pick = match k {
+                KeyIn::Up | KeyIn::Char('w' | 'W') => {
+                    m.step(-1);
+                    return;
+                }
+                KeyIn::Down | KeyIn::Char('s' | 'S') => {
+                    m.step(1);
+                    return;
+                }
+                KeyIn::Enter | KeyIn::Char(' ') => m.hover,
+                KeyIn::Char(c @ '1'..='9') => Some(c as usize - '1' as usize).filter(|&i| i < m.items.len()),
+                _ if act == Some(0) => m.hover,
+                _ if act == Some(8) => {
+                    self.menu = None;
+                    return;
+                }
+                _ => None,
+            };
+            if let Some(i) = pick {
+                let a = m.items[i].1;
+                self.menu = None;
+                self.menu_do(a);
+                return;
+            }
+        }
+        // at the table for a game: the arrows, Enter, D/S, Esc to get up
+        if self.settings.editing.is_none() && !self.settings.open && self.scene.at_table() {
+            use crate::scene::games::Key as G;
+            // on a board WASD moves about too; at cards D draws, S stands
+            let board = self.scene.table_board();
+            let g = match k {
+                KeyIn::Up => Some(Some(G::Up)),
+                KeyIn::Down => Some(Some(G::Down)),
+                KeyIn::Left => Some(Some(G::Left)),
+                KeyIn::Right => Some(Some(G::Right)),
+                KeyIn::Char('w' | 'W') if board => Some(Some(G::Up)),
+                KeyIn::Char('s' | 'S') if board => Some(Some(G::Down)),
+                KeyIn::Char('a' | 'A') if board => Some(Some(G::Left)),
+                KeyIn::Char('d' | 'D') if board => Some(Some(G::Right)),
+                KeyIn::Char('d' | 'D' | 's' | 'S') => Some(Some(G::Other)),
+                KeyIn::Enter | KeyIn::Char(' ' | 'e' | 'E') => Some(Some(G::Pick)),
+                KeyIn::Esc => Some(None),
+                _ => None,
+            };
+            if let Some(g) = g {
+                self.scene.table_key(g);
+            }
+            return;
+        }
+        // a conversation: the arrows go through the answers, Enter picks
+        if self.settings.editing.is_none() && !self.settings.open && self.scene.convo_choosing() {
+            match k {
+                KeyIn::Up => return self.scene.convo_step(-1),
+                KeyIn::Down => return self.scene.convo_step(1),
+                KeyIn::Enter if self.scene.convo_pick() => {
+                    self.scene.woke();
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.hold(k);
         if self.settings.editing.is_none() && !self.settings.open && self.scene.has_player() {
-            // the villager's keys: steered by hand again (autopilot stands down)
-            if matches!(k, KeyIn::Char('e' | 'E' | ' ' | 'f' | 'F' | 'r' | 'R' | 'i' | 'I' | 'q' | 'Q' | '1'..='5') | KeyIn::Enter) {
+            // the villager's keys (as set): steered by hand again (autopilot
+            // stands down)
+            let act = self.key_action(k).or((k == KeyIn::Enter).then_some(0));
+            if act.is_some_and(|a| a != 6) || matches!(k, KeyIn::Char('1'..='5')) {
                 self.scene.woke();
             }
-            match k {
-                KeyIn::Char('e' | 'E') | KeyIn::Enter => self.scene.interact(),
-                KeyIn::Char(' ') => self.scene.jump(),
-                KeyIn::Char('f' | 'F') => self.scene.invite(),
-                KeyIn::Char('r' | 'R') => self.scene.snowball(),
-                KeyIn::Char('i' | 'I') => self.scene.toggle_pockets(),
-                KeyIn::Char('q' | 'Q') => self.scene.cycle_held(),
-                KeyIn::Char('c' | 'C') => self.scene.recenter(),
-                KeyIn::Char(c @ '1'..='5') => self.scene.number(c as usize - '0' as usize),
-                _ => {}
+            match act {
+                Some(0) => self.scene.interact(),
+                Some(1) => {
+                    self.scene.jump();
+                    self.jump_down = true;
+                    self.jump_until = if self.exact_keys { f32::INFINITY } else { self.t() + 0.25 };
+                }
+                Some(2) => self.scene.snowball(),
+                Some(3) => self.scene.invite(),
+                Some(4) => self.scene.toggle_pockets(),
+                Some(5) => self.scene.cycle_held(),
+                Some(6) => self.scene.recenter(),
+                Some(7) => self.scene.rest(),
+                Some(8) => self.open_todo(),
+                _ => {
+                    if let KeyIn::Char(c @ '1'..='5') = k {
+                        self.scene.number(c as usize - '0' as usize);
+                    }
+                }
             }
         }
         if let Some(buf) = self.settings.editing.as_mut() {
@@ -850,7 +1068,7 @@ impl App {
                 Some(_) => "pointer",
                 None => "default",
             }
-        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) {
+        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) || settings::zoom_rects(self.w as i32).0.contains(hx, hy) || settings::zoom_rects(self.w as i32).1.contains(hx, hy) {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
             "grab"
@@ -922,6 +1140,65 @@ impl App {
         self.hushed
     }
 
+    /// Something picked from a menu.
+    fn menu_do(&mut self, a: crate::ctxmenu::MenuAct) {
+        use crate::ctxmenu::MenuAct;
+        match a {
+            MenuAct::Settings => self.settings.open = true,
+            MenuAct::Look(i) => self.acts.push(Act::Look(i, 1)),
+            MenuAct::Hide(i) => {
+                let f = [settings::F::Clock, settings::F::System, settings::F::Music, settings::F::Weather, settings::F::Map, settings::F::Viz][(i as usize).min(5)];
+                self.acts.push(Act::Toggle(f));
+            }
+            MenuAct::LockWidgets => self.acts.push(Act::Toggle(settings::F::Locked)),
+            MenuAct::Scene(crate::scene::Do::More(k)) => {
+                // a further list, where this one was
+                let (title, items) = self.scene.more_menu(k);
+                let (x, y) = self.last_menu_at;
+                let (w, h) = (self.w as i32, self.h as i32);
+                let items = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+                self.menu = Some(crate::ctxmenu::CtxMenu::plain(x, y, title, items, w, h));
+            }
+            MenuAct::Scene(d) => {
+                self.scene.woke();
+                self.scene.act(d);
+            }
+            MenuAct::Shelf(a) => self.shelf_act(a),
+            MenuAct::Desktop => self.desktop_menu = true,
+        }
+    }
+
+    /// T: what there is to do right here, by the villager.
+    fn open_todo(&mut self) {
+        use crate::ctxmenu::{CtxMenu, MenuAct};
+        let (title, items) = self.scene.todo_menu();
+        if items.is_empty() {
+            return;
+        }
+        let (x, y) = self.scene.zoom_focus();
+        let (w, h) = (self.w as i32, self.h as i32);
+        let items = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        let m = CtxMenu::plain(x as i32 + 4, y as i32 - 6, title, items, w, h);
+        self.last_menu_at = (m.x, m.y);
+        self.menu = Some(m);
+    }
+
+    /// Whether key `k` is the one set for something (see `KeysCfg`).
+    fn bound(spec: &str, k: KeyIn) -> bool {
+        match (spec.to_ascii_lowercase().as_str(), k) {
+            ("space" | " ", KeyIn::Char(' ')) => true,
+            ("enter", KeyIn::Enter) => true,
+            ("tab", KeyIn::Char('\t')) => true,
+            (s, KeyIn::Char(c)) => s.chars().count() == 1 && s.chars().next().is_some_and(|x| x.eq_ignore_ascii_case(&c)),
+            _ => false,
+        }
+    }
+
+    /// Which of the villager's keys `k` is (index into `KEY_ACTIONS`).
+    fn key_action(&self, k: KeyIn) -> Option<usize> {
+        (0..config::KEY_ACTIONS.len()).find(|&i| Self::bound(self.cfg.keys.get(i), k))
+    }
+
     /// Open the right-click menu at (x, y).
     fn open_menu(&mut self, x: i32, y: i32) {
         self.build_menu(x, y);
@@ -934,6 +1211,7 @@ impl App {
 
     fn build_menu(&mut self, x: i32, y: i32) {
         use crate::ctxmenu::{CtxMenu, MenuAct};
+        self.last_menu_at = (x, y + 1);
         use crate::widgets::shelf::{Hit, MenuAct as S};
         self.commit_city();
         let (w, h) = (self.w as i32, self.h as i32);
@@ -1306,6 +1584,28 @@ impl App {
                     self.cfg.seed = self.seed as u64;
                     reseed = true;
                 }
+                Act::ExportSave => {
+                    let t = self.t();
+                    let s = self.current_save();
+                    match crate::save::export(&s) {
+                        Ok(p) => {
+                            self.settings.toast = Some((format!("a copy saved: {}", p.display()), t + 4.0));
+                            if let Some(dir) = p.parent() {
+                                crate::widgets::shelf::open(dir);
+                            }
+                        }
+                        Err(e) => self.settings.toast = Some((format!("couldn't save a copy ({e})"), t + 4.0)),
+                    }
+                }
+                Act::ImportSave => {
+                    if self.import_pick.is_none() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.import_pick = Some(rx);
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::save::pick());
+                        });
+                    }
+                }
                 Act::Quit => self.quit = true,
                 Act::PopOut => self.pop_out(false),
                 Act::FullScreen if self.windowed => self.fullscreen_toggle = true,
@@ -1339,6 +1639,18 @@ impl App {
                 Act::LockRedraw => {
                     #[cfg(target_os = "linux")]
                     crate::linwall::start_lock(true);
+                }
+                Act::InstallFfmpeg => {
+                    #[cfg(target_os = "linux")]
+                    if self.ffmpeg_job.is_none() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.ffmpeg_job = Some(rx);
+                        let t = self.t();
+                        self.settings.toast = Some(("installing ffmpeg… (the system asks for your password)".into(), t + 30.0));
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::linwall::install_ffmpeg());
+                        });
+                    }
                 }
                 Act::Autostart => {
                     let on = !self.settings.autostart.unwrap_or(false);
@@ -1374,6 +1686,43 @@ impl App {
             self.seed = self.cfg.seed as u32;
             reseed = true;
         }
+        // a save to import, picked: its village and its things
+        if let Some(rx) = &self.import_pick {
+            match rx.try_recv() {
+                Ok(p) => {
+                    self.import_pick = None;
+                    let t = self.t();
+                    match p.as_deref().and_then(crate::save::read) {
+                        Some(s) => {
+                            self.seed = s.seed;
+                            if self.cfg.seed != 0 {
+                                self.cfg.seed = s.seed as u64;
+                            }
+                            let who = if s.name.is_empty() { "the".to_string() } else { format!("{}'s", s.name) };
+                            self.settings.toast = Some((format!("imported {who} village"), t + 3.0));
+                            self.importing_save = Some(s);
+                            reseed = true;
+                        }
+                        None if p.is_some() => self.settings.toast = Some(("that isn't an xmas-tui save".into(), t + 3.0)),
+                        None => {}
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.import_pick = None,
+                Err(_) => {}
+            }
+        }
+        // ffmpeg being installed: how it went
+        if let Some(rx) = &self.ffmpeg_job {
+            if let Ok(r) = rx.try_recv() {
+                self.ffmpeg_job = None;
+                let t = self.t();
+                self.settings.toast = Some((r.unwrap_or_else(|e| e), t + 5.0));
+            }
+        }
+        // saved now and then (and on the way out)
+        if self.saves && self.t() - self.saved_at > 60.0 {
+            self.write_save();
+        }
         self.frame.glow_near = self.cfg.scene.glow;
         self.frame.glow_far = self.cfg.scene.glow;
         self.settings.file_error = self.sync.error.is_some();
@@ -1393,12 +1742,21 @@ impl App {
                 c.chattiness = 0.0;
                 c.pet = Default::default();
                 c.name.clear();
+                // (these apply live too: no new village for them)
+                c.autopilot = false;
+                c.friends.clear();
                 c
             };
             if reseed || live(&self.cfg.scene) != live(&old.scene) {
                 let pockets = self.scene.take_pockets();
                 self.scene = Scene::new(self.w, self.h, self.seed, &self.cfg.scene);
                 self.scene.set_pockets(pockets);
+                // a save imported: its things, in its village
+                if let Some(s) = self.importing_save.take() {
+                    self.scene.set_pockets(s.pockets);
+                    self.scene.place_player(s.player);
+                    self.write_save();
+                }
             }
             #[cfg(any(target_os = "linux", windows))]
             if let Some(fx) = &self.fx {
@@ -1433,6 +1791,11 @@ impl App {
         self.last = now;
         let (mx, my) = self.move_dir();
         self.scene.set_move(mx, my);
+        self.scene.set_ui_look(&self.cfg.ui.look);
+        if self.jump_down && self.t() > self.jump_until {
+            self.jump_down = false;
+            self.scene.release_jump();
+        }
         let left = match self.cfg.scene.traffic.as_str() {
             "left" => true,
             "right" => false,
@@ -1502,7 +1865,10 @@ impl App {
             _ => want,
         };
         self.zoom_focus = Some(f);
-        self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+        // the zoom eases to where it's been set
+        let dz = self.cfg.zoom - self.zoom_now;
+        self.zoom_now = if dz.abs() < 0.005 { self.cfg.zoom } else { self.zoom_now + dz * (1.0 - (-dt * 9.0).exp()) };
+        self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
         // the widgets' tops are something to climb up onto (next frame)
@@ -1549,9 +1915,10 @@ impl App {
         }
         self.settings.draw_banner(&mut self.frame, t);
         self.settings.draw(&mut self.frame, &self.cfg, t);
-        self.settings.draw_help(&mut self.frame);
+        self.settings.draw_help(&mut self.frame, &self.cfg.keys, &self.cfg.ui.look);
         if let Some(m) = &self.menu {
             m.draw(&mut self.frame);
+            crate::widgets::looks::apply(&mut self.frame, m.rect(), &self.cfg.ui.look, crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.95), 5);
         }
         self.frame.compose();
         &self.frame.out
@@ -1921,10 +2288,13 @@ mod tests {
         assert_eq!(app.world_pt(100, 30), (100, 30));
         app.ctrl_key('=', false);
         app.ctrl_key('=', false);
-        assert!((app.cfg.zoom - 1.2).abs() < 1e-3, "{}", app.cfg.zoom);
-        app.step();
+        assert!((app.cfg.zoom - 1.32).abs() < 1e-3, "{}", app.cfg.zoom);
+        // (the view eases in to it)
+        for _ in 0..40 {
+            app.step();
+        }
         let (z, x0, y0) = app.zoom_xf;
-        assert!((z - 1.2).abs() < 1e-3);
+        assert!(z > 1.0 && z <= 1.321, "{z}");
         let (wx, wy) = app.world_pt(150, 30);
         assert_eq!((wx, wy), ((x0 + 150.5 / z) as i32, (y0 + 30.5 / z) as i32));
         app.ctrl_key('0', false);
@@ -1966,3 +2336,12 @@ fn open_detached(path: std::path::PathBuf) {
 
 #[cfg(test)]
 static OPENED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+impl Drop for App {
+    /// On the way out: the save, written.
+    fn drop(&mut self) {
+        if self.saves {
+            self.write_save();
+        }
+    }
+}

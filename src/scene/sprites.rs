@@ -71,6 +71,30 @@ impl Canvas {
         }
     }
 
+    /// Laid down on its back (head to the left, front upwards), trimmed to
+    /// the rows with anything in them: lying in the snow.
+    fn lie_down(&self) -> Canvas {
+        let mut c = Canvas::new(self.h, self.w);
+        for y in 0..self.h {
+            for x in 0..self.w {
+                if let Some(p) = self.px[(y * self.w + x) as usize] {
+                    c.set(y, self.w - 1 - x, p);
+                }
+            }
+        }
+        let rows: Vec<i32> = (0..c.h).filter(|&y| (0..c.w).any(|x| c.px[(y * c.w + x) as usize].is_some())).collect();
+        let (y0, y1) = (rows.first().copied().unwrap_or(0), rows.last().copied().unwrap_or(c.h - 1));
+        let mut out = Canvas::new(c.w, y1 - y0 + 1);
+        for y in y0..=y1 {
+            for x in 0..c.w {
+                if let Some(p) = c.px[(y * c.w + x) as usize] {
+                    out.set(x, y - y0, p);
+                }
+            }
+        }
+        out
+    }
+
     /// Mirrored left-right (to face left).
     fn mirror(&mut self) {
         for y in 0..self.h {
@@ -168,6 +192,13 @@ pub enum Pose {
     Climb(u8),
     /// In the air: knees tucked, arms out.
     Jump,
+    /// Lying on their back in the snow.
+    Lie,
+    /// Lying, making a snow angel: arms swept out over the head (1) or back
+    /// down by the sides (0).
+    Angel(u8),
+    /// Sitting (in a chair, on a bench): knees forward, hands on them.
+    Sit,
 }
 
 /// How a person looks.
@@ -195,7 +226,11 @@ pub fn person(l: &Look, pose: Pose, dir: f32, light: f32) -> Arc<Picture> {
         (pose, dir > 0.0, (light * 20.0) as i32),
     ));
     cached(k, || {
-        let mut c = draw_person(l, pose);
+        let mut c = match pose {
+            Pose::Lie | Pose::Angel(0) => draw_person(l, Pose::Stand).lie_down(),
+            Pose::Angel(_) => draw_person(l, Pose::ArmsUp).lie_down(),
+            _ => draw_person(l, pose),
+        };
         if dir < 0.0 {
             c.mirror();
         }
@@ -239,11 +274,20 @@ fn draw_person(l: &Look, pose: Pose) -> Canvas {
         Pose::Jump => (2, 2),
         _ => (0, 0),
     };
-    for (dx, col, b, up) in [(back_dx, pants * 0.75, boot * 0.75, back_up), (front_dx, pants, boot, front_up)] {
-        let x = (cx - 1.0) as i32 + dx.signum() * dx.abs().min(1);
-        c.line(cx - 1.0 + (dx as f32) * 0.25, hip_y as f32, x as f32 + (dx as f32) * 0.5, (boots_y - 1 - up) as f32, 2, col);
-        let bx = x + dx / 2;
-        c.rect(bx, boots_y - up, 3, 2, b);
+    if pose == Pose::Sit {
+        // thighs forward, shins down to the floor
+        for (dy, col, b) in [(0.0, pants * 0.75, boot * 0.75), (0.6, pants, boot)] {
+            c.line(cx - 1.5, hip_y as f32 - 1.0 + dy, cx + 3.0, hip_y as f32 - 1.0 + dy, 2, col);
+            c.line(cx + 3.0, hip_y as f32 - 1.0 + dy, cx + 3.0, (boots_y - 1) as f32, 2, col);
+            c.rect((cx + 2.5) as i32, boots_y, 3, 2, b);
+        }
+    } else {
+        for (dx, col, b, up) in [(back_dx, pants * 0.75, boot * 0.75, back_up), (front_dx, pants, boot, front_up)] {
+            let x = (cx - 1.0) as i32 + dx.signum() * dx.abs().min(1);
+            c.line(cx - 1.0 + (dx as f32) * 0.25, hip_y as f32, x as f32 + (dx as f32) * 0.5, (boots_y - 1 - up) as f32, 2, col);
+            let bx = x + dx / 2;
+            c.rect(bx, boots_y - up, 3, 2, b);
+        }
     }
     // the coat: a body, a little wider at the hem, buttons down the front
     let top = shoulder_y;
@@ -306,6 +350,8 @@ fn draw_person(l: &Look, pose: Pose) -> Canvas {
         Pose::Climb(0) => ((cx + 2.2, head_cy - 3.2), (cx + 3.4, sh + 1.4)),
         Pose::Climb(_) => ((cx + 2.0, sh + 1.4), (cx + 3.6, head_cy - 3.4)),
         Pose::Jump => ((cx - 4.2, head_cy - 1.2), (cx + 4.4, head_cy - 2.2)),
+        Pose::Lie | Pose::Angel(_) => ((cx - 2.6, rest), (cx + 2.6, rest)),
+        Pose::Sit => ((cx + 1.0, hip_y as f32 - 2.0), (cx + 3.0, hip_y as f32 - 2.0)),
     };
     let shoulder_back = (cx - 1.8 + lean, sh);
     let shoulder_front = (cx + 1.2 + lean, sh);

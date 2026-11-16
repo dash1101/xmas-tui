@@ -15,6 +15,9 @@ pub mod lines;
 pub mod player;
 pub mod sky;
 pub mod autopilot;
+pub mod games;
+pub mod play;
+pub mod trips;
 pub mod builds;
 pub mod chapel;
 pub mod newyear;
@@ -68,6 +71,9 @@ pub struct Scene {
     /// Camera: world column at the left edge, and where it's heading.
     cam: f32,
     cam_target: f32,
+    /// The view was lifted to keep the villager in it, up high (and comes
+    /// down with them).
+    lifted: bool,
     cfg: SceneCfg,
     sky: sky::Sky,
     land: land::Land,
@@ -126,6 +132,21 @@ pub struct Scene {
     goal: Option<Goal>,
     /// Autopilot (Settings → You): the villager left to their own devices.
     auto: autopilot::Auto,
+    /// A game of tag going on; a carol being sung.
+    tag: Option<play::TagGame>,
+    carol: Option<play::Carol>,
+    /// Santa, clicked out of his sleigh and on the run; the clicks on him.
+    runaway: Option<play::Runaway>,
+    santa_clicks: Vec<f32>,
+    /// The pet's being carried about with the pointer (and has been moved).
+    pet_drag: Option<bool>,
+    /// Sat at the table for a game.
+    table: Option<games::Table>,
+    /// Away on a trip (skiing, a drive).
+    trip: Option<trips::Trip>,
+    /// The seed the village was laid out from (for the save file).
+    #[allow(dead_code)]
+    seed: u32,
     show_cheered: bool,
     blackout_until: f32,
     power_back: bool,
@@ -150,6 +171,10 @@ pub struct Scene {
     convo: Option<story::Convo>,
     story_talk: dialogue::Talk,
     convo_hover: Option<usize>,
+    /// The answer was picked out with the arrow keys (not the mouse).
+    convo_keys: bool,
+    /// The look of the app's own panels.
+    ui_look: &'static str,
     /// Where the box was last dragged to (kept for the next one), and the
     /// grab offset while it's being dragged.
     convo_pos: Option<(i32, i32)>,
@@ -288,6 +313,31 @@ pub enum Do {
     LookUp,
     LookDown,
     Leave,
+    /// Lie down in the snow for a rest (or get up); a snow angel.
+    Rest,
+    Angel,
+    /// Tag with this kid.
+    Tag(u64),
+    /// Sing a carol (the neighbours join in).
+    Sing,
+    /// Berries off the bush at (column, row).
+    Pick(f32, f32),
+    /// Knock down the snowman or igloo at this column.
+    Remove(f32),
+    /// A light show this many seconds long (everyone gathers first);
+    /// fireworks, this many.
+    LightShow(u16),
+    Fireworks(u8),
+    /// A further list of choices (see `more_menu`).
+    More(u8),
+    /// A snowball fight: the villager (and whoever's along) against the
+    /// folk round about.
+    TeamFight,
+    /// A game at the table with whoever's at home.
+    Game(games::Kind),
+    /// A trip out: the train up to the ski slopes (true; from the station),
+    /// or a drive (from the car by home).
+    Trip(bool),
 }
 
 /// Where the villager is walking on their own, and what to do there.
@@ -346,7 +396,7 @@ impl Scene {
         let (pw, ph) = (w, h * 2);
         let (wf, hf) = (w as f32, h as f32);
         // a wider world to wander through (small screens just get one screen)
-        let ww = if w >= 150 && h >= 30 { (wf * 3.6) as usize } else { w };
+        let ww = if w >= 150 && h >= 30 { (wf * 4.8) as usize } else { w };
         let wwf = ww as f32;
         let mut rng = Rng::new(seed as u64);
         let land = land::Land::new(ww, w, ph, seed);
@@ -376,13 +426,15 @@ impl Scene {
             House(i32, i32, bool, f32),
             Snowman,
             Fence(i32),
+            /// An open stretch of snowfield (room to play).
+            Open(i32),
         }
         let tree_w = |fh: f32, gifts: bool| ((hf * fh) * 1.1) as i32 + if gifts { 10 } else { 4 };
         let width = |it: &It| match *it {
             It::Tree(fh, _, _, g) => tree_w(fh, g),
             It::House(w, _, church, _) => w + if church { 4 } else { 4 },
             It::Snowman => sz(16.0, 8),
-            It::Fence(len) => len,
+            It::Fence(len) | It::Open(len) => len,
         };
         let house = |rng: &mut Rng| It::House(sz(rng.range(12.0, 19.0), 8), sz(rng.range(4.0, 7.0), 3), false, rng.range(0.80, 0.835));
         // each side is a long procession; packing stops at the world's edge
@@ -411,9 +463,11 @@ impl Scene {
         let styles = [LightStyle::Multi, LightStyle::Warm, LightStyle::Icy];
         for side in [&mut right, &mut left] {
             for k in 0..40 {
-                side.push(match (k + rng.int(0, 2) as usize) % 5 {
+                side.push(match (k + rng.int(0, 2) as usize) % 7 {
                     0 => It::Tree(rng.range(0.18, 0.30), rng.range(0.85, 0.9), *rng.pick(&styles), rng.chance(0.4)),
                     1 => It::Fence(sz(rng.range(24.0, 50.0), 10)),
+                    // now and then a wide open stretch between the houses
+                    4 => It::Open(sz(rng.range(30.0, 70.0), 12)),
                     _ => house(&mut rng),
                 });
             }
@@ -493,6 +547,7 @@ impl Scene {
                     village.snowmen.push(Snowman { cx: x + wdt / 2, base: (hf * 0.93).round() as i32, scale: u.min(1.4) });
                 }
                 It::Fence(len) => village.fences.push((x, x + len - 1, fence_row)),
+                It::Open(_) => {}
             }
         }
         // lamp posts in the roomier gaps, plus one either side of the tree
@@ -568,6 +623,7 @@ impl Scene {
             ww,
             cam,
             cam_target: cam,
+            lifted: false,
             player,
             mv: (0.0, 0.0),
             focus: None,
@@ -595,6 +651,14 @@ impl Scene {
             show_stats: false,
             goal: None,
             auto: autopilot::Auto { on: cfg.autopilot, ..Default::default() },
+            tag: None,
+            carol: None,
+            runaway: None,
+            santa_clicks: vec![],
+            pet_drag: None,
+            table: None,
+            trip: None,
+            seed,
             show_cheered: false,
             blackout_until: 0.0,
             power_back: false,
@@ -623,6 +687,8 @@ impl Scene {
             convo: None,
             story_talk: dialogue::Talk::new(seed ^ 0x570),
             convo_hover: None,
+            convo_keys: false,
+            ui_look: "classic",
             convo_pos: None,
             convo_drag: None,
             deeds: vec![],
@@ -648,6 +714,9 @@ impl Scene {
         s.map = s.static_map();
         s.shop = s.place_shop();
         s.build_ledges();
+        // people come out of the houses' front doors, and go back in at them
+        let doors = s.village.houses.iter().filter(|h| !h.church).map(|h| (h.door() as f32 + 0.5, s.lo_at(h.door() as f32))).collect();
+        s.critters.set_doors(doors);
         // the villager's own house: the one nearest where they start out
         if let Some(px) = s.player.as_ref().map(|p| p.centre()) {
             let home = s.village.houses.iter().enumerate().filter(|(_, h)| !h.church).min_by_key(|(_, h)| (h.door() as f32 - px).abs() as i32).map(|(i, _)| i);
@@ -688,6 +757,42 @@ impl Scene {
     }
 
     /// The player's pockets (kept when the scene is rebuilt).
+    /// The seed the village was laid out from (the Android app's save).
+    #[allow(dead_code)]
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    pub fn pockets(&self) -> &shop::Pockets {
+        &self.pockets
+    }
+
+    /// Where the villager is (for the save file).
+    pub fn player_at(&self) -> Option<[f32; 2]> {
+        self.player.as_ref().filter(|p| p.perch.is_none()).map(|p| [p.x, p.y])
+    }
+
+    /// Back where they were (from the save file), on the snowfield.
+    pub fn place_player(&mut self, at: Option<[f32; 2]>) {
+        let Some([x, y]) = at else { return };
+        let (ww, h) = (self.ww as f32, self.h as f32);
+        if !(1.0..ww - 4.0).contains(&x) {
+            return;
+        }
+        let lo = self.lo_at(x + 1.0);
+        if let Some(p) = &mut self.player {
+            p.x = x;
+            p.y = y.clamp(lo, h - 1.0);
+        }
+        self.look_at(x + 1.0);
+        self.cam = self.cam_target;
+        self.ctx.cam = self.cam;
+        if let Some(pet) = &mut self.my_pet {
+            pet.x = x - 4.0;
+            pet.y = y.clamp(lo, h - 1.0);
+        }
+    }
+
     pub fn take_pockets(&mut self) -> shop::Pockets {
         std::mem::take(&mut self.pockets)
     }
@@ -732,7 +837,9 @@ impl Scene {
         let t = self.now();
         let mut out: Vec<(String, Do)> = vec![];
         if self.inside.is_some() {
-            return ("indoors".into(), vec![("step back outside".into(), Do::Leave)]);
+            let mut v = vec![("step back outside".into(), Do::Leave)];
+            v.extend(self.game_choices());
+            return ("indoors".into(), v);
         }
         let y = sy - self.oy_i();
         if y < 0 {
@@ -804,12 +911,13 @@ impl Scene {
             let (bx, ..) = self.builds.spot(i).unwrap_or((x as f32, 0.0, 0.0, false));
             let (snowman, p) = self.builds.about(i).unwrap_or((true, 1.0));
             let what = if snowman { "snowman" } else { "igloo" };
+            let down = (format!("knock the {what} down"), Do::Remove(bx));
             return if p < 1.0 {
-                (format!("a {what}, going up"), vec![(format!("help build the {what}"), Do::HelpBuild(bx))])
+                (format!("a {what}, going up"), vec![(format!("help build the {what}"), Do::HelpBuild(bx)), down])
             } else if !snowman {
-                ("an igloo".into(), vec![("crawl inside".into(), Do::Crawl(bx))])
+                ("an igloo".into(), vec![("crawl inside".into(), Do::Crawl(bx)), down])
             } else {
-                ("a snowman".into(), vec![("walk over here".into(), Do::WalkTo(bx, y as f32 + 1.0))])
+                ("a snowman".into(), vec![("walk over here".into(), Do::WalkTo(bx, y as f32 + 1.0)), down])
             };
         }
         // open ground (or anywhere else): drop in, walk over, or build
@@ -885,6 +993,22 @@ impl Scene {
             }
             Do::LookDown => self.sky_up_target = 0.0,
             Do::Leave => self.leave(),
+            Do::Rest => self.rest(),
+            Do::Angel => {
+                self.goal = None;
+                self.snow_angel();
+            }
+            Do::Sing => {
+                self.goal = None;
+                self.sing();
+            }
+            Do::Remove(bx) => self.knock_down(bx),
+            Do::LightShow(secs) => self.start_light_show(secs as f32),
+            Do::Fireworks(n) => self.set_off_fireworks(n as usize),
+            Do::More(_) => {}
+            Do::TeamFight => self.start_team_fight(),
+            Do::Game(k) => self.start_game(k),
+            Do::Trip(_) => self.goal = Some(Goal { then: what, until: t + 60.0 }),
             // everything else: walk over there first
             _ => self.goal = Some(Goal { then: what, until: t + 25.0 }),
         }
@@ -896,6 +1020,9 @@ impl Scene {
             Do::WalkTo(x, y) => Some((x, y, 1.0)),
             Do::Talk(id) | Do::Invite(id) | Do::Give(id, _) | Do::Pet(id) => self.critters.position(id).map(|(x, y)| (x, y, 5.0)),
             Do::Snowball(id) => self.critters.position(id).map(|(x, y)| (x, y, 22.0)),
+            Do::Tag(id) => self.critters.position(id).map(|(x, y)| (x, y, 8.0)),
+            Do::Trip(ski) => self.trip_spot(ski).map(|(x, y)| (x, y, 1.5)),
+            Do::Pick(x, y) => Some((x, y, 1.5)),
             Do::Visit(i) => self.village.houses.get(i).map(|h| (h.door() as f32 + 0.5, self.lo_at(h.door() as f32).max(h.base as f32), 1.2)),
             Do::Shop => self.shop.as_ref().map(|s| (s.centre() as f32, s.base as f32 + 2.0, 3.0)),
             Do::Build(igloo, x, row) => {
@@ -972,6 +1099,9 @@ impl Scene {
                 }
             }
             Do::Visit(i) => self.enter(i),
+            Do::Tag(id) => self.start_tag(id, 40.0),
+            Do::Trip(ski) => self.start_trip(ski),
+            Do::Pick(..) => self.interact(),
             Do::Build(igloo, x, row) => self.start_build(igloo, x, row, t),
             Do::HelpBuild(bx) | Do::Crawl(bx) => {
                 if let Some(i) = self.builds_near(bx) {
@@ -1331,7 +1461,7 @@ impl Scene {
         let seed = self.rng.next_u32();
         let Some(inn) = self.inside.as_mut() else { return };
         let Some(info) = inn.about(i) else { return };
-        let id = HOST_ID + (inn.house as u64) * 16 + i as u64;
+        let id = HOST_ID.wrapping_add((inn.house as u64).wrapping_mul(16)).wrapping_add(i as u64);
         let visits = self.talks.get(&id).copied().unwrap_or(0);
         *self.talks.entry(id).or_insert(0) += 1;
         // a little job they might ask for
@@ -1516,6 +1646,34 @@ impl Scene {
         true
     }
 
+    /// A conversation open with answers to choose from.
+    pub fn convo_choosing(&self) -> bool {
+        self.convo.as_ref().is_some_and(|c| c.ended_at.is_none() && !c.opts.is_empty())
+    }
+
+    /// The arrow keys: the next (or previous) answer, picked out.
+    pub fn convo_step(&mut self, d: i32) {
+        let Some(n) = self.convo.as_ref().map(|c| c.opts.len() as i32).filter(|&n| n > 0) else { return };
+        self.convo_hover = Some(match self.convo_hover {
+            Some(i) => ((i as i32 - 1 + d).rem_euclid(n) + 1) as usize,
+            None if d > 0 => 1,
+            None => n as usize,
+        });
+        self.convo_keys = true;
+    }
+
+    /// Enter: the answer picked out with the arrows (false: none is).
+    pub fn convo_pick(&mut self) -> bool {
+        match self.convo_hover.filter(|_| self.convo_keys && self.convo_choosing()) {
+            Some(n) => {
+                self.answer(n);
+                self.convo_hover = Some(1);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn convo_dragging(&self) -> bool {
         self.convo_drag.is_some() && self.convo.is_some()
     }
@@ -1618,10 +1776,13 @@ impl Scene {
         match &self.convo {
             Some(c) if c.contains(x, y, w, h) => {
                 self.convo_hover = c.option_at(x, y, w, h);
+                self.convo_keys = false;
                 true
             }
             _ => {
-                self.convo_hover = None;
+                if !self.convo_keys {
+                    self.convo_hover = None;
+                }
                 false
             }
         }
@@ -1636,6 +1797,11 @@ impl Scene {
 
     /// Esc: close the shop / pockets first. True if something closed.
     pub fn close_panels(&mut self) -> bool {
+        // away on a trip: Esc heads home
+        if let Some(tr) = &mut self.trip {
+            tr.done = Some(if matches!(tr.at, trips::Where::Drive) { trips::Back::Home } else { trips::Back::Station });
+            return true;
+        }
         let shop_open = self.shop.as_ref().map(|s| s.open).unwrap_or(false);
         if let Some(s) = &mut self.shop {
             s.open = false;
@@ -1785,6 +1951,19 @@ impl Scene {
             self.cursor_seen -= s;
             self.next_round -= s;
             self.auto.rebase(s);
+            if let Some(g) = &mut self.tag {
+                g.rebase(s);
+            }
+            if let Some(c) = &mut self.carol {
+                c.rebase(s);
+            }
+            if let Some(r) = &mut self.runaway {
+                r.rebase(s);
+            }
+            if let Some(tr) = &mut self.trip {
+                tr.rebase(s);
+            }
+            self.santa_clicks.clear();
             if let Some(n) = &mut self.newyear {
                 n.rebase(s);
             }
@@ -1904,7 +2083,9 @@ impl Scene {
     /// How much the view is magnified on its own: rooms are drawn at
     /// their designed size and scaled up to fill a taller screen.
     pub fn view_zoom(&self) -> f32 {
-        if self.inside.is_some() && self.look.is_none() {
+        if self.trip.is_some() {
+            1.0
+        } else if self.inside.is_some() && self.look.is_none() {
             room_scale(self.h)
         } else {
             1.0
@@ -1975,6 +2156,23 @@ impl Scene {
     }
 
     /// Ctrl+wheel: look up into (or back down from) the sky.
+    /// The look of the app's own panels (conversations are drawn in it).
+    pub fn set_ui_look(&mut self, look: &str) {
+        if self.ui_look != look {
+            self.ui_look = crate::widgets::looks::LOOKS.iter().find(|l| **l == look).copied().unwrap_or("classic");
+        }
+    }
+
+    /// A trackpad: up into the sky (or back down) by `rows`.
+    pub fn lift_by(&mut self, rows: f32) {
+        if self.inside.is_some() {
+            return;
+        }
+        self.sky_up_target = (self.sky_up_target + rows).clamp(0.0, self.high.depth as f32);
+        self.sky_up = self.sky_up_target;
+        self.lifted = false;
+    }
+
     pub fn pan_up(&mut self, up: bool) {
         if self.inside.is_some() {
             return;
@@ -2021,7 +2219,9 @@ impl Scene {
     pub fn recenter(&mut self) {
         let Some(c) = self.player.as_ref().map(|p| p.centre()) else { return };
         self.look_at(c);
+        self.cam_target = self.cam_target.round();
         self.sky_up_target = 0.0;
+        self.lifted = false;
     }
 
     pub fn look_at(&mut self, x: f32) {
@@ -2102,57 +2302,81 @@ impl Scene {
 
     /// The nearest thing the player could interact with: someone to talk
     /// to or pet, a berry bush, or something in the village in front of them.
+    /// What E would do something with: everything in reach, scored. The
+    /// villager's own things come first (the pet they're facing, the cocoa
+    /// cabin's counter, their own front door, a build they're at), then
+    /// someone they're facing (a friend before a stranger, someone standing
+    /// about before someone walking by), then doors, bushes and things. What
+    /// it's already on keeps it unless something clearly better comes along,
+    /// so it doesn't flick about in a crowd.
     fn find_focus(&self) -> Option<Focus> {
         let p = self.player.as_ref()?;
-        let (px, py) = (p.centre(), p.y);
+        let (px, py, dir) = (p.centre(), p.y, p.dir);
         let t = self.now();
+        let mut best: Option<(f32, Focus)> = None;
+        let same = |a: &Focus, b: &Focus| match (a, b) {
+            (Focus::Pet(..), Focus::Pet(..)) | (Focus::Shop(..), Focus::Shop(..)) => true,
+            (Focus::Door(i, ..), Focus::Door(j, ..)) | (Focus::Bush(i, ..), Focus::Bush(j, ..)) | (Focus::Build(i, ..), Focus::Build(j, ..)) => i == j,
+            (Focus::Critter(i, ..), Focus::Critter(j, ..)) => i == j,
+            (Focus::Spot(x, y), Focus::Spot(u, v)) => (x - u).abs() <= 1 && (y - v).abs() <= 2,
+            _ => false,
+        };
+        let mut offer = |score: f32, f: Focus| {
+            let score = if self.focus.as_ref().is_some_and(|c| same(c, &f)) { score - 1.2 } else { score };
+            if best.as_ref().is_none_or(|b| score < b.0) {
+                best = Some((score, f));
+            }
+        };
+        // facing it: a bit better than having it behind
+        let ahead = |x: f32| if (x - px) * dir >= -0.5 { 1.0 } else { 1.7 };
         // at the cocoa cabin's counter
         if let Some(s) = &self.shop {
             if (s.centre() as f32 - px).abs() <= 9.0 && py >= s.base as f32 && py <= s.base as f32 + 6.0 {
-                return Some(Focus::Shop(s.centre(), s.base - 8));
+                offer(0.5, Focus::Shop(s.centre(), s.base - 8));
             }
         }
-        // facing the pet, close by: the pet (before people, bushes, doors and
-        // things — it's always about, so turning to it is how to say hello)
+        // the pet: facing it close by, first of all; at their heels, last
         let k = sprite_k(self.h);
-        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, k) && (pet.x - px) * p.dir > 0.0) {
-            return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
+        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, k)) {
+            let facing = (pet.x - px) * dir > 0.0;
+            offer(if facing { 0.8 } else { 7.0 }, Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
         }
         // right by a snowman or igloo going up: lend a hand (before the kids
         // building it, who are standing right there); a finished igloo's door
         if let Some((i, _)) = self.builds.at(px, py) {
-            return Some(Focus::Build(i, px.round() as i32, py.round() as i32 - 5));
+            offer(1.0, Focus::Build(i, px.round() as i32, py.round() as i32 - 5));
         }
-        if let Some(id) = self.critters.nearest(px, py, 7.0) {
-            let (bx, by, bw, _) = self.critters.bbox_of(id, t)?;
-            return Some(Focus::Critter(id, bx + bw / 2, by - 1));
+        // on a doorstep: go in (home first of all)
+        for (i, h) in self.village.houses.iter().enumerate() {
+            if (h.door() as f32 + 0.5 - px).abs() <= 2.5 && p.y - (h.base as f32) <= 5.0 && p.y >= h.base as f32 - 1.0 {
+                offer(if self.home == Some(i) { 0.6 } else { 1.6 }, Focus::Door(i, h.door(), h.base - 3));
+            }
+        }
+        // people and animals
+        for (id, cx, cy, friend, passing) in self.critters.around(px, py, 7.0) {
+            let dist = (cx - px).abs() * 0.3 + (cy - py).abs() * 0.4;
+            let score = (2.0 + dist) * ahead(cx) - if friend { 0.6 } else { 0.0 } + if passing { 1.5 } else { 0.0 };
+            if let Some((bx, by, bw, _)) = self.critters.bbox_of(id, t) {
+                offer(score, Focus::Critter(id, bx + bw / 2, by - 1));
+            }
         }
         if let Some(b) = self.critters.bush_near(px, py) {
             let (bx, base, bw) = self.critters.bush_rect(b);
-            return Some(Focus::Bush(b, bx + bw / 2, base - 3));
-        }
-        // on a doorstep: go in
-        for (i, h) in self.village.houses.iter().enumerate() {
-            if (h.door() as f32 + 0.5 - px).abs() <= 2.5 && p.y - (h.base as f32) <= 5.0 && p.y >= h.base as f32 - 1.0 {
-                return Some(Focus::Door(i, h.door(), h.base - 3));
-            }
+            offer(1.5 * ahead(bx as f32 + bw as f32 / 2.0), Focus::Bush(b, bx + bw / 2, base - 3));
         }
         // in front first, then right underfoot, then just behind
         let (x0, y0) = (px.round() as i32, py.round() as i32);
-        let d = p.dir as i32;
-        for k in [1, 2, 0, 3, 4, -1, 5, 6, -2] {
+        let d = dir as i32;
+        'spots: for (n, k) in [1, 2, 0, 3, 4, -1, 5, 6, -2].into_iter().enumerate() {
             let x = x0 + d * k;
             for y in (y0 - 16..=y0).rev() {
                 if self.pokeable(x, y) {
-                    return Some(Focus::Spot(x, y));
+                    offer(5.0 + n as f32 * 0.3, Focus::Spot(x, y));
+                    break 'spots;
                 }
             }
         }
-        // nothing else in reach: the pet, at their heels
-        if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, sprite_k(self.h))) {
-            return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
-        }
-        None
+        best.map(|b| b.1)
     }
 
     fn pokeable(&self, x: i32, y: i32) -> bool {
@@ -2239,9 +2463,54 @@ impl Scene {
         if self.inside.is_some() || self.in_igloo {
             return self.interact();
         }
-        let ground = self.player.as_ref().map(|p| self.lo_at(p.centre())).unwrap_or(0.0);
+        if let Some(tr) = &mut self.trip {
+            tr.jump(true);
+            return;
+        }
         if let Some(p) = &mut self.player {
-            p.jump(t, &self.ledges, ground, &mut self.director);
+            p.jump(t, &self.ledges, &mut self.director);
+        }
+    }
+
+    /// Space let go: a jump stops rising.
+    pub fn release_jump(&mut self) {
+        if let Some(tr) = &mut self.trip {
+            tr.jump(false);
+        }
+        if let Some(p) = &mut self.player {
+            p.release_jump();
+        }
+    }
+
+    /// Z: down in the snow for a rest (or up again).
+    pub fn rest(&mut self) {
+        let t = self.now();
+        if self.inside.is_some() || self.in_igloo {
+            return;
+        }
+        self.goal = None;
+        if let Some(p) = &mut self.player {
+            if p.lying() {
+                p.get_up(t, &mut self.director);
+            } else if p.lie_down(t, &mut self.director) {
+                let (x, y, night) = (p.centre(), p.y, self.daylight.sun < 0.25);
+                self.critters.join_lying(x, y, false, night, t, &mut self.director);
+            }
+        }
+    }
+
+    /// A snow angel, right here: down on their back, and arms and legs out.
+    pub fn snow_angel(&mut self) {
+        let t = self.now();
+        if self.inside.is_some() || self.in_igloo {
+            return;
+        }
+        if let Some(p) = &mut self.player {
+            if p.lying() || p.lie_down(t, &mut self.director) {
+                p.flap(t, &mut self.director);
+                let (x, y) = (p.centre(), p.y);
+                self.critters.join_lying(x, y, true, false, t, &mut self.director);
+            }
         }
     }
 
@@ -2249,6 +2518,10 @@ impl Scene {
     /// whatever's in front of the player.
     pub fn interact(&mut self) {
         let t = self.now();
+        if let Some(tr) = &mut self.trip {
+            tr.interact(t);
+            return;
+        }
         if self.look.take().is_some() {
             return;
         }
@@ -2438,15 +2711,26 @@ impl Scene {
         self.look = None;
         self.convo = None;
         let Some(inn) = self.inside.take() else { return };
+        let t = self.now();
+        let igloo = inn.is_igloo();
         if let Some(p) = &mut self.player {
             (p.x, p.y) = inn.outside;
             p.dir = 1.0;
-            self.director.sound(Sfx::Click, p.centre(), 0.9);
+            p.lie = None;
+            if igloo {
+                self.builds.crawl_out();
+                self.director.snow_puff(p.centre(), p.y);
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, "brr!", t + 0.2, 1.6, 4);
+            } else {
+                self.director.sound(Sfx::Click, p.centre(), 0.9);
+            }
             if let Some(pet) = self.my_pet.as_mut().filter(|pet| !pet.staying) {
                 (pet.x, pet.y) = (p.centre() - 4.0, p.y);
             }
         }
-        self.deed(Deed::Visit, inn.outside.0);
+        if !igloo {
+            self.deed(Deed::Visit, inn.outside.0);
+        }
     }
 
     /// Previews: talking with the host (indoors), or the pet's menu.
@@ -2475,6 +2759,87 @@ impl Scene {
     /// station / cabin, or "climb"ing a house, or "jump"ing off its roof.
     pub fn preview_perch(&mut self, what: &str) {
         use ledges::Kind as K;
+        // or: at the table in someone's home for a game
+        if let Some(&k) = games::Kind::ALL.iter().find(|k| k.name().to_lowercase().replace('-', "") == what) {
+            let house = (0..self.village.houses.len()).find(|&i| {
+                !self.village.houses[i].church && Some(i) != self.home && {
+                    let seed = self.seed_for(i);
+                    let h = &self.village.houses[i];
+                    let (rw, rh) = room_size(self.w, self.h);
+                    !interior::Interior::new(i, false, false, h.wall, rw, rh, seed, (0.0, 0.0), 0.0).residents.is_empty()
+                }
+            });
+            if let Some(i) = house {
+                self.enter(i);
+                self.start_game(k);
+                if let Some(tb) = &mut self.table {
+                    // a few moves in
+                    for key in [games::Key::Right, games::Key::Pick, games::Key::Up, games::Key::Pick] {
+                        tb.key(key, 0.0);
+                    }
+                }
+            }
+            return;
+        }
+        // or: away on a trip (the ski lodge, a run down the mountain, a drive)
+        if let Some(rest) = what.strip_prefix("trip-") {
+            let t = self.now();
+            let mut tr = if rest == "drive" { trips::Trip::drive(t, 7) } else { trips::Trip::ski(t, 7) };
+            match rest {
+                "lodge" => tr.interact(t),
+                "ski" => {
+                    tr.interact(t);
+                    tr.skis = true;
+                    tr.at = trips::Where::Lift { since: t };
+                    tr.interact(t);
+                    for _ in 0..90 {
+                        tr.update(1.0 / 30.0, t, (1.0, 0.0));
+                    }
+                }
+                "lift" => {
+                    tr.interact(t);
+                    tr.at = trips::Where::Lift { since: t - 3.0 };
+                }
+                "drive" => {
+                    for k in 0..200 {
+                        tr.update(1.0 / 30.0, t + k as f32 / 30.0, (0.0, -1.0));
+                    }
+                }
+                _ => {}
+            }
+            self.trip = Some(tr);
+            return;
+        }
+        // or: lying in the snow; a snow angel being made (one beside, done);
+        // inside a finished igloo
+        if matches!(what, "rest" | "angel" | "igloo") {
+            let t = self.now();
+            let Some((px, py)) = self.player.as_ref().map(|p| (p.centre(), p.y)) else { return };
+            if what == "igloo" {
+                let row = ((py + 3.0).min(self.h as f32 - 2.0)) as i32;
+                let mut x = px + 8.0;
+                let half = self.builds.half_for(true);
+                while x < self.ww as f32 - 20.0 && !self.build_spot_free(x, row, half) {
+                    x += 2.0;
+                }
+                self.builds.start(builds::What::Igloo, x, row, t, &mut self.critters, &mut self.director);
+                if let Some(i) = self.builds.find(x) {
+                    self.builds.preview(i, 1.0);
+                    self.enter_igloo(i, t);
+                }
+                return;
+            }
+            if what == "angel" {
+                self.director.snow_angel(px - 9.0, py, t - 30.0, sprite_k(self.h), true);
+            }
+            if let Some(p) = &mut self.player {
+                p.lie_down(t, &mut self.director);
+                if what == "angel" {
+                    p.flap(t, &mut self.director);
+                }
+            }
+            return;
+        }
         // or: building with the kids (a snowman and an igloo done, one going up)
         if what == "builds" {
             let Some((px, py)) = self.player.as_ref().map(|p| (p.centre(), p.y)) else { return };
@@ -2533,7 +2898,7 @@ impl Scene {
                 p.y = f;
                 p.perch = Some(i);
                 if what == "jump" {
-                    p.jump(t, &self.ledges, lo, &mut self.director);
+                    p.jump(t, &self.ledges, &mut self.director);
                 }
             }
         }
@@ -2724,6 +3089,14 @@ impl Scene {
             self.director.sound(Sfx::Pickup, p.centre(), 1.0);
             return true;
         }
+        // the villager's own pet: picked up and carried about
+        let k = sprite_k(self.h);
+        if let Some(pet) = self.my_pet.as_mut().filter(|pet| !pet.staying && pet.carried.is_none() && pet.hit(x, y, k)) {
+            pet.carry(x as f32 - pet.x, y as f32 - pet.y, t);
+            self.pet_drag = Some(false);
+            self.director.sound(Sfx::Pickup, x as f32, 0.7);
+            return true;
+        }
         self.critters.grab(x, y, t, &mut self.director)
     }
 
@@ -2735,7 +3108,30 @@ impl Scene {
             p.drag(wx, y, ww, h);
             return;
         }
+        if let (Some(pet), Some(_)) = (self.my_pet.as_mut(), self.pet_drag) {
+            pet.carry_to((wx as f32).clamp(1.0, ww - 2.0), (y as f32).clamp(2.0, h - 1.0));
+            self.pet_drag = Some(true);
+            return;
+        }
         self.critters.drag(wx, y);
+    }
+
+    /// The pet let go of: down into the snow (or, a click without carrying
+    /// it anywhere, its menu).
+    fn drop_pet(&mut self, menu: bool) -> bool {
+        let Some(moved) = self.pet_drag.take() else { return false };
+        let t = self.now();
+        let land = self.my_pet.as_ref().map(|pet| pet.y.max(self.lo_at(pet.x)).min(self.h as f32 - 1.0)).unwrap_or(0.0);
+        if let Some(pet) = &mut self.my_pet {
+            pet.put_down(land, t);
+            if !moved {
+                pet.wake(t);
+            }
+        }
+        if !moved && menu {
+            self.pet_menu(0);
+        }
+        true
     }
 
     /// Let go (a click without dragging becomes a pat or a hello).
@@ -2743,6 +3139,9 @@ impl Scene {
         let t = self.now();
         if let Some(p) = self.player.as_mut().filter(|p| p.held.is_some()) {
             p.release();
+            return;
+        }
+        if self.drop_pet(true) {
             return;
         }
         let carried = self.critters.held_info().filter(|&(id, moved)| moved && self.critters.is_person(id)).map(|(id, _)| id);
@@ -2760,11 +3159,14 @@ impl Scene {
             p.release();
             return;
         }
+        if self.drop_pet(false) {
+            return;
+        }
         self.critters.let_go(t);
     }
 
     pub fn holding(&self) -> bool {
-        self.player.as_ref().map(|p| p.held.is_some()).unwrap_or(false) || self.critters.holding()
+        self.player.as_ref().map(|p| p.held.is_some()).unwrap_or(false) || self.critters.holding() || self.pet_drag.is_some()
     }
 
     /// R: pack a snowball (a moment, crouched), then throw it the way
@@ -2853,7 +3255,11 @@ impl Scene {
         let t = self.now();
         let cam = self.cam;
         match thing {
-            Thing::Sleigh => self.santa_clicked(t),
+            Thing::Sleigh => {
+                if !self.santa_spammed(t) {
+                    self.santa_clicked(t);
+                }
+            }
             Thing::Star(i) => {
                 // caught one: a burst of sparkles, and a wish
                 let wx = sx as f32 + cam;
@@ -3236,6 +3642,7 @@ impl Scene {
     pub fn update(&mut self, dt: f32, _app_t: f32) {
         self.tick(dt);
         let t = self.now();
+        self.director.sun = self.daylight.sun;
         self.eve_night(t);
         // ease the camera toward where it's been asked to look
         let max = (self.ww - self.w) as f32;
@@ -3268,6 +3675,11 @@ impl Scene {
             let wx = cx + self.cam;
             let ground = self.on_ground(wx as i32, cy as i32);
             self.director.cursor(wx, cy, self.cursor_vel.0, self.cursor_vel.1, ground, dt);
+        }
+        // away on a trip: that's all that moves
+        if self.trip.is_some() {
+            self.update_trip(dt, t);
+            return;
         }
         // walking somewhere on their own (from the right-click menu); any
         // direction key takes over again
@@ -3346,20 +3758,70 @@ impl Scene {
             p.update(dt, t, mv, lo, self.ww as f32, h, &self.ledges, &mut self.director);
             // up on a widget: it's fixed to the screen, so the view holds still
             let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.on_screen());
-            // the camera keeps the player comfortably in view while walking
-            if p.moving && !on_widget {
-                // walking brings the view back down to earth
-                self.sky_up_target = 0.0;
+            // the camera keeps the player comfortably in view as they go
+            // (walking, in the air, carried along on autopilot); its target
+            // is a whole column, so it comes to rest square on the cells
+            let moved = before.is_some_and(|(bx, _)| (bx - p.x).abs() > 1e-4);
+            if moved && !on_widget {
                 let (w, c) = (self.w as f32, p.centre());
-                let (l, r) = (w * 0.3, w * 0.7);
+                let (l, r) = ((w * 0.3).round(), (w * 0.7).round());
                 if c - self.cam_target < l {
-                    self.cam_target = c - l;
+                    self.cam_target = (c - l).round();
                 } else if c - self.cam_target > r {
-                    self.cam_target = c - r;
+                    self.cam_target = (c - r).round();
                 }
                 self.cam_target = self.cam_target.clamp(0.0, (self.ww - self.w) as f32);
             }
+            // up high (a tall tree, a big jump): the view lifts to keep them
+            // in it, and comes back down with them; walking along the
+            // snowfield brings it back down to earth
+            let head = p.y - 6.0 * p.k;
+            let need = (3.0 - head).max(0.0);
+            let grounded = !p.aloft() && p.drop_to.is_none();
+            if need > self.sky_up_target && p.drop_to.is_none() {
+                self.sky_up_target = (need + 3.0).round().min(self.high.depth as f32);
+                self.lifted = true;
+            } else if self.lifted && (need + 8.0 < self.sky_up_target || (need == 0.0 && grounded)) {
+                self.sky_up_target = if need == 0.0 && grounded { 0.0 } else { (need + 3.0).round() };
+                self.lifted = self.sky_up_target > 0.0;
+            }
+            if p.moving && !p.aloft() && need == 0.0 {
+                self.sky_up_target = 0.0;
+                self.lifted = false;
+            }
+            // a snow angel, finished: pressed into the snow there
+            if std::mem::take(&mut p.angel_made) {
+                self.pockets.angels += 1;
+                let (x, y, k, left) = (p.centre(), p.y, p.k, p.dir > 0.0);
+                self.director.snow_angel(x, y, t, k, left);
+                self.director.burst(x, y - 1.0, 10, &[Rgb::WHITE, Rgb::hex(0xbfe4ff)], 4.0, 3.0);
+                let line = *self.rng.pick(&["a snow angel!", "look — an angel ✦", "perfect wings", "my best one yet!"]);
+                self.director.say(x.round() as i32, y as i32 - 3, line, t + 0.3, 2.4, 6);
+                self.director.sound(Sfx::Chime, x, 0.5);
+            }
+            // resting in the snow: a thought, and in a while a doze
+            if let Some(since) = p.lie.map(|l| t - l).filter(|_| p.angel_at.is_none()) {
+                let (x, y) = (p.centre(), p.y);
+                if since >= 3.5 && since - dt < 3.5 {
+                    let night = self.daylight.sun < 0.25;
+                    let lines: &[&str] = if night {
+                        &["so many stars…", "is that Orion up there?", "the sky goes on forever", "the snow's oddly warm, lying here"]
+                    } else {
+                        &["the snowflakes look huge from down here", "mmm. five more minutes", "the clouds are going so slowly", "best seat in the village"]
+                    };
+                    let line = *self.rng.pick(lines);
+                    self.director.say(x.round() as i32, y as i32 - 3, line, t, 3.0, 6);
+                }
+                if since > 10.0 && (t * 0.45).fract() < dt * 0.45 {
+                    self.director.emote(x - p.dir, y - 2.0, 'z', Rgb::hex(0xc8d8ff), 1);
+                }
+            }
         }
+        self.update_tag(t);
+        self.update_carol(t);
+        self.fight_results(t);
+        self.update_table(t);
+        self.update_runaway(dt, t);
         // the pet out and about: after an animal now and then (a dog chases,
         // a cat stalks, a bunny hops along with rabbits), or playing with
         // another pet
@@ -3596,10 +4058,11 @@ impl Scene {
         // speech bubbles follow their speakers (the player included)
         let mut who = self.critters.anchors();
         if let (None, Some(p)) = (&self.inside, &self.player) {
-            who.push((u64::MAX - 1, p.centre(), p.y));
+            let me = if self.you_name.trim().is_empty() { "you".to_string() } else { self.you_name.trim().to_string() };
+            who.push((u64::MAX - 1, p.centre(), p.y, me));
         }
         if let Some((x, y)) = self.sleigh.santa_at(t) {
-            who.push((u64::MAX - 2, x + self.cam, y));
+            who.push((u64::MAX - 2, x + self.cam, y, "Santa".to_string()));
         }
         self.director.track(&who);
         if self.critters.take_hits_on_you() > 0 {
@@ -3856,18 +4319,7 @@ impl Scene {
     fn work_on(&mut self, i: usize, t: f32) {
         let Some((px, py)) = self.player.as_ref().filter(|p| p.free(t)).map(|p| (p.centre(), p.y)) else { return };
         match self.builds.at(px, py) {
-            Some((_, true)) => {
-                if let Some((dx, dy)) = self.builds.crawl_in(i) {
-                    self.in_igloo = true;
-                    self.goal = None;
-                    if let Some(p) = &mut self.player {
-                        (p.x, p.y) = (dx - 1.0, dy);
-                        p.moving = false;
-                    }
-                    self.director.snow_puff(dx, dy);
-                    self.director.sound(Sfx::Rustle, dx, 0.5);
-                }
-            }
+            Some((_, true)) => self.enter_igloo(i, t),
             _ => {
                 let Some((bx, ..)) = self.builds.spot(i) else { return };
                 if let Some(p) = &mut self.player {
@@ -3880,12 +4332,37 @@ impl Scene {
                 if self.builds.pitch_in(i, px, py, t, &self.critters, &mut self.director) {
                     // finished it (with a hand from the villager)
                     self.cheer(3);
+                    self.pockets.built += 1;
                     let what = if self.builds.about(i).is_some_and(|a| a.0) { "snowman" } else { "igloo" };
                     let line = format!("our {what}!");
                     self.director.say(px.round() as i32, py as i32 - 4, &line, t + 0.6, 2.4, 6);
                 }
             }
         }
+    }
+
+    /// In through the igloo's tunnel: a room of its own (with whoever's in
+    /// there already).
+    fn enter_igloo(&mut self, i: usize, t: f32) {
+        let guests = self.builds.guests(i);
+        let Some((dx, dy)) = self.builds.crawl_in(i) else { return };
+        let Some(p) = self.player.as_mut() else { return };
+        let (rw, rh) = room_size(self.w, self.h);
+        let seed = crate::rng::hash(dx.round() as u32 ^ 0x1c_100);
+        let inn = interior::Interior::igloo(rw, rh, seed, (dx - 1.0, dy), t, &guests);
+        let (ex, ey) = inn.entrance();
+        (p.x, p.y, p.dir) = (ex, ey, 1.0);
+        p.lie = None;
+        p.angel_at = None;
+        p.snowball = false;
+        p.moving = false;
+        if let Some(pet) = self.my_pet.as_mut().filter(|pet| !pet.staying) {
+            (pet.x, pet.y) = (ex + 9.0, ey + 1.0);
+        }
+        self.goal = None;
+        self.director.snow_puff(dx, dy);
+        self.director.sound(Sfx::Rustle, dx, 0.6);
+        self.inside = Some(Box::new(inn));
     }
 
     /// Out of the igloo, back into the cold.
@@ -3985,6 +4462,9 @@ impl Scene {
             let (fx, fy) = focus.unwrap_or_else(|| self.zoom_focus());
             let (bw, bh) = self.view_bounds();
             let (x0, y0) = f.zoom(z, fx, fy, (bw, bh), spare);
+            // (whatever pictures were drawn before it — indoors, everyone —
+            // grow with it)
+            f.zoom_pictures(z, x0, y0);
             xf = (z, x0, y0);
             if self.zoomed.get() {
                 self.draw_people(f, View { z, x0, y0, cam: self.cam_i() as f32, oy: self.oy_i() as f32 });
@@ -4027,7 +4507,10 @@ impl Scene {
         f.oy = 0;
         if self.inside.is_some() && self.look.is_none() {
             if let Some(c) = &self.convo {
-                c.draw(f, self.convo_hover);
+                c.draw(f, self.convo_hover, self.ui_look);
+            }
+            if let Some(tb) = &self.table {
+                tb.draw(f, self.ui_look);
             }
             return;
         }
@@ -4036,7 +4519,7 @@ impl Scene {
             inn.draw_window_frame(f, look, t, self.cfg.glow);
         }
         if let Some(c) = &self.convo {
-            c.draw(f, self.convo_hover);
+            c.draw(f, self.convo_hover, self.ui_look);
         }
         if self.show_stats {
             shop::draw_stats(f, &self.pockets);
@@ -4066,6 +4549,10 @@ impl Scene {
         let glow = self.cfg.glow;
         f.day = 0.0;
         f.day_warm = 0.0;
+        if let Some(tr) = &self.trip {
+            tr.draw(f, t, &player::Player::look());
+            return;
+        }
         if let (Some(inn), Some(p), None) = (&self.inside, &self.player, &self.look) {
             let pet_faced = self.my_pet.as_ref().filter(|pet| (!pet.staying || inn.home) && pet.near(p.centre(), p.y, 2.0) && (pet.x - p.centre()) * p.dir > 0.0);
             let prompt = (t - p.active_at < 20.0 && self.convo.is_none())
@@ -4170,6 +4657,7 @@ impl Scene {
         // (zoomed in, the people come after the zoom, drawn at the bigger
         // size: see `draw_people`)
         let people = !self.zoomed.get();
+        self.draw_car(f, glow);
         self.critters.draw(f, t, glow, people, None);
         if let (Some(p), None, true) = (&self.player, &self.inside, people) {
             let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
@@ -4182,6 +4670,9 @@ impl Scene {
             if let Some(pet) = pet.filter(|pet| pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
+        }
+        if self.inside.is_none() {
+            self.draw_runaway(f, t);
         }
         let ny_left = newyear::to_midnight(&crate::clock::now()).unwrap_or(1e9);
         let ny_year = crate::clock::now().year() + (ny_left > 0.0) as i32;
@@ -4198,7 +4689,9 @@ impl Scene {
         self.director.draw_front(f, t, glow);
         self.critters.draw_top(f, t, glow);
         // what E would do, while the player is out walking
-        if let (Some(p), Some(fc)) = (&self.player, self.focus) {
+        // (not while autopilot's steering: nobody's there to press it)
+        let steering = self.auto.on && t - self.auto.touched >= autopilot::IDLE;
+        if let (Some(p), Some(fc), false) = (&self.player, self.focus, steering) {
             if t - p.active_at < 20.0 {
                 // over the person / bush; for village things, over the player's head
                 let (x, y) = match fc {
@@ -4747,6 +5240,165 @@ mod tests {
         assert!(s.auto.plan.is_none());
     }
 
+    /// A jump held goes about four times as high as a tap.
+    #[test]
+    fn holding_jump_goes_up_to_four_times_as_high() {
+        let peak = |hold: bool| {
+            let mut s = walker_scene();
+            run(&mut s, 0.5);
+            // (out in the open, nothing to leap up onto)
+            let y0 = s.player.as_ref().unwrap().y;
+            s.ledges.clear();
+            s.static_ledges = 0;
+            s.jump();
+            if !hold {
+                s.release_jump();
+            }
+            let mut top = y0;
+            for _ in 0..120 {
+                s.update(DT, 0.0);
+                top = top.min(s.player.as_ref().unwrap().y);
+            }
+            y0 - top
+        };
+        let (tap, held) = (peak(false), peak(true));
+        assert!(tap > 2.0, "a tap barely jumps: {tap}");
+        assert!(held > tap * 3.3 && held < tap * 4.6, "held {held} vs tap {tap}");
+    }
+
+    /// Z, then Space: a snow angel, pressed into the snow and counted.
+    #[test]
+    fn a_snow_angel_is_pressed_into_the_snow() {
+        let mut s = walker_scene();
+        run(&mut s, 0.5);
+        s.rest();
+        assert!(s.player.as_ref().unwrap().lying());
+        s.jump();
+        run(&mut s, player::ANGEL_TIME + 0.5);
+        assert_eq!(s.director.angel_count(), 1);
+        assert_eq!(s.pockets.angels, 1);
+        // a direction key gets up again
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.2);
+        assert!(!s.player.as_ref().unwrap().lying());
+    }
+
+    /// The villager's pet can be picked up with the pointer, carried off
+    /// and let go of: it drops back down into the snow there.
+    #[test]
+    fn the_pet_is_carried_about_with_the_pointer() {
+        let mut s = walker_scene();
+        run(&mut s, 1.0);
+        let k = sprite_k(s.h);
+        let (px, py) = s.my_pet.as_ref().map(|p| (p.x, p.y)).expect("a pet");
+        let (sx, sy) = (px.round() as i32 - s.cam_i(), py.round() as i32 - 1 + s.oy_i());
+        assert!(s.my_pet.as_ref().unwrap().hit(sx + s.cam_i(), py.round() as i32 - 1, k), "not on the pet");
+        assert!(s.grab(sx, sy), "couldn't pick the pet up");
+        for d in 1..=10 {
+            s.drag(sx + d, sy - 6);
+            run(&mut s, 0.05);
+        }
+        let held = s.my_pet.as_ref().map(|p| (p.x, p.y)).unwrap();
+        assert!((held.0 - (px + 10.0)).abs() < 1.5 && held.1 < py - 4.0, "not carried: {held:?}");
+        s.release();
+        run(&mut s, 1.0);
+        let (x, y) = s.my_pet.as_ref().map(|p| (p.x, p.y)).unwrap();
+        assert!(y >= s.lo_at(x) && y <= s.h as f32 - 1.0, "not back down in the snow: {y}");
+        assert!(s.my_pet.as_ref().unwrap().carried.is_none());
+    }
+
+    /// Once they're in the village, people stay in it: ten minutes on,
+    /// nobody's walked off either end (they go home, in at a door).
+    #[test]
+    fn people_stay_in_the_village_and_go_home_at_a_door() {
+        let mut s = Scene::new(300, 75, 5, &SceneCfg { critters: 2.0, ..SceneCfg::default() });
+        let ww = s.ww as f32;
+        let mut went_home = 0;
+        for _ in 0..(600.0 / DT) as usize {
+            let before = s.critters.people().len();
+            s.update(DT, 0.0);
+            for (x, person) in s.critters.positions() {
+                if person {
+                    assert!(x > -8.0 && x < ww + 8.0, "a villager wandered off the map: {x}");
+                }
+            }
+            went_home += before.saturating_sub(s.critters.people().len()).min(1);
+        }
+        assert!(went_home > 0, "nobody ever went home");
+    }
+
+    /// A team snowball fight with someone walking along ends with a score.
+    #[test]
+    fn a_team_snowball_fight_ends_with_a_result() {
+        let mut s = walker_scene();
+        let (px, py) = s.player.as_ref().map(|p| (p.centre(), p.y)).unwrap();
+        let t = s.now();
+        for (k, dx) in [6.0, 18.0, 22.0].into_iter().enumerate() {
+            s.critters.spawn_demo(if k == 0 { events::Kind::Walker } else { events::Kind::Kid }, px + dx, t);
+        }
+        let friend = s.critters.people().into_iter().min_by(|a, b| (a.1 - px).abs().total_cmp(&(b.1 - px).abs())).map(|p| p.0).unwrap();
+        let mut berries = 5;
+        s.critters.invite(friend, &mut berries, t, &mut s.director, &mut s.lines);
+        let _ = py;
+        assert_eq!(s.critters.follower_ids(), vec![friend]);
+        run(&mut s, 0.5);
+        s.act(Do::TeamFight);
+        assert!(s.critters.team_score().is_some(), "no fight");
+        let (w0, l0) = (s.pockets.fights_won, s.pockets.fights_lost);
+        run(&mut s, 45.0);
+        assert!(s.critters.team_score().is_none(), "still going");
+        assert_eq!(s.pockets.fights_won + s.pockets.fights_lost, w0 + l0 + 1, "no result on the scorecard");
+        // whoever came along walks on with the villager again
+        assert!(s.critters.following(friend), "the friend didn't come back along");
+    }
+
+    /// Santa, clicked out of his sleigh, can't be caught however hard
+    /// he's chased, and runs clean off the screen.
+    #[test]
+    fn santa_clicked_out_of_his_sleigh_runs_off_uncaught() {
+        let mut s = walker_scene();
+        let t = s.now();
+        s.sleigh.trigger(t);
+        for _ in 0..2000 {
+            s.update(DT, 0.0);
+            if s.sleigh.santa_at(s.now()).is_some_and(|(x, _)| x > 10.0 && x < s.w as f32 - 30.0) {
+                break;
+            }
+        }
+        assert!(s.sleigh.santa_at(s.now()).is_some(), "no sleigh");
+        let t = s.now();
+        for k in 0..5 {
+            s.santa_spammed(t + k as f32 * 0.1);
+        }
+        assert!(s.runaway.is_some(), "didn't fall out");
+        assert!(s.sleigh.santa_at(t).is_none(), "still in his seat");
+        let mut closest = f32::MAX;
+        let mut ran = false;
+        for _ in 0..(60.0 / DT) as usize {
+            // chase him, flat out
+            if let (Some(r), Some(p)) = (&s.runaway, &mut s.player) {
+                p.sprint = true;
+                let dx = r.x - p.centre();
+                s.mv = (dx.signum(), 0.0);
+                if r.dir != 0.0 {
+                    ran = true;
+                }
+            }
+            s.update(DT, 0.0);
+            match (&s.runaway, &s.player) {
+                (Some(r), Some(p)) if ran => closest = closest.min((r.x - p.centre()).abs()),
+                (None, _) => break,
+                _ => {}
+            }
+        }
+        let secs = s.now() - t;
+        assert!(s.runaway.is_none(), "never ran off");
+        assert!(closest > 1.5, "caught him: {closest}");
+        // a proper chase, not gone in an instant
+        assert!(secs > 4.0, "gone too soon: {secs}s");
+        assert!(!s.sleigh.santa_out, "the seat's still empty");
+    }
+
     /// Tag with a kid: the villager chases, tags them, runs off, and gets
     /// tagged back.
     #[test]
@@ -4761,17 +5413,20 @@ mod tests {
         s.auto.plan = None;
         s.auto.next_at = t + 1e6;
         s.goal = None;
-        s.critters.tag(id, false, t + 60.0);
-        s.auto.plan = Some(autopilot::Plan::Tag { id, you_it: true, grace: t + 0.5, tire_at: 0.0, until: t + 60.0 });
+        s.start_tag(id, 60.0);
+        s.auto.plan = Some(autopilot::Plan::Tag { swaps: 0, tire_at: 0.0, dodge: 0.0, commit: 0.0 });
         let _ = py;
         let (mut you_tagged, mut got_tagged) = (false, false);
         for _ in 0..(50.0 / DT) as usize {
             s.update(DT, 0.0);
-            match s.auto.plan {
-                Some(autopilot::Plan::Tag { you_it: false, .. }) => you_tagged = true,
-                Some(autopilot::Plan::Tag { you_it: true, .. }) if you_tagged => got_tagged = true,
+            match s.tag {
+                Some(play::TagGame { you_it: false, .. }) => you_tagged = true,
+                Some(play::TagGame { you_it: true, .. }) if you_tagged => got_tagged = true,
                 _ => {}
             }
+            // never stuck jittering against either end of the world
+            let px = s.player.as_ref().unwrap().centre();
+            assert!(px > 2.0 && px < s.ww as f32 - 3.0, "pinned at the edge: {px}");
         }
         assert!(you_tagged, "the villager tagged the kid");
         assert!(got_tagged, "and got tagged back");
@@ -4929,13 +5584,19 @@ mod tests {
         }
         run(&mut s, 0.6);
         s.interact();
-        assert!(s.in_igloo, "didn't crawl in");
+        assert!(s.inside.as_ref().is_some_and(|i| i.is_igloo()), "didn't crawl in");
         run(&mut s, 1.0);
-        // a step: back out
-        s.set_move(1.0, 0.0);
-        run(&mut s, 0.2);
+        // back out through the tunnel
+        s.set_move(-1.0, 0.0);
+        for _ in 0..60 {
+            run(&mut s, 0.1);
+            if s.inside.is_none() {
+                break;
+            }
+        }
         s.set_move(0.0, 0.0);
-        assert!(!s.in_igloo, "stuck inside");
+        assert!(s.inside.is_none(), "stuck inside");
+        assert!((s.player.as_ref().unwrap().centre() - dx).abs() < 4.0, "came out somewhere else");
     }
 
     #[test]

@@ -94,7 +94,14 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_create(mut env: JN
             log(&format!("config: {e}"));
             Config::default()
         });
-        let g = Game::new(w.max(64) as usize, h.max(64) as usize, size, cfg);
+        // (and where the save file goes: `save_path = "…"` at the top)
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct Extra {
+            save_path: Option<String>,
+        }
+        let extra: Extra = toml::from_str(&text).unwrap_or_default();
+        let g = Game::new(w.max(64) as usize, h.max(64) as usize, size, cfg, extra.save_path.map(std::path::PathBuf::from));
         Box::into_raw(Box::new(Handle { game: Mutex::new(g), win: Mutex::new(None) })) as jlong
     })
 }
@@ -205,9 +212,34 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_menu(mut env: JNIE
     arr.into_raw()
 }
 
+/// A choice from a menu: null, or a further menu ({title, choice, …}).
 #[no_mangle]
-pub extern "system" fn Java_io_github_dash1101_xmastui_Native_pick(_: JNIEnv, _: JClass, h: jlong, i: jint) {
-    with_game(h, "pick", (), |g| g.pick(i.max(0) as usize));
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_pick(mut env: JNIEnv, _: JClass, h: jlong, i: jint) -> jobjectArray {
+    let Some((title, items)) = with_game(h, "pick", None, |g| g.pick(i.max(0) as usize)) else { return std::ptr::null_mut() };
+    strings(&mut env, std::iter::once(title).chain(items).collect())
+}
+
+/// Things to do here: {title, choice, …}, or null.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_todo(mut env: JNIEnv, _: JClass, h: jlong) -> jobjectArray {
+    let Some((title, items)) = with_game(h, "todo", None, |g| g.todo()) else { return std::ptr::null_mut() };
+    strings(&mut env, std::iter::once(title).chain(items).collect())
+}
+
+/// Write the save file now (the wallpaper going out of sight).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_save(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "save", (), |g| g.save());
+}
+
+fn strings(env: &mut JNIEnv, all: Vec<String>) -> jobjectArray {
+    let Ok(arr) = env.new_object_array(all.len() as i32, "java/lang/String", JObject::null()) else { return std::ptr::null_mut() };
+    for (i, s) in all.iter().enumerate() {
+        if let Ok(js) = env.new_string(s) {
+            let _ = env.set_object_array_element(&arr, i as i32, js);
+        }
+    }
+    arr.into_raw()
 }
 
 #[no_mangle]
