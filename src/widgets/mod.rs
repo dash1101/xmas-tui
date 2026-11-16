@@ -1,8 +1,10 @@
 //! TUI widgets drawn over the scene: a big glowing clock with a Christmas
-//! countdown, a system panel (CPU/GPU/VRAM/RAM/disk/net), now-playing and
-//! weather. Panels are "frosted": they darken the scene behind them.
+//! countdown, a system panel (CPU/GPU/VRAM/RAM/disk/net), now-playing,
+//! weather, the village map and a visualizer. Panels are "frosted": they
+//! darken the scene behind them.
 
 pub mod data;
+pub mod viz;
 #[cfg(windows)]
 pub mod win;
 
@@ -21,6 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const PANEL: Bg = Bg::Mix(pal::UI_PANEL, 0.80);
+/// Clock, system, music, weather, map, visualizer.
+pub const COUNT: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -64,8 +68,11 @@ pub struct Widgets {
     music_park: Option<Park>,
     weather: Option<Arc<Mutex<Weather>>>,
     weather_gen: Arc<AtomicU64>,
+    viz: Option<Arc<Mutex<viz::Spectrum>>>,
+    viz_gen: Arc<AtomicU64>,
+    bars: VizBars,
     /// Where each widget was drawn last frame (for hit-testing).
-    pub rects: [Option<Rect>; 5],
+    pub rects: [Option<Rect>; COUNT],
     /// The village map's data for this frame (from the scene).
     pub map: Option<crate::scene::MiniMap>,
     pub hover: Option<usize>,
@@ -82,7 +89,10 @@ impl Widgets {
             music_park: None,
             weather: None,
             weather_gen: Arc::new(AtomicU64::new(0)),
-            rects: [None; 5],
+            viz: None,
+            viz_gen: Arc::new(AtomicU64::new(0)),
+            bars: VizBars::default(),
+            rects: [None; COUNT],
             map: None,
             hover: None,
             dragging: None,
@@ -127,6 +137,15 @@ impl Widgets {
             // turning the widget back on starts a fresh one
             self.weather_gen.fetch_add(1, Ordering::SeqCst);
         }
+        // the visualizer listens only while it's on (likewise by generation:
+        // its thread ends the capture when superseded)
+        if self.cfg.widgets.visualizer && self.viz.is_none() {
+            let gen = self.viz_gen.fetch_add(1, Ordering::SeqCst) + 1;
+            self.viz = Some(viz::spawn(self.viz_gen.clone(), gen));
+        } else if !self.cfg.widgets.visualizer && self.viz.take().is_some() {
+            self.viz_gen.fetch_add(1, Ordering::SeqCst);
+            self.bars = VizBars::default();
+        }
     }
 
     /// Adopt a new config (from the settings panel or a file reload).
@@ -142,7 +161,8 @@ impl Widgets {
             1 => self.cfg.widgets.system,
             2 => self.cfg.widgets.music,
             3 => self.cfg.widgets.weather,
-            _ => self.cfg.widgets.map && self.map.as_ref().map(|m| m.ww > m.vw + 1.0).unwrap_or(false),
+            4 => self.cfg.widgets.map && self.map.as_ref().map(|m| m.ww > m.vw + 1.0).unwrap_or(false),
+            _ => self.cfg.widgets.visualizer,
         }
     }
 
@@ -157,10 +177,11 @@ impl Widgets {
             1 => (54, 9),
             2 => (60, 6),
             3 => (60, 8),
-            _ => match self.cfg.layout.map_size {
+            4 => match self.cfg.layout.map_size {
                 Some([mw, mh]) => (mw.clamp(24, w.max(24)), mh.clamp(3, 20)),
                 None => Self::map_default(w),
             },
+            _ => (60, 8),
         }
     }
 
@@ -171,10 +192,12 @@ impl Widgets {
             2 => (w - 63, 2),
             3 => (w - 63, 9),
             // bottom middle, just above the taskbar
-            _ => {
+            4 => {
                 let (mw, mh) = self.size(4, w);
                 ((w - mw) / 2, h - mh - 3)
             }
+            // under the weather
+            _ => (w - 63, 18),
         }
     }
 
@@ -223,16 +246,16 @@ impl Widgets {
 
     /// Top-most widget under a cell.
     pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        (0..5).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
+        (0..COUNT).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
     }
 
     pub fn draw(&mut self, f: &mut Frame, t: f32) {
-        self.rects = [None; 5];
+        self.rects = [None; COUNT];
         if f.w < 150 || f.h < 30 {
             return;
         }
         let (w, h) = (f.w as i32, f.h as i32);
-        for i in 0..5 {
+        for i in 0..COUNT {
             if !self.enabled(i) {
                 continue;
             }
@@ -254,10 +277,20 @@ impl Widgets {
                     let wx = self.weather.as_ref().and_then(|w| w.lock().ok().map(|g| g.clone())).unwrap_or_default();
                     draw_weather(f, r.x, r.y, r.w, &wx, t);
                 }
-                _ => {
+                4 => {
                     if let Some(m) = &self.map {
                         draw_map(f, r, m, t);
                     }
+                }
+                _ => {
+                    let s = self.viz.as_ref().and_then(|v| {
+                        let mut g = v.lock().ok()?;
+                        let fresh = g.take(&mut self.bars.target);
+                        Some((fresh, g.live, g.status.clone(), g.quiet_for))
+                    });
+                    let (live, status, quiet) = s.map(|(_, l, st, q)| (l, st, q)).unwrap_or((false, String::new(), 0.0));
+                    self.bars.step(r.w - 4, bar_gap(self.cfg.widgets.visualizer_khz), t);
+                    draw_viz(f, r, &self.bars, live, &status, quiet, self.cfg.widgets.visualizer_khz, t);
                 }
             }
             let active = self.dragging == Some(i) || (self.dragging.is_none() && self.hover == Some(i));
@@ -434,6 +467,164 @@ fn draw_map(f: &mut Frame, r: Rect, m: &crate::scene::MiniMap, t: f32) {
         let x = col(p);
         let k = 0.85 + 0.15 * (t * 4.0).sin();
         f.put_g(x, ground, Glyph::new('●', Rgb::hex(0xffd36b) * (1.2 * k)).bg(cbg(x)).lit(0.0));
+    }
+}
+
+/// The visualizer's bars as shown: eased toward the latest levels, each
+/// with a cap of snow that's pushed up by the bar and settles back slowly.
+struct VizBars {
+    /// The latest levels per band (from the capture thread).
+    target: Vec<f32>,
+    v: Vec<f32>,
+    cap: Vec<f32>,
+    cap_v: Vec<f32>,
+    hold: Vec<f32>,
+    last_t: Option<f32>,
+}
+
+impl Default for VizBars {
+    fn default() -> Self {
+        VizBars { target: vec![0.0; viz::BANDS], v: vec![], cap: vec![], cap_v: vec![], hold: vec![], last_t: None }
+    }
+}
+
+const BAR_W: i32 = 2;
+
+/// The gap between bars: wider with the kHz labels, so they don't run
+/// into each other.
+fn bar_gap(khz: bool) -> i32 {
+    if khz {
+        2
+    } else {
+        1
+    }
+}
+
+impl VizBars {
+    /// Advance to time `t` with bars across `iw` columns.
+    fn step(&mut self, iw: i32, gap: i32, t: f32) {
+        let n = ((iw + gap) / (BAR_W + gap)).max(1) as usize;
+        if self.v.len() != n {
+            self.v = vec![0.0; n];
+            self.cap = vec![0.0; n];
+            self.cap_v = vec![0.0; n];
+            self.hold = vec![0.0; n];
+        }
+        let dt = self.last_t.map(|l| (t - l).clamp(0.0, 0.1)).unwrap_or(0.0);
+        self.last_t = Some(t);
+        let bands = self.target.len();
+        for i in 0..n {
+            let a = i * bands / n;
+            let b = ((i + 1) * bands / n).max(a + 1).min(bands);
+            let tgt = self.target[a..b].iter().cloned().fold(0.0, f32::max);
+            // quick to rise, slower to fall
+            let tau = if tgt > self.v[i] { 0.03 } else { 0.16 };
+            self.v[i] += (tgt - self.v[i]) * (1.0 - (-dt / tau).exp());
+            let v = self.v[i];
+            if v >= self.cap[i] {
+                (self.cap[i], self.cap_v[i], self.hold[i]) = (v, 0.0, 0.45);
+            } else if self.hold[i] > 0.0 {
+                self.hold[i] -= dt;
+            } else {
+                // the snow drifts down, gathering speed
+                self.cap_v[i] += 0.8 * dt;
+                self.cap[i] = (self.cap[i] - self.cap_v[i] * dt).max(v);
+            }
+        }
+    }
+}
+
+/// Pine at the bottom of the bars, gold in the middle, candy red at the top.
+fn viz_col(fr: f32) -> Rgb {
+    let (green, gold, red) = (Rgb::hex(0x3fbf6a), Rgb::hex(0xffd36b), Rgb::hex(0xff4a4a));
+    if fr < 0.5 {
+        green.lerp(gold, fr * 2.0)
+    } else {
+        gold.lerp(red, (fr - 0.5) * 2.0)
+    }
+}
+
+/// The visualizer: bars in Christmas colours, snow on top of each, standing
+/// on a strip of ice that reflects them.
+fn draw_viz(f: &mut Frame, r: Rect, bars: &VizBars, live: bool, status: &str, quiet: f32, khz: bool, t: f32) {
+    const FILL: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    panel(f, r.x, r.y, r.w, r.h, '♬', if khz { "visualizer · kHz" } else { "visualizer" });
+    let snow = Rgb::hex(0xeef4ff);
+    let rows = r.h - 3;
+    let base = r.y + r.h - 3;
+    let ice = r.y + r.h - 2;
+    let (x0, iw) = (r.x + 2, r.w - 4);
+    let n = bars.v.len() as i32;
+    let gap = bar_gap(khz);
+    let off = (iw - (n * (BAR_W + gap) - gap)).max(0) / 2;
+    let ice_bg = Bg::Mix(Rgb::hex(0x1c2c52), 0.88);
+    for x in r.x + 1..r.x + r.w - 1 {
+        f.put_g(x, ice, Glyph::new(' ', snow).bg(ice_bg).lit(0.0));
+    }
+    let levels = (rows * 8) as f32;
+    for i in 0..n {
+        let bx = x0 + off + i * (BAR_W + gap);
+        let v = bars.v[i as usize];
+        let lv = v * levels;
+        let cap_cell = ((bars.cap[i as usize] * levels) / 8.0).floor().clamp(0.0, (rows - 1) as f32) as i32;
+        let amt = |k: i32| (lv - k as f32 * 8.0).clamp(0.0, 8.0).round() as usize;
+        let top = (0..rows).rev().find(|&k| amt(k) > 0).unwrap_or(-1);
+        let bright = 0.72 + 0.5 * v;
+        for k in 0..=top {
+            let mut col = viz_col((k as f32 + 0.5) / rows as f32) * bright;
+            if k == top && cap_cell <= top {
+                // snow-capped
+                col = col.lerp(snow, 0.55);
+            }
+            for dx in 0..BAR_W {
+                f.put_g(bx + dx, base - k, Glyph::new(FILL[amt(k)], col).bg(PANEL).lit(0.0));
+            }
+        }
+        if cap_cell > top {
+            for dx in 0..BAR_W {
+                f.put_g(bx + dx, base - cap_cell, Glyph::new('▁', snow * 0.9).bg(PANEL).lit(0.0));
+            }
+        }
+        // the reflection in the ice
+        if top >= 0 && !khz {
+            let a = (amt(0) as f32 / 8.0) * (0.25 + 0.2 * v);
+            for dx in 0..BAR_W {
+                f.put_g(bx + dx, ice, Glyph::new('▀', viz_col(0.1) * a + Rgb::hex(0x2a3c66) * 0.4).bg(ice_bg).lit(0.0));
+            }
+        }
+        // or each bar's frequency in kHz, written on the ice
+        if khz {
+            let bands = bars.target.len();
+            let a = i as usize * bands / n as usize;
+            let b = ((i as usize + 1) * bands / n as usize).max(a + 1).min(bands);
+            let label = viz::khz_label(viz::centre_hz(a, b));
+            f.text(bx, ice, &label, Rgb::hex(0xc8d4ec), ice_bg, 0.0);
+        }
+    }
+    // the odd glint on the ice
+    let g = (t * 0.7) as i32;
+    let gx = x0 + ((g * 37).rem_euclid(iw.max(1)));
+    if !khz && (t * 0.7).fract() < 0.35 {
+        f.put_g(gx, ice, Glyph::new('✧', snow * 0.55).bg(ice_bg).lit(0.0));
+    }
+    let msg = if !live {
+        if status.is_empty() { "♪ listening…".to_string() } else { status.to_string() }
+    } else if quiet > 1.5 {
+        "♪ waiting for music…".to_string()
+    } else {
+        String::new()
+    };
+    if !msg.is_empty() {
+        // a few flakes drifting through while it's quiet
+        for k in 0..6 {
+            let fx = x0 + ((k * 11 + 4) % iw.max(1));
+            let fy = r.y + 1 + ((t * 0.5 + k as f32 * 0.61) * 1.0).rem_euclid(rows as f32) as i32;
+            let sway = ((t * 0.9 + k as f32).sin() * 1.2).round() as i32;
+            f.put_g(fx + sway, fy, Glyph::new('·', snow * 0.5).bg(PANEL).lit(0.0));
+        }
+        let msg = clip(&msg, iw as usize);
+        let mx = r.x + (r.w - msg.chars().count() as i32) / 2;
+        txt(f, mx, r.y + 1 + rows / 2 - 1, &msg, pal::UI_DIM);
     }
 }
 

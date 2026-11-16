@@ -261,13 +261,14 @@ pub struct LayoutCfg {
     pub music: Option<[f32; 2]>,
     pub weather: Option<[f32; 2]>,
     pub map: Option<[f32; 2]>,
+    pub visualizer: Option<[f32; 2]>,
     /// The map widget's size in cells (it can be resized).
     pub map_size: Option<[i32; 2]>,
 }
 
 impl LayoutCfg {
     pub fn get(&self, i: usize) -> Option<[f32; 2]> {
-        [self.clock, self.system, self.music, self.weather, self.map][i]
+        [self.clock, self.system, self.music, self.weather, self.map, self.visualizer][i]
     }
     pub fn set(&mut self, i: usize, v: Option<[f32; 2]>) {
         match i {
@@ -275,7 +276,8 @@ impl LayoutCfg {
             1 => self.system = v,
             2 => self.music = v,
             3 => self.weather = v,
-            _ => self.map = v,
+            4 => self.map = v,
+            _ => self.visualizer = v,
         }
     }
 }
@@ -294,6 +296,9 @@ pub struct SceneCfg {
     pub events: f32,
     /// How many animals and people come by (0 = none).
     pub critters: f32,
+    /// The most animals and people out at once (the villager and their pet
+    /// aren't counted).
+    pub most_at_once: u32,
     /// Festive berry bushes the animals snack from.
     pub bushes: bool,
     /// A little villager to walk around with WASD / the arrow keys.
@@ -351,6 +356,10 @@ pub struct WidgetCfg {
     pub weather: bool,
     /// A strip map of the village (where the villager is, and where they started).
     pub map: bool,
+    /// Bars dancing to whatever's playing (captured from the default output).
+    pub visualizer: bool,
+    /// Each visualizer bar's frequency (kHz) under it.
+    pub visualizer_khz: bool,
     /// Mount point shown in the disk row.
     pub disk: String,
 }
@@ -388,7 +397,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new() }
     }
 }
 
@@ -400,7 +409,7 @@ impl Default for ClockCfg {
 
 impl Default for WidgetCfg {
     fn default() -> Self {
-        WidgetCfg { system: true, music: true, weather: true, map: true, disk: "/".into() }
+        WidgetCfg { system: true, music: true, weather: true, map: true, visualizer: false, visualizer_khz: false, disk: "/".into() }
     }
 }
 

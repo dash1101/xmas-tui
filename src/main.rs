@@ -89,6 +89,8 @@ struct Args {
     /// --export: the stats card open / a right-click menu at (x, y).
     stats: bool,
     menu: Option<(i32, i32)>,
+    /// --export: the visualizer on, listening for real (frames in real time).
+    viz: bool,
 }
 
 fn parse_args() -> Args {
@@ -130,6 +132,7 @@ fn parse_args() -> Args {
         ui: None,
         stats: false,
         menu: None,
+        viz: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -160,6 +163,7 @@ fn parse_args() -> Args {
             "--look" => a.look = it.next().and_then(|v| v.parse().ok()),
             "--ui" => a.ui = it.next(),
             "--stats" => a.stats = true,
+            "--viz" => a.viz = true,
             "--controls" => a.controls = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
@@ -584,6 +588,9 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
 }
 
 fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
+    let mut cfg = cfg.clone();
+    cfg.widgets.visualizer |= args.viz;
+    let cfg = &cfg;
     let (w, h) = args.size.unwrap_or((568, 75));
     std::fs::create_dir_all(dir).expect("create export dir");
     let mut frame = Frame::new(w, h);
@@ -712,6 +719,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             ex.render(&frame.out, w, h, &p).expect("write png");
         }
         t += dt;
+        if args.viz {
+            std::thread::sleep(Duration::from_secs_f32(dt));
+        }
     }
     eprintln!("exported {} frame(s) of {}x{} cells to {}", args.frames, w, h, dir);
 }

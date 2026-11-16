@@ -384,7 +384,7 @@ fn run(shared: Arc<Mutex<FxCfg>>, mon: Rect, skip: HWND, stop: &AtomicBool) -> R
             // fullscreen game / presentation (the shell's own verdict);
             // asked twice a second, it isn't free
             if fullscreen.1.elapsed() > Duration::from_millis(500) {
-                fullscreen = (crate::winsys::fullscreen_app(), Instant::now());
+                fullscreen = (crate::winsys::fullscreen_app(hwnd), Instant::now());
             }
             if fullscreen.0 {
                 fx.hidden = true;

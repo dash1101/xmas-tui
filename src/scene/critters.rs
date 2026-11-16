@@ -251,6 +251,10 @@ pub struct Critters {
     /// First walkable row per column (the snowfield in front of the village).
     lo: Vec<i32>,
     mult: f32,
+    /// The most out at once (the "Most at once" setting), and whether it
+    /// just went down (see `trim`).
+    max: usize,
+    trim: bool,
     startle_cd: f32,
     /// What people talk about: what's going on, and what's been said.
     talk: Talk,
@@ -322,6 +326,8 @@ impl Critters {
             view: (ctx.cam, ctx.vw as f32),
             lo,
             mult,
+            max: 24,
+            trim: false,
             startle_cd: 0.0,
             talk: Talk::new(seed),
             tctx: TalkCtx::default(),
@@ -367,19 +373,62 @@ impl Critters {
         self.lo[(x.max(0.0) as usize).min(self.lo.len() - 1)] as f32
     }
 
+    /// Room for this many more under the "Most at once" setting.
+    fn room(&self) -> usize {
+        self.max.saturating_sub(self.list.len())
+    }
+
+    /// A new "Most at once" (applied on the next update).
+    pub fn set_max(&mut self, max: usize) {
+        self.trim |= max < self.max;
+        self.max = max;
+    }
+
+    /// With fewer allowed than are out, the extra passers-by head off (those
+    /// out of view first; nobody who's busy with the villager, held or in a
+    /// snowball fight).
+    fn trim(&mut self, t: f32) {
+        self.trim = false;
+        let over = self.list.len().saturating_sub(self.max);
+        if over == 0 {
+            return;
+        }
+        let mid = self.view.0 + self.view.1 * 0.5;
+        let fighting: Vec<u64> = self.fights.iter().flat_map(|f| f.sides.iter().flatten().map(|s| s.0)).collect();
+        let mut free: Vec<(f32, usize)> = self
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.held() && !fighting.contains(&c.id) && !matches!(c.st, St::Follow { .. } | St::Talk { .. }) && t <= c.leave_at)
+            .map(|(i, c)| (-(c.centre() - mid).abs(), i))
+            .collect();
+        free.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for &(_, i) in free.iter().take(over) {
+            let c = &mut self.list[i];
+            c.leave_at = t;
+            c.group = 0;
+            if matches!(c.st, St::Walk) {
+                // the nearer edge of the view
+                c.dir = if c.centre() < mid { -1.0 } else { 1.0 };
+            } else {
+                c.st = St::Walk;
+            }
+        }
+    }
+
     /// The director asked for someone to come by.
     pub fn request(&mut self, kind: Kind, t: f32) {
-        if self.mult <= 0.0 || self.list.len() >= 24 || (self.asleep && matches!(kind, Kind::Walker | Kind::Kid)) {
+        if self.mult <= 0.0 || self.room() == 0 || (self.asleep && matches!(kind, Kind::Walker | Kind::Kid)) {
             return;
         }
         // fewer/more visitors with the "Animals & people" setting
         let mut n = self.mult.floor() as i32 + self.rng.chance(self.mult.fract()) as i32;
-        while n > 0 {
+        while n > 0 && self.room() > 0 {
             let id = self.spawn(kind, t, None);
             // people often go about in twos and threes
             if kind == Kind::Walker && self.rng.chance(0.45) {
                 let extra = if self.rng.chance(0.3) { 2 } else { 1 };
-                self.companions(id, extra, t);
+                self.companions(id, extra.min(self.room()), t);
             }
             n -= 1;
         }
@@ -665,13 +714,16 @@ impl Critters {
         let (w, h) = (self.w as f32, (self.h - 1) as f32);
         self.view = (ctx.cam, ctx.vw as f32);
         let (v0, vw) = self.view;
+        if self.trim {
+            self.trim(t);
+        }
         // keep a few around the view (scaled by the setting)
-        let floor = (1.5 * self.mult).round() as usize;
+        let floor = ((1.5 * self.mult).round() as usize).min(self.max);
         let free = self.list.iter().filter(|c| !c.held() && c.x > v0 - vw * 0.5 && c.x < v0 + vw * 1.5).count();
-        if free < floor && self.rng.chance(dt * 0.08) {
+        if free < floor && self.room() > 0 && self.rng.chance(dt * 0.08) {
             let k = *self.rng.pick(&[Kind::Deer, Kind::Fox, Kind::Rabbit, Kind::Walker, Kind::Rabbit, Kind::Deer, Kind::Kid]);
             self.spawn(k, t, None);
-            if k == Kind::Kid {
+            if k == Kind::Kid && self.room() > 0 {
                 self.spawn(Kind::Kid, t, None);
             }
         }
@@ -2361,6 +2413,30 @@ mod tests {
             t += 1.0 / 30.0;
         }
         t
+    }
+
+    #[test]
+    fn most_at_once_caps_visitors_and_lowering_it_sends_the_extra_off() {
+        let (ctx, mut d, mut l) = world();
+        let mut c = Critters::new(&ctx, 1, 3.0, false, &[]);
+        c.set_max(4);
+        let mut t = 0.0;
+        for _ in 0..40 {
+            c.request(Kind::Walker, t);
+            c.request(Kind::Deer, t);
+            t = run(&mut c, &ctx, &mut d, &mut l, t, 0.5);
+            assert!(c.list.len() <= 4, "{} out with a cap of 4", c.list.len());
+        }
+        assert!(c.list.len() >= 3, "only {} came by", c.list.len());
+        // lowered: the extra head off, and nobody new comes while they go
+        c.set_max(1);
+        for _ in 0..400 {
+            let before = c.list.len();
+            c.request(Kind::Walker, t);
+            assert!(c.list.len() <= before.max(1));
+            t = run(&mut c, &ctx, &mut d, &mut l, t, 0.5);
+        }
+        assert!(c.list.len() <= 1, "{} still out with a cap of 1", c.list.len());
     }
 
     #[test]

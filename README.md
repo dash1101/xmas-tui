@@ -44,7 +44,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
-- **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather and a village map.
+- **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather, a village map and an
+  audio visualizer.
 - **Synthesized music and sound**: no audio files, all generated live, with live level meters.
 - **Snow on open windows**: it piles up on window tops and the taskbar, with string lights.
 - **Installers and updates**: a per-user Windows setup, a `.deb`, a no-sudo Linux installer, and built-in updates.
@@ -151,6 +152,10 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 - Weather, from Open-Meteo, which needs no API key.
 - A map of the whole village: where the villager is, where they started (⚑), what's on screen, trains and
   townsfolk. Click it to look somewhere; drag its ◢ corner to resize it.
+- A visualizer (off until switched on): bars in Christmas colours dancing to whatever's playing, each with a cap
+  of snow that settles back down, standing on a strip of ice that reflects them. **kHz labels** write each bar's
+  frequency on the ice. It listens to the default audio output (the sink's monitor through `pw-record` or `parec`
+  on Linux, WASAPI loopback on Windows), only while it's on; nothing is recorded or sent anywhere.
 
 ## 🖱️ Interacting in detail
 **Walking around** (click the desktop first so it has keyboard focus)
@@ -455,19 +460,20 @@ stick around for a few minutes. They also interact:
 to drop them back in the snow; people get a little dizzy. A click without dragging is a pat or a friendly hello. Clicking
 a bush rustles it, and sometimes a cardinal flies out or a rabbit pops out.
 
-The Scene tab sets how many visitors come by ("Animals & people") and turns the bushes on or off.
+The Scene tab sets how many visitors come by ("Animals & people"), the most out at once, and turns the bushes on
+or off.
 
 ## ⚙️ Settings
 <img src="docs/settings.png" align="right" width="360" alt="The settings panel, Scene tab: snowfall, wind, glow, surprises, visitors, sleigh and frame rate">
 
 The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
 window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has five tabs:
-- **Scene:** snow, wind, glow, surprises, visitors, sleigh, walk speed, which side of the road traffic keeps to,
+- **Scene:** snow, wind, glow, surprises, visitors and the **most out at once**, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
   rate, **speech bubbles** (how long they stay up; longer lines always stay longer), **chattiness** (how often people
   stop to talk and remark on things), aurora, bushes, the villager and **their name**, and the villager's **pet**
   (dog, cat, bunny or none, its colour and its name).
-- **Display:** clock, widgets (including the map), weather city and units, widget layout, **resolution** (0.5× to
+- **Display:** clock, widgets (including the map, and the visualizer with its kHz labels), weather city and units, widget layout, **resolution** (0.5× to
   2× in 0.05 steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on
   the villager; Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger
   size, speech bubbles kept readable), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
@@ -531,6 +537,7 @@ xmas-tui --bench 300 --size 568x75                                 # timing + by
 - kitty ≥ 0.36, for background panels.
 - Rust toolchain (only to build from source).
 - `busctl`, for the music widget (part of systemd).
+- `pw-record` (PipeWire) or `parec` (PulseAudio), for the visualizer.
 
 ## 📊 Performance
 Measured on a 5120×1440 screen (the size it was designed for; it adapts to any other).

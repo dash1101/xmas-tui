@@ -96,6 +96,12 @@ struct Runner {
     last_geom_check: Instant,
     #[cfg(windows)]
     last_pause_check: Instant,
+    /// How often resting has started or stopped (for the log).
+    #[cfg(windows)]
+    pause_changes: u32,
+    /// Since when there's been a reason to rest (see `pause_reason`).
+    #[cfg(windows)]
+    rest_since: Option<Instant>,
     /// When we attached (the layout is logged again a few seconds later,
     /// once everything has settled).
     #[cfg(windows)]
@@ -690,7 +696,37 @@ impl ApplicationHandler for Runner {
                 let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
                 // (also while the village is popped out into a window of its own)
                 let popped = self.app.as_mut().is_some_and(|a| a.popped_out());
-                self.paused = !self.wall_full && (popped || crate::winsys::should_pause(own as windows_sys::Win32::Foundation::HWND));
+                let why = if self.wall_full {
+                    None
+                } else if popped {
+                    Some(("popped out into a window".to_string(), 0.0))
+                } else {
+                    crate::winsys::pause_reason(own as windows_sys::Win32::Foundation::HWND)
+                };
+                // a reason has to hold for its delay before the wallpaper
+                // rests (a flickering fullscreen verdict mustn't make it stutter)
+                let why = match why {
+                    Some((w, delay)) => {
+                        let since = *self.rest_since.get_or_insert(now);
+                        (now.duration_since(since).as_secs_f32() >= delay).then_some(w)
+                    }
+                    None => {
+                        self.rest_since = None;
+                        None
+                    }
+                };
+                self.paused = why.is_some();
+                if was != self.paused && self.gfx.is_some() {
+                    // in the log, so a wallpaper that keeps stopping can be
+                    // explained (the first 40 changes, then every 200th)
+                    self.pause_changes += 1;
+                    if self.pause_changes <= 40 || self.pause_changes % 200 == 0 {
+                        match &why {
+                            Some(w) => eprintln!("xmas-tui: resting ({w}) [change {}]", self.pause_changes),
+                            None => eprintln!("xmas-tui: drawing again [change {}]", self.pause_changes),
+                        }
+                    }
+                }
                 if was && !self.paused {
                     // back: draw right away rather than at the end of a 500 ms rest
                     self.next = self.next.min(now);
@@ -749,6 +785,10 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         last_geom_check: Instant::now(),
         #[cfg(windows)]
         last_pause_check: Instant::now(),
+        #[cfg(windows)]
+        pause_changes: 0,
+        #[cfg(windows)]
+        rest_since: None,
         #[cfg(windows)]
         logged_at: None,
         #[cfg(windows)]

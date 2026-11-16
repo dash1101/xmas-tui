@@ -14,6 +14,7 @@ wind = 1.0            # wind strength multiplier
 sleigh_minutes = 4.0  # average minutes between Santa fly-bys, 0 disables
 glow = 1.0            # light/bloom intensity
 critters = 1.0        # how many animals & people come by (0 = none)
+most_at_once = 24     # the most animals & people out at once (1..40)
 bushes = true         # festive berry bushes the animals snack from
 player = true         # the villager walked around with WASD / the arrow keys
 walk_speed = 1.0      # how fast the villager walks (0.25..6)
@@ -42,6 +43,8 @@ system = true         # CPU / GPU / VRAM / RAM / disk / network
 music = true          # now playing, from any MPRIS player (browsers, Spotify, …)
 weather = true
 map = true            # a strip map of the whole village
+visualizer = false    # bars dancing to whatever's playing (listens to the default audio output)
+visualizer_khz = false # each bar's frequency in kHz under it
 disk = "/"            # mount point shown in the DISK row
 
 [weather]

@@ -47,6 +47,9 @@ pub enum F {
     SoundCursor,
     SoundMedia,
     Critters,
+    MostAtOnce,
+    Viz,
+    VizKhz,
     Bushes,
     Player,
     UpdCheck,
@@ -157,6 +160,7 @@ const PANEL_H: i32 = 28;
 
 const SLEIGH_STEPS: [f32; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 10.0, 15.0, 30.0];
 const FPS_STEPS: [f32; 6] = [15.0, 20.0, 24.0, 30.0, 45.0, 60.0];
+const MOST_STEPS: [f32; 14] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 32.0, 40.0];
 
 /// A live level bar: `level` is a 0..1 peak, shown on a -48..0 dB scale.
 fn meter_bar(f: &mut Frame, x: i32, y: i32, level: f32, w: i32) {
@@ -221,6 +225,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                     cfg.sound.track = names[(i + dir as i32).rem_euclid(names.len() as i32) as usize].to_string();
                 }
                 F::Critters => step(&mut cfg.scene.critters, 0.25 * dir, 0.0, 3.0),
+                F::MostAtOnce => cfg.scene.most_at_once = step_list(&MOST_STEPS, cfg.scene.most_at_once as f32, dir as i32).round().max(1.0) as u32,
                 F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 6.0),
                 F::TalkTime => step(&mut cfg.scene.talk_time, 0.25 * dir, 0.5, 3.0),
                 F::Chatty => step(&mut cfg.scene.chattiness, 0.25 * dir, 0.0, 2.0),
@@ -315,6 +320,8 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Player => cfg.scene.player ^= true,
                 F::UpdCheck => cfg.updates.check ^= true,
                 F::Map => cfg.widgets.map ^= true,
+                F::Viz => cfg.widgets.visualizer ^= true,
+                F::VizKhz => cfg.widgets.visualizer_khz ^= true,
                 F::UpdAuto => cfg.updates.auto_install ^= true,
                 F::WinFront => cfg.windows.front ^= true,
                 F::WinBrush => cfg.windows.brush ^= true,
@@ -327,7 +334,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             true
         }
         Act::ResetLayout => {
-            for i in 0..4 {
+            for i in [0, 1, 2, 3, 5] {
                 cfg.layout.set(i, None);
             }
             true
@@ -603,6 +610,9 @@ impl Settings {
         yy += 1;
         self.slider(f, lx, vx, yy, "Animals & people", F::Critters, pct(cfg.scene.critters, 3.0), &format!("{:.2}×", cfg.scene.critters), t);
         yy += 1;
+        let most = cfg.scene.most_at_once.max(1);
+        self.stepper(f, lx, vx, yy, "  most at once", F::MostAtOnce, &format!("{most} {}", if most == 1 { "visitor" } else { "visitors" }));
+        yy += 1;
         let sl = if cfg.scene.sleigh_minutes <= 0.0 { "never".to_string() } else { format!("every ~{:.0} min", cfg.scene.sleigh_minutes) };
         self.stepper(f, lx, vx, yy, "Santa's sleigh", F::Sleigh, &sl);
         yy += 1;
@@ -675,6 +685,14 @@ impl Settings {
         cx = self.check(f, cx, yy, "Music", Act::Toggle(F::Music), cfg.widgets.music) + 3;
         cx = self.check(f, cx, yy, "Weather", Act::Toggle(F::Weather), cfg.widgets.weather) + 3;
         self.check(f, cx, yy, "Map", Act::Toggle(F::Map), cfg.widgets.map);
+        yy += 1;
+        // the visualizer listens to the audio output: say so where it's
+        // switched on
+        cx = self.check(f, lx, yy, "Visualizer", Act::Toggle(F::Viz), cfg.widgets.visualizer) + 3;
+        if cfg.widgets.visualizer {
+            cx = self.check(f, cx, yy, "kHz labels", Act::Toggle(F::VizKhz), cfg.widgets.visualizer_khz) + 3;
+        }
+        f.text(cx, yy, "(listens to what's playing)", pal::UI_DIM, BG, 0.0);
         yy += 1;
         f.text(lx, yy, "Weather city", pal::UI_TEXT, BG, 0.0);
         let field = Rect { x: vx, y: yy, w: 30, h: 1 };

@@ -520,6 +520,7 @@ impl Scene {
         avoid.extend(village.lamps.iter().map(|l| (l.x - 1, l.x + 2)));
         let mut critters = critters::Critters::new(&ctx, seed, cfg.critters, cfg.bushes, &avoid);
         critters.k = sprite_k(h);
+        critters.set_max(cfg.most_at_once as usize);
         // the player starts out a little left of the big tree, in the snow
         let player = cfg.player.then(|| {
             let px = cam + wf * 0.40;
@@ -1829,8 +1830,9 @@ impl Scene {
     }
 
     /// Settings that apply without rebuilding the scene.
-    pub fn set_live(&mut self, walk_speed: f32, drive_left: bool) {
+    pub fn set_live(&mut self, walk_speed: f32, drive_left: bool, most_at_once: u32) {
         self.director.drive_left = drive_left;
+        self.critters.set_max(most_at_once as usize);
         if let Some(p) = &mut self.player {
             p.speed = walk_speed;
         }

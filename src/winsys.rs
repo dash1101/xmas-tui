@@ -67,6 +67,19 @@ pub fn windows_version() -> (u32, u32) {
     }
 }
 
+/// A window's class, title and rect (for the log).
+fn window_label(h: HWND) -> String {
+    if h.is_null() {
+        return "none".into();
+    }
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
+    let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(h, &mut r) };
+    format!("{} \"{title}\" ({},{})-({},{})", class_of(h), r.left, r.top, r.right, r.bottom)
+}
+
 /// One line about a window, for the log.
 fn describe_window(h: HWND) -> String {
     unsafe {
@@ -445,37 +458,71 @@ pub fn over_icon(x: i32, y: i32) -> bool {
 /// (lock screen / UAC prompt) has the input. `own` is our window: in the
 /// top-level fallback it is itself a borderless monitor-sized window, which
 /// Windows reports as a "fullscreen app" once it's in the foreground.
-pub fn should_pause(own: HWND) -> bool {
+/// Why the wallpaper should rest right now, if it should, and how long
+/// that has to hold first (seconds). Locked / secure desktop: at once. A
+/// fullscreen app: only once it's lasted a moment, since the shell's verdict
+/// can flicker (some overlays and capture tools set it off briefly), and a
+/// wallpaper that rests on every flicker stutters.
+pub fn pause_reason(own: HWND) -> Option<(String, f32)> {
     unsafe {
         // the input desktop isn't ours (Winlogon / secure desktop)
         let desk = OpenInputDesktop(0, 0, DESKTOP_SWITCHDESKTOP);
         if desk.is_null() {
-            return true;
+            return Some(("another desktop has the input (locked or a UAC prompt)".into(), 0.0));
         }
         CloseDesktop(desk);
         let mut st: QUERY_USER_NOTIFICATION_STATE = 0;
         if SHQueryUserNotificationState(&mut st) != 0 {
-            return false;
+            return None;
         }
         match st {
             // QUNS_NOT_PRESENT: locked, screen saver, fast user switching
-            1 => true,
-            // QUNS_BUSY (fullscreen app), D3D fullscreen, presentation mode
-            2..=4 => own.is_null() || GetForegroundWindow() != own,
-            _ => false,
+            1 => Some(("the session isn't present (locked or screen saver)".into(), 0.0)),
+            // QUNS_PRESENTATION_MODE: the user asked for quiet
+            4 => Some(("presentation mode".into(), 0.0)),
+            // QUNS_BUSY (fullscreen app), QUNS_RUNNING_D3D_FULL_SCREEN
+            2 | 3 => {
+                let fg = GetForegroundWindow();
+                fullscreen_over(fg, own).then(|| (format!("a fullscreen app in front (state {st}: {})", window_label(fg)), 1.5))
+            }
+            _ => None,
         }
     }
 }
 
-/// True while a fullscreen game / presentation is running (used by the
-/// window-snow overlay, which hides itself then).
-pub fn fullscreen_app() -> bool {
+/// Does `fg` cover the monitor `own` is on (so nothing of the wallpaper
+/// shows)? The shell says "busy" for a fullscreen window on any monitor.
+/// With no `own` to compare against, any fullscreen verdict counts.
+fn fullscreen_over(fg: HWND, own: HWND) -> bool {
+    unsafe {
+        if own.is_null() {
+            return true;
+        }
+        if fg.is_null() || fg == own {
+            return false;
+        }
+        // the desktop and taskbar are full-width, but they're not an app
+        let class = class_of(fg);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return false;
+        }
+        let (mut a, mut b): (RECT, RECT) = (std::mem::zeroed(), std::mem::zeroed());
+        if GetWindowRect(own, &mut a) == 0 || GetWindowRect(fg, &mut b) == 0 {
+            return true;
+        }
+        b.left <= a.left + 2 && b.top <= a.top + 2 && b.right >= a.right - 2 && b.bottom >= a.bottom - 2
+    }
+}
+
+/// True while a fullscreen game / presentation covers `own`'s monitor
+/// (used by the window-snow overlay, which hides itself then).
+pub fn fullscreen_app(own: HWND) -> bool {
     unsafe {
         let mut st: QUERY_USER_NOTIFICATION_STATE = 0;
         if SHQueryUserNotificationState(&mut st) != 0 {
             return false;
         }
         // 2 = QUNS_BUSY (fullscreen app), 3 = D3D fullscreen, 4 = presentation mode
-        matches!(st, 2..=4)
+        st == 4 || (matches!(st, 2 | 3) && fullscreen_over(GetForegroundWindow(), own))
     }
 }

@@ -922,6 +922,7 @@ impl App {
             let live = |c: &crate::config::SceneCfg| {
                 let mut c = c.clone();
                 c.walk_speed = 0.0;
+                c.most_at_once = 0;
                 c.traffic.clear();
                 c.time.clear();
                 c.talk_time = 0.0;
@@ -970,7 +971,7 @@ impl App {
             "right" => false,
             _ => crate::widgets::data::drives_left(&crate::widgets::data::country()),
         };
-        self.scene.set_live(self.cfg.scene.walk_speed, left);
+        self.scene.set_live(self.cfg.scene.walk_speed, left, self.cfg.scene.most_at_once);
         crate::scene::events::set_talk(self.cfg.scene.talk_time, self.cfg.scene.chattiness);
         self.scene.set_pet(&self.cfg.scene.pet);
         self.scene.set_name(&self.cfg.scene.name);
