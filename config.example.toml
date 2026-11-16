@@ -110,3 +110,13 @@ melt = 0.0            # piles slowly melt away (0: never)
 [updates]             # release builds only
 check = true          # look for a new version now and then
 auto_install = false  # install it without asking (otherwise a banner asks first)
+
+# Shelves: widgets that each show a folder's files and shortcuts (a tidier
+# desktop). Add as many as wanted; Settings → Shelves edits them too.
+# [[shelves]]
+# name = "Games"
+# folder = ""          # empty: Documents/Desktop Shelves/<name>; or any folder
+# style = "frosted"    # "frosted", "wood" or "gift"
+# icons = "pixel"      # "pixel" (pixel art) or "real" (the icons themselves)
+# size = [47, 15]      # columns, rows
+# rolled = false       # rolled up to its title

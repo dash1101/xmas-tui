@@ -29,6 +29,12 @@ pub enum Btn {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+enum ShelfPress {
+    Title(usize),
+    Item(usize, usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MouseIn {
     Move,
     Down(Btn),
@@ -67,8 +73,19 @@ pub struct App {
     widgets: Widgets,
     settings: Settings,
     drag: Option<(usize, i32, i32)>,
-    /// Resizing the map by its corner grip.
-    resizing: bool,
+    /// Resizing a widget (the map or a shelf) by its corner grip.
+    resizing: Option<usize>,
+    /// A press on a shelf's title (a click rolls it up) or on one of its
+    /// items (a click selects, a double-click opens, a drag moves it).
+    shelf_press: Option<ShelfPress>,
+    /// The last click on a shelf item: (shelf, item, when), for double-clicks.
+    last_click: Option<(usize, usize, f32)>,
+    /// Windows desktop mode: the grid's origin on screen and the cell size
+    /// (pixels), to put a file dragged off a shelf where it was dropped.
+    pub px_map: Option<(i32, i32, i32, i32)>,
+    /// Windows desktop: our menu's "Windows desktop menu…" was picked (the
+    /// window sends the right-click on to the desktop).
+    pub desktop_menu: bool,
     /// The right-click menu, while it's open.
     menu: Option<crate::ctxmenu::CtxMenu>,
     /// A left press on the scene: where and when (app time). Held still
@@ -241,7 +258,11 @@ impl App {
             wallpaper,
             keyboard,
             quit: false,
-            resizing: false,
+            resizing: None,
+            shelf_press: None,
+            last_click: None,
+            px_map: None,
+            desktop_menu: false,
             menu: None,
             press: None,
             press_at: (0, 0),
@@ -388,6 +409,12 @@ impl App {
     }
 
     fn commit_city(&mut self) {
+        if let Some(i) = self.settings.editing_shelf.take() {
+            if let Some(text) = self.settings.editing.take() {
+                crate::widgets::shelf::rename(&mut self.cfg, i, &text);
+            }
+            return;
+        }
         if self.settings.editing_name {
             self.settings.editing_name = false;
             if let Some(text) = self.settings.editing.take() {
@@ -427,6 +454,9 @@ impl App {
                 self.scene.set_cursor(Some((wx, wy)));
                 self.scene.convo_hover(x, y);
                 self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(x, y) };
+                if !self.settings.open {
+                    self.widgets.shelf_hover(x, y);
+                }
             }
             MouseIn::Down(Btn::Left) if self.menu.is_some() => {
                 // a click picks from the menu (or, outside it, just closes it)
@@ -434,6 +464,8 @@ impl App {
                 match m.hit(x, y).map(|i| m.items[i].1) {
                     Some(crate::ctxmenu::MenuAct::Settings) => self.settings.open = true,
                     Some(crate::ctxmenu::MenuAct::Scene(d)) => self.scene.act(d),
+                    Some(crate::ctxmenu::MenuAct::Shelf(a)) => self.shelf_act(a),
+                    Some(crate::ctxmenu::MenuAct::Desktop) => self.desktop_menu = true,
                     None => {}
                 }
             }
@@ -447,6 +479,8 @@ impl App {
                 } else if self.settings.open && in_panel {
                     match self.settings.click(x, y) {
                         Some(Act::EditCity) => self.acts.push(Act::EditCity),
+                        // clicking back into the shelf name being typed keeps it going
+                        Some(Act::ShelfName(i)) if self.settings.editing_shelf == Some(i as usize) && self.settings.editing.is_some() => {}
                         Some(a) => {
                             self.commit_city();
                             self.acts.push(a)
@@ -465,9 +499,11 @@ impl App {
                     // answered in the dialogue box
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
                     self.settings.open = true;
-                } else if !self.cfg.layout.locked && self.widgets.on_grip(x, y) {
-                    self.resizing = true;
-                    self.widgets.dragging = Some(4);
+                } else if let Some(i) = self.widgets.on_grip(x, y).filter(|_| !self.cfg.layout.locked) {
+                    self.resizing = Some(i);
+                    self.widgets.dragging = Some(i);
+                } else if let Some((s, hit)) = self.widgets.shelf_hit(x, y) {
+                    self.shelf_down(s, hit, x, y);
                 } else if let (true, Some(wx)) = (self.cfg.layout.locked, self.widgets.map_world_x(x, y)) {
                     self.scene.look_at(wx);
                 } else if let (false, Some(i)) = (self.cfg.layout.locked, self.widgets.hit(x, y)) {
@@ -502,10 +538,18 @@ impl App {
                     self.scene.drag(wx, wy);
                     return;
                 }
+                if let Some(ShelfPress::Item(s, k)) = self.shelf_press {
+                    // an item pulled off its slot: carried to wherever it's let go
+                    if self.widgets.lift.is_some() || (x - self.press_at.0).abs() > 1 || (y - self.press_at.1).abs() > 1 {
+                        self.widgets.lift = Some((s, k));
+                        self.widgets.lift_at = (x, y);
+                    }
+                    return;
+                }
                 let (wx, wy) = self.world_pt(x, y);
                 self.scene.set_cursor(Some((wx, wy)));
-                if self.resizing {
-                    self.widgets.resize_map(x, y, self.w as i32, self.h as i32);
+                if let Some(i) = self.resizing {
+                    self.widgets.resize(i, x, y, self.w as i32, self.h as i32);
                     return;
                 }
                 if let Some((i, ox, oy)) = self.drag {
@@ -516,6 +560,47 @@ impl App {
                 // the end of a long press: the menu it opened stays up
                 if self.scene.holding() {
                     self.scene.let_go();
+                }
+                self.shelf_press = None;
+                self.widgets.lift = None;
+                if self.drag.take().is_some() {
+                    self.widgets.dragging = None;
+                }
+            }
+            MouseIn::Up(Btn::Left) if self.shelf_press.is_some() => {
+                let p = self.shelf_press.take().unwrap();
+                match p {
+                    ShelfPress::Item(s, k) => {
+                        if let Some(lift) = self.widgets.lift.take() {
+                            self.shelf_drop(lift, x, y);
+                        } else {
+                            // a click selects; a second one soon after opens
+                            let now = self.t();
+                            if self.last_click.is_some_and(|(ls, lk, lt)| ls == s && lk == k && now - lt < 0.5) {
+                                self.last_click = None;
+                                if let Some(path) = self.widgets.item_path(s, k) {
+                                    open_detached(path);
+                                }
+                            } else {
+                                self.last_click = Some((s, k, now));
+                            }
+                        }
+                    }
+                    ShelfPress::Title(s) => {
+                        if (x, y) == self.press_at {
+                            // a click on the title rolls it up (or down again)
+                            if let Some(c) = self.cfg.shelves.get_mut(s) {
+                                c.rolled = !c.rolled;
+                            }
+                            if self.drag.take().is_some() {
+                                self.widgets.dragging = None;
+                            }
+                        } else if let Some((i, ox, oy)) = self.drag.take() {
+                            self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
+                            self.widgets.dragging = None;
+                            crate::widgets::set_pos(&mut self.cfg, i, crate::widgets::pos_of(&self.widgets.cfg, i));
+                        }
+                    }
                 }
             }
             MouseIn::Up(Btn::Left) if self.settings.drag.is_some() => {
@@ -531,12 +616,16 @@ impl App {
                 self.scene.drag(wx, wy);
                 self.scene.release();
             }
-            MouseIn::Up(Btn::Left) if self.resizing => {
-                self.resizing = false;
-                self.widgets.resize_map(x, y, self.w as i32, self.h as i32);
+            MouseIn::Up(Btn::Left) if self.resizing.is_some() => {
+                let i = self.resizing.take().unwrap();
+                self.widgets.resize(i, x, y, self.w as i32, self.h as i32);
                 self.widgets.dragging = None;
-                self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
-                self.cfg.layout.map = self.widgets.cfg.layout.map;
+                if i == 4 {
+                    self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
+                    self.cfg.layout.map = self.widgets.cfg.layout.map;
+                } else if let (Some(c), Some(w)) = (self.cfg.shelves.get_mut(i - crate::widgets::BUILTIN), self.widgets.cfg.shelves.get(i - crate::widgets::BUILTIN)) {
+                    (c.size, c.pos) = (w.size, w.pos);
+                }
             }
             MouseIn::Up(Btn::Left) => {
                 if let Some((4, ..)) = self.drag.filter(|_| (x, y) == self.press_at) {
@@ -555,7 +644,7 @@ impl App {
                     // meanwhile and must not be reverted
                     self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
                     self.widgets.dragging = None;
-                    self.cfg.layout.set(i, self.widgets.cfg.layout.get(i));
+                    crate::widgets::set_pos(&mut self.cfg, i, crate::widgets::pos_of(&self.widgets.cfg, i));
                 }
             }
             MouseIn::Down(Btn::Right) => {
@@ -573,6 +662,8 @@ impl App {
                     if let Some(a) = self.settings.scroll(x, y, up) {
                         self.acts.push(a);
                     }
+                } else if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
+                    self.widgets.shelf_scroll(s, if up { -1 } else { 1 });
                 } else {
                     // the wheel looks around the village
                     let step = (self.w as f32 * 0.06).max(4.0);
@@ -788,10 +879,208 @@ impl App {
 
     /// Open the right-click menu at (x, y).
     fn open_menu(&mut self, x: i32, y: i32) {
+        use crate::ctxmenu::{CtxMenu, MenuAct};
+        use crate::widgets::shelf::{Hit, MenuAct as S};
         self.commit_city();
+        let (w, h) = (self.w as i32, self.h as i32);
+        if let Some((s, hit)) = self.widgets.shelf_hit(x, y) {
+            let c = &self.cfg.shelves[s];
+            let mut items: Vec<(String, MenuAct)> = vec![];
+            let mut title = c.name.clone();
+            if let Hit::Item(k) = hit {
+                if let Some(it) = self.widgets.contents(s).and_then(|c| c.items.get(k).cloned()) {
+                    title = it.name.clone();
+                    items.push(("open".into(), MenuAct::Shelf(S::Open(s, k))));
+                    items.push(("show in its folder".into(), MenuAct::Shelf(S::Reveal(s, k))));
+                    items.push(("take off the shelf (to the desktop)".into(), MenuAct::Shelf(S::TakeOff(s, k))));
+                }
+            }
+            let style = match c.style.as_str() {
+                "wood" => "wooden shelf",
+                "gift" => "gift box",
+                _ => "frosted",
+            };
+            items.push(("open the shelf's folder".into(), MenuAct::Shelf(S::OpenFolder(s))));
+            items.push((format!("look: {style} ▸"), MenuAct::Shelf(S::Style(s))));
+            items.push((format!("icons: {} ▸", if c.icons == "real" { "real" } else { "pixel art" }), MenuAct::Shelf(S::Icons(s))));
+            items.push((if c.rolled { "unroll" } else { "roll up" }.into(), MenuAct::Shelf(S::Roll(s))));
+            items.push(("remove the shelf (its files stay)".into(), MenuAct::Shelf(S::Remove(s))));
+            if cfg!(windows) && !self.keyboard {
+                items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
+            }
+            self.menu = Some(CtxMenu::with(x, y, title, items, w, h));
+            return;
+        }
         let (wx, wy) = self.world_pt(x, y);
         let (title, items) = self.scene.menu_at(wx, wy);
-        self.menu = Some(crate::ctxmenu::CtxMenu::new(x, y, title, items, self.w as i32, self.h as i32));
+        let mut items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        if self.widgets.hit(x, y).is_none() {
+            items.push(("new shelf here".into(), MenuAct::Shelf(S::New(x, y))));
+        }
+        if cfg!(windows) && !self.keyboard {
+            items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
+        }
+        self.menu = Some(CtxMenu::with(x, y, title, items, w, h));
+    }
+
+    /// Windows desktop: a right-click the hook took from the desktop. Opens
+    /// our menu if something of ours is there (someone, a house, a widget,
+    /// a shelf) and returns true; false lets Windows' desktop menu show.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn right_click(&mut self, x: i32, y: i32) -> bool {
+        if self.settings.open {
+            self.commit_city();
+            self.settings.open = false;
+            return true;
+        }
+        if self.menu.take().is_some() {
+            return true;
+        }
+        let ours = self.widgets.hit(x, y).is_some() || settings::gear_rect(self.w as i32).contains(x, y) || {
+            let (wx, wy) = self.world_pt(x, y);
+            let (title, _) = self.scene.menu_at(wx, wy);
+            !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village")
+        };
+        if ours {
+            self.open_menu(x, y);
+        }
+        ours
+    }
+
+    /// Windows desktop: a desktop icon is being dragged (at this cell), or
+    /// not any more. A shelf under it lights up.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn icon_drag(&mut self, at: Option<(i32, i32)>) {
+        self.widgets.ext_drag = at;
+    }
+
+    /// Windows desktop: desktop icons were let go at (x, y): onto a shelf,
+    /// they go in its folder.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn desktop_drop(&mut self, x: i32, y: i32) {
+        #[cfg(windows)]
+        if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
+            if let Some(to) = self.widgets.shelf_folder(s) {
+                self.widgets.send(crate::widgets::shelf::Cmd::DesktopDrop { to });
+            }
+        }
+        let _ = (x, y);
+    }
+
+    /// A press on shelf `s`.
+    fn shelf_down(&mut self, s: usize, hit: crate::widgets::shelf::Hit, x: i32, y: i32) {
+        use crate::widgets::shelf::Hit;
+        let i = crate::widgets::BUILTIN + s;
+        self.press_at = (x, y);
+        match hit {
+            Hit::Up => self.widgets.shelf_scroll(s, -1),
+            Hit::Down => self.widgets.shelf_scroll(s, 1),
+            Hit::Item(k) => {
+                self.shelf_press = Some(ShelfPress::Item(s, k));
+                // held still, it's the item's menu
+                self.press = Some((x, y, self.t()));
+                for (j, ui) in self.widgets.shelf_ui.iter_mut().enumerate() {
+                    ui.selected = (j == s).then_some(k);
+                }
+            }
+            Hit::Title | Hit::Body | Hit::Grip => {
+                if hit == Hit::Title {
+                    self.shelf_press = Some(ShelfPress::Title(s));
+                } else {
+                    self.press = Some((x, y, self.t()));
+                }
+                for ui in self.widgets.shelf_ui.iter_mut() {
+                    ui.selected = None;
+                }
+                if !self.cfg.layout.locked {
+                    if let Some(r) = self.widgets.rects.get(i).copied().flatten() {
+                        self.drag = Some((i, x - r.x, y - r.y));
+                        self.widgets.dragging = Some(i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An item carried off shelf `s` let go at (x, y): onto another shelf,
+    /// or off the shelves onto the desktop (on Windows, where it was let go).
+    fn shelf_drop(&mut self, (s, k): (usize, usize), x: i32, y: i32) {
+        use crate::widgets::shelf::Cmd;
+        let Some(path) = self.widgets.item_path(s, k) else { return };
+        for ui in self.widgets.shelf_ui.iter_mut() {
+            ui.selected = None;
+        }
+        match self.widgets.shelf_hit(x, y) {
+            Some((t, _)) if t == s => {}
+            Some((t, _)) => {
+                if let Some(to) = self.widgets.shelf_folder(t) {
+                    self.widgets.send(Cmd::Move { paths: vec![path], to, place: None });
+                }
+            }
+            // onto another widget: nothing
+            None if self.widgets.hit(x, y).is_some() => {}
+            None => {
+                let place = self.px_map.map(|(ox, oy, cw, ch)| (ox + x * cw - 36, oy + y * ch - 24));
+                self.widgets.send(Cmd::Move { paths: vec![path], to: crate::widgets::shelf::desktop_dir(), place });
+            }
+        }
+    }
+
+    fn shelf_act(&mut self, a: crate::widgets::shelf::MenuAct) {
+        use crate::widgets::shelf::{self, Cmd, MenuAct as S};
+        match a {
+            S::Open(s, k) => {
+                if let Some(p) = self.widgets.item_path(s, k) {
+                    open_detached(p);
+                }
+            }
+            S::Reveal(s, k) => {
+                if let Some(p) = self.widgets.item_path(s, k) {
+                    shelf::reveal(&p);
+                }
+            }
+            S::TakeOff(s, k) => {
+                if let Some(p) = self.widgets.item_path(s, k) {
+                    self.widgets.send(Cmd::Move { paths: vec![p], to: shelf::desktop_dir(), place: None });
+                }
+            }
+            S::OpenFolder(s) => {
+                if let Some(f) = self.widgets.shelf_folder(s) {
+                    open_detached(f);
+                }
+            }
+            S::Style(s) => {
+                if let Some(c) = self.cfg.shelves.get_mut(s) {
+                    let i = shelf::STYLES.iter().position(|&x| x == c.style).map(|i| (i + 1) % shelf::STYLES.len()).unwrap_or(1);
+                    c.style = shelf::STYLES[i].into();
+                }
+            }
+            S::Icons(s) => {
+                if let Some(c) = self.cfg.shelves.get_mut(s) {
+                    c.icons = if c.icons == "real" { "pixel".into() } else { "real".into() };
+                }
+            }
+            S::Roll(s) => {
+                if let Some(c) = self.cfg.shelves.get_mut(s) {
+                    c.rolled = !c.rolled;
+                }
+            }
+            S::Remove(s) => {
+                if s < self.cfg.shelves.len() {
+                    self.cfg.shelves.remove(s);
+                    self.widgets.shelf_ui.clear();
+                }
+            }
+            S::New(x, y) => {
+                let (w, h) = (self.w.max(1) as f32, self.h.max(1) as f32);
+                shelf::add(&mut self.cfg, Some([x as f32 / w, y as f32 / h]));
+            }
+        }
+    }
+
+    /// The last frame: its cells and the pictures over them.
+    pub fn output(&self) -> (&[Cell], &[crate::frame::Placed]) {
+        (&self.frame.out, &self.frame.pictures)
     }
 
     pub fn step(&mut self) -> &[Cell] {
@@ -827,6 +1116,25 @@ impl App {
                         platform::open_in_editor(self.sync.path());
                     }
                 }
+                Act::ShelfName(i) => {
+                    if self.keyboard {
+                        if self.settings.editing_shelf != Some(i as usize) || self.settings.editing.is_none() {
+                            self.commit_city();
+                            self.settings.editing_shelf = Some(i as usize);
+                            self.settings.editing = self.cfg.shelves.get(i as usize).map(|c| c.name.clone());
+                        }
+                    } else {
+                        if !self.sync.path().exists() {
+                            self.sync.save_now(&self.cfg);
+                        }
+                        platform::open_in_editor(self.sync.path());
+                    }
+                }
+                Act::ShelfOpen(i) => {
+                    if let Some(c) = self.cfg.shelves.get(i as usize) {
+                        open_detached(crate::widgets::shelf::folder_of(c));
+                    }
+                }
                 Act::EditName => {
                     if self.keyboard {
                         if !self.settings.editing_name || self.settings.editing.is_none() {
@@ -842,7 +1150,7 @@ impl App {
                     }
                 }
                 Act::EditCity => {
-                    if self.settings.editing_pet || self.settings.editing_name {
+                    if self.settings.editing_pet || self.settings.editing_name || self.settings.editing_shelf.is_some() {
                         self.commit_city();
                     }
                     if self.keyboard {
@@ -947,6 +1255,9 @@ impl App {
                 // keep the widget being dragged where the pointer has it
                 let mut c = self.cfg.clone();
                 c.layout = self.widgets.cfg.layout.clone();
+                for (a, b) in c.shelves.iter_mut().zip(&self.widgets.cfg.shelves) {
+                    (a.pos, a.size) = (b.pos, b.size);
+                }
                 self.widgets.apply(&c);
             } else {
                 self.widgets.apply(&self.cfg);
@@ -1108,6 +1419,82 @@ mod tests {
         }
         // landed: nobody is hovering in the sky where we let go
         assert!(!app.scene.grabbable(x + 6, 8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shelves: items show up from their folders; a double-click opens one;
+    /// dragging an item onto another shelf moves the file there; a click on
+    /// the title rolls the shelf up; right-clicking the bare scene offers a
+    /// new shelf, and a shelf's own menu can remove it.
+    #[test]
+    fn shelves_show_open_and_move_files() {
+        use crate::widgets::{shelf, BUILTIN};
+        let dir = std::env::temp_dir().join(format!("xmas-app-shelves-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("note.txt"), "hi").unwrap();
+        std::fs::write(a.join("zeta.txt"), "z").unwrap();
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.scene.critters = 0.0;
+        (cfg.widgets.music, cfg.widgets.weather, cfg.widgets.system, cfg.widgets.map, cfg.clock.enabled) = (false, false, false, false, false);
+        cfg.sound.enabled = false;
+        let shelf_at = |name: &str, folder: &std::path::Path, x: f32| crate::config::ShelfCfg { name: name.into(), folder: folder.to_string_lossy().into(), pos: Some([x, 0.2]), size: [40, 15], ..Default::default() };
+        cfg.shelves = vec![shelf_at("A", &a, 0.05), shelf_at("B", &b, 0.55)];
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        let wait = |app: &mut App, done: &dyn Fn(&App) -> bool| {
+            for _ in 0..300 {
+                app.step();
+                if done(app) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        assert!(wait(&mut app, &|app| app.widgets.contents(0).is_some_and(|c| c.items.len() == 2)), "shelf A never showed its files");
+        let ra = app.widgets.rects[BUILTIN].unwrap();
+        let rb = app.widgets.rects[BUILTIN + 1].unwrap();
+        let (x0, y0, _, _) = shelf::grid(ra);
+        let (ix, iy) = (x0 + 2, y0 + 1); // on the first item's icon
+        assert_eq!(app.widgets.shelf_hit(ix, iy), Some((0, shelf::Hit::Item(0))));
+        // double-click: opens it
+        for _ in 0..2 {
+            app.mouse(MouseIn::Down(Btn::Left), ix, iy);
+            app.mouse(MouseIn::Up(Btn::Left), ix, iy);
+        }
+        assert!(OPENED.lock().unwrap().iter().any(|p| p.ends_with("note.txt")), "a double-click didn't open the item");
+        // drag it onto shelf B
+        app.mouse(MouseIn::Down(Btn::Left), ix, iy);
+        app.mouse(MouseIn::Drag, ix + 5, iy + 1);
+        app.mouse(MouseIn::Drag, rb.x + 5, rb.y + 4);
+        app.step();
+        app.mouse(MouseIn::Up(Btn::Left), rb.x + 5, rb.y + 4);
+        assert!(wait(&mut app, &|_| b.join("note.txt").exists()), "the file didn't move to shelf B's folder");
+        assert!(!a.join("note.txt").exists());
+        assert!(wait(&mut app, &|app| app.widgets.contents(1).is_some_and(|c| c.items.len() == 1)));
+        // a click on the title rolls it up
+        app.mouse(MouseIn::Down(Btn::Left), ra.x + 6, ra.y);
+        app.mouse(MouseIn::Up(Btn::Left), ra.x + 6, ra.y);
+        assert!(app.cfg.shelves[0].rolled);
+        // right-click on the bare scene: "new shelf here"
+        app.mouse(MouseIn::Down(Btn::Right), 150, 50);
+        let m = app.menu.as_ref().expect("no menu");
+        let k = m.items.iter().position(|(l, _)| l == "new shelf here").expect("no 'new shelf here'");
+        let (mx, my) = (m.x + 3, m.y + 1 + k as i32);
+        app.mouse(MouseIn::Down(Btn::Left), mx, my);
+        assert_eq!(app.cfg.shelves.len(), 3);
+        // a shelf's menu removes it (its files stay)
+        app.step();
+        app.mouse(MouseIn::Down(Btn::Right), rb.x + 3, rb.y + rb.h - 2);
+        let m = app.menu.as_ref().expect("no shelf menu");
+        let k = m.items.iter().position(|(l, _)| l.starts_with("remove the shelf")).expect("no remove");
+        let (mx, my) = (m.x + 3, m.y + 1 + k as i32);
+        app.mouse(MouseIn::Down(Btn::Left), mx, my);
+        assert_eq!(app.cfg.shelves.len(), 2);
+        assert!(b.join("note.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1273,3 +1660,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Open a shelf item (or folder) off the render thread: launching can take
+/// a moment.
+fn open_detached(path: std::path::PathBuf) {
+    // (tests note what would have opened instead of opening it)
+    #[cfg(test)]
+    {
+        OPENED.lock().unwrap().push(path);
+        return;
+    }
+    #[allow(unreachable_code)]
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        crate::winshelf::com_init();
+        crate::widgets::shelf::open(&path);
+    });
+}
+
+#[cfg(test)]
+static OPENED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());

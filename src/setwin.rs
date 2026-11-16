@@ -131,6 +131,12 @@ impl Panel {
     }
 
     fn commit_city(&mut self) {
+        if let Some(i) = self.settings.editing_shelf.take() {
+            if let Some(text) = self.settings.editing.take() {
+                crate::widgets::shelf::rename(&mut self.cfg, i, &text);
+            }
+            return;
+        }
         if let Some(text) = self.settings.editing.take() {
             let city = text.trim().to_string();
             if city != self.cfg.weather.city {
@@ -146,6 +152,7 @@ impl Panel {
         match ev {
             MouseIn::Down(Btn::Left) => match self.settings.click(x, y) {
                 Some(Act::EditCity) => self.acts.push(Act::EditCity),
+                Some(Act::ShelfName(i)) if self.settings.editing_shelf == Some(i as usize) => {}
                 Some(a) => {
                     self.commit_city();
                     self.acts.push(a);
@@ -212,6 +219,20 @@ impl Panel {
                     // clicking back into the field while typing keeps the text
                     if self.settings.editing.is_none() {
                         self.settings.editing = Some(self.cfg.weather.city.clone());
+                    }
+                }
+                Act::ShelfName(i) => {
+                    self.settings.editing_shelf = Some(i as usize);
+                    self.settings.editing = self.cfg.shelves.get(i as usize).map(|c| c.name.clone());
+                }
+                Act::ShelfOpen(i) => {
+                    if let Some(c) = self.cfg.shelves.get(i as usize) {
+                        let f = crate::widgets::shelf::folder_of(c);
+                        std::thread::spawn(move || {
+                            #[cfg(windows)]
+                            crate::winshelf::com_init();
+                            crate::widgets::shelf::open(&f);
+                        });
                     }
                 }
                 Act::Shuffle => self.cfg.seed = random_seed() as u64,

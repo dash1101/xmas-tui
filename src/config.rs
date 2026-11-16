@@ -21,6 +21,35 @@ pub struct Config {
     pub windows: WindowsCfg,
     pub sound: SoundCfg,
     pub updates: UpdatesCfg,
+    /// Shelves: widgets that each show a folder's files and shortcuts.
+    pub shelves: Vec<ShelfCfg>,
+}
+
+/// A shelf: a widget showing a folder's files and shortcuts (a tidier
+/// desktop). Everything on it is an ordinary file in that folder.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ShelfCfg {
+    pub name: String,
+    /// The folder it shows. Empty: "Desktop Shelves/<name>" in Documents.
+    pub folder: String,
+    /// "frosted" (a frosted panel with snow on top), "wood" (wooden
+    /// planks) or "gift" (a present with a ribbon and bow).
+    pub style: String,
+    /// "pixel" (icons as chunky pixel art) or "real" (the icons themselves).
+    pub icons: String,
+    /// Top-left as fractions of the screen (missing: a default spot).
+    pub pos: Option<[f32; 2]>,
+    /// Size in cells.
+    pub size: [i32; 2],
+    /// Rolled up to its title.
+    pub rolled: bool,
+}
+
+impl Default for ShelfCfg {
+    fn default() -> Self {
+        ShelfCfg { name: "Shelf".into(), folder: String::new(), style: "frosted".into(), icons: "pixel".into(), pos: None, size: [47, 15], rolled: false }
+    }
 }
 
 /// New versions from GitHub (release builds only).
@@ -391,6 +420,7 @@ impl Default for Config {
             windows: WindowsCfg::default(),
             sound: SoundCfg::default(),
             updates: UpdatesCfg::default(),
+            shelves: vec![],
         }
     }
 }

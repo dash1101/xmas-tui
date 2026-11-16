@@ -23,6 +23,13 @@ pub struct Term {
     /// Colors closer than this (per channel, 0..255) count as unchanged.
     pub tolerance: u8,
     pub bytes_last: usize,
+    /// Pictures to show over the cells this frame (real icons), with
+    /// kitty's graphics protocol; which images kitty already has, and what
+    /// was placed last frame.
+    pub pictures: Vec<crate::frame::Placed>,
+    kitty: bool,
+    sent: std::collections::HashSet<u64>,
+    placed: Vec<(u64, i32, i32, i32, i32)>,
 }
 
 /// How a cell looks: half-block cells are just two colours, whichever of
@@ -78,9 +85,27 @@ fn push_rgb(b: &mut Vec<u8>, c: [u8; 3]) {
     }
 }
 
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            if k <= c.len() {
+                out.push(T[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 impl Term {
     pub fn new() -> Self {
-        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0 }
+        let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some() || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
+        crate::frame::set_pictures_ok(kitty);
+        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![] }
     }
 
     pub fn enter() -> io::Result<()> {
@@ -233,15 +258,59 @@ impl Term {
                 self.prev[i] = Cell { ch, fg: if ch == ' ' { g } else { f }, bg: if ch == '█' { f } else { g } };
             }
         }
+        if self.kitty {
+            self.place_pictures();
+        }
+        let b = &mut self.buf;
         b.extend_from_slice(b"\x1b[?2026l");
         self.force = false;
         self.bytes_last = b.len();
         b.len()
     }
+
+    /// kitty's graphics protocol: each image sent once (by id), then placed
+    /// over its cells; any change re-places them all (a handful of icons).
+    fn place_pictures(&mut self) {
+        let now: Vec<(u64, i32, i32, i32, i32)> = self.pictures.iter().map(|p| (p.pic.id, p.x, p.y, p.cols, p.rows)).collect();
+        if now == self.placed && !self.force {
+            return;
+        }
+        let b = &mut self.buf;
+        // take down every placement (the images stay loaded)
+        b.extend_from_slice(b"\x1b_Ga=d,d=a,q=2\x1b\\");
+        for p in &self.pictures {
+            let id = p.pic.id as u32;
+            if self.sent.insert(p.pic.id) {
+                let data = base64(&p.pic.rgba);
+                let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
+                for (k, c) in chunks.iter().enumerate() {
+                    let more = (k + 1 < chunks.len()) as u8;
+                    if k == 0 {
+                        b.extend_from_slice(format!("\x1b_Ga=t,f=32,s={},v={},i={id},q=2,m={more};", p.pic.w, p.pic.h).as_bytes());
+                    } else {
+                        b.extend_from_slice(format!("\x1b_Gm={more};").as_bytes());
+                    }
+                    b.extend_from_slice(c);
+                    b.extend_from_slice(b"\x1b\\");
+                }
+            }
+            b.extend_from_slice(format!("\x1b[{};{}H\x1b_Ga=p,i={id},c={},r={},C=1,z=1,q=2\x1b\\", p.y + 1, p.x + 1, p.cols, p.rows).as_bytes());
+        }
+        self.placed = now;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn base64_matches_the_standard() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+    }
+
     use super::*;
 
     /// A tiny terminal for exactly the sequences `render` emits.

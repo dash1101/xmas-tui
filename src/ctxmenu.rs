@@ -8,6 +8,9 @@ use crate::scene::Do;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MenuAct {
     Scene(Do),
+    Shelf(crate::widgets::shelf::MenuAct),
+    /// Windows desktop: show Windows' own desktop menu instead.
+    Desktop,
     Settings,
 }
 
@@ -22,7 +25,12 @@ pub struct CtxMenu {
 impl CtxMenu {
     /// A menu at (x, y), kept on a `w`×`h` screen.
     pub fn new(x: i32, y: i32, title: String, items: Vec<(String, Do)>, w: i32, h: i32) -> Self {
-        let mut items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        let items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        Self::with(x, y, title, items, w, h)
+    }
+
+    /// A menu of any actions (the settings are added at the bottom).
+    pub fn with(x: i32, y: i32, title: String, mut items: Vec<(String, MenuAct)>, w: i32, h: i32) -> Self {
         items.push(("settings…".into(), MenuAct::Settings));
         let mut m = CtxMenu { x, y, title, items, hover: None };
         let (mw, mh) = m.size();
@@ -75,7 +83,7 @@ impl CtxMenu {
                 f.put_g(x, y, Glyph::new(' ', border).bg(ibg).lit(0.0));
             }
             let fg = match act {
-                MenuAct::Settings => pal::UI_DIM,
+                MenuAct::Settings | MenuAct::Desktop => pal::UI_DIM,
                 _ if hot => Rgb::hex(0xffd36b),
                 _ => pal::UI_TEXT,
             };

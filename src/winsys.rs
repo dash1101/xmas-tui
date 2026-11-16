@@ -526,3 +526,111 @@ pub fn fullscreen_app(own: HWND) -> bool {
         st == 4 || (matches!(st, 2 | 3) && fullscreen_over(GetForegroundWindow(), own))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Right-clicks on the village. The desktop's own window (above ours) gets
+// every right-click and shows Windows' desktop menu. A low-level mouse hook
+// takes the right-clicks that land on the bare desktop (not on an icon,
+// not on a window) and hands them to the wallpaper: if something of ours is
+// there (someone in the village, a house, a widget, a shelf), it shows its
+// own menu; otherwise the click is sent on again, unhooked, and Windows'
+// menu shows as usual. The hook runs on a thread of its own that does
+// nothing but pump messages, so it never waits on a frame being drawn
+// (every mouse event on the system passes through it).
+
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+static RC_HOOKED: AtomicBool = AtomicBool::new(false);
+static RC_OWN: AtomicUsize = AtomicUsize::new(0);
+static RC_AREA: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+static RC_PENDING: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+static RC_EATEN: AtomicBool = AtomicBool::new(false);
+static RC_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// Start taking right-clicks on the bare desktop (once). `own` is the
+/// wallpaper's window; `area` the screen rect it covers.
+pub fn rclick_hook(own: HWND, area: (i32, i32, i32, i32)) {
+    RC_OWN.store(own as usize, Ordering::Relaxed);
+    if let Ok(mut a) = RC_AREA.lock() {
+        *a = area;
+    }
+    if RC_HOOKED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("right-click hook".into()).spawn(|| unsafe {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        let h = SetWindowsHookExW(WH_MOUSE_LL, Some(rclick_proc), GetModuleHandleW(std::ptr::null()), 0);
+        if h.is_null() {
+            eprintln!("xmas-tui: no right-click hook (SetWindowsHookEx failed): long-press for the menu");
+            RC_HOOKED.store(false, Ordering::SeqCst);
+            return;
+        }
+        RC_HOOK.store(h as isize, Ordering::Relaxed);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+/// The screen rect the wallpaper covers (it moves with the monitor layout).
+pub fn rclick_area(area: (i32, i32, i32, i32)) {
+    if let Ok(mut a) = RC_AREA.lock() {
+        *a = area;
+    }
+}
+
+/// A right-click taken from the desktop, waiting for the wallpaper.
+pub fn take_rclick() -> Option<(i32, i32)> {
+    RC_PENDING.lock().ok()?.take()
+}
+
+/// Send a right-click on to whatever's under the cursor (the desktop's own
+/// menu): injected input, which the hook lets through.
+pub fn pass_rclick() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT};
+    let ev = |flags| INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+    let inputs = [ev(MOUSEEVENTF_RIGHTDOWN), ev(MOUSEEVENTF_RIGHTUP)];
+    unsafe {
+        SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Is (x, y) bare desktop over the wallpaper: the desktop's own windows (or
+/// ours) under it, and no icon there?
+fn rclick_ours(x: i32, y: i32) -> bool {
+    let (ax, ay, aw, ah) = RC_AREA.lock().map(|a| *a).unwrap_or_default();
+    if aw <= 0 || x < ax || y < ay || x >= ax + aw || y >= ay + ah {
+        return false;
+    }
+    let under = unsafe { WindowFromPoint(POINT { x, y }) };
+    if under.is_null() {
+        return false;
+    }
+    let own = RC_OWN.load(Ordering::Relaxed);
+    let desktop = under as usize == own || matches!(class_of(under).as_str(), "SysListView32" | "SHELLDLL_DefView" | "Progman" | "WorkerW");
+    desktop && !over_icon(x, y)
+}
+
+unsafe extern "system" fn rclick_proc(code: i32, wp: usize, lp: isize) -> isize {
+    if code == HC_ACTION as i32 && lp != 0 {
+        let m = &*(lp as *const MSLLHOOKSTRUCT);
+        let injected = m.flags & LLMHF_INJECTED != 0;
+        if !injected {
+            match wp as u32 {
+                WM_RBUTTONDOWN if rclick_ours(m.pt.x, m.pt.y) => {
+                    RC_EATEN.store(true, Ordering::SeqCst);
+                    if let Ok(mut p) = RC_PENDING.lock() {
+                        *p = Some((m.pt.x, m.pt.y));
+                    }
+                    return 1;
+                }
+                WM_RBUTTONUP if RC_EATEN.swap(false, Ordering::SeqCst) => return 1,
+                _ => {}
+            }
+        }
+    }
+    CallNextHookEx(RC_HOOK.load(Ordering::Relaxed) as HHOOK, code, wp, lp)
+}

@@ -34,6 +34,8 @@ struct Gfx {
     raster: Raster,
     fb: Vec<u32>,
     prev: Vec<Cell>,
+    /// Pictures drawn over the cells last frame.
+    pics: Vec<crate::frame::Placed>,
     size: (u32, u32),
     #[cfg_attr(not(windows), allow(dead_code))]
     origin: (i32, i32),
@@ -68,6 +70,10 @@ struct Runner {
     next: Instant,
     cursor: (f64, f64),
     left_down: bool,
+    /// Windows desktop: the left press went to a desktop icon (Explorer's
+    /// drag); where it's let go may be a shelf.
+    #[cfg(windows)]
+    icon_drag: bool,
     pointer: &'static str,
     #[cfg(windows)]
     polled: (bool, bool),
@@ -196,20 +202,37 @@ impl Runner {
     }
 
     fn draw(&mut self) {
+        let desktop = self.opts.desktop;
         let (Some(g), Some(app)) = (self.gfx.as_mut(), self.app.as_mut()) else { return };
         if g.hidden {
             return;
         }
         let (cols, rows) = (app.w, app.h);
-        let cells = app.step();
+        // the grid on screen, for putting a file dragged off a shelf where
+        // it was let go (Windows desktop: the window is at the monitor's origin)
+        app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, g.raster.cw as i32, g.raster.ch as i32));
+        app.step();
+        let (cells, pics) = app.output();
+        let pics = pics.to_vec();
         let (cw, ch) = (g.raster.cw, g.raster.ch);
         let stride = g.size.0 as usize;
         let full = g.force || g.prev.len() != cells.len();
+        // cells under pictures (real icons) are redrawn every frame, so the
+        // picture always goes onto fresh cells; the ones that had pictures
+        // last frame too, so a moved picture leaves nothing behind
+        let mut under = vec![false; cols * rows];
+        for p in pics.iter().chain(g.pics.iter()) {
+            for y in p.y.max(0) as usize..((p.y + p.rows).max(0) as usize).min(rows) {
+                for x in p.x.max(0) as usize..((p.x + p.cols).max(0) as usize).min(cols) {
+                    under[y * cols + x] = true;
+                }
+            }
+        }
         let (mut y0, mut y1) = (usize::MAX, 0usize);
         for cy in 0..rows {
             for cx in 0..cols {
                 let i = cy * cols + cx;
-                if full || cells[i] != g.prev[i] {
+                if full || cells[i] != g.prev[i] || under[i] {
                     g.raster.draw_cell(&mut g.fb, stride, g.offset.0 + cx * cw, g.offset.1 + cy * ch, &cells[i]);
                     y0 = y0.min(cy);
                     y1 = y1.max(cy);
@@ -217,6 +240,10 @@ impl Runner {
             }
         }
         g.prev = cells.to_vec();
+        for p in &pics {
+            p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch);
+        }
+        g.pics = pics;
         let Ok(mut buf) = g.surface.buffer_mut() else { return };
         let (dy0, dy1) = if full || buf.age() != 1 {
             (0, g.size.1 as usize)
@@ -275,11 +302,38 @@ impl Runner {
             }
             // a press on a desktop icon belongs to Explorer (open / drag the
             // icon), not to the scene or a widget under it
-            if p.on_desktop && p.left && !was_l && !crate::winsys::over_icon(p.x, p.y) {
-                self.left_down = true;
-                app.mouse(MouseIn::Down(Btn::Left), cx, cy);
+            if p.on_desktop && p.left && !was_l {
+                if crate::winsys::over_icon(p.x, p.y) {
+                    self.icon_drag = true;
+                } else {
+                    self.left_down = true;
+                    app.mouse(MouseIn::Down(Btn::Left), cx, cy);
+                }
             }
-            // right-click belongs to Windows' desktop menu; the ⚙ opens settings
+            // an icon being dragged over a shelf lights it up
+            if self.icon_drag && p.left {
+                app.icon_drag(Some((cx, cy)));
+            }
+        }
+        // an icon let go over a shelf (and not onto another icon) goes on it
+        if self.icon_drag && !p.left {
+            self.icon_drag = false;
+            app.icon_drag(None);
+            if inside && p.on_desktop && !crate::winsys::over_icon(p.x, p.y) {
+                app.desktop_drop(cx, cy);
+            }
+        }
+        // a right-click the hook took from the desktop: our menu if there's
+        // something of ours there, else Windows' menu after all
+        if let Some((sx, sy)) = crate::winsys::take_rclick() {
+            let rx = ((sx - g.origin.0 - g.offset.0 as i32) as f64 / g.raster.cw as f64).floor() as i32;
+            let ry = ((sy - g.origin.1 - g.offset.1 as i32) as f64 / g.raster.ch as f64).floor() as i32;
+            if !app.right_click(rx, ry) {
+                crate::winsys::pass_rclick();
+            }
+        }
+        if std::mem::take(&mut app.desktop_menu) {
+            crate::winsys::pass_rclick();
         }
         // the release always counts, wherever it happens (e.g. a widget
         // dragged off onto another monitor): clamp it onto the grid, or the
@@ -353,6 +407,7 @@ impl Runner {
         if let Some((x, y, w, h)) = rect {
             // the Resized event this causes re-runs layout()
             crate::winsys::reposition(hwnd, x, y, w, h);
+            crate::winsys::rclick_area((x, y, w, h));
             g.origin = (x, y);
             if rect_changed {
                 self.restart_winfx(Some((x, y, w, h)));
@@ -451,6 +506,10 @@ impl Runner {
                     }
                     eprintln!("xmas-tui: monitor {:?}, window {}x{}\n{}", mon_rect, s.width, s.height, crate::winsys::describe(hwnd));
                     self.logged_at = Some(Instant::now());
+                    // right-clicks on the village (not on icons) get our menu
+                    if self.attached {
+                        crate::winsys::rclick_hook(hwnd, (origin.0, origin.1, s.width as i32, s.height as i32));
+                    }
                     self.geom = (mon_rect, crate::winsys::parent_origin(hwnd));
                 }
             }
@@ -461,9 +520,10 @@ impl Runner {
         self.gfx = Some(Gfx {
             window: window.clone(),
             surface,
-            raster: Raster::new(8, 17),
+            raster: { crate::frame::set_pictures_ok(true); Raster::new(8, 17) },
             fb: vec![],
             prev: vec![],
+            pics: vec![],
             size: (0, 0),
             origin,
             offset: (0, 0),
@@ -766,6 +826,8 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         next: Instant::now(),
         cursor: (-1.0, -1.0),
         left_down: false,
+        #[cfg(windows)]
+        icon_drag: false,
         pointer: "",
         #[cfg(windows)]
         polled: (false, false),

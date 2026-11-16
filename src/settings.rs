@@ -101,6 +101,14 @@ pub enum Act {
     CheckUpdate,
     InstallUpdate,
     DismissUpdate,
+    /// The shelves (Shelves tab): rename shelf i, change its look or icons,
+    /// open its folder, remove it; or make a new one.
+    ShelfName(u8),
+    ShelfStyle(u8, i8),
+    ShelfIcons(u8),
+    ShelfOpen(u8),
+    ShelfRemove(u8),
+    ShelfNew,
 }
 
 #[derive(Default)]
@@ -112,6 +120,8 @@ pub struct Settings {
     pub editing_pet: bool,
     /// The field being edited is the villager's own name.
     pub editing_name: bool,
+    /// The field being edited is shelf i's name.
+    pub editing_shelf: Option<usize>,
     regions: Vec<(Rect, Act)>,
     banner: Vec<(Rect, Act)>,
     pub rect: Option<Rect>,
@@ -152,7 +162,7 @@ pub struct Settings {
     pub help: bool,
 }
 
-pub const TABS: [&str; 5] = ["Scene", "Display", "Sound", "Effects", "Windows"];
+pub const TABS: [&str; 6] = ["Scene", "Display", "Sound", "Effects", "Windows", "Shelves"];
 const LIGHT_COUNTS: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const AMB_ROWS: [&str; 5] = ["Wind", "Snowfall hiss", "Fireplace", "Wind chimes", "Aurora shimmer"];
 const PANEL_W: i32 = 66;
@@ -339,7 +349,31 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             }
             true
         }
-        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen => false,
+        Act::ShelfStyle(i, d) => {
+            let Some(c) = cfg.shelves.get_mut(i as usize) else { return false };
+            let styles = crate::widgets::shelf::STYLES;
+            let k = styles.iter().position(|&x| x == c.style).unwrap_or(0) as i32;
+            c.style = styles[(k + d as i32).rem_euclid(styles.len() as i32) as usize].into();
+            true
+        }
+        Act::ShelfIcons(i) => {
+            let Some(c) = cfg.shelves.get_mut(i as usize) else { return false };
+            c.icons = if c.icons == "real" { "pixel".into() } else { "real".into() };
+            true
+        }
+        Act::ShelfRemove(i) => {
+            if (i as usize) < cfg.shelves.len() {
+                cfg.shelves.remove(i as usize);
+                true
+            } else {
+                false
+            }
+        }
+        Act::ShelfNew => {
+            crate::widgets::shelf::add(cfg, None);
+            true
+        }
+        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) => false,
     }
 }
 
@@ -573,7 +607,8 @@ impl Settings {
             1 => self.tab_display(f, cfg, lx, vx, yy, t),
             2 => self.tab_sound(f, cfg, lx, vx, yy, t),
             3 => self.tab_effects(f, cfg, lx, x + 28, yy, t),
-            _ => self.tab_windows(f, cfg, lx, vx, yy, t),
+            4 => self.tab_windows(f, cfg, lx, vx, yy, t),
+            _ => self.tab_shelves(f, cfg, lx, yy, x + w - 1, t),
         }
 
         let tips = [
@@ -846,6 +881,54 @@ impl Settings {
                 meter_bar(f, vx + 32, yy, m[i], 4);
             }
             yy += 1;
+        }
+    }
+
+    fn tab_shelves(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, right: i32, t: f32) {
+        self.section(f, lx, yy, "SHELVES");
+        yy += 1;
+        let tip = if cfg!(windows) {
+            "Each shows a folder. Drag desktop icons onto one to tidy them away."
+        } else {
+            "Each shows a folder: move files and app shortcuts into it."
+        };
+        f.text(lx, yy, tip, pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        let room = (right - lx - 1).max(10) as usize;
+        for (i, c) in cfg.shelves.iter().enumerate().take(5) {
+            let i8 = i as u8;
+            let editing = self.editing_shelf == Some(i) && self.editing.is_some();
+            let txt = if editing { self.editing.clone().unwrap_or_default() } else { c.name.clone() };
+            self.field(f, Rect { x: lx, y: yy, w: 14, h: 1 }, &txt, editing, Act::ShelfName(i8), t);
+            let style = match c.style.as_str() {
+                "wood" => "wooden",
+                "gift" => "gift box",
+                _ => "frosted",
+            };
+            let mut cx = lx + 16;
+            self.arrow(f, cx, yy, '◂', Act::ShelfStyle(i8, -1));
+            let e = f.text(cx + 2, yy, &format!("{style:<8}"), pal::UI_TITLE, BG, 0.0);
+            self.arrow(f, e + 1, yy, '▸', Act::ShelfStyle(i8, 1));
+            cx = e + 4;
+            let icons = if c.icons == "real" { "real icons" } else { "pixel art" };
+            self.button(f, cx, yy, icons, Act::ShelfIcons(i8));
+            cx += icons.chars().count() as i32 + 3;
+            self.button(f, cx, yy, "open", Act::ShelfOpen(i8));
+            self.button(f, right - 4, yy, "✕", Act::ShelfRemove(i8));
+            yy += 1;
+            let folder = crate::widgets::shelf::folder_of(c);
+            let shown = folder.to_string_lossy().replace(&*crate::widgets::shelf::home_dir().to_string_lossy(), "~");
+            let shown: String = if shown.chars().count() > room { format!("…{}", shown.chars().rev().take(room - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { shown };
+            f.text(lx + 1, yy, &shown, pal::UI_DIM * 0.9, BG, 0.0);
+            yy += 2;
+        }
+        if cfg.shelves.len() > 5 {
+            f.text(lx, yy, &format!("…and {} more (in the config file)", cfg.shelves.len() - 5), pal::UI_DIM, BG, 0.0);
+            yy += 2;
+        }
+        self.button(f, lx, yy, "+ new shelf", Act::ShelfNew);
+        if cfg.shelves.is_empty() {
+            f.text(lx + 15, yy, "(or right-click the desktop: new shelf here)", pal::UI_DIM, BG, 0.0);
         }
     }
 

@@ -28,6 +28,90 @@ pub struct Glyph {
     pub ui: bool,
 }
 
+static PICTURES_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The front-end can show pictures over the cells (the window, kitty, the
+/// exporter); otherwise real icons fall back to pixel art.
+pub fn set_pictures_ok(on: bool) {
+    PICTURES_OK.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn pictures_ok() -> bool {
+    PICTURES_OK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// An image (RGBA, straight alpha), shared and identified for caching.
+pub struct Picture {
+    pub id: u64,
+    pub w: usize,
+    pub h: usize,
+    pub rgba: Vec<u8>,
+}
+
+impl Picture {
+    pub fn new(w: usize, h: usize, rgba: Vec<u8>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Picture { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), w, h, rgba }
+    }
+
+    /// Blit into a 0RGB pixel buffer, scaled to fit `bw`×`bh` at (x, y)
+    /// (centred, aspect kept; bilinear; alpha-blended over what's there).
+    pub fn blit(&self, buf: &mut [u32], stride: usize, x: usize, y: usize, bw: usize, bh: usize) {
+        if self.w == 0 || self.h == 0 || bw == 0 || bh == 0 {
+            return;
+        }
+        let k = (bw as f32 / self.w as f32).min(bh as f32 / self.h as f32);
+        let (dw, dh) = ((self.w as f32 * k).round() as usize, (self.h as f32 * k).round() as usize);
+        let (ox, oy) = (x + (bw - dw) / 2, y + (bh - dh) / 2);
+        let rows = buf.len() / stride.max(1);
+        for dy in 0..dh {
+            let py = oy + dy;
+            if py >= rows {
+                break;
+            }
+            let sy = ((dy as f32 + 0.5) / k - 0.5).clamp(0.0, (self.h - 1) as f32);
+            let (y0, fy) = (sy.floor() as usize, sy.fract());
+            let y1 = (y0 + 1).min(self.h - 1);
+            for dx in 0..dw {
+                let px = ox + dx;
+                if px >= stride {
+                    break;
+                }
+                let sx = ((dx as f32 + 0.5) / k - 0.5).clamp(0.0, (self.w - 1) as f32);
+                let (x0, fx) = (sx.floor() as usize, sx.fract());
+                let x1 = (x0 + 1).min(self.w - 1);
+                let mut c = [0f32; 4];
+                for (xx, yy, wgt) in [(x0, y0, (1.0 - fx) * (1.0 - fy)), (x1, y0, fx * (1.0 - fy)), (x0, y1, (1.0 - fx) * fy), (x1, y1, fx * fy)] {
+                    let i = (yy * self.w + xx) * 4;
+                    let a = self.rgba[i + 3] as f32 / 255.0 * wgt;
+                    c[0] += self.rgba[i] as f32 * a;
+                    c[1] += self.rgba[i + 1] as f32 * a;
+                    c[2] += self.rgba[i + 2] as f32 * a;
+                    c[3] += a;
+                }
+                if c[3] <= 0.004 {
+                    continue;
+                }
+                let o = &mut buf[py * stride + px];
+                let (br, bg, bb) = ((*o >> 16) & 255, (*o >> 8) & 255, *o & 255);
+                let a = c[3].min(1.0);
+                let mix = |src: f32, dst: u32| ((src + dst as f32 * (1.0 - a)).round() as u32).min(255);
+                *o = (mix(c[0], br) << 16) | (mix(c[1], bg) << 8) | mix(c[2], bb);
+            }
+        }
+    }
+}
+
+/// A picture placed over cells.
+#[derive(Clone)]
+pub struct Placed {
+    pub x: i32,
+    pub y: i32,
+    pub cols: i32,
+    pub rows: i32,
+    pub pic: std::sync::Arc<Picture>,
+}
+
 impl Glyph {
     pub fn new(ch: char, fg: Rgb) -> Self {
         Glyph { ch, fg, bg: Bg::Scene, alpha: 1.0, lit: 1.0, ui: false }
@@ -102,6 +186,12 @@ pub struct Frame {
     /// and leaves trees, houses and their lights alone.
     speck: Vec<bool>,
     pub specks: bool,
+    /// Pictures over the cells (real icons on shelves): the window blits
+    /// them, the terminal shows them with kitty's graphics protocol.
+    pub pictures: Vec<Placed>,
+    /// Set once the widgets are drawn: anything drawn after (the settings,
+    /// menus, cards) hides a picture it overlaps.
+    pub cover_pictures: bool,
     /// Light already bloomed (and magnified) by `zoom`, added at compose.
     pre: Vec<Rgb>,
     pre_on: bool,
@@ -134,6 +224,8 @@ impl Frame {
             keep_ui: false,
             speck: vec![],
             specks: false,
+            pictures: vec![],
+            cover_pictures: false,
             pre: vec![],
             pre_on: false,
             glow_near: 1.0,
@@ -171,6 +263,22 @@ impl Frame {
         self.specks = false;
         self.glyph.fill(None);
         self.speck.fill(false);
+        self.pictures.clear();
+        self.cover_pictures = false;
+    }
+
+    /// A picture over `cols`×`rows` cells at (x, y) (the cells under it are
+    /// whatever was drawn there; the picture goes on top).
+    pub fn picture(&mut self, x: i32, y: i32, cols: i32, rows: i32, pic: std::sync::Arc<Picture>) {
+        let (x, y) = (x - self.ox, y + self.oy);
+        if x >= 0 && y >= 0 && x + cols <= self.w as i32 && y + rows <= self.h as i32 {
+            // not over a speech bubble (it stays readable on top)
+            let w = self.w;
+            let ui = (y..y + rows).any(|yy| (x..x + cols).any(|xx| self.glyph[yy as usize * w + xx as usize].is_some_and(|g| g.ui)));
+            if !ui {
+                self.pictures.push(Placed { x, y, cols, rows, pic });
+            }
+        }
     }
 
     // ---------------- pixel layer ----------------
@@ -303,6 +411,9 @@ impl Frame {
             let i = y as usize * self.w + x as usize;
             if self.keep_ui && self.glyph[i].is_some_and(|o| o.ui) {
                 return;
+            }
+            if self.cover_pictures && !self.pictures.is_empty() {
+                self.pictures.retain(|p| x < p.x || x >= p.x + p.cols || y < p.y || y >= p.y + p.rows);
             }
             let g = if self.ui { Glyph { ui: true, ..g } } else { g };
             self.glyph[i] = Some(g);

@@ -22,6 +22,8 @@ mod update;
 mod widgets;
 mod window;
 #[cfg(windows)]
+mod winshelf;
+#[cfg(windows)]
 mod winsys;
 #[cfg(any(target_os = "linux", windows))]
 mod winsnow;
@@ -225,6 +227,12 @@ fn parse_args() -> Args {
 }
 
 fn main() {
+    // Windows: try the desktop-icon calls the shelves use (a test hook)
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--shelf-probe") {
+        winshelf::probe(&std::env::args().skip(2).collect::<Vec<_>>());
+        return;
+    }
     let args = parse_args();
     if std::env::args().any(|a| a == "--update") {
         std::process::exit(update::cli());
@@ -567,7 +575,9 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             Term::pointer(want);
         }
         let (w, h) = (app.w, app.h);
-        let cells = app.step();
+        app.step();
+        let (cells, pics) = app.output();
+        term.pictures = pics.to_vec();
         if let Err(e) = term.draw(cells, w, h) {
             Term::leave();
             shutdown_extras();
@@ -705,6 +715,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             m.draw(&mut frame);
         }
         frame.compose();
+        ex.pictures = frame.pictures.clone();
         if args.raw {
             use std::io::Write;
             let (img, iw, ih) = ex.rgb(&frame.out, w, h);

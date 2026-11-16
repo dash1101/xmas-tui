@@ -4,6 +4,7 @@
 //! darken the scene behind them.
 
 pub mod data;
+pub mod shelf;
 pub mod viz;
 #[cfg(windows)]
 pub mod win;
@@ -23,8 +24,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const PANEL: Bg = Bg::Mix(pal::UI_PANEL, 0.80);
-/// Clock, system, music, weather, map, visualizer.
-pub const COUNT: usize = 6;
+/// Clock, system, music, weather, map, visualizer; the shelves come after.
+pub const BUILTIN: usize = 6;
+
+/// Widget `i`'s saved position (fractions of the screen).
+pub fn pos_of(cfg: &Config, i: usize) -> Option<[f32; 2]> {
+    if i < BUILTIN {
+        cfg.layout.get(i)
+    } else {
+        cfg.shelves.get(i - BUILTIN).and_then(|s| s.pos)
+    }
+}
+
+pub fn set_pos(cfg: &mut Config, i: usize, v: Option<[f32; 2]>) {
+    if i < BUILTIN {
+        cfg.layout.set(i, v);
+    } else if let Some(s) = cfg.shelves.get_mut(i - BUILTIN) {
+        s.pos = v;
+    }
+}
+
+/// A shelf's scroll and pointer state (not saved).
+#[derive(Clone, Copy, Default)]
+pub struct ShelfUi {
+    pub scroll: usize,
+    pub hover: Option<usize>,
+    pub selected: Option<usize>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -71,8 +97,17 @@ pub struct Widgets {
     viz: Option<Arc<Mutex<viz::Spectrum>>>,
     viz_gen: Arc<AtomicU64>,
     bars: VizBars,
+    shelves: Option<shelf::Worker>,
+    shelf_folders: Vec<std::path::PathBuf>,
+    pub shelf_ui: Vec<ShelfUi>,
+    /// An item being dragged off a shelf: (shelf, item), and where the
+    /// pointer is.
+    pub lift: Option<(usize, usize)>,
+    pub lift_at: (i32, i32),
+    /// Windows desktop: a desktop icon being dragged, at this cell.
+    pub ext_drag: Option<(i32, i32)>,
     /// Where each widget was drawn last frame (for hit-testing).
-    pub rects: [Option<Rect>; COUNT],
+    pub rects: Vec<Option<Rect>>,
     /// The village map's data for this frame (from the scene).
     pub map: Option<crate::scene::MiniMap>,
     pub hover: Option<usize>,
@@ -92,7 +127,13 @@ impl Widgets {
             viz: None,
             viz_gen: Arc::new(AtomicU64::new(0)),
             bars: VizBars::default(),
-            rects: [None; COUNT],
+            shelves: None,
+            shelf_folders: vec![],
+            shelf_ui: vec![],
+            lift: None,
+            lift_at: (0, 0),
+            ext_drag: None,
+            rects: vec![None; BUILTIN],
             map: None,
             hover: None,
             dragging: None,
@@ -146,6 +187,76 @@ impl Widgets {
             self.viz_gen.fetch_add(1, Ordering::SeqCst);
             self.bars = VizBars::default();
         }
+        // the shelves' worker scans their folders
+        let folders: Vec<std::path::PathBuf> = self.cfg.shelves.iter().map(shelf::folder_of).collect();
+        if !folders.is_empty() && self.shelves.is_none() {
+            self.shelves = Some(shelf::spawn());
+            self.shelf_folders.clear();
+        }
+        if folders != self.shelf_folders {
+            if let Some(w) = &self.shelves {
+                let _ = w.tx.send(shelf::Cmd::Folders(folders.clone()));
+            }
+            self.shelf_folders = folders;
+        }
+        self.shelf_ui.resize(self.cfg.shelves.len(), ShelfUi::default());
+    }
+
+    /// How many widgets there are (the built-in ones, then the shelves).
+    pub fn count(&self) -> usize {
+        BUILTIN + self.cfg.shelves.len()
+    }
+
+    /// What's on shelf `s` (once its folder has been scanned).
+    pub fn contents(&self, s: usize) -> Option<shelf::Contents> {
+        let folder = self.shelf_folders.get(s)?;
+        let w = self.shelves.as_ref()?;
+        let d = w.data.lock().ok()?;
+        d.get(s).filter(|c| &c.folder == folder).cloned()
+    }
+
+    pub fn shelf_folder(&self, s: usize) -> Option<std::path::PathBuf> {
+        self.shelf_folders.get(s).cloned()
+    }
+
+    pub fn item_path(&self, s: usize, k: usize) -> Option<std::path::PathBuf> {
+        self.contents(s)?.items.get(k).map(|it| it.path.clone())
+    }
+
+    pub fn send(&self, cmd: shelf::Cmd) {
+        if let Some(w) = &self.shelves {
+            let _ = w.tx.send(cmd);
+        }
+    }
+
+    /// The shelf under (x, y), and what on it.
+    pub fn shelf_hit(&self, x: i32, y: i32) -> Option<(usize, shelf::Hit)> {
+        (0..self.cfg.shelves.len()).rev().find_map(|s| {
+            let r = self.rects.get(BUILTIN + s).copied().flatten()?;
+            let n = self.contents(s).map(|c| c.items.len()).unwrap_or(0);
+            let ui = self.shelf_ui.get(s).copied().unwrap_or_default();
+            shelf::hit(r, self.cfg.shelves[s].rolled, n, ui.scroll, x, y).map(|h| (s, h))
+        })
+    }
+
+    /// Point at an item (or nothing) on the shelves.
+    pub fn shelf_hover(&mut self, x: i32, y: i32) {
+        let hit = self.shelf_hit(x, y);
+        for (s, ui) in self.shelf_ui.iter_mut().enumerate() {
+            ui.hover = match hit {
+                Some((hs, shelf::Hit::Item(k))) if hs == s => Some(k),
+                _ => None,
+            };
+        }
+    }
+
+    /// Scroll shelf `s` by `d` rows.
+    pub fn shelf_scroll(&mut self, s: usize, d: i32) {
+        let n = self.contents(s).map(|c| c.items.len()).unwrap_or(0);
+        let Some(r) = self.rects.get(BUILTIN + s).copied().flatten() else { return };
+        if let Some(ui) = self.shelf_ui.get_mut(s) {
+            ui.scroll = (ui.scroll as i32 + d).clamp(0, shelf::max_scroll(r, n) as i32) as usize;
+        }
     }
 
     /// Adopt a new config (from the settings panel or a file reload).
@@ -156,6 +267,9 @@ impl Widgets {
     }
 
     pub fn enabled(&self, i: usize) -> bool {
+        if i >= BUILTIN {
+            return i - BUILTIN < self.cfg.shelves.len();
+        }
         match i {
             0 => self.cfg.clock.enabled,
             1 => self.cfg.widgets.system,
@@ -172,6 +286,10 @@ impl Widgets {
     }
 
     pub fn size(&self, i: usize, w: i32) -> (i32, i32) {
+        if let Some(s) = i.checked_sub(BUILTIN).and_then(|j| self.cfg.shelves.get(j)) {
+            let sw = s.size[0].clamp(shelf::MIN_W, w.max(shelf::MIN_W));
+            return (sw, if s.rolled { 1 } else { s.size[1].clamp(shelf::MIN_H, 60) });
+        }
         match i {
             0 => (66, 11),
             1 => (54, 9),
@@ -197,33 +315,53 @@ impl Widgets {
                 ((w - mw) / 2, h - mh - 3)
             }
             // under the weather
-            _ => (w - 63, 18),
+            5 => (w - 63, 18),
+            // shelves: in the middle, each a little below the last
+            _ => {
+                let (sw, _) = self.size(i, w);
+                let j = (i - BUILTIN) as i32;
+                ((w - sw) / 2 + 3 * j, h / 3 + 2 * j)
+            }
         }
     }
 
     /// Current rect for widget i on a w x h grid, clamped on-screen.
     pub fn rect(&self, i: usize, w: i32, h: i32) -> Rect {
         let (sw, sh) = self.size(i, w);
-        let (x, y) = match self.cfg.layout.get(i) {
+        let (x, y) = match pos_of(&self.cfg, i) {
             Some([fx, fy]) => ((fx * w as f32).round() as i32, (fy * h as f32).round() as i32),
             None => self.default_pos(i, w, h),
         };
         Rect { x: x.clamp(0, (w - sw).max(0)), y: y.clamp(0, (h - sh).max(0)), w: sw, h: sh }
     }
 
-    /// Resize the map so its bottom-right corner is at (x, y).
-    pub fn resize_map(&mut self, x: i32, y: i32, w: i32, h: i32) {
-        let r = self.rect(4, w, h);
-        let nw = (x - r.x + 1).clamp(24, (w - r.x).max(24));
-        let nh = (y - r.y + 1).clamp(3, (h - r.y).clamp(3, 20));
-        self.cfg.layout.map_size = Some([nw, nh]);
-        // keep its top-left where it was
-        self.cfg.layout.map = Some([r.x as f32 / w as f32, r.y as f32 / h as f32]);
+    /// Resize widget `i` (the map or a shelf) so its bottom-right corner is
+    /// at (x, y), keeping its top-left where it was.
+    pub fn resize(&mut self, i: usize, x: i32, y: i32, w: i32, h: i32) {
+        let r = self.rect(i, w, h);
+        let keep = Some([r.x as f32 / w as f32, r.y as f32 / h as f32]);
+        if i == 4 {
+            let nw = (x - r.x + 1).clamp(24, (w - r.x).max(24));
+            let nh = (y - r.y + 1).clamp(3, (h - r.y).clamp(3, 20));
+            self.cfg.layout.map_size = Some([nw, nh]);
+            self.cfg.layout.map = keep;
+        } else if let Some(s) = i.checked_sub(BUILTIN).and_then(|j| self.cfg.shelves.get_mut(j)) {
+            let nw = (x - r.x + 1).clamp(shelf::MIN_W, (w - r.x).max(shelf::MIN_W));
+            let nh = (y - r.y + 1).clamp(shelf::MIN_H, (h - r.y).max(shelf::MIN_H));
+            s.size = [nw, nh];
+            s.pos = keep;
+        }
     }
 
-    /// Is (x, y) the map's resize grip (its bottom-right corner)?
-    pub fn on_grip(&self, x: i32, y: i32) -> bool {
-        self.rects[4].map(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1).unwrap_or(false)
+    /// The widget whose resize grip (its bottom-right corner) is at (x, y).
+    pub fn on_grip(&self, x: i32, y: i32) -> Option<usize> {
+        if self.rects[4].is_some_and(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1) {
+            return Some(4);
+        }
+        match self.shelf_hit(x, y) {
+            Some((s, shelf::Hit::Grip)) if !self.cfg.shelves[s].rolled => Some(BUILTIN + s),
+            _ => None,
+        }
     }
 
     /// The world column under (x, y) on the map, if it's on the map.
@@ -241,12 +379,12 @@ impl Widgets {
         let (sw, sh) = self.size(i, w);
         let x = x.clamp(0, (w - sw).max(0));
         let y = y.clamp(0, (h - sh).max(0));
-        self.cfg.layout.set(i, Some([x as f32 / w as f32, y as f32 / h as f32]));
+        set_pos(&mut self.cfg, i, Some([x as f32 / w as f32, y as f32 / h as f32]));
     }
 
     /// Top-most widget under a cell.
     pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        (0..COUNT).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
+        (0..self.rects.len()).rev().find(|&i| self.rects[i].map(|r| r.contains(x, y)).unwrap_or(false))
     }
 
     pub fn draw(&mut self, f: &mut Frame, t: f32) {
@@ -254,15 +392,17 @@ impl Widgets {
         f.keep_ui = true;
         self.draw_all(f, t);
         f.keep_ui = false;
+        // what's drawn after (settings, menus) hides real icons under it
+        f.cover_pictures = true;
     }
 
     fn draw_all(&mut self, f: &mut Frame, t: f32) {
-        self.rects = [None; COUNT];
+        self.rects = vec![None; self.count()];
         if f.w < 150 || f.h < 30 {
             return;
         }
         let (w, h) = (f.w as i32, f.h as i32);
-        for i in 0..COUNT {
+        for i in 0..self.count() {
             if !self.enabled(i) {
                 continue;
             }
@@ -289,6 +429,25 @@ impl Widgets {
                         draw_map(f, r, m, t);
                     }
                 }
+                _ if i >= BUILTIN => {
+                    let s = i - BUILTIN;
+                    let contents = self.contents(s);
+                    let ui = self.shelf_ui.get(s).copied().unwrap_or_default();
+                    let lifted = self.lift.filter(|l| l.0 == s).map(|l| l.1);
+                    let target = (self.lift.is_some_and(|l| l.0 != s) && r.contains(self.lift_at.0, self.lift_at.1)) || self.ext_drag.is_some_and(|(x, y)| r.contains(x, y));
+                    let view = shelf::View {
+                        cfg: &self.cfg.shelves[s],
+                        contents: contents.as_ref(),
+                        scroll: ui.scroll,
+                        hover: ui.hover,
+                        selected: ui.selected,
+                        lifted,
+                        target,
+                        locked: self.cfg.layout.locked,
+                        seed: s as u32 * 7919 + 17,
+                    };
+                    shelf::draw(f, r, &view, t);
+                }
                 _ => {
                     let s = self.viz.as_ref().and_then(|v| {
                         let mut g = v.lock().ok()?;
@@ -303,6 +462,25 @@ impl Widgets {
             let active = self.dragging == Some(i) || (self.dragging.is_none() && self.hover == Some(i));
             if active && !self.cfg.layout.locked {
                 draw_handles(f, r, self.dragging == Some(i), t);
+            }
+        }
+        // an item being carried off a shelf, under the pointer
+        if let Some((s, k)) = self.lift {
+            if let Some(it) = self.contents(s).and_then(|c| c.items.get(k).cloned()) {
+                let (x, y) = self.lift_at;
+                let bg = Bg::Mix(pal::UI_PANEL, 0.7);
+                shelf::draw_pixels(f, x - 4, y - 2, &it.pixels, bg, 1.0);
+                let label = clip(&it.name, 12);
+                f.text(x - label.chars().count() as i32 / 2, y + 2, &label, Rgb::hex(0xfff1d6), bg, 0.0);
+                let onto = match self.shelf_hit(x, y) {
+                    Some((t, _)) if t == s => None,
+                    Some((t, _)) => Some(format!("→ {}", self.cfg.shelves[t].name)),
+                    None if self.hit(x, y).is_some() => None,
+                    None => Some("→ desktop".to_string()),
+                };
+                if let Some(o) = onto {
+                    f.text(x - o.chars().count() as i32 / 2, y + 3, &o, Rgb::hex(0xffd36b), bg, 0.0);
+                }
             }
         }
     }

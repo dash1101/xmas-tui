@@ -8,11 +8,14 @@ use std::path::Path;
 
 pub struct Exporter {
     raster: Raster,
+    /// Pictures to draw over the cells (real icons), as the window does.
+    pub pictures: Vec<crate::frame::Placed>,
 }
 
 impl Exporter {
     pub fn new() -> Self {
-        Exporter { raster: Raster::new(9, 19) }
+        crate::frame::set_pictures_ok(true);
+        Exporter { raster: Raster::new(9, 19), pictures: vec![] }
     }
 
     /// The frame as packed RGB bytes: (pixels, width, height).
@@ -24,6 +27,9 @@ impl Exporter {
             for cx in 0..w {
                 self.raster.draw_cell(&mut buf, iw, cx * cw, cy * ch, &cells[cy * w + cx]);
             }
+        }
+        for p in &self.pictures {
+            p.pic.blit(&mut buf, iw, p.x as usize * cw, p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch);
         }
         let mut img = Vec::with_capacity(iw * ih * 3);
         for p in buf {

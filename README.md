@@ -46,6 +46,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
 - **Widgets**: a big clock with a Christmas countdown, system stats, now playing, weather, a village map and an
   audio visualizer.
+- **Shelves**: tidy desktop shortcuts and files onto frosted panels, wooden shelves or gift boxes, with their real
+  icons or as pixel art.
 - **Synthesized music and sound**: no audio files, all generated live, with live level meters.
 - **Snow on open windows**: it piles up on window tops and the taskbar, with string lights.
 - **Installers and updates**: a per-user Windows setup, a `.deb`, a no-sudo Linux installer, and built-in updates.
@@ -156,6 +158,25 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   of snow that settles back down, standing on a strip of ice that reflects them. **kHz labels** write each bar's
   frequency on the ice. It listens to the default audio output (the sink's monitor through `pw-record` or `parec`
   on Linux, WASAPI loopback on Windows), only while it's on; nothing is recorded or sent anywhere.
+- Shelves: see below.
+
+### Shelves
+A shelf shows a folder's files and shortcuts, so the desktop can stay tidy and everything still has a place. What's
+on a shelf is an ordinary file in its folder (`Documents/Desktop Shelves/<name>`, or any folder picked), so it can
+always be found in Explorer or Dolphin.
+- **Making one:** right-click (or press and hold) on the bare scene → *new shelf here*, or Settings → **Shelves** →
+  *+ new shelf*. That tab also renames shelves (the folder is renamed with them) and changes their look and icons.
+- **Using it:** double-click an item to open it; long-press or right-click it for *open*, *show in its folder* and
+  *take off the shelf*. Drag an item onto another shelf to move it there, or off the shelves to put it back on the
+  desktop (on Windows, where it's let go). Scroll with the wheel or the ▲ ▼ arrows; click the title to roll the
+  shelf up to one line; drag the ◢ corner to resize it.
+- **On Windows:** drag desktop icons straight onto a shelf to put them away (the shortcuts on the shared "all
+  users" desktop need admin rights to move, so they stay). Moves go through Explorer, so Ctrl+Z on the desktop
+  undoes them.
+- **Looks:** a frosted panel with snow piled on top (the default), a wooden shelf with snow on its planks, or a
+  gift box with a gold ribbon and a bow.
+- **Icons:** each item's real icon, or the same icon redrawn as chunky pixel art. Linux uses an app's PNG icon
+  where it has one, and a little drawing of the file type otherwise. Real icons need kitty (or the window).
 
 ## 🖱️ Interacting in detail
 **Walking around** (click the desktop first so it has keyboard focus)
@@ -213,8 +234,10 @@ Click the bare desktop first so the wallpaper has keyboard focus.
   pockets; it shows at the bottom left): E then gives it to whoever's in front, or uses it with nobody there.
 - **People know the villager's name** once one is set (Scene tab → Your name): they say it when they see the
   villager again, and word gets round.
-- **Right-click** (or **press and hold** the left button for a moment, which works everywhere, including the Windows
-  desktop) shows what can be done with whatever's under the pointer, and the villager walks over to do it:
+- **Right-click** (or **press and hold** the left button for a moment, which works everywhere) shows what can be
+  done with whatever's under the pointer, and the villager walks over to do it. On the Windows desktop, right-click
+  works on people, animals, houses, the station, the cabin, widgets and shelves; on open ground, in the sky and on
+  desktop icons it's still Windows' own desktop menu (our menus have a *Windows desktop menu…* item too):
   - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
   - **the villager:** the stats card and Christmas list, or the pockets;
   - **people:** say hello, invite along or say goodbye, give a gingerbread or candy cane, throw a snowball;
@@ -401,7 +424,8 @@ The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) 
 - **How it runs:** it draws the same grid itself, with fonts bundled inside the `.exe`, and attaches behind the
   desktop icons on the main monitor. It pauses during fullscreen games.
 - **Controls:** the **⚙ settings** button (top right) opens settings, which include **Run at startup** and **Quit**.
-  Right-click on the desktop belongs to Windows, so **press and hold** the left button instead: the same menus open.
+  **Right-click** on something in the village (or on a widget or shelf) opens its menu; on open ground, in the sky
+  and on icons it's Windows' desktop menu, as usual. **Press and hold** the left button opens our menu anywhere.
   Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
   scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
 - **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons
@@ -468,14 +492,15 @@ or off.
 <img src="docs/settings.png" align="right" width="360" alt="The settings panel, Scene tab: snowfall, wind, glow, surprises, visitors, sleigh and frame rate">
 
 The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
-window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has five tabs:
+window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has six tabs:
 - **Scene:** snow, wind, glow, surprises, visitors and the **most out at once**, sleigh, walk speed, which side of the road traffic keeps to,
   **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
   rate, **speech bubbles** (how long they stay up; longer lines always stay longer), **chattiness** (how often people
   stop to talk and remark on things), aurora, bushes, the villager and **their name**, and the villager's **pet**
   (dog, cat, bunny or none, its colour and its name).
-- **Display:** clock, widgets (including the map, and the visualizer with its kHz labels), weather city and units, widget layout, **resolution** (0.5× to
-  2× in 0.05 steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on
+- **Display:** clock, widgets (including the map, and the visualizer with its kHz labels), weather city and units,
+  widget layout, **resolution** (0.5× to 2× in 0.05 steps: more detail, with everything the same size; Ctrl
+  Shift +/-), **zoom** (1× to 3×, centred on
   the villager; Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger
   size, speech bubbles kept readable), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
   rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the keyboard, and **back
@@ -491,6 +516,8 @@ window, which shows the live sound levels too) can be dragged anywhere by its ti
   - **falling snow in front of windows** on/off (piles still grow when it's off), and cursor sweeping
   - snow on the taskbar, with its own pile height
   - light colours (multicolour, warm white, icy blue, candy cane), how many windows get lights, and brightness
+- **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
+  and *+ new shelf*.
 
 ## 🔁 Staying on
 It runs as a systemd user service (`xmas-tui.service`) that starts with the graphical session.
