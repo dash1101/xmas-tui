@@ -526,6 +526,15 @@ impl Critters {
         id
     }
 
+    /// Someone arriving at column `x` (off the train), if there's room under
+    /// "Most at once".
+    pub fn arrive(&mut self, kind: Kind, x: f32, t: f32) {
+        if self.room() > 0 && self.mult > 0.0 {
+            let y = (self.lo_at(x) + 2.0).min((self.h - 1) as f32);
+            self.spawn(kind, t, Some((x, y)));
+        }
+    }
+
     /// For previews: someone already on screen.
     /// `x`: world column.
     pub fn spawn_demo(&mut self, kind: Kind, x: f32, t: f32) {
@@ -1668,8 +1677,12 @@ impl Critters {
         Some(Hidden(self.list.remove(i)))
     }
 
-    /// …and back out again at column `x`, row `y`.
+    /// …and back out again at column `x`, row `y` (unless the village has
+    /// filled up meanwhile: then they stay in).
     pub fn put_back(&mut self, h: Hidden, x: f32, y: f32, t: f32) {
+        if self.room() == 0 {
+            return;
+        }
         let mut c = h.0;
         c.x = x - c.centre() + c.x;
         c.y = y;
@@ -2413,6 +2426,21 @@ mod tests {
             t += 1.0 / 30.0;
         }
         t
+    }
+
+    #[test]
+    fn train_passengers_respect_most_at_once() {
+        let (ctx, mut d, mut l) = world();
+        let mut c = Critters::new(&ctx, 1, 0.25, false, &[]);
+        c.set_max(3);
+        let mut t = 0.0;
+        for _ in 0..20 {
+            for k in 0..4 {
+                c.arrive(Kind::Walker, 60.0 + k as f32 * 5.0, t);
+            }
+            t = run(&mut c, &ctx, &mut d, &mut l, t, 0.5);
+            assert!(c.list.len() <= 3, "{} out with a cap of 3", c.list.len());
+        }
     }
 
     #[test]

@@ -44,11 +44,15 @@ pub struct ShelfCfg {
     pub size: [i32; 2],
     /// Rolled up to its title.
     pub rolled: bool,
+    /// Items in the order they were arranged in (file names); others
+    /// follow, by name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
 }
 
 impl Default for ShelfCfg {
     fn default() -> Self {
-        ShelfCfg { name: "Shelf".into(), folder: String::new(), style: "frosted".into(), icons: "pixel".into(), pos: None, size: [47, 15], rolled: false }
+        ShelfCfg { name: "Shelf".into(), folder: String::new(), style: "frosted".into(), icons: "pixel".into(), pos: None, size: [47, 15], rolled: false, order: vec![] }
     }
 }
 

@@ -83,7 +83,8 @@ public class SettingsActivity extends Activity {
         toggle("Speech bubbles", "bubbles", true);
         choice("Time of day", "time", new String[] {"auto", "night", "dusk", "day", "dawn"}, "auto");
         slider("Snowfall", "snow", 0, 200, 100, "%");
-        choice("Detail", "detail_name", new String[] {"normal", "chunky", "fine"}, "normal");
+        slider("Size", "size", 50, 200, sizeNow(), "%");
+        col.addView(note("Bigger or smaller village. It stays the same size whichever way the screen is turned: sideways just shows more of it."));
 
         section("FRAME RATE");
         choiceInt("Frames per second", "fps", new int[] {10, 15, 20, 24, 30, 45, 60}, 24);
@@ -97,6 +98,12 @@ public class SettingsActivity extends Activity {
         slider("Width", "dock_width", 30, 100, 92, "%");
         slider("Snow pile", "dock_pile", 0, 14, 6, "px");
         col.addView(note("Every launcher puts its dock somewhere different: slide the shelf to sit under yours. Snow lands on it and piles up; tap it to knock the snow off."));
+    }
+
+    /** The size setting, or what the older "detail" one comes to. */
+    private int sizeNow() {
+        int legacy = Math.round(155f * 100f / Math.max(60, prefs.getInt("detail", 155)));
+        return Math.max(50, Math.min(200, prefs.getInt("size", legacy)));
     }
 
     private void setWallpaper() {
@@ -200,12 +207,7 @@ public class SettingsActivity extends Activity {
         sp.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                SharedPreferences.Editor ed = prefs.edit().putString(key, items[pos]);
-                if ("detail_name".equals(key)) {
-                    int across = "chunky".equals(items[pos]) ? 125 : ("fine".equals(items[pos]) ? 200 : 155);
-                    ed.putInt("detail", across);
-                }
-                ed.apply();
+                prefs.edit().putString(key, items[pos]).apply();
             }
 
             @Override

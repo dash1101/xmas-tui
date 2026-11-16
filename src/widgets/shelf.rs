@@ -188,6 +188,9 @@ fn make_item(path: &Path, file: &str, dir: bool, stamp: (Option<SystemTime>, u64
             }
             icon = i.and_then(|i| find_icon(&i)).map(Arc::new);
         }
+    } else {
+        // pictures, music with cover art, album folders with a cover
+        icon = super::art::thumb_or_folder(path, dir).map(Arc::new);
     }
     let pixels = match &icon {
         Some(p) => pixel_art(p),
@@ -413,6 +416,39 @@ fn desktop_drop(to: &Path) {
     }
 }
 
+/// The system's folder picker (blocks until it's answered; None when
+/// cancelled, or when there's no picker to be had).
+pub fn pick_folder(start: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        let _ = start;
+        None
+    }
+    #[cfg(all(not(test), windows))]
+    {
+        crate::winshelf::com_init();
+        crate::winshelf::pick_folder(start)
+    }
+    #[cfg(all(not(test), not(windows)))]
+    {
+        use std::process::Command;
+        let s = start.to_string_lossy().to_string();
+        let tries: [(&str, Vec<String>); 2] = [
+            ("kdialog", vec!["--title".into(), "A folder for the shelf".into(), "--getexistingdirectory".into(), s.clone()]),
+            ("zenity", vec!["--file-selection".into(), "--directory".into(), "--title=A folder for the shelf".into(), format!("--filename={s}/")]),
+        ];
+        for (cmd, args) in tries {
+            if !which(cmd) {
+                continue;
+            }
+            let out = Command::new(cmd).args(&args).output().ok()?;
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return (out.status.success() && !p.is_empty()).then(|| PathBuf::from(p));
+        }
+        None
+    }
+}
+
 /// Open an item the way the desktop would.
 pub fn open(path: &Path) {
     #[cfg(windows)]
@@ -576,20 +612,31 @@ pub enum MenuAct {
     Icons(usize),
     Roll(usize),
     Remove(usize),
-    /// A new shelf with its top-left at this cell.
+    /// Pick shelf s's folder with the system's folder picker.
+    PickFolder(usize),
+    /// A new shelf with its top-left at this cell (in a folder of its own,
+    /// or one picked).
     New(i32, i32),
+    NewFrom(i32, i32),
 }
 
 /// Where a press on a shelf landed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hit {
+    /// The title row (drag: move; click: roll up / down).
     Title,
-    Grip,
-    Up,
-    Down,
+    /// An edge or corner to resize by: a mix of the EDGE_* bits.
+    Edge(u8),
+    /// The scrollbar, this many rows down it.
+    Bar(i32),
     Item(usize),
     Body,
 }
+
+pub const EDGE_L: u8 = 1;
+pub const EDGE_R: u8 = 2;
+pub const EDGE_T: u8 = 4;
+pub const EDGE_B: u8 = 8;
 
 /// The item grid inside a shelf: top-left of the first slot, columns, and
 /// rows that fit.
@@ -608,22 +655,60 @@ pub fn max_scroll(r: Rect, n: usize) -> usize {
     need.saturating_sub(rows as usize)
 }
 
+/// The scrollbar's column, and its length (rows), for a shelf that needs one.
+pub fn bar(r: Rect, n: usize) -> Option<(i32, i32)> {
+    (max_scroll(r, n) > 0 && r.h >= 5).then_some((r.x + r.w - 2, r.h - 2))
+}
+
+/// The scrollbar's thumb: first row (from the bar's top) and length.
+pub fn thumb(r: Rect, n: usize, scroll: usize) -> (i32, i32) {
+    let (_, _, cols, rows) = grid(r);
+    let total = n.div_ceil(cols as usize).max(1) as i32;
+    let len = r.h - 2;
+    let size = (len * rows / total).clamp(1, len);
+    let max = max_scroll(r, n).max(1) as i32;
+    ((len - size) * scroll.min(max as usize) as i32 / max, size)
+}
+
+/// The scroll position for a press `row` rows down the bar (centring the thumb there).
+pub fn scroll_at(r: Rect, n: usize, row: i32) -> usize {
+    let (_, size) = thumb(r, n, 0);
+    let len = r.h - 2;
+    let max = max_scroll(r, n) as i32;
+    if len <= size {
+        return 0;
+    }
+    (((row - size / 2) as f32 / (len - size) as f32 * max as f32).round() as i32).clamp(0, max) as usize
+}
+
+/// The slot an item dropped at (x, y) goes to (for rearranging), 0..n-1.
+pub fn slot_at(r: Rect, n: usize, scroll: usize, x: i32, y: i32) -> usize {
+    let (x0, y0, cols, rows) = grid(r);
+    let col = ((x - x0).max(0) / SLOT_W).min(cols - 1);
+    let row = ((y - y0).max(0) / SLOT_H).min(rows - 1);
+    ((row as usize + scroll) * cols as usize + col as usize).min(n.saturating_sub(1))
+}
+
 pub fn hit(r: Rect, rolled: bool, n: usize, scroll: usize, x: i32, y: i32) -> Option<Hit> {
     if !r.contains(x, y) {
         return None;
     }
+    let (left, right, bottom) = (x == r.x, x == r.x + r.w - 1, y == r.y + r.h - 1);
     if y == r.y {
-        if x >= r.x + r.w - 3 && scroll > 0 && !rolled {
-            return Some(Hit::Up);
-        }
-        return Some(Hit::Title);
+        // the corners of the title row resize; the rest moves / rolls up
+        return Some(match (rolled, left, right) {
+            (false, true, _) => Hit::Edge(EDGE_L | EDGE_T),
+            (false, _, true) => Hit::Edge(EDGE_R | EDGE_T),
+            _ => Hit::Title,
+        });
     }
-    if y == r.y + r.h - 1 {
-        if x >= r.x + r.w - 2 {
-            return Some(Hit::Grip);
-        }
-        if x >= r.x + r.w - 6 && scroll < max_scroll(r, n) {
-            return Some(Hit::Down);
+    let e = (left as u8 * EDGE_L) | (right as u8 * EDGE_R) | (bottom as u8 * EDGE_B);
+    if e != 0 {
+        return Some(Hit::Edge(e));
+    }
+    if let Some((bx, _)) = bar(r, n) {
+        if x == bx {
+            return Some(Hit::Bar(y - r.y - 1));
         }
     }
     let (x0, y0, cols, rows) = grid(r);
@@ -648,6 +733,8 @@ pub struct View<'a> {
     pub lifted: Option<usize>,
     /// Something's being dragged over the shelf (it lights up).
     pub target: bool,
+    /// An item of its own being dragged about: where it would go.
+    pub insert: Option<usize>,
     pub locked: bool,
     pub seed: u32,
 }
@@ -708,13 +795,27 @@ pub fn draw(f: &mut Frame, r: Rect, v: &View, t: f32) {
         return;
     }
     let scroll = v.scroll.min(max_scroll(r, n));
-    if scroll > 0 {
-        f.text(r.x + r.w - 3, r.y, "▲", GOLD, title_bg, 0.0);
-    } else if !count.is_empty() && r.w > 16 {
+    if !count.is_empty() && r.w > 16 {
         f.text(r.x + r.w - 2 - count.chars().count() as i32, r.y, &count, pal::UI_DIM, title_bg, 0.0);
     }
-    if scroll < max_scroll(r, n) {
-        f.text(r.x + r.w - 6, r.y + r.h - 1, "▼", GOLD, title_bg, 0.0);
+    // more than fits: a scrollbar inside the right edge, and which items
+    // are showing on the bottom edge
+    if let Some((bx, len)) = bar(r, n) {
+        let (t0, size) = thumb(r, n, scroll);
+        for k in 0..len {
+            let on = k >= t0 && k < t0 + size;
+            let g = if on { Glyph::new('┃', GOLD) } else { Glyph::new('│', pal::UI_DIM * 0.6) };
+            f.put_g(bx, r.y + 1 + k, g.bg(body).lit(0.0));
+        }
+        let (_, _, cols, rows) = grid(r);
+        let first = scroll * cols as usize + 1;
+        let last = ((scroll + rows as usize) * cols as usize).min(n);
+        let range = format!(" {first}–{last} of {n} ");
+        let rx = r.x + r.w - 3 - range.chars().count() as i32;
+        if rx > r.x + 2 {
+            let bottom_bg = if style == "wood" { Bg::Solid(WOOD_DARK) } else { body };
+            f.text(rx, r.y + r.h - 1, &range, pal::UI_DIM * 1.2, bottom_bg, 0.0);
+        }
     }
     if !v.locked {
         f.put_g(r.x + r.w - 1, r.y + r.h - 1, Glyph::new('◢', GOLD * 0.8).bg(title_bg).lit(0.0));
@@ -759,6 +860,23 @@ pub fn draw(f: &mut Frame, r: Rect, v: &View, t: f32) {
         let lx = sx + (SLOT_W - 1 - label.chars().count() as i32) / 2;
         let fg = if sel { GOLD } else if hot { Rgb::hex(0xfff1d6) } else { Rgb::hex(0xc8d0e4) * dim };
         f.text(lx, sy + 4, &label, fg, slot_bg, 0.0);
+    }
+    if let Some(k) = v.insert {
+        draw_insert(f, r, n, scroll, k);
+    }
+}
+
+/// Where a dragged item would land among its own shelf's slots: a gold
+/// bar at the left of that slot.
+pub fn draw_insert(f: &mut Frame, r: Rect, n: usize, scroll: usize, k: usize) {
+    let (x0, y0, cols, rows) = grid(r);
+    let j = k as i32 - scroll as i32 * cols;
+    if j < 0 || j >= cols * rows || k >= n {
+        return;
+    }
+    let (sx, sy) = (x0 + (j % cols) * SLOT_W, y0 + (j / cols) * SLOT_H);
+    for yy in sy..sy + SLOT_H - 1 {
+        f.put_g(sx - 1, yy, Glyph::new('▎', GOLD * 1.2).lit(0.0));
     }
 }
 
@@ -886,12 +1004,26 @@ mod tests {
         // past the last item, the gap under a name, the corner, the top
         assert_eq!(hit(r, false, 5, 0, x0 + 2 * SLOT_W + 1, y0 + SLOT_H + 1), Some(Hit::Body));
         assert_eq!(hit(r, false, 5, 0, x0 + 1, y0 + SLOT_H - 1), Some(Hit::Body));
-        assert_eq!(hit(r, false, 5, 0, r.x + r.w - 1, r.y + r.h - 1), Some(Hit::Grip));
+        // edges and corners resize; the title row's middle moves it
+        assert_eq!(hit(r, false, 5, 0, r.x + r.w - 1, r.y + r.h - 1), Some(Hit::Edge(EDGE_R | EDGE_B)));
+        assert_eq!(hit(r, false, 5, 0, r.x, r.y + 3), Some(Hit::Edge(EDGE_L)));
+        assert_eq!(hit(r, false, 5, 0, r.x + 9, r.y + r.h - 1), Some(Hit::Edge(EDGE_B)));
+        assert_eq!(hit(r, false, 5, 0, r.x, r.y), Some(Hit::Edge(EDGE_L | EDGE_T)));
+        assert_eq!(hit(r, true, 5, 0, r.x, r.y), Some(Hit::Title));
         assert_eq!(hit(r, false, 5, 0, r.x + 5, r.y), Some(Hit::Title));
         assert_eq!(hit(r, false, 5, 0, r.x - 1, r.y), None);
         // scrolled down a row: the first slot is item 3
         assert_eq!(hit(r, false, 9, 1, x0 + 1, y0 + 1), Some(Hit::Item(3)));
         assert_eq!(max_scroll(r, 9), 1);
+        // the scrollbar, inside the right edge, only when it's needed
+        assert!(bar(r, 5).is_none());
+        let (bx, len) = bar(r, 9).unwrap();
+        assert_eq!(hit(r, false, 9, 0, bx, r.y + 4), Some(Hit::Bar(3)));
+        assert_eq!(scroll_at(r, 9, 0), 0);
+        assert_eq!(scroll_at(r, 9, len - 1), 1);
+        // where a dragged item lands when rearranging
+        assert_eq!(slot_at(r, 9, 0, x0 + SLOT_W + 2, y0 + SLOT_H + 2), 4);
+        assert_eq!(slot_at(r, 4, 0, x0 + 2 * SLOT_W + 2, y0 + SLOT_H + 2), 3);
     }
 
     #[test]

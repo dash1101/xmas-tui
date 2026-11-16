@@ -136,6 +136,71 @@ pub fn restart_requested() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
+fn encode(s: &Status) -> String {
+    match s {
+        Status::Unsupported => "unsupported".into(),
+        Status::Managed => "managed".into(),
+        Status::Idle => "idle".into(),
+        Status::Checking => "checking".into(),
+        Status::UpToDate => "uptodate".into(),
+        Status::Available(v) => format!("available\t{v}"),
+        Status::Installing(v) => format!("installing\t{v}"),
+        Status::Installed(v) => format!("installed\t{v}"),
+        Status::Failed(e) => format!("failed\t{}", e.replace(['\n', '\t'], " ")),
+    }
+}
+
+fn decode(line: &str) -> Option<Status> {
+    let (kind, v) = line.trim_end().split_once('\t').map(|(k, v)| (k, v.to_string())).unwrap_or((line.trim_end(), String::new()));
+    Some(match kind {
+        "unsupported" => Status::Unsupported,
+        "managed" => Status::Managed,
+        "idle" => Status::Idle,
+        "checking" => Status::Checking,
+        "uptodate" => Status::UpToDate,
+        "available" => Status::Available(v),
+        "installing" => Status::Installing(v),
+        "installed" => Status::Installed(v),
+        "failed" => Status::Failed(v),
+        _ => return None,
+    })
+}
+
+/// The wallpaper side (call about once a second): share the status with a
+/// settings window in another process (the tray's), and do what it asks.
+pub fn serve() {
+    if !running() {
+        return;
+    }
+    let path = crate::platform::update_status_path();
+    let _ = std::fs::write(&path, encode(&status()));
+    let req = crate::platform::update_request_path();
+    if let Ok(what) = std::fs::read_to_string(&req) {
+        let _ = std::fs::remove_file(&req);
+        match what.trim() {
+            "check" => check_now(),
+            "install" => install_now(),
+            "dismiss" => dismiss(),
+            _ => {}
+        }
+    }
+}
+
+/// The settings window side: the running wallpaper's update status (None
+/// if it isn't sharing one, e.g. it isn't running).
+pub fn remote_status() -> Option<Status> {
+    let path = crate::platform::update_status_path();
+    if !crate::platform::fresh(&path, 4.0) {
+        return None;
+    }
+    decode(&std::fs::read_to_string(path).ok()?)
+}
+
+/// The settings window side: ask the wallpaper to "check", "install" or "dismiss".
+pub fn request(what: &str) {
+    let _ = std::fs::write(crate::platform::update_request_path(), what);
+}
+
 /// Is the checker running in this process (the wallpaper, not the
 /// separate settings window)?
 pub fn running() -> bool {
@@ -473,6 +538,17 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_survives_the_trip_to_the_settings_window() {
+        for st in [Status::Idle, Status::Checking, Status::UpToDate, Status::Available("1.9.0".into()), Status::Failed("no net\there".into()), Status::Unsupported] {
+            let back = decode(&encode(&st)).unwrap();
+            match (&st, &back) {
+                (Status::Failed(_), Status::Failed(b)) => assert_eq!(b, "no net here"),
+                _ => assert_eq!(format!("{st:?}"), format!("{back:?}")),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

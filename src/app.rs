@@ -28,6 +28,13 @@ pub enum Btn {
     Right,
 }
 
+/// What a folder picker is for: a new shelf (at this cell), or shelf s.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pick {
+    New(i32, i32),
+    Change(usize),
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ShelfPress {
     Title(usize),
@@ -74,7 +81,11 @@ pub struct App {
     settings: Settings,
     drag: Option<(usize, i32, i32)>,
     /// Resizing a widget (the map or a shelf) by its corner grip.
-    resizing: Option<usize>,
+    resizing: Option<(usize, u8)>,
+    /// Dragging shelf `s`'s scrollbar.
+    bar_drag: Option<usize>,
+    /// A folder picker open (on its own thread): what it's for, and its answer.
+    picking: Option<std::sync::mpsc::Receiver<(Pick, Option<std::path::PathBuf>)>>,
     /// A press on a shelf's title (a click rolls it up) or on one of its
     /// items (a click selects, a double-click opens, a drag moves it).
     shelf_press: Option<ShelfPress>,
@@ -259,6 +270,8 @@ impl App {
             keyboard,
             quit: false,
             resizing: None,
+            bar_drag: None,
+            picking: None,
             shelf_press: None,
             last_click: None,
             px_map: None,
@@ -500,7 +513,7 @@ impl App {
                 } else if settings::gear_rect(self.w as i32).contains(x, y) {
                     self.settings.open = true;
                 } else if let Some(i) = self.widgets.on_grip(x, y).filter(|_| !self.cfg.layout.locked) {
-                    self.resizing = Some(i);
+                    self.resizing = Some((i, crate::widgets::shelf::EDGE_R | crate::widgets::shelf::EDGE_B));
                     self.widgets.dragging = Some(i);
                 } else if let Some((s, hit)) = self.widgets.shelf_hit(x, y) {
                     self.shelf_down(s, hit, x, y);
@@ -548,8 +561,12 @@ impl App {
                 }
                 let (wx, wy) = self.world_pt(x, y);
                 self.scene.set_cursor(Some((wx, wy)));
-                if let Some(i) = self.resizing {
-                    self.widgets.resize(i, x, y, self.w as i32, self.h as i32);
+                if let Some(s) = self.bar_drag {
+                    self.shelf_bar(s, y);
+                    return;
+                }
+                if let Some((i, e)) = self.resizing {
+                    self.widgets.resize(i, e, x, y, self.w as i32, self.h as i32);
                     return;
                 }
                 if let Some((i, ox, oy)) = self.drag {
@@ -616,9 +633,12 @@ impl App {
                 self.scene.drag(wx, wy);
                 self.scene.release();
             }
+            MouseIn::Up(Btn::Left) if self.bar_drag.is_some() => {
+                self.bar_drag = None;
+            }
             MouseIn::Up(Btn::Left) if self.resizing.is_some() => {
-                let i = self.resizing.take().unwrap();
-                self.widgets.resize(i, x, y, self.w as i32, self.h as i32);
+                let (i, e) = self.resizing.take().unwrap();
+                self.widgets.resize(i, e, x, y, self.w as i32, self.h as i32);
                 self.widgets.dragging = None;
                 if i == 4 {
                     self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
@@ -901,6 +921,7 @@ impl App {
                 _ => "frosted",
             };
             items.push(("open the shelf's folder".into(), MenuAct::Shelf(S::OpenFolder(s))));
+            items.push(("choose its folder…".into(), MenuAct::Shelf(S::PickFolder(s))));
             items.push((format!("look: {style} ▸"), MenuAct::Shelf(S::Style(s))));
             items.push((format!("icons: {} ▸", if c.icons == "real" { "real" } else { "pixel art" }), MenuAct::Shelf(S::Icons(s))));
             items.push((if c.rolled { "unroll" } else { "roll up" }.into(), MenuAct::Shelf(S::Roll(s))));
@@ -916,6 +937,7 @@ impl App {
         let mut items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
         if self.widgets.hit(x, y).is_none() {
             items.push(("new shelf here".into(), MenuAct::Shelf(S::New(x, y))));
+            items.push(("new shelf from a folder…".into(), MenuAct::Shelf(S::NewFrom(x, y))));
         }
         if cfg!(windows) && !self.keyboard {
             items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
@@ -968,14 +990,74 @@ impl App {
         let _ = (x, y);
     }
 
+    /// Shelf `s`'s scrollbar pressed or dragged at row `y`.
+    fn shelf_bar(&mut self, s: usize, y: i32) {
+        let Some(r) = self.widgets.rects.get(crate::widgets::BUILTIN + s).copied().flatten() else { return };
+        let n = self.widgets.contents(s).map(|c| c.items.len()).unwrap_or(0);
+        let to = crate::widgets::shelf::scroll_at(r, n, y - r.y - 1);
+        if let Some(ui) = self.widgets.shelf_ui.get_mut(s) {
+            ui.scroll = to;
+        }
+    }
+
+    /// Open the system's folder picker (on a thread of its own) for a new
+    /// shelf or to change shelf s's folder.
+    fn pick_folder(&mut self, why: Pick) {
+        if self.picking.is_some() {
+            return;
+        }
+        let start = match why {
+            Pick::Change(s) => self.cfg.shelves.get(s).map(crate::widgets::shelf::folder_of).unwrap_or_else(crate::widgets::shelf::home_dir),
+            Pick::New(..) => crate::widgets::shelf::home_dir(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.picking = Some(rx);
+        std::thread::spawn(move || {
+            let got = crate::widgets::shelf::pick_folder(&start);
+            let _ = tx.send((why, got));
+        });
+    }
+
+    /// The folder picker answered.
+    fn picked(&mut self, why: Pick, dir: Option<std::path::PathBuf>) {
+        let Some(dir) = dir else { return };
+        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Shelf".into());
+        match why {
+            Pick::New(x, y) => {
+                let (w, h) = (self.w.max(1) as f32, self.h.max(1) as f32);
+                crate::widgets::shelf::add(&mut self.cfg, Some([x as f32 / w, y as f32 / h]));
+                if let Some(c) = self.cfg.shelves.last_mut() {
+                    c.folder = dir.to_string_lossy().to_string();
+                    c.name = name;
+                }
+            }
+            Pick::Change(s) => {
+                if let Some(c) = self.cfg.shelves.get_mut(s) {
+                    c.folder = dir.to_string_lossy().to_string();
+                    c.order.clear();
+                    // a shelf still called "Shelf…" takes the folder's name
+                    if c.name.starts_with("Shelf") {
+                        c.name = name;
+                    }
+                }
+            }
+        }
+    }
+
     /// A press on shelf `s`.
     fn shelf_down(&mut self, s: usize, hit: crate::widgets::shelf::Hit, x: i32, y: i32) {
         use crate::widgets::shelf::Hit;
         let i = crate::widgets::BUILTIN + s;
         self.press_at = (x, y);
         match hit {
-            Hit::Up => self.widgets.shelf_scroll(s, -1),
-            Hit::Down => self.widgets.shelf_scroll(s, 1),
+            Hit::Bar(_) => {
+                self.bar_drag = Some(s);
+                self.shelf_bar(s, y);
+            }
+            Hit::Edge(e) if !self.cfg.layout.locked => {
+                self.resizing = Some((i, e));
+                self.widgets.dragging = Some(i);
+            }
             Hit::Item(k) => {
                 self.shelf_press = Some(ShelfPress::Item(s, k));
                 // held still, it's the item's menu
@@ -984,7 +1066,7 @@ impl App {
                     ui.selected = (j == s).then_some(k);
                 }
             }
-            Hit::Title | Hit::Body | Hit::Grip => {
+            Hit::Title | Hit::Body | Hit::Edge(_) => {
                 if hit == Hit::Title {
                     self.shelf_press = Some(ShelfPress::Title(s));
                 } else {
@@ -1012,7 +1094,17 @@ impl App {
             ui.selected = None;
         }
         match self.widgets.shelf_hit(x, y) {
-            Some((t, _)) if t == s => {}
+            Some((t, _)) if t == s => {
+                // back onto its own shelf: rearranged to where it was let go
+                if let Some(r) = self.widgets.rects.get(crate::widgets::BUILTIN + s).copied().flatten() {
+                    let n = self.widgets.contents(s).map(|c| c.items.len()).unwrap_or(0);
+                    let scroll = self.widgets.shelf_ui.get(s).map(|u| u.scroll).unwrap_or(0);
+                    let to = crate::widgets::shelf::slot_at(r, n, scroll, x, y);
+                    if let (Some(order), Some(c)) = (self.widgets.reordered(s, k, to), self.cfg.shelves.get_mut(s)) {
+                        c.order = order;
+                    }
+                }
+            }
             Some((t, _)) => {
                 if let Some(to) = self.widgets.shelf_folder(t) {
                     self.widgets.send(Cmd::Move { paths: vec![path], to, place: None });
@@ -1076,6 +1168,8 @@ impl App {
                 let (w, h) = (self.w.max(1) as f32, self.h.max(1) as f32);
                 shelf::add(&mut self.cfg, Some([x as f32 / w, y as f32 / h]));
             }
+            S::NewFrom(x, y) => self.pick_folder(Pick::New(x, y)),
+            S::PickFolder(s) => self.pick_folder(Pick::Change(s)),
         }
     }
 
@@ -1093,6 +1187,17 @@ impl App {
                     self.scene.let_go();
                 }
                 self.open_menu(px, py);
+            }
+        }
+        // the folder picker answered
+        if let Some(rx) = &self.picking {
+            match rx.try_recv() {
+                Ok((why, dir)) => {
+                    self.picking = None;
+                    self.picked(why, dir);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.picking = None,
+                Err(_) => {}
             }
         }
         let old = self.applied.clone();
@@ -1136,6 +1241,8 @@ impl App {
                         open_detached(crate::widgets::shelf::folder_of(c));
                     }
                 }
+                Act::ShelfFolder(i) => self.pick_folder(Pick::Change(i as usize)),
+                Act::ShelfNewFrom => self.pick_folder(Pick::New(self.w as i32 / 3, self.h as i32 / 3)),
                 Act::EditName => {
                     if self.keyboard {
                         if !self.settings.editing_name || self.settings.editing.is_none() {
@@ -1355,12 +1462,16 @@ impl App {
             self.popout_touched = t;
             let _ = std::fs::write(crate::platform::popout_path(), b"1");
         }
-        // the tray's settings window (another process) shows the levels too
-        if self.audio.is_some() {
-            if t - self.meters_check > 1.0 {
-                self.meters_check = t;
-                self.meters_wanted = crate::platform::fresh(&crate::platform::meters_want_path(), 3.0);
+        // the tray's settings window (another process) shows the levels and
+        // the update status too, and can ask for an update check
+        if t - self.meters_check > 1.0 {
+            self.meters_check = t;
+            self.meters_wanted = self.audio.is_some() && crate::platform::fresh(&crate::platform::meters_want_path(), 3.0);
+            if !self.popout {
+                crate::update::serve();
             }
+        }
+        if self.audio.is_some() {
             if self.meters_wanted && t - self.meters_sent > 0.08 {
                 self.meters_sent = t;
                 if let Some(m) = self.audio.as_ref().and_then(|a| a.meters.lock().ok().map(|m| *m)) {
@@ -1496,6 +1607,55 @@ mod tests {
         app.mouse(MouseIn::Down(Btn::Left), mx, my);
         assert_eq!(app.cfg.shelves.len(), 2);
         assert!(b.join("note.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shelves: an item dragged to another spot on its own shelf moves
+    /// there (and stays there); a shelf's left edge resizes it.
+    #[test]
+    fn shelves_rearrange_and_resize_by_an_edge() {
+        use crate::widgets::{shelf, BUILTIN};
+        let dir = std::env::temp_dir().join(format!("xmas-app-arrange-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(f), f).unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.scene.critters = 0.0;
+        (cfg.widgets.music, cfg.widgets.weather, cfg.widgets.system, cfg.widgets.map, cfg.clock.enabled) = (false, false, false, false, false);
+        cfg.sound.enabled = false;
+        cfg.shelves = vec![crate::config::ShelfCfg { name: "S".into(), folder: dir.to_string_lossy().into(), pos: Some([0.3, 0.2]), size: [40, 15], ..Default::default() }];
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        for _ in 0..300 {
+            app.step();
+            if app.widgets.contents(0).is_some_and(|c| c.items.len() == 3) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let names = |app: &App| app.widgets.contents(0).unwrap().items.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&app), ["a.txt", "b.txt", "c.txt"]);
+        let r = app.widgets.rects[BUILTIN].unwrap();
+        let (x0, y0, _, _) = shelf::grid(r);
+        // carry a.txt over to the third slot
+        app.mouse(MouseIn::Down(Btn::Left), x0 + 2, y0 + 1);
+        app.mouse(MouseIn::Drag, x0 + 6, y0 + 2);
+        app.mouse(MouseIn::Drag, x0 + 2 * shelf::SLOT_W + 3, y0 + 1);
+        app.step();
+        app.mouse(MouseIn::Up(Btn::Left), x0 + 2 * shelf::SLOT_W + 3, y0 + 1);
+        app.step();
+        assert_eq!(names(&app), ["b.txt", "c.txt", "a.txt"], "not rearranged");
+        assert_eq!(app.cfg.shelves[0].order, ["b.txt", "c.txt", "a.txt"]);
+        // the left edge, dragged 6 to the left: wider, same right side
+        let right = r.x + r.w;
+        app.mouse(MouseIn::Down(Btn::Left), r.x, r.y + 5);
+        app.mouse(MouseIn::Drag, r.x - 6, r.y + 5);
+        app.mouse(MouseIn::Up(Btn::Left), r.x - 6, r.y + 5);
+        app.step();
+        let r2 = app.widgets.rects[BUILTIN].unwrap();
+        assert_eq!((r2.x, r2.x + r2.w), (r.x - 6, right), "the left edge didn't resize it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

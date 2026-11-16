@@ -31,7 +31,10 @@ final class Prefs {
         cfg.petName = p.getString("pet_name", "");
         cfg.bubbles = p.getBoolean("bubbles", true);
         cfg.time = p.getString("time", "auto");
-        cfg.detail = p.getInt("detail", 155);
+        // size (percent; 100 = 155 pixels across the short side), or the
+        // older "detail" setting (pixels across) from before there was one
+        int size = p.getInt("size", Math.round(155f * 100f / Math.max(60, p.getInt("detail", 155))));
+        cfg.detail = Math.round(155f * 100f / Math.max(40, Math.min(250, size)));
         return cfg;
     }
 }

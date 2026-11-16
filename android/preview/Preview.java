@@ -25,7 +25,7 @@ public class Preview {
         cfg.dockStyle = a.length > 7 ? a[7] : "frost";
         cfg.name = "Parker";
         cfg.petName = "Kitters";
-        int scale = Math.max(3, Math.round(sw / (float) cfg.detail));
+        int scale = Math.max(2, Math.round(Math.min(sw, sh) / (float) cfg.detail));
         int w = (sw + scale - 1) / scale, h = (sh + scale - 1) / scale;
         Village v = new Village(w, h, cfg, 7);
         Pix pix = new Pix(w, h);
@@ -43,7 +43,7 @@ public class Preview {
                 }
             Graphics2D g = img.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            float font = Math.max(18f, sw / 34f);
+            float font = Math.max(18f, Math.min(sw, sh) / 34f);
             g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, Math.round(font)));
             FontMetrics fm = g.getFontMetrics();
             for (Village.Say s : v.bubbles()) {

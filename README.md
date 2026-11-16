@@ -164,19 +164,25 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 A shelf shows a folder's files and shortcuts, so the desktop can stay tidy and everything still has a place. What's
 on a shelf is an ordinary file in its folder (`Documents/Desktop Shelves/<name>`, or any folder picked), so it can
 always be found in Explorer or Dolphin.
-- **Making one:** right-click (or press and hold) on the bare scene → *new shelf here*, or Settings → **Shelves** →
-  *+ new shelf*. That tab also renames shelves (the folder is renamed with them) and changes their look and icons.
+- **Making one:** right-click (or press and hold) on the bare scene → *new shelf here* (a folder of its own) or
+  *new shelf from a folder…* (any folder, picked with the system's folder picker: a Music shelf, say), or Settings →
+  **Shelves**. That tab also renames shelves (the folder is renamed with them), picks a shelf's folder, and changes
+  their look and icons; a shelf's own menu has *choose its folder…* too.
 - **Using it:** double-click an item to open it; long-press or right-click it for *open*, *show in its folder* and
-  *take off the shelf*. Drag an item onto another shelf to move it there, or off the shelves to put it back on the
-  desktop (on Windows, where it's let go). Scroll with the wheel or the ▲ ▼ arrows; click the title to roll the
-  shelf up to one line; drag the ◢ corner to resize it.
+  *take off the shelf*. Drag an item to another spot on the same shelf to rearrange it (the order is kept), onto
+  another shelf to move it there, or off the shelves to put it back on the desktop (on Windows, where it's let go).
+  A shelf with more than fits has a scrollbar inside its right edge (drag it, or click along it; the wheel works
+  too) and says which items are showing (*1–8 of 26*). Click the title to roll the shelf up to one line; drag any
+  edge or corner to resize it.
 - **On Windows:** drag desktop icons straight onto a shelf to put them away (the shortcuts on the shared "all
   users" desktop need admin rights to move, so they stay). Moves go through Explorer, so Ctrl+Z on the desktop
   undoes them.
 - **Looks:** a frosted panel with snow piled on top (the default), a wooden shelf with snow on its planks, or a
   gift box with a gold ribbon and a bow.
-- **Icons:** each item's real icon, or the same icon redrawn as chunky pixel art. Linux uses an app's PNG icon
-  where it has one, and a little drawing of the file type otherwise. Real icons need kitty (or the window).
+- **Icons:** each item's real icon, or the same icon redrawn as chunky pixel art. On Windows they're the shell's
+  icons and thumbnails. On Linux: an app's PNG icon, a picture's own image, the cover art inside music files (MP3,
+  FLAC, M4A, Ogg/Opus; wide video thumbnails are cropped to the square cover in the middle), or an album folder's
+  `cover.jpg`; otherwise a little drawing of the file type. Real icons need kitty (or the window).
 
 ## 🖱️ Interacting in detail
 **Walking around** (click the desktop first so it has keyboard focus)
@@ -400,8 +406,9 @@ A cut-down village for the phone's home screen, made to be watched rather than p
 - **Day and night** follow the phone's clock (or stay at a chosen time), and the village pans gently as the home
   screens are swiped.
 - **Settings** (the app's own screen, or the gear in the wallpaper picker): the frame rate (24 fps by default; it
-  only runs while the home screen is showing), snowfall, detail, the villager's name, the pet (cat, dog, bunny or
-  none) and its name, speech bubbles, time of day, and the dock.
+  only runs while the home screen is showing), snowfall, **size** (50% to 200%; the village keeps its size
+  whichever way the screen is turned, so a phone or tablet held sideways shows more of it), the villager's name, the
+  pet (cat, dog, bunny or none) and its name, speech bubbles, time of day, and the dock.
 
 **Install:** on the phone, download `xmas-tui-android.apk` from the newest
 [release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or

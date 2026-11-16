@@ -83,9 +83,11 @@ public class VillageWallpaper extends WallpaperService {
         /** (Re)make the village for the screen; `fresh`: even if the size is the same. */
         private void build(boolean fresh) {
             if (sw <= 0 || sh <= 0) return;
-            // wallpaper pixels across the screen: the "detail" setting
-            int across = Math.max(100, Math.min(260, cfg.detail));
-            int s = Math.max(3, Math.round(sw / (float) across));
+            // wallpaper pixels across the screen's short side (the "size"
+            // setting), so turning a phone or tablet sideways shows more of
+            // the village at the same size instead of zooming it in
+            int across = Math.max(60, Math.min(340, cfg.detail));
+            int s = Math.max(2, Math.round(Math.min(sw, sh) / (float) across));
             int w = (sw + s - 1) / s, h = (sh + s - 1) / s;
             if (!fresh && village != null && pix != null && pix.w == w && pix.h == h) return;
             scale = s;
@@ -94,7 +96,7 @@ public class VillageWallpaper extends WallpaperService {
             pix = new Pix(w, h);
             bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             dst.set(0, 0, w * s, h * s);
-            text.setTextSize(Math.max(18f, sw / 34f));
+            text.setTextSize(Math.max(18f, Math.min(sw, sh) / 34f));
             last = 0;
         }
 

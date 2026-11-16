@@ -300,3 +300,23 @@ pub fn icon(path: &std::path::Path, size: i32) -> Option<crate::frame::Picture> 
         Some(crate::frame::Picture::new(w as usize, h as usize, buf))
     }
 }
+
+/// Windows' folder picker (modal; on a thread with COM initialized).
+pub fn pick_folder(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+    unsafe {
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL).ok()?;
+        let opts = dlg.GetOptions().ok()?;
+        dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        let _ = dlg.SetTitle(&HSTRING::from("A folder for the shelf"));
+        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(start.as_os_str()), None) {
+            let _ = dlg.SetFolder(&item);
+        }
+        dlg.Show(None).ok()?;
+        let item = dlg.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s.map(std::path::PathBuf::from)
+    }
+}

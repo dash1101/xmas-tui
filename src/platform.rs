@@ -105,6 +105,16 @@ pub fn meters_path() -> PathBuf {
     shared_dir().join("xmas-tui-meters")
 }
 
+/// The wallpaper's update status, for the settings window (one line).
+pub fn update_status_path() -> PathBuf {
+    shared_dir().join("xmas-tui-update")
+}
+
+/// The settings window asking the wallpaper to check / install / dismiss.
+pub fn update_request_path() -> PathBuf {
+    shared_dir().join("xmas-tui-update.request")
+}
+
 /// Kept fresh by a popped-out window while it's open.
 pub fn popout_path() -> PathBuf {
     shared_dir().join("xmas-tui-popout")

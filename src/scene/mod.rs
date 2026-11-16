@@ -3152,7 +3152,7 @@ impl Scene {
         for x in arrivals {
             // passengers off the train walk down into the village
             let kind = if self.rng.chance(0.25) { events::Kind::Kid } else { events::Kind::Walker };
-            self.critters.spawn_demo(kind, x, t);
+            self.critters.arrive(kind, x, t);
         }
         if let Some(p) = &mut self.player {
             p.lantern = self.pockets.lantern_on && self.pockets.count(shop::Item::Lantern) > 0;

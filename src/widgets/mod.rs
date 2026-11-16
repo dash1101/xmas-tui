@@ -3,6 +3,7 @@
 //! weather, the village map and a visualizer. Panels are "frosted": they
 //! darken the scene behind them.
 
+pub mod art;
 pub mod data;
 pub mod shelf;
 pub mod viz;
@@ -207,12 +208,36 @@ impl Widgets {
         BUILTIN + self.cfg.shelves.len()
     }
 
-    /// What's on shelf `s` (once its folder has been scanned).
+    /// What's on shelf `s` (once its folder has been scanned), in the order
+    /// it was arranged in.
     pub fn contents(&self, s: usize) -> Option<shelf::Contents> {
         let folder = self.shelf_folders.get(s)?;
         let w = self.shelves.as_ref()?;
         let d = w.data.lock().ok()?;
-        d.get(s).filter(|c| &c.folder == folder).cloned()
+        let mut c = d.get(s).filter(|c| &c.folder == folder).cloned()?;
+        drop(d);
+        let order = &self.cfg.shelves.get(s)?.order;
+        if !order.is_empty() {
+            let rank = |it: &std::sync::Arc<shelf::Item>| {
+                let name = it.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                order.iter().position(|o| *o == name).unwrap_or(usize::MAX)
+            };
+            // (stable: the rest keep their folders-first, by-name order)
+            c.items.sort_by_key(rank);
+        }
+        Some(c)
+    }
+
+    /// Shelf `s` with item `k` moved to slot `to`: the new order (file names).
+    pub fn reordered(&self, s: usize, k: usize, to: usize) -> Option<Vec<String>> {
+        let c = self.contents(s)?;
+        let mut names: Vec<String> = c.items.iter().map(|it| it.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect();
+        if k >= names.len() {
+            return None;
+        }
+        let it = names.remove(k);
+        names.insert(to.min(names.len()), it);
+        Some(names)
     }
 
     pub fn shelf_folder(&self, s: usize) -> Option<std::path::PathBuf> {
@@ -335,9 +360,9 @@ impl Widgets {
         Rect { x: x.clamp(0, (w - sw).max(0)), y: y.clamp(0, (h - sh).max(0)), w: sw, h: sh }
     }
 
-    /// Resize widget `i` (the map or a shelf) so its bottom-right corner is
-    /// at (x, y), keeping its top-left where it was.
-    pub fn resize(&mut self, i: usize, x: i32, y: i32, w: i32, h: i32) {
+    /// Resize widget `i` (the map, or a shelf) by its `edges` (shelf::EDGE_*
+    /// bits; the map only by its bottom-right corner) to reach (x, y).
+    pub fn resize(&mut self, i: usize, edges: u8, x: i32, y: i32, w: i32, h: i32) {
         let r = self.rect(i, w, h);
         let keep = Some([r.x as f32 / w as f32, r.y as f32 / h as f32]);
         if i == 4 {
@@ -346,22 +371,29 @@ impl Widgets {
             self.cfg.layout.map_size = Some([nw, nh]);
             self.cfg.layout.map = keep;
         } else if let Some(s) = i.checked_sub(BUILTIN).and_then(|j| self.cfg.shelves.get_mut(j)) {
-            let nw = (x - r.x + 1).clamp(shelf::MIN_W, (w - r.x).max(shelf::MIN_W));
-            let nh = (y - r.y + 1).clamp(shelf::MIN_H, (h - r.y).max(shelf::MIN_H));
-            s.size = [nw, nh];
-            s.pos = keep;
+            use shelf::{EDGE_B, EDGE_L, EDGE_R, EDGE_T, MIN_H, MIN_W};
+            let (mut x0, mut y0, mut x1, mut y1) = (r.x, r.y, r.x + r.w - 1, r.y + r.h - 1);
+            if edges & EDGE_L != 0 {
+                x0 = x.min(x1 - MIN_W + 1).max(0);
+            }
+            if edges & EDGE_R != 0 {
+                x1 = x.max(x0 + MIN_W - 1).min(w - 1);
+            }
+            if edges & EDGE_T != 0 {
+                y0 = y.min(y1 - MIN_H + 1).max(0);
+            }
+            if edges & EDGE_B != 0 {
+                y1 = y.max(y0 + MIN_H - 1).min(h - 1);
+            }
+            s.size = [x1 - x0 + 1, y1 - y0 + 1];
+            s.pos = Some([x0 as f32 / w as f32, y0 as f32 / h as f32]);
         }
     }
 
     /// The widget whose resize grip (its bottom-right corner) is at (x, y).
     pub fn on_grip(&self, x: i32, y: i32) -> Option<usize> {
-        if self.rects[4].is_some_and(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1) {
-            return Some(4);
-        }
-        match self.shelf_hit(x, y) {
-            Some((s, shelf::Hit::Grip)) if !self.cfg.shelves[s].rolled => Some(BUILTIN + s),
-            _ => None,
-        }
+        // (shelves resize by any edge: see shelf_hit)
+        self.rects[4].is_some_and(|r| x >= r.x + r.w - 2 && x < r.x + r.w && y == r.y + r.h - 1).then_some(4)
     }
 
     /// The world column under (x, y) on the map, if it's on the map.
@@ -435,6 +467,9 @@ impl Widgets {
                     let ui = self.shelf_ui.get(s).copied().unwrap_or_default();
                     let lifted = self.lift.filter(|l| l.0 == s).map(|l| l.1);
                     let target = (self.lift.is_some_and(|l| l.0 != s) && r.contains(self.lift_at.0, self.lift_at.1)) || self.ext_drag.is_some_and(|(x, y)| r.contains(x, y));
+                    // one of its own items carried about over it: where it'd go
+                    let n = contents.as_ref().map(|c| c.items.len()).unwrap_or(0);
+                    let insert = self.lift.filter(|l| l.0 == s && r.contains(self.lift_at.0, self.lift_at.1)).map(|_| shelf::slot_at(r, n, ui.scroll, self.lift_at.0, self.lift_at.1));
                     let view = shelf::View {
                         cfg: &self.cfg.shelves[s],
                         contents: contents.as_ref(),
@@ -443,6 +478,7 @@ impl Widgets {
                         selected: ui.selected,
                         lifted,
                         target,
+                        insert,
                         locked: self.cfg.layout.locked,
                         seed: s as u32 * 7919 + 17,
                     };

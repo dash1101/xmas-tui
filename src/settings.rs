@@ -109,6 +109,9 @@ pub enum Act {
     ShelfOpen(u8),
     ShelfRemove(u8),
     ShelfNew,
+    /// Pick shelf i's folder; a new shelf from a picked folder.
+    ShelfFolder(u8),
+    ShelfNewFrom,
 }
 
 #[derive(Default)]
@@ -373,7 +376,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) => false,
+        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom => false,
     }
 }
 
@@ -790,17 +793,21 @@ impl Settings {
         yy += 1;
         use crate::update::Status;
         let ver = crate::update::current();
-        let (msg, act) = match crate::update::status() {
-            Status::Unsupported => (format!("v{ver} · built from source: updates come from git"), None),
-            Status::Managed => (format!("v{ver} · system-wide install: update via the package manager"), None),
-            _ if !crate::update::running() => (format!("v{ver} · the wallpaper checks for updates"), None),
-            Status::Idle => (format!("v{ver}"), Some(("check now", Act::CheckUpdate))),
-            Status::Checking => (format!("v{ver} · checking…"), None),
-            Status::UpToDate => (format!("v{ver} · up to date ✓"), Some(("check now", Act::CheckUpdate))),
-            Status::Available(v) => (format!("v{ver} · {v} is available"), Some(("⬇ install", Act::InstallUpdate))),
-            Status::Installing(v) => (format!("installing {v}…"), None),
-            Status::Installed(v) => (format!("{v} installed · restarting…"), None),
-            Status::Failed(e) => (format!("update: {e}"), Some(("retry", Act::CheckUpdate))),
+        // in the tray's settings window, the wallpaper (another process)
+        // shares its status and takes requests
+        let local = crate::update::status();
+        let st = if crate::update::running() || matches!(local, Status::Unsupported | Status::Managed) { Some(local) } else { crate::update::remote_status() };
+        let (msg, act) = match st {
+            None => (format!("v{ver} · start the wallpaper to check for updates"), None),
+            Some(Status::Unsupported) => (format!("v{ver} · built from source: updates come from git"), None),
+            Some(Status::Managed) => (format!("v{ver} · system-wide install: update via the package manager"), None),
+            Some(Status::Idle) => (format!("v{ver}"), Some(("check now", Act::CheckUpdate))),
+            Some(Status::Checking) => (format!("v{ver} · checking…"), None),
+            Some(Status::UpToDate) => (format!("v{ver} · up to date ✓"), Some(("check now", Act::CheckUpdate))),
+            Some(Status::Available(v)) => (format!("v{ver} · {v} is available"), Some(("⬇ install", Act::InstallUpdate))),
+            Some(Status::Installing(v)) => (format!("installing {v}…"), None),
+            Some(Status::Installed(v)) => (format!("{v} installed · restarting…"), None),
+            Some(Status::Failed(e)) => (format!("update: {e}"), Some(("retry", Act::CheckUpdate))),
         };
         let msg: String = msg.chars().take(44).collect();
         let cx = f.text(lx, yy, &msg, pal::UI_DIM, BG, 0.0);
@@ -919,7 +926,10 @@ impl Settings {
             let folder = crate::widgets::shelf::folder_of(c);
             let shown = folder.to_string_lossy().replace(&*crate::widgets::shelf::home_dir().to_string_lossy(), "~");
             let shown: String = if shown.chars().count() > room { format!("…{}", shown.chars().rev().take(room - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { shown };
-            f.text(lx + 1, yy, &shown, pal::UI_DIM * 0.9, BG, 0.0);
+            let room = room.saturating_sub(11);
+            let shown: String = if shown.chars().count() > room { format!("…{}", shown.chars().rev().take(room.saturating_sub(1)).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { shown };
+            let e = f.text(lx + 1, yy, &shown, pal::UI_DIM * 0.9, BG, 0.0);
+            self.button(f, e + 1, yy, "folder…", Act::ShelfFolder(i8));
             yy += 2;
         }
         if cfg.shelves.len() > 5 {
@@ -927,8 +937,9 @@ impl Settings {
             yy += 2;
         }
         self.button(f, lx, yy, "+ new shelf", Act::ShelfNew);
+        self.button(f, lx + 15, yy, "+ from a folder…", Act::ShelfNewFrom);
         if cfg.shelves.is_empty() {
-            f.text(lx + 15, yy, "(or right-click the desktop: new shelf here)", pal::UI_DIM, BG, 0.0);
+            f.text(lx, yy + 1, "(or right-click the desktop: new shelf here)", pal::UI_DIM, BG, 0.0);
         }
     }
 

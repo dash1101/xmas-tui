@@ -27,7 +27,7 @@ public final class Config {
     public boolean bubbles = true;
     /** "auto" (the phone's clock), "night", "dusk", "day" or "dawn". */
     public String time = "auto";
-    /** Detail: wallpaper pixels across the screen (130 chunky .. 200 fine). */
+    /** Wallpaper pixels across the screen's short side (the size setting: 155 at 100%). */
     public int detail = 155;
 
     public Config copy() {

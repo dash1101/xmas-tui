@@ -53,6 +53,8 @@ pub struct Panel {
     /// Asking the running wallpaper for its sound levels: when last asked,
     /// and when last read.
     meters_asked: f32,
+    /// A folder picker open: for shelf Some(i), or a new shelf.
+    picking: Option<std::sync::mpsc::Receiver<(Option<usize>, Option<std::path::PathBuf>)>>,
     meters_read: f32,
     pub w: usize,
     pub h: usize,
@@ -87,6 +89,7 @@ impl Panel {
             rng: Rng::new(random_seed() as u64),
             acts: vec![],
             meters_asked: -10.0,
+            picking: None,
             meters_read: -10.0,
             w: 1,
             h: 1,
@@ -193,11 +196,49 @@ impl Panel {
         }
     }
 
+    fn pick_folder(&mut self, which: Option<usize>) {
+        if self.picking.is_some() {
+            return;
+        }
+        let start = which.and_then(|i| self.cfg.shelves.get(i)).map(crate::widgets::shelf::folder_of).unwrap_or_else(crate::widgets::shelf::home_dir);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.picking = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send((which, crate::widgets::shelf::pick_folder(&start)));
+        });
+    }
+
     /// Apply queued actions, sync with the config file, draw a frame.
     pub fn step(&mut self, t: f32, dt: f32) -> &[Cell] {
-        // the Sound tab's live meters come from the running wallpaper: keep
+        if let Some(rx) = &self.picking {
+            if let Ok((which, dir)) = rx.try_recv() {
+                self.picking = None;
+                if let Some(dir) = dir {
+                    let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Shelf".into());
+                    match which {
+                        Some(i) => {
+                            if let Some(c) = self.cfg.shelves.get_mut(i) {
+                                c.folder = dir.to_string_lossy().to_string();
+                                c.order.clear();
+                                if c.name.starts_with("Shelf") {
+                                    c.name = name;
+                                }
+                            }
+                        }
+                        None => {
+                            crate::widgets::shelf::add(&mut self.cfg, None);
+                            if let Some(c) = self.cfg.shelves.last_mut() {
+                                c.folder = dir.to_string_lossy().to_string();
+                                c.name = name;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // the Sound and Effects tabs' live meters come from the running wallpaper: keep
         // telling it they're wanted, and read what it shares
-        if self.settings.tab == 2 {
+        if matches!(self.settings.tab, 2 | 3) {
             if t - self.meters_asked > 1.0 {
                 self.meters_asked = t;
                 let _ = std::fs::write(crate::platform::meters_want_path(), b"1");
@@ -225,6 +266,8 @@ impl Panel {
                     self.settings.editing_shelf = Some(i as usize);
                     self.settings.editing = self.cfg.shelves.get(i as usize).map(|c| c.name.clone());
                 }
+                Act::ShelfFolder(i) => self.pick_folder(Some(i as usize)),
+                Act::ShelfNewFrom => self.pick_folder(None),
                 Act::ShelfOpen(i) => {
                     if let Some(c) = self.cfg.shelves.get(i as usize) {
                         let f = crate::widgets::shelf::folder_of(c);
@@ -241,9 +284,10 @@ impl Panel {
                     self.close = true;
                 }
                 Act::Tab(i) => self.settings.tab = i as usize,
-                // the wallpaper process runs the updater; this window only
-                // has the toggles
-                Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate => {}
+                // the wallpaper process runs the updater: ask it
+                Act::CheckUpdate => crate::update::request("check"),
+                Act::InstallUpdate => crate::update::request("install"),
+                Act::DismissUpdate => crate::update::request("dismiss"),
                 Act::Autostart => {
                     let on = !self.settings.autostart.unwrap_or(false);
                     platform::autostart_set(on);
