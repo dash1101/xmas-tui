@@ -570,9 +570,10 @@ pub fn desktop_keys() -> Option<[bool; 17]> {
 /// Best effort: the icon layer is Explorer's SysListView32, which
 /// hot-tracks the item under the mouse, so LVM_GETHOTITEM (no
 /// cross-process buffer needed, unlike LVM_HITTEST) tells us whether an
-/// icon is hovered. Only called on a button press, with a short timeout so
-/// a hung Explorer can't stall us. Rubber-band selections that start on
-/// empty desktop still count as desktop clicks.
+/// icon is hovered. Called on a press, and while the pointer is over
+/// something of the village's, with a short timeout so a hung Explorer
+/// can't stall the wallpaper. Rubber-band selections that start on empty
+/// desktop still count as desktop clicks.
 pub fn over_icon(x: i32, y: i32) -> bool {
     const LVM_GETHOTITEM: u32 = 0x103D;
     unsafe {
@@ -581,7 +582,7 @@ pub fn over_icon(x: i32, y: i32) -> bool {
             return false;
         }
         let mut res: usize = usize::MAX;
-        let ok = SendMessageTimeoutW(under, LVM_GETHOTITEM, 0, 0, SMTO_ABORTIFHUNG, 50, &mut res);
+        let ok = SendMessageTimeoutW(under, LVM_GETHOTITEM, 0, 0, SMTO_ABORTIFHUNG, 25, &mut res);
         ok != 0 && (res as isize) >= 0
     }
 }
@@ -664,63 +665,107 @@ pub fn fullscreen_app(own: HWND) -> bool {
 // ---------------------------------------------------------------------------
 // Right-clicks on the village. The desktop's own window (above ours) gets
 // every right-click and shows Windows' desktop menu. A low-level mouse hook
-// takes the right-clicks that land on the bare desktop (not on an icon,
-// not on a window) and hands them to the wallpaper: if something of ours is
-// there (someone in the village, a house, a widget, a shelf), it shows its
-// own menu; otherwise the click is sent on again, unhooked, and Windows'
-// menu shows as usual. The hook runs on a thread of its own that does
-// nothing but pump messages, so it never waits on a frame being drawn
-// (every mouse event on the system passes through it).
+// takes the right-clicks that land on something of the village's (someone
+// in the village, a house, a widget, a shelf; never an icon or a window)
+// and hands them to the wallpaper, which shows its own menu; every other
+// right-click goes straight on to Windows. Whether a click is the village's
+// is worked out ahead of time by the wallpaper as the pointer moves (see
+// `rclick_target`): the hook itself only reads that, since Windows quietly
+// drops a mouse hook that's slow to answer (and every mouse event on the
+// system passes through it). It runs on a thread of its own that does
+// nothing but pump messages; if Windows drops it anyway, the wallpaper
+// notices and puts it back (`rclick_hook_quiet_ms`, `rclick_rehook`).
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 static RC_HOOKED: AtomicBool = AtomicBool::new(false);
-static RC_OWN: AtomicUsize = AtomicUsize::new(0);
-static RC_AREA: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
 static RC_PENDING: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static RC_EATEN: AtomicBool = AtomicBool::new(false);
 /// The wallpaper is drawing (not resting, not full screen, attached): only
-/// then are right-clicks taken from the desktop (a resting wallpaper
-/// wouldn't answer them until it woke).
+/// then are right-clicks taken from the desktop.
 static RC_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The screen rect (the cell) last looked at under the pointer, whether a
+/// right-click there is the village's, and when (GetTickCount).
+static RC_TARGET: Mutex<((i32, i32, i32, i32), bool, u32)> = Mutex::new(((0, 0, 0, 0), false, 0));
+/// When the hook last saw any mouse event (GetTickCount).
+static RC_SEEN: AtomicU32 = AtomicU32::new(0);
+static RC_THREAD: AtomicU32 = AtomicU32::new(0);
+static RC_HOOK: AtomicIsize = AtomicIsize::new(0);
+const WM_REHOOK: u32 = WM_APP + 1;
+
+fn ticks() -> u32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() }
+}
 
 pub fn rclick_active(on: bool) {
     RC_ACTIVE.store(on, Ordering::Relaxed);
 }
-static RC_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Start taking right-clicks on the bare desktop (once). `own` is the
-/// wallpaper's window; `area` the screen rect it covers.
-pub fn rclick_hook(own: HWND, area: (i32, i32, i32, i32)) {
-    RC_OWN.store(own as usize, Ordering::Relaxed);
-    if let Ok(mut a) = RC_AREA.lock() {
-        *a = area;
+/// The pointer is over screen rect `r` (x0, y0, x1, y1), and a right-click
+/// there is (or isn't) the village's.
+pub fn rclick_target(r: (i32, i32, i32, i32), ours: bool) {
+    if let Ok(mut t) = RC_TARGET.lock() {
+        *t = (r, ours, ticks());
     }
+}
+
+/// Start taking the village's right-clicks (once).
+pub fn rclick_hook() {
     if RC_HOOKED.swap(true, Ordering::SeqCst) {
         return;
     }
     let _ = std::thread::Builder::new().name("right-click hook".into()).spawn(|| unsafe {
         use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-        let h = SetWindowsHookExW(WH_MOUSE_LL, Some(rclick_proc), GetModuleHandleW(std::ptr::null()), 0);
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        // answered promptly even with the CPU busy
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        RC_THREAD.store(GetCurrentThreadId(), Ordering::SeqCst);
+        let hook = || SetWindowsHookExW(WH_MOUSE_LL, Some(rclick_proc), GetModuleHandleW(std::ptr::null()), 0);
+        let h = hook();
         if h.is_null() {
             eprintln!("xmas-tui: no right-click hook (SetWindowsHookEx failed): long-press for the menu");
             RC_HOOKED.store(false, Ordering::SeqCst);
             return;
         }
         RC_HOOK.store(h as isize, Ordering::Relaxed);
+        RC_SEEN.store(ticks(), Ordering::Relaxed);
+        // testing: lose the hook after 10 s, the way Windows drops one
+        let drop_test = std::env::var_os("XMAS_TEST_DROP_HOOK").is_some().then(|| SetTimer(std::ptr::null_mut(), 0, 10_000, None));
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_TIMER && drop_test.is_some_and(|t| t == msg.wParam) {
+                KillTimer(std::ptr::null_mut(), msg.wParam);
+                UnhookWindowsHookEx(RC_HOOK.load(Ordering::Relaxed) as HHOOK);
+                eprintln!("xmas-tui: (test) right-click hook dropped");
+                continue;
+            }
+            if msg.message == WM_REHOOK {
+                UnhookWindowsHookEx(RC_HOOK.load(Ordering::Relaxed) as HHOOK);
+                let h = hook();
+                RC_HOOK.store(h as isize, Ordering::Relaxed);
+                RC_SEEN.store(ticks(), Ordering::Relaxed);
+                eprintln!("xmas-tui: right-click hook put back ({})", if h.is_null() { "failed" } else { "ok" });
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     });
 }
 
-/// The screen rect the wallpaper covers (it moves with the monitor layout).
-pub fn rclick_area(area: (i32, i32, i32, i32)) {
-    if let Ok(mut a) = RC_AREA.lock() {
-        *a = area;
+/// How long since the hook last saw a mouse event (ms). Long, while the
+/// pointer is moving, means Windows has dropped it.
+pub fn rclick_hook_quiet_ms() -> Option<u32> {
+    RC_HOOKED.load(Ordering::Relaxed).then(|| ticks().wrapping_sub(RC_SEEN.load(Ordering::Relaxed)))
+}
+
+/// Put the hook back.
+pub fn rclick_rehook() {
+    let t = RC_THREAD.load(Ordering::SeqCst);
+    if t != 0 {
+        RC_SEEN.store(ticks(), Ordering::Relaxed);
+        unsafe { PostThreadMessageW(t, WM_REHOOK, 0, 0) };
     }
 }
 
@@ -740,37 +785,30 @@ pub fn pass_rclick() {
     }
 }
 
-/// Is (x, y) bare desktop over the wallpaper: the desktop's own windows (or
-/// ours) under it, and no icon there?
+/// Is a right-click at (x, y) the village's? Only what the wallpaper worked
+/// out lately for that spot; nothing that could wait.
 fn rclick_ours(x: i32, y: i32) -> bool {
     if !RC_ACTIVE.load(Ordering::Relaxed) {
         return false;
     }
-    let (ax, ay, aw, ah) = RC_AREA.lock().map(|a| *a).unwrap_or_default();
-    if aw <= 0 || x < ax || y < ay || x >= ax + aw || y >= ay + ah {
-        return false;
-    }
-    let under = unsafe { WindowFromPoint(POINT { x, y }) };
-    if under.is_null() {
-        return false;
-    }
-    let own = RC_OWN.load(Ordering::Relaxed);
-    let desktop = under as usize == own || matches!(class_of(under).as_str(), "SysListView32" | "SHELLDLL_DefView" | "Progman" | "WorkerW");
-    desktop && !over_icon(x, y)
+    let Ok(t) = RC_TARGET.try_lock() else { return false };
+    let ((x0, y0, x1, y1), ours, at) = *t;
+    ours && x >= x0 && x < x1 && y >= y0 && y < y1 && ticks().wrapping_sub(at) < 1500
 }
 
 unsafe extern "system" fn rclick_proc(code: i32, wp: usize, lp: isize) -> isize {
     if code == HC_ACTION as i32 && lp != 0 {
+        RC_SEEN.store(ticks(), Ordering::Relaxed);
         let m = &*(lp as *const MSLLHOOKSTRUCT);
         let injected = m.flags & LLMHF_INJECTED != 0;
         if !injected {
             match wp as u32 {
                 WM_RBUTTONDOWN if rclick_ours(m.pt.x, m.pt.y) => {
-                    RC_EATEN.store(true, Ordering::SeqCst);
-                    if let Ok(mut p) = RC_PENDING.lock() {
+                    if let Ok(mut p) = RC_PENDING.try_lock() {
                         *p = Some((m.pt.x, m.pt.y));
+                        RC_EATEN.store(true, Ordering::SeqCst);
+                        return 1;
                     }
-                    return 1;
                 }
                 WM_RBUTTONUP if RC_EATEN.swap(false, Ordering::SeqCst) => return 1,
                 _ => {}

@@ -119,6 +119,14 @@ struct Runner {
     /// Something changed that should show at once (a menu opened).
     #[cfg_attr(not(windows), allow(dead_code))]
     draw_now: bool,
+    /// Windows desktop: the cell last checked for whether a right-click
+    /// there is the village's, and when (see winsys::rclick_target).
+    #[cfg(windows)]
+    rc_seen: ((i32, i32), Instant),
+    /// Since when the pointer has been moving with the right-click hook
+    /// hearing nothing (Windows dropped it?), and when it was last put back.
+    #[cfg(windows)]
+    hook_doubt: (Option<Instant>, Instant),
     /// Desktop mode: attach afresh at this time (after something that can
     /// leave the wallpaper hidden or stuck: see winsys::take_desktop_event),
     /// and why.
@@ -317,6 +325,33 @@ impl Runner {
         let (was_l, was_r) = self.polled;
         self.polled = (p.left, p.right);
         let Some(app) = self.app.as_mut() else { return };
+        let now = Instant::now();
+        // what a right-click here would be, worked out now (the hook can't
+        // wait to ask): the village's, if something of its own is under the
+        // pointer on the bare desktop, not on an icon
+        if (cx, cy) != self.rc_seen.0 || now.duration_since(self.rc_seen.1) > Duration::from_millis(300) {
+            self.rc_seen = ((cx, cy), now);
+            let ours = inside && p.on_desktop && app.right_click_ours(cx, cy) && !crate::winsys::over_icon(p.x, p.y);
+            let (cw, ch) = (g.raster.cw as i32, g.raster.ch as i32);
+            let x0 = g.origin.0 + g.offset.0 as i32 + cx * cw;
+            let y0 = g.origin.1 + g.offset.1 as i32 + cy * ch;
+            crate::winsys::rclick_target((x0, y0, x0 + cw, y0 + ch), ours);
+        }
+        // the pointer moving while the hook hears nothing: Windows dropped
+        // it (it does that to a hook that was slow to answer); put it back
+        if (lx, ly) != self.cursor {
+            match crate::winsys::rclick_hook_quiet_ms() {
+                Some(q) if q > 1500 => {
+                    let since = *self.hook_doubt.0.get_or_insert(now);
+                    if now.duration_since(since) > Duration::from_secs(2) && now.duration_since(self.hook_doubt.1) > Duration::from_secs(10) {
+                        eprintln!("xmas-tui: the right-click hook stopped hearing the mouse; putting it back");
+                        crate::winsys::rclick_rehook();
+                        self.hook_doubt = (None, now);
+                    }
+                }
+                _ => self.hook_doubt.0 = None,
+            }
+        }
         if inside {
             if (lx, ly) != self.cursor {
                 self.cursor = (lx, ly);
@@ -449,7 +484,6 @@ impl Runner {
         if let Some((x, y, w, h)) = rect {
             // the Resized event this causes re-runs layout()
             crate::winsys::reposition(hwnd, x, y, w, h);
-            crate::winsys::rclick_area((x, y, w, h));
             g.origin = (x, y);
             if rect_changed {
                 self.restart_winfx(Some((x, y, w, h)));
@@ -570,7 +604,7 @@ impl Runner {
                     // right-clicks on the village (not on icons) get its menus;
                     // sleep, unlock and display changes are looked out for
                     if self.attached {
-                        crate::winsys::rclick_hook(hwnd, (origin.0, origin.1, s.width as i32, s.height as i32));
+                        crate::winsys::rclick_hook();
                         crate::winsys::watch_desktop_events();
                     }
                     self.geom = (mon_rect, crate::winsys::parent_origin(hwnd));
@@ -952,6 +986,10 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         wall_seen: std::time::SystemTime::now(),
         #[cfg(windows)]
         fixes: (0, Instant::now()),
+        #[cfg(windows)]
+        rc_seen: ((i32::MIN, i32::MIN), Instant::now()),
+        #[cfg(windows)]
+        hook_doubt: (None, Instant::now()),
     };
     el.run_app(&mut r)?;
     Ok(())

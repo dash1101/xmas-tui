@@ -952,9 +952,25 @@ impl App {
         self.menu = Some(CtxMenu::with(x, y, title, items, w, h));
     }
 
+    /// Would a right-click at (x, y) be the village's (something of its own
+    /// there, or a panel open that it closes)? Windows desktop: worked out
+    /// as the pointer moves, so the mouse hook knows at once.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn right_click_ours(&self, x: i32, y: i32) -> bool {
+        if self.settings.open || self.menu.is_some() {
+            return true;
+        }
+        self.widgets.hit(x, y).is_some_and(|i| i != 0) || settings::gear_rect(self.w as i32).contains(x, y) || {
+            let (wx, wy) = self.world_pt(x, y);
+            let (title, items) = self.scene.menu_at(wx, wy);
+            !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village") || items.iter().any(|(_, d)| matches!(d, crate::scene::Do::DropOn(..)))
+        }
+    }
+
     /// Windows desktop: a right-click the hook took from the desktop. Opens
-    /// our menu if something of ours is there (someone, a house, a widget,
-    /// a shelf) and returns true; false lets Windows' desktop menu show.
+    /// the village's menu if something of its own is there (someone, a
+    /// house, a widget, a shelf) and returns true; false lets Windows'
+    /// desktop menu show.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn right_click(&mut self, x: i32, y: i32) -> bool {
         if self.settings.open {
