@@ -377,10 +377,11 @@ A cut-down village for the phone's home screen, made to be watched rather than p
   only runs while the home screen is showing), snowfall, detail, the villager's name, the pet (cat, dog, bunny or
   none) and its name, speech bubbles, time of day, and the dock.
 
-**Install:** download `xmas-tui-android.apk` from the [latest release](https://github.com/dash1101/xmas-tui/releases/latest)
-on the phone, open it (allowing installs from the browser or file manager when asked), then open **xmas-tui
-village** and tap **Set as live wallpaper**. Android 7 or newer. [Orbit](https://github.com/dash1101/orbit) on Android
-installs it too, and keeps it updated.
+**Install:** on the phone, download `xmas-tui-android.apk` from the newest
+[release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or
+file manager when asked), then open **xmas-tui village** and tap **Set as live wallpaper**. Android 7 or newer. The APK
+is attached only to releases that change the Android app, so desktop-only releases don't offer phones an identical
+update. [Orbit](https://github.com/dash1101/orbit) on Android finds the newest one, installs it, and keeps it updated.
 
 **Build:** `android/build.sh` (a JDK 17 and the Android SDK; no Gradle). The village itself is plain Java in
 `android/src/.../core`, and `android/preview/Preview.java` renders it to PNGs on the desktop.
