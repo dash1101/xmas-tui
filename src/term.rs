@@ -36,6 +36,8 @@ pub struct Term {
     frames: u64,
     /// A cell's size in pixels (from the terminal), for crisp sprites.
     cell_px: (usize, usize),
+    /// The whole window's size in pixels (as kitty reports it).
+    screen_px: (f32, f32),
 }
 
 /// How a cell looks: half-block cells are just two colours, whichever of
@@ -111,7 +113,7 @@ impl Term {
     pub fn new() -> Self {
         let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some() || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
         crate::frame::set_pictures_ok(kitty);
-        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![], used: Default::default(), frames: 0, cell_px: (9, 19) }
+        Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![], used: Default::default(), frames: 0, cell_px: (9, 19), screen_px: (0.0, 0.0) }
     }
 
     pub fn enter() -> io::Result<()> {
@@ -163,6 +165,7 @@ impl Term {
             if let Ok(ws) = crossterm::terminal::window_size() {
                 if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 {
                     self.cell_px = ((ws.width / ws.columns).max(1) as usize, (ws.height / ws.rows).max(1) as usize);
+                    self.screen_px = (ws.width as f32, ws.height as f32);
                 }
             }
             self.w = w;
@@ -282,6 +285,14 @@ impl Term {
 
     /// kitty's graphics protocol: each image sent once (by id), then placed
     /// over its cells; any change re-places them all (a handful of icons).
+    /// The pixel grid (see `App::screen_map`): kitty centres the cells in
+    /// the window (its default placement), the leftover split either side.
+    pub fn screen_map(&self) -> Option<(f32, f32, f32, f32, f32, f32)> {
+        let (w, h) = self.screen_px;
+        let (cw, ch) = (self.cell_px.0 as f32, self.cell_px.1 as f32);
+        (w > 0.0 && self.w > 0).then(|| (w, h, ((w - self.w as f32 * cw) / 2.0).max(0.0), ((h - self.h as f32 * ch) / 2.0).max(0.0), cw, ch))
+    }
+
     /// A cell's height over its width (for laying sprites out).
     pub fn cell_aspect(&self) -> f32 {
         self.cell_px.1 as f32 / self.cell_px.0.max(1) as f32

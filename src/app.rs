@@ -94,6 +94,15 @@ pub struct App {
     /// Windows desktop mode: the grid's origin on screen and the cell size
     /// (pixels), to put a file dragged off a shelf where it was dropped.
     pub px_map: Option<(i32, i32, i32, i32)>,
+    /// The wallpaper's pixel grid: the screen's size, where the cells start
+    /// on it, and a cell's size (px). Open windows (whose tops the villager
+    /// can climb onto) are placed on the grid with it.
+    pub screen_map: Option<(f32, f32, f32, f32, f32, f32)>,
+    /// The open windows (where they show), in cells: menus keep out from
+    /// under them.
+    window_rects: Vec<(i32, i32, i32, i32)>,
+    /// (XMAS_TEST_DROP_ON_WINDOW: the villager's been dropped on a window)
+    test_dropped: u8,
     /// Windows desktop: our menu's "Windows desktop menu…" was picked (the
     /// window sends the right-click on to the desktop).
     pub desktop_menu: bool,
@@ -275,6 +284,9 @@ impl App {
             shelf_press: None,
             last_click: None,
             px_map: None,
+            screen_map: None,
+            window_rects: vec![],
+            test_dropped: 0,
             desktop_menu: false,
             menu: None,
             press: None,
@@ -895,6 +907,15 @@ impl App {
 
     /// Open the right-click menu at (x, y).
     fn open_menu(&mut self, x: i32, y: i32) {
+        self.build_menu(x, y);
+        // (drawn on the wallpaper: out from under the open windows)
+        let (w, h) = (self.w as i32, self.h as i32);
+        if let Some(m) = &mut self.menu {
+            m.avoid(&self.window_rects, (x, y), w, h);
+        }
+    }
+
+    fn build_menu(&mut self, x: i32, y: i32) {
         use crate::ctxmenu::{CtxMenu, MenuAct};
         use crate::widgets::shelf::{Hit, MenuAct as S};
         self.commit_city();
@@ -1463,7 +1484,23 @@ impl App {
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
         // the widgets' tops are something to climb up onto (next frame)
-        self.scene.set_widget_ledges(self.widgets.rects.iter().flatten().map(|r| (r.x, r.y, r.w, r.h)).collect());
+        self.scene.set_widget_ledges(self.widgets.rects.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r.x, r.y, r.w, r.h))).collect());
+        // and the open windows' tops (the window-snow overlay sees them)
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some((sw, sh, ox, oy, cw, ch)) = self.screen_map.filter(|m| m.4 > 0.0 && m.5 > 0.0) {
+            let tops = crate::winsnow::tops();
+            let cells: Vec<(u64, f32, f32, f32, f32)> = tops.iter().map(|t| (t.id, (t.x0 * sw - ox) / cw, (t.x1 * sw - ox) / cw, (t.y * sh - oy) / ch, (t.bottom * sh - oy) / ch)).collect();
+            self.window_rects = cells.iter().map(|&(_, x0, x1, y0, y1)| (x0.floor() as i32, y0.floor() as i32, x1.ceil() as i32, y1.ceil() as i32)).collect();
+            // testing: drop the villager in on the first window to show up
+            // (a frame after it's seen, once the village has it as a ledge)
+            if let Some(&(_, x0, x1, y0, _)) = cells.first().filter(|_| std::env::var_os("XMAS_TEST_DROP_ON_WINDOW").is_some() && self.test_dropped < 2) {
+                self.test_dropped += 1;
+                if self.test_dropped == 2 {
+                    self.scene.drop_on_screen((x0 + x1) / 2.0, y0);
+                }
+            }
+            self.scene.set_window_ledges(cells);
+        }
         self.settings.draw_gear(&mut self.frame, t);
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         // a popped-out window tells the wallpaper it's open

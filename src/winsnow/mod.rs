@@ -170,6 +170,57 @@ struct Part {
     life: f32,
 }
 
+/// The top edge of an open window, where it shows (not under another
+/// window), for the villager to climb up onto: in fractions of the screen
+/// the overlay covers. `id` is the window's, so a villager up there moves
+/// with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Top {
+    pub id: u64,
+    pub x0: f32,
+    pub x1: f32,
+    pub y: f32,
+    pub bottom: f32,
+}
+
+static TOPS: std::sync::Mutex<Vec<Top>> = std::sync::Mutex::new(Vec::new());
+
+/// The open windows' tops, as last seen (none while no overlay runs).
+pub fn tops() -> Vec<Top> {
+    TOPS.lock().map(|t| t.clone()).unwrap_or_default()
+}
+
+/// Where each normal window's top edge can be seen: split round the windows
+/// in front of the strip just above it.
+fn visible_tops(wins: &[Win], sw: f32, sh: f32) -> Vec<Top> {
+    let mut out = vec![];
+    if sw <= 0.0 || sh <= 0.0 {
+        return out;
+    }
+    for w in wins.iter().filter(|w| w.kind == 0 && w.w > 60.0 && w.y > 12.0 && w.y < sh - 12.0) {
+        let id = w.id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+        let line = w.y - 6.0;
+        let mut segs = vec![(w.x.max(0.0), (w.x + w.w).min(sw))];
+        for o in wins.iter().filter(|o| o.z > w.z && o.y <= line && o.y + o.h > line) {
+            let (a, b) = (o.x, o.x + o.w);
+            segs = segs
+                .into_iter()
+                .flat_map(|(s0, s1)| {
+                    if b <= s0 || a >= s1 {
+                        vec![(s0, s1)]
+                    } else {
+                        [(s0, a.min(s1)), (b.max(s0), s1)].into_iter().filter(|(x, y)| y > x).collect()
+                    }
+                })
+                .collect();
+        }
+        for (k, (s0, s1)) in segs.into_iter().filter(|(a, b)| b - a >= 24.0).enumerate() {
+            out.push(Top { id: id ^ (k as u64) << 56, x0: s0 / sw, x1: s1 / sw, y: w.y / sh, bottom: ((w.y + w.h) / sh).min(1.0) });
+        }
+    }
+    out
+}
+
 pub struct Fx {
     pub cfg: FxCfg,
     pub sw: f32,
@@ -198,6 +249,15 @@ pub struct Fx {
     pub docks: Vec<(f32, f32, f32)>,
     /// Light strings, cached per window layout.
     lights: lights::Lights,
+}
+
+impl Drop for Fx {
+    // the overlay's gone: no windows to climb
+    fn drop(&mut self) {
+        if let Ok(mut tops) = TOPS.lock() {
+            tops.clear();
+        }
+    }
 }
 
 impl Fx {
@@ -431,6 +491,9 @@ impl Fx {
         }
         self.cursor = Some(cursor);
         self.cursor_t = t;
+        if let Ok(mut tops) = TOPS.lock() {
+            *tops = visible_tops(&wins, self.sw, self.sh);
+        }
         self.wins = wins;
         self.brush();
     }
@@ -1004,6 +1067,25 @@ mod tests {
 
     fn cfg() -> FxCfg {
         FxCfg { lights: false, ..FxCfg::default() }
+    }
+
+    #[test]
+    fn window_tops_show_where_nothing_is_in_front() {
+        // a at the back; b in front, over the middle of a's top edge
+        let a = win("a", 100.0, 300.0, 600.0, 300.0, 1);
+        let b = win("b", 300.0, 200.0, 200.0, 300.0, 2);
+        let tops = visible_tops(&[a, b], 1000.0, 1000.0);
+        let mine: Vec<&Top> = tops.iter().filter(|t| (t.y - 0.3).abs() < 1e-6).collect();
+        assert_eq!(mine.len(), 2, "a's top, either side of b: {tops:?}");
+        assert!((mine[0].x0 - 0.1).abs() < 1e-6 && (mine[0].x1 - 0.3).abs() < 1e-6);
+        assert!((mine[1].x0 - 0.5).abs() < 1e-6 && (mine[1].x1 - 0.7).abs() < 1e-6);
+        assert_ne!(mine[0].id, mine[1].id);
+        // b's own top is all there
+        assert!(tops.iter().any(|t| (t.y - 0.2).abs() < 1e-6 && (t.x1 - t.x0 - 0.2).abs() < 1e-6));
+        // a maximized window or the taskbar isn't climbed
+        let mut m = win("m", 0.0, 0.0, 1000.0, 1000.0, 3);
+        m.kind = 3;
+        assert!(visible_tops(&[m], 1000.0, 1000.0).is_empty());
     }
 
     fn win(id: &str, x: f32, y: f32, w: f32, h: f32, z: i64) -> Win {

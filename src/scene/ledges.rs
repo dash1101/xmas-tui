@@ -1,8 +1,8 @@
 //! Things the villager can climb and stand on: roofs (their real outline,
 //! slopes, chimneys and steeple), trees (up to the star), the station, lamp
 //! posts, presents, the cocoa cabin and the snowman; and on the desktop,
-//! the tops of the widgets. Each is the top edge of its shape, column by
-//! column.
+//! the tops of the widgets and of the open windows. Each is the top edge of
+//! its shape, column by column.
 
 /// What a ledge is (some things care: the camera holds still on a widget,
 /// which stays put on the screen while the village scrolls).
@@ -17,11 +17,16 @@ pub enum Kind {
     Snowman,
     /// A widget, on the screen (its columns are where it is this frame).
     Widget,
+    /// An open window's top edge (the part of it that shows).
+    Window,
 }
 
 #[derive(Clone, Debug)]
 pub struct Ledge {
     pub kind: Kind,
+    /// Which widget or window (0: part of the village): the ledges on the
+    /// screen are made afresh every frame, and someone up on one keeps to it.
+    pub id: u64,
     /// First column, and the top edge of the shape at each column from
     /// there (in rows: half a row lower where its top cell is half empty).
     pub x0: i32,
@@ -38,19 +43,33 @@ impl Ledge {
     /// top..=base: its top edge.
     pub fn from_shape(kind: Kind, x0: i32, x1: i32, top: i32, base: i32, solid: impl Fn(i32, i32) -> bool) -> Option<Ledge> {
         let tops: Vec<Option<f32>> = (x0..x1).map(|x| (top..=base).find(|&y| solid(x, y)).map(|y| y as f32)).collect();
-        tops.iter().any(|t| t.is_some()).then_some(Ledge { kind, x0, tops, base })
+        tops.iter().any(|t| t.is_some()).then_some(Ledge { kind, id: 0, x0, tops, base })
     }
 
     /// A shape given by its top edge in each column it covers.
     pub fn from_tops(kind: Kind, tops: &std::collections::BTreeMap<i32, f32>, base: i32) -> Option<Ledge> {
         let (&x0, _) = tops.first_key_value()?;
         let (&x1, _) = tops.last_key_value()?;
-        Some(Ledge { kind, x0, tops: (x0..=x1).map(|x| tops.get(&x).copied()).collect(), base })
+        Some(Ledge { kind, id: 0, x0, tops: (x0..=x1).map(|x| tops.get(&x).copied()).collect(), base })
     }
 
     /// A flat top: columns x..x+w, top row `top`.
     pub fn flat(kind: Kind, x: i32, w: i32, top: i32, base: i32) -> Ledge {
-        Ledge { kind, x0: x, tops: vec![Some(top as f32); w.max(1) as usize], base }
+        Ledge { kind, id: 0, x0: x, tops: vec![Some(top as f32); w.max(1) as usize], base }
+    }
+
+    /// A flat top on the screen (a widget's, a window's): over columns
+    /// x0..x1 (the cells wholly on it), its edge at row `top` (which can
+    /// fall part way down a cell).
+    pub fn edge(kind: Kind, id: u64, x0: f32, x1: f32, top: f32, base: i32) -> Option<Ledge> {
+        let (a, b) = (x0.ceil() as i32, x1.floor() as i32);
+        (b > a).then(|| Ledge { kind, id, x0: a, tops: vec![Some(top); (b - a) as usize], base })
+    }
+
+    /// On the screen rather than in the village (it stays put while the
+    /// village scrolls by).
+    pub fn on_screen(&self) -> bool {
+        matches!(self.kind, Kind::Widget | Kind::Window)
     }
 
     /// The row the villager's feet are on, standing on top at `x` (the
@@ -73,7 +92,7 @@ pub fn landing(ledges: &[Ledge], x: f32, from: f32, to: f32, skip: Option<usize>
         .iter()
         .enumerate()
         .filter(|(i, _)| Some(*i) != skip)
-        .filter(|(_, l)| l.kind == Kind::Widget || depth.is_none_or(|d| (l.base as f32 - d).abs() <= 4.0))
+        .filter(|(_, l)| l.on_screen() || depth.is_none_or(|d| (l.base as f32 - d).abs() <= 4.0))
         .filter_map(|(i, l)| l.feet(x).map(|f| (i, f)))
         .filter(|&(_, f)| from <= f + 0.01 && to >= f)
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -90,10 +109,7 @@ pub fn climbable(ledges: &[Ledge], x: f32, y: f32, back: bool) -> Option<(usize,
         .filter_map(|(i, l)| l.feet(x).map(|f| (i, f, l)))
         .filter(|&(_, f, l)| {
             f < y - 1.0
-                && match l.kind {
-                    Kind::Widget => y <= l.base as f32 + 6.0,
-                    _ => back && l.base as f32 <= y + 1.0,
-                }
+                && if l.on_screen() { y <= l.base as f32 + 6.0 } else { back && l.base as f32 <= y + 1.0 }
         })
         .max_by_key(|&(_, _, l)| l.base)
         .map(|(i, f, _)| (i, f))

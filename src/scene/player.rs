@@ -169,6 +169,17 @@ impl Player {
         d.sound(Sfx::Pickup, self.centre(), 0.35);
     }
 
+    /// What was underfoot has gone (a window closed or moved off): down.
+    pub fn lose_footing(&mut self) {
+        self.perch = None;
+        self.climb = None;
+        self.fall = Some((0.0, self.y));
+        self.ledge_fall = true;
+        self.left = None;
+        self.depth = None;
+        self.aim = None;
+    }
+
     /// Climbing (for drawing): hand over hand.
     pub fn climbing(&self) -> bool {
         self.climb.is_some()

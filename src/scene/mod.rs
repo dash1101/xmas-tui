@@ -78,10 +78,10 @@ pub struct Scene {
     /// `set_widget_ledges`).
     ledges: Vec<ledges::Ledge>,
     static_ledges: usize,
-    widget_ledges: Vec<(i32, i32, i32, i32)>,
-    /// The view (column, sky lift) the widget ledges were last placed at:
-    /// someone up on a widget moves with it as the village scrolls by.
-    widget_view: (i32, i32),
+    widget_ledges: Vec<(usize, i32, i32, i32, i32)>,
+    /// The open windows' tops on the screen: (id, x0, x1, top, bottom), in
+    /// cells.
+    window_ledges: Vec<(u64, f32, f32, f32, f32)>,
     snow: snow::Snow,
     pub sleigh: sleigh::Sleigh,
     director: Director,
@@ -172,6 +172,8 @@ pub struct Scene {
     /// village who've already called out to the villager.
     friends: Vec<crate::config::FriendCfg>,
     friend_hi: Vec<u64>,
+    /// The villager's curled up inside an igloo (out of sight until a key).
+    in_igloo: bool,
     /// The animal the villager's pet is after.
     pet_chasing: Option<u64>,
     /// Drawing for a zoomed view: people are left for `draw_people`.
@@ -262,6 +264,11 @@ pub enum Do {
     /// Drop in on top of whatever's at this column and row (a roof, a
     /// tree…).
     DropOn(f32, f32),
+    /// Build a snowman (false) or an igloo (true) here: column, row.
+    Build(bool, f32, f32),
+    /// Lend a hand with the build at this column; crawl into the igloo there.
+    HelpBuild(f32),
+    Crawl(f32),
     WalkTo(f32, f32),
     Stats,
     Pockets,
@@ -318,13 +325,15 @@ enum Focus {
     Door(usize, i32, i32),
     Critter(u64, i32, i32),
     Bush(usize, i32, i32),
+    /// A snowman or igloo: pitch in (or crawl into a finished igloo).
+    Build(usize, i32, i32),
     Spot(i32, i32),
 }
 
 impl Focus {
     fn mark(&self) -> (i32, i32) {
         match *self {
-            Focus::Pet(x, y) | Focus::Shop(x, y) | Focus::Door(_, x, y) | Focus::Critter(_, x, y) | Focus::Bush(_, x, y) | Focus::Spot(x, y) => (x, y),
+            Focus::Pet(x, y) | Focus::Shop(x, y) | Focus::Door(_, x, y) | Focus::Critter(_, x, y) | Focus::Bush(_, x, y) | Focus::Build(_, x, y) | Focus::Spot(x, y) => (x, y),
         }
     }
 }
@@ -576,7 +585,7 @@ impl Scene {
             ledges: vec![],
             static_ledges: 0,
             widget_ledges: vec![],
-            widget_view: (0, 0),
+            window_ledges: vec![],
             daylight: daylight::Daylight::default(),
             pockets: shop::Pockets::new(),
             show_pockets: false,
@@ -623,6 +632,7 @@ impl Scene {
             you_name: cfg.name.clone(),
             friends: cfg.friends.clone(),
             friend_hi: vec![],
+            in_igloo: false,
             pet_chasing: None,
             zoomed: std::cell::Cell::new(false),
             held: None,
@@ -785,10 +795,32 @@ impl Scene {
         if self.in_sky(sx, y) {
             return ("the sky".into(), vec![("wish on a star".into(), Do::Wish), ("look up into the sky".into(), Do::LookUp)]);
         }
-        // open ground (or anywhere else): drop in, or walk over
+        // a snowman or igloo: lend a hand, or crawl inside
+        if let Some(i) = self.builds.hit(x, y) {
+            let (bx, ..) = self.builds.spot(i).unwrap_or((x as f32, 0.0, 0.0, false));
+            let (snowman, p) = self.builds.about(i).unwrap_or((true, 1.0));
+            let what = if snowman { "snowman" } else { "igloo" };
+            return if p < 1.0 {
+                (format!("a {what}, going up"), vec![(format!("help build the {what}"), Do::HelpBuild(bx))])
+            } else if !snowman {
+                ("an igloo".into(), vec![("crawl inside".into(), Do::Crawl(bx))])
+            } else {
+                ("a snowman".into(), vec![("walk over here".into(), Do::WalkTo(bx, y as f32 + 1.0))])
+            };
+        }
+        // open ground (or anywhere else): drop in, walk over, or build
+        // something there
         let lo = self.lo_at(x as f32);
         let row = (y as f32).clamp(lo, self.h as f32 - 1.0);
-        ("here".into(), vec![("✦ drop in here".into(), Do::DropIn(x as f32, row)), ("walk over here".into(), Do::WalkTo(x as f32, row))])
+        let mut v = vec![("✦ drop in here".into(), Do::DropIn(x as f32, row)), ("walk over here".into(), Do::WalkTo(x as f32, row))];
+        let base = (row.max(lo + 3.0)).min(self.h as f32 - 1.0);
+        if y as f32 >= lo - 1.0 && self.build_spot_free(x as f32, base as i32, self.builds.half_for(false)) {
+            v.push(("build a snowman here".into(), Do::Build(false, x as f32, base)));
+            if self.build_spot_free(x as f32, base as i32, self.builds.half_for(true)) {
+                v.push(("build an igloo here".into(), Do::Build(true, x as f32, base)));
+            }
+        }
+        ("here".into(), v)
     }
 
     /// First walkable row at world column `x`.
@@ -801,6 +833,12 @@ impl Scene {
     pub fn act(&mut self, what: Do) {
         let t = self.now();
         match what {
+            Do::Build(..) | Do::HelpBuild(_) | Do::Crawl(_) => {
+                if self.in_igloo {
+                    self.leave_igloo();
+                }
+                self.goal = Some(Goal { then: what, until: t + 25.0 });
+            }
             Do::DropOn(x, y) => {
                 self.goal = None;
                 // that one (not a widget or a roof above it on the way down)
@@ -856,6 +894,22 @@ impl Scene {
             Do::Snowball(id) => self.critters.position(id).map(|(x, y)| (x, y, 22.0)),
             Do::Visit(i) => self.village.houses.get(i).map(|h| (h.door() as f32 + 0.5, self.lo_at(h.door() as f32).max(h.base as f32), 1.2)),
             Do::Shop => self.shop.as_ref().map(|s| (s.centre() as f32, s.base as f32 + 2.0, 3.0)),
+            Do::Build(igloo, x, row) => {
+                // beside the spot, on the villager's side of it
+                let half = self.builds.half_for(igloo);
+                let side = self.player.as_ref().map(|p| (p.centre() - x).signum()).unwrap_or(-1.0);
+                Some((x + side * (half + 1.0), row, 1.5))
+            }
+            Do::HelpBuild(bx) | Do::Crawl(bx) => {
+                let i = self.builds_near(bx)?;
+                let (x, row, half, igloo) = self.builds.spot(i)?;
+                if matches!(g.then, Do::Crawl(_)) && igloo {
+                    Some((x, row, 1.5))
+                } else {
+                    let side = self.player.as_ref().map(|p| (p.centre() - x).signum()).unwrap_or(-1.0);
+                    Some((x + side * (half + 1.5), row - 1.0, 2.0))
+                }
+            }
             _ => None,
         }
     }
@@ -914,6 +968,12 @@ impl Scene {
                 }
             }
             Do::Visit(i) => self.enter(i),
+            Do::Build(igloo, x, row) => self.start_build(igloo, x, row, t),
+            Do::HelpBuild(bx) | Do::Crawl(bx) => {
+                if let Some(i) = self.builds_near(bx) {
+                    self.work_on(i, t);
+                }
+            }
             Do::Shop => {
                 if let Some(s) = &mut self.shop {
                     s.open = !s.closed;
@@ -2045,6 +2105,11 @@ impl Scene {
         if let Some(pet) = self.my_pet.as_ref().filter(|pet| !pet.staying && pet.near(px, py, k) && (pet.x - px) * p.dir > 0.0) {
             return Some(Focus::Pet(pet.x.round() as i32, pet.y.round() as i32 - 3 - self.director.lift));
         }
+        // right by a snowman or igloo going up: lend a hand (before the kids
+        // building it, who are standing right there); a finished igloo's door
+        if let Some((i, _)) = self.builds.at(px, py) {
+            return Some(Focus::Build(i, px.round() as i32, py.round() as i32 - 5));
+        }
         if let Some(id) = self.critters.nearest(px, py, 7.0) {
             let (bx, by, bw, _) = self.critters.bbox_of(id, t)?;
             return Some(Focus::Critter(id, bx + bw / 2, by - 1));
@@ -2125,20 +2190,39 @@ impl Scene {
         self.ledges = v;
     }
 
-    /// The widgets' panels on the screen (x, y, w, h), to climb and stand on.
-    pub fn set_widget_ledges(&mut self, rects: Vec<(i32, i32, i32, i32)>) {
+    /// The widgets' panels on the screen (index, x, y, w, h), to climb and
+    /// stand on.
+    pub fn set_widget_ledges(&mut self, rects: Vec<(usize, i32, i32, i32, i32)>) {
         self.widget_ledges = rects;
+    }
+
+    /// Drop the villager in on whatever's at screen cell (sx, sy) (testing).
+    pub fn drop_on_screen(&mut self, sx: f32, sy: f32) {
+        let (x, y) = (sx + self.cam_i() as f32, sy - self.oy_i() as f32);
+        self.act(Do::DropOn(x.floor() + 0.5, y.ceil()));
+    }
+
+    /// The open windows' top edges on the screen (id, x0, x1, top row,
+    /// bottom row), to climb up onto.
+    pub fn set_window_ledges(&mut self, tops: Vec<(u64, f32, f32, f32, f32)>) {
+        self.window_ledges = tops;
     }
 
     /// The ledge under (world column x, row y): on it, or just above it.
     fn ledge_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.ledges.iter().position(|l| l.feet(x as f32).is_some_and(|f| y as f32 >= f - 3.0 && y <= l.base))
+        // (the one whose top edge is nearest: a window's over the tree behind it)
+        self.ledges
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.feet(x as f32).filter(|&f| y as f32 >= f - 3.0 && y <= l.base).map(|f| (i, (y as f32 - f - 1.0).abs())))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// Space: jump (off the ground, or off whatever the villager's up on).
     pub fn jump(&mut self) {
         let t = self.now();
-        if self.inside.is_some() {
+        if self.inside.is_some() || self.in_igloo {
             return self.interact();
         }
         if let Some(p) = &mut self.player {
@@ -2151,6 +2235,14 @@ impl Scene {
     pub fn interact(&mut self) {
         let t = self.now();
         if self.look.take().is_some() {
+            return;
+        }
+        if self.in_igloo {
+            self.leave_igloo();
+            return;
+        }
+        if let Some(Focus::Build(i, ..)) = self.focus {
+            self.work_on(i, t);
             return;
         }
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
@@ -2290,7 +2382,7 @@ impl Scene {
             Some(Focus::Spot(x, y)) => {
                 self.poke(x, y);
             }
-            Some(Focus::Door(..)) => {}
+            Some(Focus::Door(..)) | Some(Focus::Build(..)) => {}
             None => {
                 // nothing about: a happy little hop in the snow
                 self.director.snow_puff(px, py);
@@ -2368,6 +2460,33 @@ impl Scene {
     /// station / cabin, or "climb"ing a house, or "jump"ing off its roof.
     pub fn preview_perch(&mut self, what: &str) {
         use ledges::Kind as K;
+        // or: building with the kids (a snowman and an igloo done, one going up)
+        if what == "builds" {
+            let Some((px, py)) = self.player.as_ref().map(|p| (p.centre(), p.y)) else { return };
+            let t = self.now();
+            let row = ((py + 3.0).min(self.h as f32 - 2.0)) as i32;
+            let mut x = px + 8.0;
+            for (igloo, p) in [(false, 1.0), (true, 1.0), (false, 0.6)] {
+                // the next free spot along
+                let half = self.builds.half_for(igloo);
+                while x < self.ww as f32 - 20.0 && !self.build_spot_free(x, row, half) {
+                    x += 2.0;
+                }
+                let what = if igloo { builds::What::Igloo } else { builds::What::Snowman };
+                self.builds.start(what, x, row, t, &mut self.critters, &mut self.director);
+                if let Some(i) = self.builds.find(x) {
+                    self.builds.preview(i, p);
+                }
+                x += half * 2.0 + 6.0;
+            }
+            if let Some(p) = &mut self.player {
+                p.x = x - 8.0;
+            }
+            self.cam_target = (x - self.w as f32 * 0.7).clamp(0.0, (self.ww - self.w) as f32);
+            self.cam = self.cam_target;
+            self.ctx.cam = self.cam;
+            return;
+        }
         let kind = match what {
             "tree" => K::Tree,
             "lamp" => K::Lamp,
@@ -3141,6 +3260,15 @@ impl Scene {
             self.goal = None;
         }
         let mv = self.steer(t).unwrap_or(self.mv);
+        // curled up in an igloo: any direction key crawls back out
+        let mv = if self.in_igloo {
+            if mv != (0.0, 0.0) {
+                self.leave_igloo();
+            }
+            (0.0, 0.0)
+        } else {
+            mv
+        };
         let before = self.player.as_ref().map(|p| (p.x, p.y));
         let mut walked_out = false;
         // looking out of a window: A/D lean to see along the street, W/S
@@ -3157,25 +3285,49 @@ impl Scene {
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
             walked_out = inn.update(dt, t, mv, p);
         } else if self.player.is_some() {
-            // the widgets' tops, where they are in the village this frame
+            // the widgets' and windows' tops, where they are in the village
+            // this frame (someone up on one stays on it, and moves with it:
+            // the village scrolls by, a window is dragged)
+            let p = self.player.as_ref().unwrap();
+            let held = |i: Option<usize>, ls: &[ledges::Ledge]| i.and_then(|i| ls.get(i)).filter(|l| l.id != 0).map(|l| (l.id, l.x0, l.tops.first().copied().flatten().unwrap_or(0.0)));
+            let (on, up) = (held(p.perch, &self.ledges), held(p.climb.map(|c| c.0), &self.ledges));
             self.ledges.truncate(self.static_ledges);
             let (cam, oy) = (self.cam_i(), self.oy_i());
-            for &(x, y, w, h) in &self.widget_ledges {
-                self.ledges.push(ledges::Ledge::flat(ledges::Kind::Widget, x + cam, w, y - oy, y - oy + h - 1));
+            for &(i, x, y, w, h) in &self.widget_ledges {
+                let mut l = ledges::Ledge::flat(ledges::Kind::Widget, x + cam, w, y - oy, y - oy + h - 1);
+                l.id = 0x5717_0000 + i as u64;
+                self.ledges.push(l);
+            }
+            for &(id, x0, x1, top, bottom) in &self.window_ledges {
+                self.ledges.extend(ledges::Ledge::edge(ledges::Kind::Window, id | 1, x0 + cam as f32, x1 + cam as f32, top - oy as f32, bottom.round() as i32 - oy));
             }
             let Some(p) = self.player.as_mut() else { unreachable!() };
-            // the widget stays put on the screen; whoever's on it with it
-            let (vx, vy) = self.widget_view;
-            self.widget_view = (cam, oy);
-            if p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.kind == ledges::Kind::Widget) {
-                p.x += (cam - vx) as f32;
-                p.y -= (oy - vy) as f32;
+            let find = |id: u64, ls: &[ledges::Ledge]| ls.iter().position(|l| l.id == id);
+            if let Some((id, x0, top)) = on {
+                match find(id, &self.ledges) {
+                    Some(i) => {
+                        let l = &self.ledges[i];
+                        p.x += (l.x0 - x0) as f32;
+                        p.y += l.tops[0].unwrap_or(top) - top;
+                        p.perch = Some(i);
+                        if l.feet(p.centre()).is_none() {
+                            p.lose_footing();
+                        }
+                    }
+                    None => p.lose_footing(),
+                }
+            }
+            if let (Some((id, _, top)), Some((_, f))) = (up, p.climb) {
+                match find(id, &self.ledges) {
+                    Some(i) => p.climb = Some((i, f + self.ledges[i].tops[0].unwrap_or(top) - top)),
+                    None => p.lose_footing(),
+                }
             }
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
             p.update(dt, t, mv, lo, self.ww as f32, h, &self.ledges, &mut self.director);
             // up on a widget: it's fixed to the screen, so the view holds still
-            let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.kind == ledges::Kind::Widget);
+            let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.on_screen());
             // the camera keeps the player comfortably in view while walking
             if p.moving && !on_widget {
                 // walking brings the view back down to earth
@@ -3439,7 +3591,7 @@ impl Scene {
                 self.director.say(p.centre().round() as i32, p.y as i32 - 4, line, t + 0.2, 2.0, 6);
             }
         }
-        self.focus = if self.inside.is_some() { None } else { self.find_focus() };
+        self.focus = if self.inside.is_some() || self.in_igloo { None } else { self.find_focus() };
         // the conversation: they stay put while it lasts; walking off (or
         // a moment after goodbye) ends it
         if let Some(c) = self.convo.as_ref().filter(|c| c.id == PET_ID) {
@@ -3634,11 +3786,9 @@ impl Scene {
     }
 
     /// Kids building snowmen and igloos on the open snow.
-    fn update_builds(&mut self, dt: f32, t: f32) {
-        if self.inside.is_some() {
-            return;
-        }
-        // what's already standing on the snowfield: (columns, bottom row)
+    /// What's already standing on the snowfield, where nothing gets built:
+    /// (first column, last column, bottom row).
+    fn build_taken(&self) -> Vec<(i32, i32, i32)> {
         let mut taken: Vec<(i32, i32, i32)> = self.trees.iter().map(|tr| (tr.cx - tr.hw_base as i32 - 3, tr.cx + tr.hw_base as i32 + 3, tr.base())).collect();
         if let Some(tr) = self.trees.iter().find(|tr| tr.is_big()) {
             // the presents (and on New Year's Eve, the mast)
@@ -3651,6 +3801,94 @@ impl Scene {
         if let Some(s) = &self.shop {
             taken.push((s.x - 3, s.x + shop::SHOP_W + 3, s.base));
         }
+        taken
+    }
+
+    /// Room to build something `half` columns either side of column x, on
+    /// row `base` (and not over another build).
+    fn build_spot_free(&self, x: f32, base: i32, half: f32) -> bool {
+        let (x0, x1) = ((x - half) as i32 - 2, (x + half) as i32 + 2);
+        x0 > 2 && x1 < self.ww as i32 - 2 && base <= self.h as i32 - 1
+            && !self.build_taken().iter().any(|&(a, b, r)| x1 > a && x0 < b && (r - base).abs() < 8)
+            && !self.builds.spans().iter().any(|&(a, b)| x1 > a && x0 < b)
+    }
+
+    /// The build at column `bx` (as a menu named it).
+    fn builds_near(&self, bx: f32) -> Option<usize> {
+        self.builds.find(bx)
+    }
+
+    /// Start building a snowman (or an igloo) at column x, row `row`.
+    fn start_build(&mut self, igloo: bool, x: f32, row: f32, t: f32) {
+        let half = self.builds.half_for(igloo);
+        if !self.build_spot_free(x, row as i32, half) {
+            return;
+        }
+        let what = if igloo { builds::What::Igloo } else { builds::What::Snowman };
+        self.builds.start(what, x, row as i32, t, &mut self.critters, &mut self.director);
+        if let Some(p) = &mut self.player {
+            p.dir = (x - p.centre()).signum();
+            let line = if igloo { "let's build an igloo!" } else { "let's build a snowman!" };
+            self.director.say(p.centre().round() as i32, p.y as i32 - 4, line, t, 2.4, 6);
+        }
+    }
+
+    /// E at a build: a push on the snowball, a block on the igloo; or into
+    /// a finished igloo.
+    fn work_on(&mut self, i: usize, t: f32) {
+        let Some((px, py)) = self.player.as_ref().filter(|p| p.free(t)).map(|p| (p.centre(), p.y)) else { return };
+        match self.builds.at(px, py) {
+            Some((_, true)) => {
+                if let Some((dx, dy)) = self.builds.crawl_in(i) {
+                    self.in_igloo = true;
+                    self.goal = None;
+                    if let Some(p) = &mut self.player {
+                        (p.x, p.y) = (dx - 1.0, dy);
+                        p.moving = false;
+                    }
+                    self.director.snow_puff(dx, dy);
+                    self.director.sound(Sfx::Rustle, dx, 0.5);
+                }
+            }
+            _ => {
+                let Some((bx, ..)) = self.builds.spot(i) else { return };
+                if let Some(p) = &mut self.player {
+                    p.active_at = t;
+                    p.scoop_until = t + 0.35;
+                    if (bx - p.centre()).abs() > 0.5 {
+                        p.dir = (bx - p.centre()).signum();
+                    }
+                }
+                if self.builds.pitch_in(i, px, py, t, &self.critters, &mut self.director) {
+                    // finished it (with a hand from the villager)
+                    self.cheer(3);
+                    let what = if self.builds.about(i).is_some_and(|a| a.0) { "snowman" } else { "igloo" };
+                    let line = format!("our {what}!");
+                    self.director.say(px.round() as i32, py as i32 - 4, &line, t + 0.6, 2.4, 6);
+                }
+            }
+        }
+    }
+
+    /// Out of the igloo, back into the cold.
+    fn leave_igloo(&mut self) {
+        if !std::mem::take(&mut self.in_igloo) {
+            return;
+        }
+        self.builds.crawl_out();
+        let t = self.now();
+        if let Some(p) = &mut self.player {
+            p.active_at = t;
+            self.director.snow_puff(p.centre(), p.y);
+            self.director.say(p.centre().round() as i32, p.y as i32 - 4, "brr!", t, 1.6, 4);
+        }
+    }
+
+    fn update_builds(&mut self, dt: f32, t: f32) {
+        if self.inside.is_some() {
+            return;
+        }
+        let taken = self.build_taken();
         // in the way: overlapping columns and not well behind or in front
         let free = |x0: i32, x1: i32, row: i32| !taken.iter().any(|&(a, b, r)| x1 > a && x0 < b && (r - row).abs() < 8);
 
@@ -3753,7 +3991,9 @@ impl Scene {
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
             }
-            p.draw(f, t, glow, Some(v));
+            if !self.in_igloo {
+                p.draw(f, t, glow, Some(v));
+            }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
             }
@@ -3918,7 +4158,9 @@ impl Scene {
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
-            p.draw(f, t, glow, None);
+            if !self.in_igloo {
+                p.draw(f, t, glow, None);
+            }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
@@ -3942,7 +4184,7 @@ impl Scene {
             if t - p.active_at < 20.0 {
                 // over the person / bush; for village things, over the player's head
                 let (x, y) = match fc {
-                    Focus::Spot(..) => (p.centre().round() as i32, p.y.round() as i32 - 5 - self.director.lift),
+                    Focus::Spot(..) | Focus::Build(..) => (p.centre().round() as i32, p.y.round() as i32 - 5 - self.director.lift),
                     _ => fc.mark(),
                 };
                 player::Player::draw_prompt(f, x, y, 'E', t);
@@ -4521,6 +4763,106 @@ mod tests {
     }
 
     #[test]
+    fn up_onto_a_window_along_with_it_and_down_when_it_closes() {
+        let mut s = walker_scene();
+        run(&mut s, 0.2);
+        let (px, py) = { let p = s.player.as_ref().unwrap(); (p.centre(), p.y) };
+        // a window on the screen above the villager: its top 8 rows up
+        let sx = px - s.cam_i() as f32;
+        let top = py - 8.0 + s.oy_i() as f32;
+        let win = |dx: f32, dy: f32| vec![(77u64, sx - 10.0 + dx, sx + 20.0 + dx, top + dy, top + dy + 12.0)];
+        s.set_window_ledges(win(0.0, 0.0));
+        run(&mut s, 0.1);
+        s.set_move(0.0, -1.0);
+        run(&mut s, 3.0);
+        s.set_move(0.0, 0.0);
+        run(&mut s, 0.3);
+        let p = s.player.as_ref().unwrap();
+        let l = p.perch.map(|i| s.ledges[i].kind);
+        assert_eq!(l, Some(ledges::Kind::Window), "up on the window");
+        assert!((p.y - (top - s.oy_i() as f32 - 1.0)).abs() < 0.01, "standing on its edge: {}", p.y);
+        let (x1, y1) = (p.x, p.y);
+        // the window's dragged across and up: along with it
+        s.set_window_ledges(win(6.0, -2.0));
+        run(&mut s, 0.1);
+        let p = s.player.as_ref().unwrap();
+        assert!((p.x - x1 - 6.0).abs() < 0.01 && (p.y - y1 + 2.0).abs() < 0.01, "moved with it: {} {}", p.x - x1, p.y - y1);
+        // it closes: down into the snow
+        s.set_window_ledges(vec![]);
+        run(&mut s, 3.0);
+        let p = s.player.as_ref().unwrap();
+        // (in the snow, or on whatever was under the window: a present, a roof)
+        let under = p.perch.map(|i| s.ledges[i].kind);
+        assert!(!p.leaping() && !p.climbing() && under != Some(ledges::Kind::Window), "back down: {} on {under:?}", p.y);
+        assert!(p.y > top - s.oy_i() as f32, "lower than the window was");
+    }
+
+    #[test]
+    fn building_an_igloo_by_hand_and_crawling_inside() {
+        let mut s = walker_scene();
+        run(&mut s, 0.2);
+        // somewhere on the open snow: "build an igloo here" (along the
+        // village until there's room)
+        let mut found = None;
+        'look: for _ in 0..8 {
+            for row in [s.h as i32 - 2, s.h as i32 - 4] {
+                for sx in 10..s.w as i32 - 10 {
+                    let (_, items) = s.menu_at(sx, row);
+                    if let Some(d) = items.into_iter().find(|(l, _)| l == "build an igloo here").map(|(_, d)| d) {
+                        found = Some(d);
+                        break 'look;
+                    }
+                }
+            }
+            s.snap_pan(s.w as f32 * 0.8);
+        }
+        let Some(d) = found else { panic!("nowhere to build an igloo") };
+        // (the villager walks over there: bring them close first)
+        if let Do::Build(_, x, row) = d {
+            let p = s.player.as_mut().unwrap();
+            (p.x, p.y) = (x - 20.0, row);
+        }
+        let cheer0 = s.pockets.cheer;
+        s.act(d);
+        // walks over and starts it
+        for _ in 0..(12.0 / DT) as usize {
+            s.update(DT, 0.0);
+            if s.builds.count().0 > 0 {
+                break;
+            }
+        }
+        assert_eq!(s.builds.count().0, 1, "never started building");
+        run(&mut s, 0.3);
+        assert!(matches!(s.focus, Some(Focus::Build(..))), "E isn't on the igloo: {:?}", s.focus.is_some());
+        // E, E, E… until it's done
+        for _ in 0..40 {
+            s.interact();
+            run(&mut s, 0.5);
+            if s.builds.about(0).is_some_and(|a| a.1 >= 1.0) {
+                break;
+            }
+        }
+        assert!(s.builds.about(0).unwrap().1 >= 1.0, "never finished");
+        assert!(s.pockets.cheer >= cheer0 + 3, "no cheer for it");
+        // round to its door, and in
+        let (dx, row, _, igloo) = s.builds.spot(0).unwrap();
+        assert!(igloo);
+        {
+            let p = s.player.as_mut().unwrap();
+            (p.x, p.y) = (dx - 1.0, row);
+        }
+        run(&mut s, 0.6);
+        s.interact();
+        assert!(s.in_igloo, "didn't crawl in");
+        run(&mut s, 1.0);
+        // a step: back out
+        s.set_move(1.0, 0.0);
+        run(&mut s, 0.2);
+        s.set_move(0.0, 0.0);
+        assert!(!s.in_igloo, "stuck inside");
+    }
+
+    #[test]
     fn dropping_in_on_top_of_a_tree() {
         let mut s = walker_scene();
         let (i, x, f) = s.ledges[..s.static_ledges]
@@ -4533,7 +4875,7 @@ mod tests {
         // the menu over the tree's top offers it (and a widget above it
         // doesn't catch the villager on the way down)
         let (sx, sy) = (x - s.cam_i(), f as i32 + 2 + s.oy_i());
-        s.set_widget_ledges(vec![(sx - 6, 1, 14, 3)]);
+        s.set_widget_ledges(vec![(1, sx - 6, 1, 14, 3)]);
         run(&mut s, 0.1);
         let (_, items) = s.menu_at(sx, sy);
         let drop = items.iter().find(|(l, _)| l.contains("drop in up here")).map(|(_, d)| d.clone());

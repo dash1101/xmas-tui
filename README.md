@@ -210,8 +210,16 @@ always be found in Explorer or Dolphin.
   slopes of a roof (a chimney or the steeple is a wall), and off the end drops back down into the snow. **Space**
   jumps (from the snow, or off whatever the villager's up on), with **A** / **D** to steer in the air, so it's
   possible to leap from roof to roof; **S** hops down. The tops of the widgets are ledges too: **W** under a widget
-  climbs up onto it, and it stays put while the village scrolls past below. The pet waits underneath. A fall from
-  high up ends in a dizzy tumble; a jump or hop down lands on its feet.
+  climbs up onto it, and it stays put while the village scrolls past below. So are the **open windows** (on Windows,
+  and on KDE Plasma): the villager can climb up onto a window's title bar, or drop in on it from the right-click
+  menu, and rides along when the window's dragged about; closing it drops them back down. The pet waits
+  underneath. A fall from high up ends in a dizzy tumble; a jump or hop down lands on its feet.
+- **Building with the kids.** Right by a snowman or igloo going up, **E** lends a hand: each press pushes the
+  snowball bigger or sets another block, the kids cheer the villager on, and it goes up far faster. Right-click open
+  snow for **build a snowman here** or **build an igloo here** to start one; kids nearby come over to help. What the
+  villager helped build gets a touch of theirs (their red scarf on the snowman, a flag on top of the igloo) and
+  earns cheer. **E** at a finished igloo's doorway crawls inside, out of the cold, until a direction key (or E)
+  crawls back out.
 - **E or Enter** interacts with whatever the `[E]` prompt points at:
   - **people:** a conversation opens in a dialogue box: they say something, and **1**–**5** (or a click, or E for
     the first answer) picks what to say back. Grown-ups talk about how they are, their job, tips for a newcomer
@@ -509,7 +517,8 @@ stick around for a few minutes. They also interact:
   (and its person says who it is), and ask its owner about it.
 - **Play:** a fox plays chase with a rabbit (the fox never catches it). Kids square off in two sides for proper
   snowball fights, build snowmen ball by ball, and raise igloos block by block, then all pile inside for a while
-  (giggling) before coming back out. What they build stands for about ten minutes, then melts.
+  (giggling) before coming back out. The villager can pitch in (or start one), and crawl into a finished igloo.
+  What they build stands for about ten minutes, then melts.
 - **Manners:** nobody walks through anybody. People step a row up or down to get round each other (and the
   villager), or stop for a chat first and then step round.
 - **Light shows:** when one's coming, it's announced, a few more folk come out, and everyone gathers round the

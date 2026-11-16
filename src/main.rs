@@ -609,6 +609,10 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
         }
         let (w, h) = (app.w, app.h);
         app.frame.cell_aspect = term.cell_aspect();
+        // the wallpaper fills the screen: open windows' tops land on its grid
+        if wallpaper {
+            app.screen_map = term.screen_map();
+        }
         app.step();
         let (cells, pics) = app.output();
         term.pictures = pics.to_vec();

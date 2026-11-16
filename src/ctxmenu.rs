@@ -43,6 +43,33 @@ impl CtxMenu {
         m
     }
 
+    /// Keep clear of the open windows (x0, y0, x1, y1 in cells): the menu
+    /// is drawn on the wallpaper, under them. Below the click if that's
+    /// clear, else above it, else to the left; failing all of those, where
+    /// the least of it is hidden.
+    pub fn avoid(&mut self, wins: &[(i32, i32, i32, i32)], click: (i32, i32), w: i32, h: i32) {
+        if wins.is_empty() {
+            return;
+        }
+        let (mw, mh) = self.size();
+        let (cx, cy) = click;
+        let hidden = |x: i32, y: i32| -> i32 {
+            wins.iter()
+                .map(|&(x0, y0, x1, y1)| {
+                    let ow = (x + mw).min(x1) - x.max(x0);
+                    let oh = (y + mh).min(y1) - y.max(y0);
+                    ow.max(0) * oh.max(0)
+                })
+                .sum()
+        };
+        let fit = |x: i32, y: i32| (x.min(w - mw - 1).max(0), y.min(h - mh - 1).max(0));
+        let spots = [fit(cx, cy + 1), fit(cx, cy - mh), fit(cx - mw, cy + 1), fit(cx - mw, cy - mh)];
+        let best = spots.iter().copied().min_by_key(|&(x, y)| hidden(x, y)).unwrap_or((self.x, self.y));
+        if hidden(self.x, self.y) > hidden(best.0, best.1) {
+            (self.x, self.y) = best;
+        }
+    }
+
     fn size(&self) -> (i32, i32) {
         let w = self.items.iter().map(|i| i.0.chars().count()).chain(std::iter::once(self.title.chars().count() + 2)).max().unwrap_or(10) as i32 + 6;
         (w, self.items.len() as i32 + 2)
@@ -93,5 +120,24 @@ impl CtxMenu {
             };
             f.text(self.x + 3, y, label, fg, ibg, 0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_menu_keeps_out_from_under_a_window() {
+        let items = vec![("drop in up here".to_string(), MenuAct::Settings); 3];
+        // clicked just above a window's top edge: it opens above instead
+        let mut m = CtxMenu::with(50, 20, "the sky".into(), items.clone(), 200, 60);
+        m.avoid(&[(10, 21, 150, 50)], (50, 20), 200, 60);
+        let (_, mh) = m.size();
+        assert!(m.y + mh <= 21, "{} + {mh}", m.y);
+        // nothing in the way: where it was
+        let mut m = CtxMenu::with(50, 20, "the sky".into(), items, 200, 60);
+        m.avoid(&[(100, 0, 150, 10)], (50, 20), 200, 60);
+        assert_eq!((m.x, m.y), (50, 21));
     }
 }

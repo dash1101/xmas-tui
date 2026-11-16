@@ -2,6 +2,11 @@
 //! or an igloo raised course by course — which, once it's finished, they
 //! all pile into for a while (giggling) before coming back out. What they
 //! build stands for about ten minutes, then slowly melts away.
+//!
+//! The villager can pitch in (E beside it: pushing the snowball bigger, or
+//! setting a block), start one of their own (the kids nearby come over to
+//! help), and crawl into a finished igloo. What the villager helped with gets
+//! a touch of theirs: their red scarf on the snowman, a flag on the igloo.
 
 use super::critters::{Critters, Hidden};
 use super::events::Director;
@@ -37,9 +42,20 @@ struct Build {
     worked: f32,
     melt: f32,
     next_line: f32,
+    /// The villager lent a hand (or started it).
+    helped: bool,
+    by_you: bool,
+    /// Presses of E on it (for the villager's lines).
+    pushes: u32,
+    /// The villager's curled up inside (an igloo).
+    you_inside: bool,
 }
 
 impl Build {
+    fn new(what: What, x: f32, base: i32, u: f32, t: f32) -> Self {
+        Build { what, x, base, u, p: 0.0, kids: vec![], builders: vec![], inside: vec![], entering: None, out_at: 0.0, done_at: None, worked: t, melt: 0.0, next_line: t + 3.0, helped: false, by_you: false, pushes: 0, you_inside: false }
+    }
+
     /// Half its width in columns.
     fn half(&self) -> f32 {
         match self.what {
@@ -72,6 +88,11 @@ const SNOWMAN_DONE: &[&str] = &["ta-da!", "he's perfect!", "let's call him Mr. F
 const IGLOO_DONE: &[&str] = &["it's done! everybody in!", "last one inside's a snowball!", "come on, in we go!"];
 const INSIDE: &[&str] = &["it's so cozy in here!", "shh — secret club!", "hee hee hee", "warmer than you'd think!", "knock knock!", "this is our house now"];
 const OUT: &[&str] = &["brr — back out into the cold!", "that was the best!", "let's build another one!", "my mittens are soaked!"];
+const YOU_SNOWMAN: &[&str] = &["heave!", "rolling, rolling…", "one more push!", "it's getting heavy!", "nice and round"];
+const YOU_IGLOO: &[&str] = &["one more block!", "there — pack it in", "nice and snug", "another course!", "mind the doorway"];
+const THANKS: &[&str] = &["thanks!!", "you're really good at this!", "yay, a grown-up's helping!", "it's going so fast now!", "push harder!", "teamwork!"];
+const JOIN: &[&str] = &["can I help?", "ooh, I want to help!", "wait for me!", "I'll pat the snow down!"];
+const YOU_INSIDE: &[&str] = &["it's so cozy in here", "I could stay in here all winter", "shh… it's so quiet", "everything's blue and glowy in here"];
 
 impl Builds {
     pub fn new(h: usize, seed: u32) -> Self {
@@ -123,6 +144,147 @@ impl Builds {
         true
     }
 
+    /// What the villager at (x, y) can do with a build: pitch in on one being
+    /// built (false), or crawl into a finished igloo (true).
+    pub fn at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
+        self.list.iter().enumerate().find_map(|(i, b)| {
+            let near_row = (y - b.base as f32).abs() <= 4.0;
+            if b.done_at.is_none() && b.melt == 0.0 && near_row && (x - b.x).abs() <= b.half() + 5.0 {
+                Some((i, false))
+            } else if b.what == What::Igloo && b.p >= 1.0 && b.melt < 0.4 && b.entering.is_none() && near_row && (x - b.door()).abs() <= 3.5 {
+                Some((i, true))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The build drawn over cell (x, y), if any.
+    pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
+        self.list.iter().position(|b| {
+            let tall = match b.what {
+                What::Snowman => 12.5 * b.u * SNOW_K * b.p.max(0.3),
+                What::Igloo => IGLOO_R * b.u * 0.5 * b.p.max(0.2),
+            };
+            (x as f32 - b.x).abs() <= b.half() && y <= b.base && (y as f32) >= b.base as f32 - tall - 1.0
+        })
+    }
+
+    /// Half the width (columns) of a snowman or igloo built now.
+    pub fn half_for(&self, igloo: bool) -> f32 {
+        if igloo {
+            IGLOO_R * self.u
+        } else {
+            5.5 * self.u * SNOW_K + 1.0
+        }
+    }
+
+    /// The build at column x (as a menu named it).
+    pub fn find(&self, x: f32) -> Option<usize> {
+        self.list.iter().position(|b| (b.x - x).abs() < 0.5)
+    }
+
+    /// A build's centre, bottom row and whether it's a finished igloo (for
+    /// walking over to it).
+    pub fn spot(&self, i: usize) -> Option<(f32, f32, f32, bool)> {
+        self.list.get(i).map(|b| (b.x, b.base as f32 + 1.0, b.half(), b.what == What::Igloo && b.p >= 1.0))
+    }
+
+    /// Is it a snowman, and how far along?
+    pub fn about(&self, i: usize) -> Option<(bool, f32)> {
+        self.list.get(i).map(|b| (b.what == What::Snowman, b.p))
+    }
+
+    /// The villager lends a hand with build `i` (E beside it): a push on the
+    /// snowball, a block on the igloo. True once it's finished.
+    pub fn pitch_in(&mut self, i: usize, px: f32, py: f32, t: f32, c: &Critters, d: &mut Director) -> bool {
+        let Some(b) = self.list.get_mut(i).filter(|b| b.done_at.is_none()) else { return false };
+        let snowman = b.what == What::Snowman;
+        let before = b.p;
+        b.p = (b.p + if snowman { 0.07 } else { 0.05 }).min(1.0);
+        b.helped = true;
+        b.worked = t;
+        b.pushes += 1;
+        let sx = b.x + self.rng.range(-b.half(), b.half()) * 0.7;
+        d.snow_puff(sx, b.base as f32);
+        d.sound(Sfx::Crunch, b.x, 0.55);
+        // the villager's part, now and then
+        if b.pushes % 3 == 1 {
+            let line = *self.rng.pick(if snowman { YOU_SNOWMAN } else { YOU_IGLOO });
+            d.say(px.round() as i32, py as i32 - 4, line, t, 1.8, 4);
+        }
+        // a new stage of the snowman
+        let stage = |a: f32| before < a && b.p >= a;
+        let call = if snowman && stage(0.45) {
+            Some("now the middle one!")
+        } else if snowman && stage(0.75) {
+            Some("now the head!")
+        } else if !snowman && stage(0.85) {
+            Some("leave a hole for the door!")
+        } else if self.rng.chance(0.3) {
+            Some(*self.rng.pick(THANKS))
+        } else {
+            None
+        };
+        if let Some(line) = call {
+            if let Some((kx, ky)) = b.kids.get(self.rng.int(0, b.kids.len().max(1) as i32) as usize).and_then(|&id| c.position(id)) {
+                d.say(kx.round() as i32, ky as i32 - 4, line, t + 0.5, 2.2, 4);
+            }
+        }
+        b.p >= 1.0
+    }
+
+    /// The villager starts building something at column x, row `base`; free
+    /// kids close by come over to help.
+    pub fn start(&mut self, what: What, x: f32, base: i32, t: f32, c: &mut Critters, d: &mut Director) {
+        let mut b = Build::new(what, x, base, self.u, t);
+        b.by_you = true;
+        b.helped = true;
+        let half = b.half();
+        let busy = self.busy();
+        let mut kids: Vec<(u64, f32, f32)> = c.people().into_iter().filter(|p| p.3 && !busy.contains(&p.0) && (p.1 - x).abs() < 60.0).map(|p| (p.0, p.1, p.2)).collect();
+        kids.sort_by(|a, b2| (a.1 - x).abs().total_cmp(&(b2.1 - x).abs()));
+        for (k, &(id, kx, ky)) in kids.iter().take(2).enumerate() {
+            let side = if k % 2 == 0 { -1.0 } else { 1.0 };
+            c.work_at(id, x + side * (half + 2.0), base as f32, x, t + 90.0);
+            b.kids.push(id);
+            b.builders.push(id);
+            d.say(kx.round() as i32, ky as i32 - 4, self.rng.pick(JOIN), t + 0.8 + k as f32, 2.2, 6);
+        }
+        if kids.is_empty() && self.rng.chance(0.7) {
+            // word gets round: a kid or two comes out to join in
+            c.request(super::events::Kind::Kid, t);
+        }
+        self.list.push(b);
+    }
+
+    /// Curl up inside finished igloo `i`: its doorway (x, row), if it's
+    /// there to crawl into.
+    pub fn crawl_in(&mut self, i: usize) -> Option<(f32, f32)> {
+        let b = self.list.get_mut(i).filter(|b| b.what == What::Igloo && b.p >= 1.0 && b.melt < 0.4)?;
+        b.you_inside = true;
+        b.next_line = 0.0;
+        Some((b.door(), b.base as f32 + 1.0))
+    }
+
+    /// Previews: build `i` at progress p (helped by the villager).
+    pub fn preview(&mut self, i: usize, p: f32) {
+        if let Some(b) = self.list.get_mut(i) {
+            b.p = p;
+            b.helped = true;
+            if p >= 1.0 {
+                b.done_at = Some(0.0);
+            }
+        }
+    }
+
+    /// Out of the igloo again.
+    pub fn crawl_out(&mut self) {
+        for b in &mut self.list {
+            b.you_inside = false;
+        }
+    }
+
     /// Column spans already taken (so nothing gets built on top of it).
     pub fn spans(&self) -> Vec<(i32, i32)> {
         self.list.iter().map(|b| ((b.x - b.half()) as i32 - 3, (b.x + b.half()) as i32 + 3)).collect()
@@ -168,7 +330,7 @@ impl Builds {
                     if !free(x0, x1, base) || self.spans().iter().any(|&(a, b)| x1 > a && x0 < b) {
                         continue;
                     }
-                    let mut b = Build { what, x, base, u, p: 0.0, kids: vec![], builders: vec![], inside: vec![], entering: None, out_at: 0.0, done_at: None, worked: t, melt: 0.0, next_line: t + 3.0 };
+                    let mut b = Build::new(what, x, base, u, t);
                     let mut near = kids.clone();
                     near.sort_by(|a, b2| (a.1 - x).abs().total_cmp(&(b2.1 - x).abs()));
                     for (k, &(id, _)) in near.iter().take(3).enumerate() {
@@ -187,7 +349,25 @@ impl Builds {
             }
         }
 
+        let busy = self.busy();
         for b in &mut self.list {
+            // the villager's own: kids nearby come and join in, now and then
+            if b.done_at.is_none() && b.by_you && b.kids.len() < 2 && self.rng.chance(dt * 0.2) {
+                let near = c.people().into_iter().find(|p| p.3 && !busy.contains(&p.0) && !b.kids.contains(&p.0) && (p.1 - b.x).abs() < 50.0);
+                if let Some((id, kx, ky, _)) = near {
+                    let side = if b.kids.len() % 2 == 0 { -1.0 } else { 1.0 };
+                    c.work_at(id, b.x + side * (b.half() + 2.0), b.base as f32, b.x, t + 90.0);
+                    b.kids.push(id);
+                    b.builders.push(id);
+                    d.say(kx.round() as i32, ky as i32 - 4, self.rng.pick(JOIN), t, 2.2, 6);
+                }
+            }
+            // the villager, curled up in the igloo
+            if b.you_inside && t > b.next_line {
+                b.next_line = t + self.rng.range(5.0, 9.0);
+                let top = b.base as f32 - IGLOO_R * b.u / 2.0 - 2.0;
+                d.say(b.x.round() as i32, top as i32, self.rng.pick(YOU_INSIDE), t, 2.6, 6);
+            }
             if b.done_at.is_none() {
                 b.kids.retain(|&id| c.position(id).is_some());
                 let n = b.kids.iter().filter(|&&id| c.arrived(id)).count();
@@ -217,7 +397,7 @@ impl Builds {
                         d.burst(b.x, b.base as f32 - 3.0, 12, &[Rgb::WHITE, Rgb::hex(0xbfe0ff), Rgb::hex(0xffd36b)], 3.0, 2.0);
                         d.sound(Sfx::Snowman, b.x, 0.6);
                         if let Some((kx, ky)) = b.kids.first().and_then(|&id| c.position(id)) {
-                            let line = *self.rng.pick(if b.what == What::Snowman { SNOWMAN_DONE } else { IGLOO_DONE });
+                            let line = if b.helped && self.rng.chance(0.5) { "we did it — together!" } else { *self.rng.pick(if b.what == What::Snowman { SNOWMAN_DONE } else { IGLOO_DONE }) };
                             d.say(kx.round() as i32, ky as i32 - 4, line, t + 0.3, 2.6, 6);
                         }
                     }
@@ -279,7 +459,7 @@ impl Builds {
             }
             // it stands for about ten minutes, then melts
             if let Some(done) = b.done_at {
-                if b.inside.is_empty() && b.entering.is_none() && t - done > 600.0 {
+                if b.inside.is_empty() && b.entering.is_none() && !b.you_inside && t - done > 600.0 {
                     b.melt += dt / 25.0;
                 }
             }
@@ -344,7 +524,7 @@ impl Builds {
                     }
                     // the doorway, once it's all but finished
                     if b.p > 0.85 && b.melt < 0.6 {
-                        let warm = !b.inside.is_empty();
+                        let warm = !b.inside.is_empty() || b.you_inside;
                         let dr = 3.0 * b.u.max(0.7);
                         for y in ((bp - dr) as i32)..(bp as i32) {
                             let up = bp - y as f32 - 0.5;
@@ -378,10 +558,27 @@ impl Builds {
                     let ar = r1.ceil() as i32;
                     f.put_g(cx - ar - 1, mrow, Glyph::new('╲', wood).lit(0.6));
                     f.put_g(cx + ar + 1, mrow, Glyph::new('╱', wood).lit(0.6));
+                    // the villager helped: their red scarf round its neck
+                    if b.helped {
+                        let scarf = Rgb::hex(0xd8283a);
+                        let nrow = ((hy + r2) / 2.0).round() as i32;
+                        for dx in -1..=1 {
+                            f.put_g(cx + dx, nrow, Glyph::new('▬', scarf).lit(0.5));
+                        }
+                        f.put_g(cx + 2, nrow + 1, Glyph::new('╲', scarf * 0.85).lit(0.5));
+                    }
                 }
-                What::Igloo if !b.inside.is_empty() => {
-                    let k = 0.75 + 0.25 * (t * 3.0 + b.x).sin();
-                    f.light_cell(b.x as i32, b.base, Rgb::hex(0xffa040) * (2.2 * k * glow));
+                What::Igloo if !b.inside.is_empty() || b.you_inside || (b.helped && b.p >= 1.0 && b.melt < 0.6) => {
+                    if !b.inside.is_empty() || b.you_inside {
+                        let k = 0.75 + 0.25 * (t * 3.0 + b.x).sin();
+                        f.light_cell(b.x as i32, b.base, Rgb::hex(0xffa040) * (2.2 * k * glow));
+                    }
+                    // the villager helped: a little flag on top
+                    if b.helped && b.p >= 1.0 {
+                        let top = ((bp - IGLOO_R * b.u * (1.0 - 0.4 * b.melt)) / 2.0).floor() as i32;
+                        let wave = if (t * 2.0 + b.x).sin() > 0.0 { '⚑' } else { '⚐' };
+                        f.put_g(b.x.round() as i32, top - 1, Glyph::new(wave, Rgb::hex(0xd8283a)).lit(0.5));
+                    }
                 }
                 _ => {}
             }

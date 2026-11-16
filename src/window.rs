@@ -234,6 +234,7 @@ impl Runner {
         // the grid on screen, for putting a file dragged off a shelf where
         // it was let go (Windows desktop: the window is at the monitor's origin)
         app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, g.raster.cw as i32, g.raster.ch as i32));
+        app.screen_map = desktop.then(|| (g.size.0 as f32, g.size.1 as f32, g.offset.0 as f32, g.offset.1 as f32, g.raster.cw as f32, g.raster.ch as f32));
         app.frame.cell_aspect = g.raster.ch as f32 / g.raster.cw.max(1) as f32;
         app.step();
         let (cells, pics) = app.output();
