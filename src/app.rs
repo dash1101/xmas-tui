@@ -144,6 +144,8 @@ pub struct App {
     jump_until: f32,
     /// Where the last menu opened (a further list opens there too).
     last_menu_at: (i32, i32),
+    /// A menu picked up by its title bar: where it was held.
+    menu_drag: Option<(i32, i32)>,
     /// Keeping the save file (a real session, not a tool or a test); when
     /// it was last written; a save being imported (picked, then applied).
     saves: bool,
@@ -152,6 +154,11 @@ pub struct App {
     /// ffmpeg being installed (Settings → Desktop): its result.
     ffmpeg_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     importing_save: Option<crate::save::Save>,
+    /// The link to the relay (online: friends, shared villages).
+    link: Option<crate::net::tcp::Tcp>,
+    /// A line being typed (a friend's code, a message): what for, the
+    /// question, the text.
+    typing: Option<(crate::scene::online::TextFor, String, String)>,
     /// Scrolling's come from a trackpad (sideways scrolling seen): up and
     /// down look into the sky, sideways along the village.
     trackpad: bool,
@@ -324,11 +331,14 @@ impl App {
             jump_down: false,
             jump_until: 0.0,
             last_menu_at: (0, 0),
+            menu_drag: None,
             saves: false,
             saved_at: 0.0,
             import_pick: None,
             ffmpeg_job: None,
             importing_save: None,
+            link: None,
+            typing: None,
             trackpad: false,
             pad_acc: 0.0,
             #[cfg(any(target_os = "linux", windows))]
@@ -384,6 +394,11 @@ impl App {
     /// the resolution instead (finer / coarser detail).
     pub fn ctrl_key(&mut self, c: char, shift: bool) {
         let t = self.t();
+        // Ctrl+V while typing: the clipboard (a friend's code)
+        if let (Some((_, _, text)), 'v' | 'V') = (self.typing.as_mut(), c) {
+            text.push_str(crate::net::paste_text().trim());
+            return;
+        }
         let (up, down) = (matches!(c, '=' | '+'), matches!(c, '-' | '_'));
         if shift && (up || down) {
             settings::apply(&mut self.cfg, if up { Act::Inc(F::Scale) } else { Act::Dec(F::Scale) });
@@ -405,6 +420,8 @@ impl App {
             saved: crate::clock::now().format("%Y-%m-%d %H:%M").to_string(),
             player: self.scene.player_at(),
             pockets: self.scene.pockets().clone(),
+            you: Some(crate::save::You::of(&self.cfg)),
+            online: Some(self.scene.online.book.clone()),
         }
     }
 
@@ -424,7 +441,90 @@ impl App {
         if let Some(s) = crate::save::load().filter(|s| s.seed == self.seed) {
             self.scene.set_pockets(s.pockets);
             self.scene.place_player(s.player);
+            // the villager's name, the pet's, friends: from the save where
+            // the config has none (it was carried here from elsewhere)
+            if let Some(you) = &s.you {
+                you.fill(&mut self.cfg);
+            }
         }
+        // online: the friend code and friends (in any save: they're the
+        // villager's, whichever village)
+        let book = crate::save::load().and_then(|s| s.online).unwrap_or_default();
+        self.scene.put_online(crate::net::Online::new(book, &self.cfg.scene.name));
+        self.scene.online.dirty = true;
+    }
+
+    /// Once a frame: bytes to and from the relay, a line to type, a code to
+    /// copy, into a shared village (or home again).
+    fn update_online(&mut self) {
+        if !self.saves {
+            return;
+        }
+        crate::net::tcp::pump(&mut self.scene.online, &mut self.link);
+        if std::mem::take(&mut self.scene.online.dirty) {
+            // (the friends list changed: saved soon)
+            self.saved_at = self.saved_at.min(self.t() - 55.0);
+        }
+        if let Some((what, ask)) = self.scene.take_text_ask() {
+            self.typing = Some((what, ask, String::new()));
+            self.menu = None;
+        }
+        if let Some(text) = self.scene.take_copy() {
+            crate::net::copy_text(&text);
+        }
+        if let Some(to) = self.scene.take_village() {
+            let seed = to.unwrap_or(self.seed);
+            let pockets = self.scene.take_pockets();
+            let online = self.scene.take_online();
+            self.scene = Scene::new(self.w, self.h, seed, &self.cfg.scene);
+            self.scene.set_pockets(pockets);
+            self.scene.put_online(online);
+            self.scene.set_own_seed(self.seed);
+            self.scene.arrive_by_host();
+        }
+    }
+
+    /// The line being typed, over the bottom of the village.
+    fn draw_typing(&mut self) {
+        let blink = (self.t() * 2.0) as i32 % 2 == 0;
+        let Some((_, ask, text)) = &self.typing else { return };
+        use crate::color::pal;
+        use crate::frame::{Bg, Glyph};
+        let f = &mut self.frame;
+        let w = (ask.chars().count().max(text.chars().count() + 2) as i32 + 6).clamp(30, f.w as i32 - 4);
+        let (x0, y0) = ((f.w as i32 - w) / 2, f.h as i32 - 8);
+        let bg = Bg::Mix(pal::UI_PANEL, 0.95);
+        for y in y0..y0 + 4 {
+            for x in x0..x0 + w {
+                let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + 3) {
+                    (true, _, true, _) => '╭',
+                    (_, true, true, _) => '╮',
+                    (true, _, _, true) => '╰',
+                    (_, true, _, true) => '╯',
+                    (_, _, true, _) | (_, _, _, true) => '─',
+                    (true, _, _, _) | (_, true, _, _) => '│',
+                    _ => ' ',
+                };
+                f.put_g(x, y, Glyph::new(ch, crate::color::Rgb::hex(0xffd36b) * 0.8).bg(bg).lit(0.0));
+            }
+        }
+        f.text(x0 + 2, y0, &format!(" {ask} "), pal::UI_TITLE, bg, 0.0);
+        let shown: String = text.chars().rev().take((w - 6) as usize).collect::<Vec<_>>().into_iter().rev().collect();
+        f.text(x0 + 2, y0 + 1, &format!("{shown}{}", if blink { "▏" } else { " " }), pal::UI_TEXT, bg, 0.0);
+        f.text(x0 + 2, y0 + 2, "Enter: send · Esc: never mind · Ctrl+V: paste", pal::UI_DIM, bg, 0.0);
+        crate::widgets::looks::apply(f, crate::widgets::Rect { x: x0, y: y0, w, h: 4 }, &self.cfg.ui.look, bg, 3);
+    }
+
+    /// O: friends & online.
+    fn open_online(&mut self) {
+        use crate::ctxmenu::{CtxMenu, MenuAct};
+        let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
+        let (x, y) = self.scene.zoom_focus();
+        let (w, h) = (self.w as i32, self.h as i32);
+        let items = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        let m = CtxMenu::plain(x as i32 + 4, y as i32 - 10, title, items, w, h);
+        self.last_menu_at = (m.x, m.y);
+        self.menu = Some(m);
     }
 
     /// Zoom in (k > 1) or out, centred on the villager; eased into on screen.
@@ -435,7 +535,7 @@ impl App {
             z = 1.0;
         }
         self.cfg.zoom = (z * 100.0).round() / 100.0;
-        self.settings.toast = Some((format!("zoom {:.1}×  (Ctrl+wheel or pinch · Ctrl 0: back)", self.cfg.zoom), t + 1.4));
+        self.settings.toast = Some((format!("zoom {:.1}×  (Ctrl+wheel or pinch · Ctrl 0: back)", ((self.cfg.zoom * 2.0).round() / 2.0).max(1.0)), t + 1.4));
     }
 
     /// The wallpaper itself goes full screen (or back behind the desktop):
@@ -533,6 +633,11 @@ impl App {
                     self.widgets.shelf_hover(x, y);
                 }
             }
+            // picked up by its title bar: moved, not closed
+            MouseIn::Down(Btn::Left) if self.menu.as_ref().is_some_and(|m| m.on_title(x, y)) => {
+                let m = self.menu.as_ref().unwrap();
+                self.menu_drag = Some((x - m.x, y - m.y));
+            }
             MouseIn::Down(Btn::Left) if self.menu.is_some() => {
                 // a click picks from the menu (or, outside it, just closes it)
                 let m = self.menu.take().unwrap();
@@ -583,7 +688,10 @@ impl App {
                 } else if settings::help_rect(self.w as i32).contains(x, y) {
                     self.settings.help = true;
                 } else if self.scene.at_table() {
-                    self.scene.table_click(x, y);
+                    // (its title bar picks it up to move it)
+                    if !self.scene.table_grab(x, y) {
+                        self.scene.table_click(x, y);
+                    }
                 } else if self.scene.convo_click(x, y) {
                     // answered in the dialogue box (by hand: autopilot stands down)
                     self.scene.woke();
@@ -624,6 +732,15 @@ impl App {
                 }
                 if self.settings.drag.is_some() {
                     self.settings.drag_to(x, y);
+                    return;
+                }
+                if let (Some((dx, dy)), Some(m)) = (self.menu_drag, self.menu.as_mut()) {
+                    m.move_to(x - dx, y - dy, self.w as i32, self.h as i32);
+                    self.last_menu_at = (m.x, m.y);
+                    return;
+                }
+                if self.scene.table_dragging() {
+                    self.scene.table_drag_to(x, y);
                     return;
                 }
                 if self.scene.convo_dragging() {
@@ -708,6 +825,8 @@ impl App {
                 self.settings.drag_to(x, y);
                 self.settings.drag = None;
             }
+            MouseIn::Up(Btn::Left) if self.menu_drag.is_some() => self.menu_drag = None,
+            MouseIn::Up(Btn::Left) if self.scene.table_dragging() => self.scene.table_drop(),
             MouseIn::Up(Btn::Left) if self.scene.convo_dragging() => {
                 self.scene.convo_drag_to(x, y);
                 self.scene.convo_drop();
@@ -901,6 +1020,23 @@ impl App {
     }
 
     pub fn key(&mut self, k: KeyIn) {
+        // a line being typed (a friend's code, a message)
+        if let Some((what, _, text)) = self.typing.as_mut() {
+            match k {
+                KeyIn::Char(c) if !c.is_control() && text.chars().count() < 200 => text.push(c),
+                KeyIn::Backspace => {
+                    text.pop();
+                }
+                KeyIn::Enter => {
+                    let (what, text) = (*what, std::mem::take(text));
+                    self.typing = None;
+                    self.scene.give_text(what, &text);
+                }
+                KeyIn::Esc => self.typing = None,
+                _ => {}
+            }
+            return;
+        }
         // a key being set for something (Settings → You → Keys)
         if let Some(i) = self.settings.binding {
             match k {
@@ -1006,6 +1142,7 @@ impl App {
                 Some(6) => self.scene.recenter(),
                 Some(7) => self.scene.rest(),
                 Some(8) => self.open_todo(),
+                Some(9) => self.open_online(),
                 _ => {
                     if let KeyIn::Char(c @ '1'..='5') = k {
                         self.scene.number(c as usize - '0' as usize);
@@ -1699,6 +1836,10 @@ impl App {
                                 self.cfg.seed = s.seed as u64;
                             }
                             let who = if s.name.is_empty() { "the".to_string() } else { format!("{}'s", s.name) };
+                            // the villager too: their name, pet, friends, keys
+                            if let Some(you) = &s.you {
+                                you.apply(&mut self.cfg);
+                            }
                             self.settings.toast = Some((format!("imported {who} village"), t + 3.0));
                             self.importing_save = Some(s);
                             reseed = true;
@@ -1719,6 +1860,7 @@ impl App {
                 self.settings.toast = Some((r.unwrap_or_else(|e| e), t + 5.0));
             }
         }
+        self.update_online();
         // saved now and then (and on the way out)
         if self.saves && self.t() - self.saved_at > 60.0 {
             self.write_save();
@@ -1744,6 +1886,7 @@ impl App {
                 c.name.clear();
                 // (these apply live too: no new village for them)
                 c.autopilot = false;
+                c.only_friends = false;
                 c.friends.clear();
                 c
             };
@@ -1807,6 +1950,7 @@ impl App {
         self.scene.set_name(&self.cfg.scene.name);
         self.scene.set_friends(&self.cfg.scene.friends);
         self.scene.set_autopilot(self.cfg.scene.autopilot);
+        self.scene.set_only_friends(self.cfg.scene.only_friends);
         if let Some((sc, at)) = self.scale_pending {
             if t - at > 0.6 {
                 self.scale_pending = None;
@@ -1866,8 +2010,11 @@ impl App {
         };
         self.zoom_focus = Some(f);
         // the zoom eases to where it's been set
-        let dz = self.cfg.zoom - self.zoom_now;
-        self.zoom_now = if dz.abs() < 0.005 { self.cfg.zoom } else { self.zoom_now + dz * (1.0 - (-dt * 9.0).exp()) };
+        // (it settles on a half step: 1, 1.5, 2 … so the pixels come out
+        // even and nothing shimmers)
+        let want = ((self.cfg.zoom * 2.0).round() / 2.0).clamp(1.0, 4.0);
+        let dz = want - self.zoom_now;
+        self.zoom_now = if dz.abs() < 0.01 { want } else { self.zoom_now + dz * (1.0 - (-dt * 9.0).exp()) };
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
@@ -1920,6 +2067,7 @@ impl App {
             m.draw(&mut self.frame);
             crate::widgets::looks::apply(&mut self.frame, m.rect(), &self.cfg.ui.look, crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.95), 5);
         }
+        self.draw_typing();
         self.frame.compose();
         &self.frame.out
     }
@@ -2289,12 +2437,12 @@ mod tests {
         app.ctrl_key('=', false);
         app.ctrl_key('=', false);
         assert!((app.cfg.zoom - 1.32).abs() < 1e-3, "{}", app.cfg.zoom);
-        // (the view eases in to it)
+        // (the view eases in to it, settling on a half step: 1.5)
         for _ in 0..40 {
             app.step();
         }
         let (z, x0, y0) = app.zoom_xf;
-        assert!(z > 1.0 && z <= 1.321, "{z}");
+        assert!(z > 1.0 && z <= 1.5, "{z}");
         let (wx, wy) = app.world_pt(150, 30);
         assert_eq!((wx, wy), ((x0 + 150.5 / z) as i32, (y0 + 30.5 / z) as i32));
         app.ctrl_key('0', false);
@@ -2342,6 +2490,12 @@ impl Drop for App {
     fn drop(&mut self) {
         if self.saves {
             self.write_save();
+        }
+        // off the relay politely ("gone", for friends)
+        if let Some(l) = self.link.take() {
+            self.scene.online.goodbye();
+            l.close(self.scene.online.take_out());
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
 }

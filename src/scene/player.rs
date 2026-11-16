@@ -30,8 +30,8 @@ const LEAP_MAX: f32 = 24.0;
 /// Gravity (rows a second, a second).
 const GRAVITY: f32 = 70.0;
 /// Space held: the jump keeps rising this long (as a share of the time a
-/// plain jump takes to its top) — up to four times as high.
-const BOOST: f32 = 1.5;
+/// plain jump takes to its top) — up to twice as high.
+const BOOST: f32 = 0.5;
 /// How long a snow angel takes (s).
 pub const ANGEL_TIME: f32 = 2.4;
 
@@ -109,16 +109,22 @@ pub struct Player {
     /// cell, so they hold still on the screen while the village scrolls by
     /// a cell at a time).
     pub shift: f32,
+    /// Hopping down off something (S): straight down to the snowfield, not
+    /// onto whatever's below on the way.
+    hop: bool,
+    /// Autopilot's steering: a steady pace (1.5×), whatever the setting.
+    pub auto_pace: bool,
 }
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0 }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0, hop: false, auto_pace: false }
     }
 
     /// How fast to go: the walk speed, doubled while running.
     pub fn pace(&self) -> f32 {
-        self.speed.clamp(0.25, 6.0) * if self.sprint { 2.0 } else { 1.0 }
+        let base = if self.auto_pace { 1.5 } else { self.speed.clamp(0.25, 6.0) };
+        base * if self.sprint { 2.0 } else { 1.0 }
     }
 
     pub fn rebase(&mut self, s: f32) {
@@ -135,6 +141,11 @@ impl Player {
     /// How the villager looks (for drawing them elsewhere: on a trip).
     pub fn look() -> super::sprites::Look {
         super::sprites::Look { kid: false, coat: COAT, hat: Some(HAT), hair: Rgb::hex(0x3a2a1a), scarf: Some(SCARF), skin: SKIN, mittens: SCARF, holding: None, lantern: false }
+    }
+
+    /// Up in the air (a jump, a fall).
+    pub fn in_air(&self) -> bool {
+        self.fall.is_some()
     }
 
     /// Can walk / act right now (not carried, falling, dizzy or busy)?
@@ -238,6 +249,20 @@ impl Player {
     /// window above), it's a leap right up onto it. `ground`: the first
     /// snowfield row here.
     pub fn jump(&mut self, t: f32, ledges: &[Ledge], d: &mut Director) {
+        // in the air already: up again anyway, on Christmas spirit
+        if let (Some((vy, from)), true) = (self.fall, self.ledge_fall && self.held.is_none() && self.drop_to.is_none() && !self.magic) {
+            let v = JUMP * self.k.sqrt();
+            self.fall = Some((vy.min(-v), from));
+            self.aim = None;
+            self.glide = None;
+            self.hop = false;
+            self.jump_held = true;
+            self.boost = BOOST * v / GRAVITY;
+            self.active_at = t;
+            d.burst(self.centre(), self.y, 10, &[Rgb::hex(0xffd36b), Rgb::WHITE, Rgb::hex(0xbfe4ff)], 4.0, 2.0);
+            d.sound(Sfx::Magic, self.centre(), 0.25);
+            return;
+        }
         if self.held.is_some() || self.fall.is_some() || self.climb.is_some() || t < self.dizzy_until {
             return;
         }
@@ -423,8 +448,8 @@ impl Player {
                 vy + GRAVITY * dt
             };
             self.y += vy * dt;
-            // landing on something on the way down
-            if self.ledge_fall && vy > 0.0 {
+            // landing on something on the way down (not hopping down)
+            if self.ledge_fall && vy > 0.0 && !self.hop {
                 let found = match self.aim {
                     Some(a) => ledges.get(a).and_then(|l| l.feet(self.centre())).filter(|&f| prev <= f + 0.01 && self.y >= f).map(|f| (a, f)),
                     None => super::ledges::landing(ledges, self.centre(), prev, self.y, self.left, self.depth),
@@ -446,7 +471,8 @@ impl Player {
                     return;
                 }
             }
-            if self.ledge_fall && self.y > prev && self.left.is_some_and(|l| ledges.get(l).and_then(|l| l.feet(self.centre())).is_none_or(|f| self.y > f + 1.0)) {
+            // (well clear of it: past where it could catch them again)
+            if self.ledge_fall && self.y > prev && self.left.is_some_and(|l| ledges.get(l).and_then(|l| l.feet(self.centre())).is_none_or(|f| self.y > f + super::ledges::CATCH + 0.5)) {
                 // clear of the ledge just left: it can be landed on again
                 self.left = None;
             }
@@ -462,6 +488,7 @@ impl Player {
                 self.depth = None;
                 self.aim = None;
                 self.glide = None;
+                self.hop = false;
                 d.snow_puff(self.centre(), self.y);
                 // a jump or a hop down lands on its feet; dropped from a
                 // height, it's a bit of a tumble
@@ -493,10 +520,12 @@ impl Player {
                 return;
             };
             if my > 0.0 {
+                // S: down off it, all the way to the snow
                 self.perch = None;
                 self.left = Some(li);
                 self.fall = Some((0.0, self.y));
                 self.ledge_fall = true;
+                self.hop = true;
                 return;
             }
             // W: up towards the top of it (the ridge, the star)

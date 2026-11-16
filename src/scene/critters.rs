@@ -207,6 +207,10 @@ impl Hidden {
     pub fn about(&self) -> (&'static str, bool, Rgb) {
         (self.0.name, self.0.kind == Kind::Kid, self.0.color)
     }
+
+    pub fn id(&self) -> u64 {
+        self.0.id
+    }
 }
 
 pub struct Bush {
@@ -287,6 +291,8 @@ pub struct Critters {
     talk: Talk,
     /// The villager's friends and family, each a villager of their own.
     friends: Vec<Friend>,
+    /// Only friends & family come by as people.
+    pub only_friends: bool,
     /// The houses' front doors (column, row): people come out of them, and
     /// go in at them when they're done (rather than off out of the village).
     doors: Vec<(f32, f32)>,
@@ -377,6 +383,7 @@ impl Critters {
             startle_cd: 0.0,
             talk: Talk::new(seed),
             friends: vec![],
+            only_friends: false,
             doors: vec![],
             forced: None,
             tctx: TalkCtx::default(),
@@ -502,8 +509,10 @@ impl Critters {
     }
 
     fn spawn(&mut self, kind: Kind, t: f32, at: Option<(f32, f32)>) -> u64 {
-        // the village is in bed: only the animals are out
-        let kind = if self.asleep && at.is_none() && matches!(kind, Kind::Walker | Kind::Kid) { *self.rng.pick(&[Kind::Deer, Kind::Fox, Kind::Rabbit]) } else { kind };
+        // the village is in bed (or only friends & family come by, and it
+        // isn't one of them): only the animals are out
+        let only = self.only_friends && self.forced.is_none();
+        let kind = if (self.asleep || only) && at.is_none() && matches!(kind, Kind::Walker | Kind::Kid) { *self.rng.pick(&[Kind::Deer, Kind::Fox, Kind::Rabbit]) } else { kind };
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
         // people now and then step out of a front door in view
         let (v0, vw) = self.view;
@@ -1800,6 +1809,27 @@ impl Critters {
         n
     }
 
+    /// Only friends & family as people (the others head home).
+    pub fn set_only_friends(&mut self, on: bool, t: f32) {
+        if self.only_friends == on {
+            return;
+        }
+        self.only_friends = on;
+        if on {
+            for c in self.list.iter_mut().filter(|c| c.person() && !c.friend && c.free()) {
+                c.leave_at = t;
+            }
+        }
+    }
+
+    /// Walking along with the villager again (out of a house with them).
+    pub fn rejoin(&mut self, id: u64, t: f32) {
+        if let Some(c) = self.list.iter_mut().find(|c| c.id == id) {
+            c.leave_at = c.leave_at.max(t + 90.0);
+            c.st = St::Follow { until: c.leave_at, moving: false };
+        }
+    }
+
     /// Whoever's walking along with the villager.
     pub fn follower_ids(&self) -> Vec<u64> {
         self.list.iter().filter(|c| matches!(c.st, St::Follow { .. })).map(|c| c.id).collect()
@@ -2540,7 +2570,7 @@ impl Critters {
 
     /// The player throws a snowball from (x, y) the way they face: at the
     /// nearest person or animal over there, or into the snow.
-    pub fn throw(&mut self, x: f32, y: f32, dir: f32, d: &mut Director) {
+    pub fn throw(&mut self, x: f32, y: f32, dir: f32, d: &mut Director) -> (f32, f32, f32, f32) {
         let target = self
             .list
             .iter()
@@ -2551,8 +2581,21 @@ impl Critters {
         let (sx, sy) = (x + dir, y - 2.0);
         let dist = tx - sx;
         let flight = (dist.abs() / 30.0).clamp(0.35, 0.9);
-        self.balls.push(Snowball { x: sx, y: sy, vx: dist / flight, vy: (ty - 1.0 - sy) / flight - 15.0 * flight, target: id, age: 0.0, yours: true, land: ty + 0.5 });
+        let (vx, vy) = (dist / flight, (ty - 1.0 - sy) / flight - 15.0 * flight);
+        self.balls.push(Snowball { x: sx, y: sy, vx, vy, target: id, age: 0.0, yours: true, land: ty + 0.5 });
         d.sound(Sfx::Snowball, sx, 0.6);
+        (sx, sy, vx, vy)
+    }
+
+    /// A snowball someone else threw (in a shared village): from (x, y) at
+    /// this speed; at the villager or into the snow.
+    pub fn throw_from(&mut self, x: f32, y: f32, vx: f32, vy: f32, at_you: bool, d: &mut Director) {
+        // (where it comes down: a row or so below where it set off, as
+        // the villager's own do)
+        let flight = ((-vy + (vy * vy + 60.0).sqrt()) / 30.0).clamp(0.2, 1.6);
+        let land = y + vy * flight + 15.0 * flight * flight + 1.5;
+        self.balls.push(Snowball { x, y, vx, vy, target: if at_you { AT_YOU } else { 0 }, age: 0.0, yours: false, land });
+        d.sound(Sfx::Snowball, x, 0.4);
     }
 
     /// A kid plays tag with the villager: "it" (after them) or running off,
@@ -2868,6 +2911,32 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
             let fl = 0.85 + 0.15 * (t * 8.0 + c.id as f32).sin();
             f.light_px(cx_ + c.dir * 2.0 * k, (cy_ + 1.0) * 2.0 - 4.0 * k, Rgb::hex(0xffb050) * (4.0 * fl * glow));
         }
+        return;
+    }
+    // deer, foxes and rabbits: pixel-art pictures too
+    if c.animal() && crate::frame::pictures_ok() {
+        use super::sprites::{self, Wild, WildPose};
+        let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Curious { .. } | St::Follow { moving: true, .. });
+        let rate = if c.kind == Kind::Fox { 10.0 } else if c.kind == Kind::Rabbit { 3.0 } else { 6.0 };
+        let pose = if c.held() || matches!(c.st, St::Fall { .. }) {
+            WildPose::Kick(((t * 7.0) as i32 % 2) as u8)
+        } else if matches!(c.st, St::Graze { .. } | St::Munch { .. }) {
+            WildPose::Graze(((t * 5.0) as i32 % 2) as u8)
+        } else if moving {
+            WildPose::Walk(((c.age * rate) as i32 % 2) as u8)
+        } else {
+            WildPose::Stand
+        };
+        let kind = match c.kind {
+            Kind::Deer => Wild::Deer,
+            Kind::Fox => Wild::Fox,
+            _ => Wild::Rabbit,
+        };
+        let light = 0.85 + 0.3 * f.day.max(0.0);
+        let pic = sprites::wild(kind, c.color, pose, c.dir, light);
+        let rows = sprites::rows_of(&pic, k);
+        let bob = if matches!(c.st, St::Petted { .. }) && (t * 4.0) as i32 % 2 == 0 { 0.2 } else { 0.0 };
+        f.sprite(cx_, cy_ + 1.0 - bob, rows, pic);
         return;
     }
     // people, on a screen tall enough: the same pixel-art folk as indoors

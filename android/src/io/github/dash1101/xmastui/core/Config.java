@@ -29,6 +29,42 @@ public final class Config {
     public String time = "auto";
     /** Wallpaper pixels across the screen's short side (the size setting: 155 at 100%). */
     public int detail = 155;
+    /** The most folk about at once (0: as many as fit the village). */
+    public int mostPeople = 0;
+    /** Friends & family: folk who come by under these names. */
+    public java.util.List<Friend> friends = new java.util.ArrayList<>();
+    /** Only friends & family come by. */
+    public boolean onlyFriends = false;
+
+    /** Someone in the friends & family list: a name, a kid or not, a coat and hat colour name. */
+    public static final class Friend {
+        public final String name, coat, hat;
+        public final boolean kid;
+
+        public Friend(String name, boolean kid, String coat, String hat) {
+            this.name = name;
+            this.kid = kid;
+            this.coat = coat == null ? "" : coat;
+            this.hat = hat == null ? "" : hat;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof Friend)) return false;
+            Friend f = (Friend) o;
+            return f.name.equals(name) && f.kid == kid && f.coat.equals(coat) && f.hat.equals(hat);
+        }
+
+        @Override
+        public int hashCode() {
+            return name.hashCode() * 31 + (kid ? 1 : 0);
+        }
+    }
+
+    /** Who's about changed (a new cast of folk). */
+    boolean folkDiffer(Config o) {
+        return o.mostPeople != mostPeople || o.onlyFriends != onlyFriends || !o.friends.equals(friends);
+    }
 
     public Config copy() {
         Config c = new Config();
@@ -46,6 +82,9 @@ public final class Config {
         c.bubbles = bubbles;
         c.time = time;
         c.detail = detail;
+        c.mostPeople = mostPeople;
+        c.friends = new java.util.ArrayList<>(friends);
+        c.onlyFriends = onlyFriends;
         return c;
     }
 

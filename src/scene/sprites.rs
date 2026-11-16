@@ -663,8 +663,12 @@ pub fn sheet(path: &std::path::Path) -> std::io::Result<()> {
     for (kind, b, m) in [(PetKind::Cat, 0xe08a3a, 0xa85a20), (PetKind::Dog, 0xd8a050, 0x8a5a28), (PetKind::Bunny, 0xe8e0d4, 0xc8b8a8)] {
         rows.push(pp.iter().map(|&p| pet(kind, Rgb::hex(b), Rgb::hex(m), Some(Rgb::hex(0x2fae5c)), p, false, 1.0, 1.0)).collect());
     }
+    let wp = [WildPose::Stand, WildPose::Walk(0), WildPose::Walk(1), WildPose::Graze(0), WildPose::Graze(1), WildPose::Kick(0)];
+    for (kind, b) in [(Wild::Deer, 0x8a5a32), (Wild::Fox, 0xd8682a), (Wild::Rabbit, 0xd8d4cc)] {
+        rows.push(wp.iter().map(|&p| wild(kind, Rgb::hex(b), p, 1.0, 1.0)).collect());
+    }
     let s = 4;
-    let cell = (22 * s, 29 * s);
+    let cell = (32 * s, 29 * s);
     let (w, h) = (cell.0 * 9, cell.1 * rows.len());
     let mut buf = vec![0xd8e0eeu32; w * h];
     for (ry, row) in rows.iter().enumerate() {
@@ -680,4 +684,181 @@ pub fn sheet(path: &std::path::Path) -> std::io::Result<()> {
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().map_err(std::io::Error::other)?.write_image_data(&rgb).map_err(std::io::Error::other)
+}
+
+// ---------------------------------------------------------------------------
+// the wild things: deer, foxes and rabbits
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Wild {
+    Deer,
+    Fox,
+    Rabbit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WildPose {
+    Stand,
+    /// Walking (or a rabbit's hop): which step.
+    Walk(u8),
+    /// Head down in the snow, nibbling (which chew).
+    Graze(u8),
+    /// Picked up or tumbling, legs going (which kick).
+    Kick(u8),
+}
+
+/// A deer, fox or rabbit (`body`: its coat), posed, facing `dir`.
+pub fn wild(kind: Wild, body: Rgb, pose: WildPose, dir: f32, light: f32) -> Arc<Picture> {
+    let k = key(("wild", kind, rgb_key(body), pose, dir > 0.0, (light * 20.0) as i32));
+    cached(k, || {
+        let mut c = match kind {
+            Wild::Deer => draw_deer(body, pose),
+            Wild::Fox => draw_fox(body, pose),
+            Wild::Rabbit => draw_rabbit(body, pose),
+        };
+        if dir < 0.0 {
+            c.mirror();
+        }
+        c.picture(light)
+    })
+}
+
+/// Four legs from the body down to the ground (`frame`: a step, swinging
+/// them; `kick`: splayed out), each with a darker hoof or paw.
+fn wild_legs(c: &mut Canvas, xs: [i32; 4], top: i32, ground: i32, pose: WildPose, col: Rgb, far: Rgb, foot: Rgb) {
+    for (i, &x) in xs.iter().enumerate() {
+        let colr = if i % 2 == 1 { far } else { col };
+        let (dx, end) = match pose {
+            WildPose::Walk(f) => (if (i + f as usize) % 2 == 0 { 2 } else { -1 }, ground),
+            WildPose::Kick(f) => (if (i + f as usize) % 2 == 0 { 2 } else { -2 }, ground - 1),
+            _ => (0, ground),
+        };
+        c.line(x as f32, top as f32, (x + dx) as f32, end as f32, 1, colr);
+        c.set(x + dx, end, foot);
+    }
+}
+
+fn draw_deer(body: Rgb, pose: WildPose) -> Canvas {
+    let mut c = Canvas::new(30, 26);
+    let g = 25;
+    let belly = Rgb::hex(0xe8d8bc);
+    let dark = body * 0.62;
+    let antler = Rgb::hex(0xd8c49a);
+    let lift = if matches!(pose, WildPose::Kick(_)) { 2 } else { 0 };
+    let by = 15.0 - lift as f32;
+    // legs first (the body over their tops)
+    wild_legs(&mut c, [17, 19, 7, 9], by as i32 + 2, g - lift, pose, body * 0.9, body * 0.7, Rgb::hex(0x2a1a12));
+    // the body: a long barrel, a pale belly, dappled faintly
+    c.ellipse(13.0, by, 8.6, 3.8, body);
+    c.ellipse(13.5, by + 2.8, 5.2, 0.9, belly);
+    for (x, y) in [(9, -2), (12, -3), (15, -2), (11, -1)] {
+        c.set(x, by as i32 + y, body * 1.12);
+    }
+    // the white rump and the little dark-tipped tail
+    c.ellipse(5.0, by - 0.6, 1.8, 2.2, belly);
+    c.set(4, by as i32 - 3, dark);
+    c.set(4, by as i32 - 2, belly);
+    let graze = matches!(pose, WildPose::Graze(_));
+    let (hx, hy) = if graze { (23.5, g as f32 - 3.0) } else { (23.0, by - 8.6) };
+    // the neck, up (or down to the snow)
+    c.line(19.0, by - 1.5, hx - 1.4, hy + 1.2, 3, body);
+    if !graze {
+        c.line(19.6, by - 0.2, hx - 1.0, hy + 2.6, 1, belly);
+    }
+    // the head: long, a dark nose, a big ear, an eye
+    c.ellipse(hx, hy, 2.4, 1.9, body);
+    let chew = matches!(pose, WildPose::Graze(1));
+    c.rect(hx as i32 + 1, hy as i32 + if chew { 1 } else { 0 }, 3, 2, body * 0.95);
+    c.set(hx as i32 + 4, hy as i32 + if chew { 1 } else { 0 }, Rgb::hex(0x1a1414));
+    c.set(hx as i32 + 3, hy as i32 + 2, belly);
+    c.set(hx as i32, hy as i32 - 1, EYE);
+    c.line(hx - 1.6, hy - 1.4, hx - 3.4, hy - 3.2, 2, body * 0.92);
+    c.set(hx as i32 - 3, hy as i32 - 3, PINK * 0.7);
+    // antlers: two tines a side, up and back
+    let (ax, ay) = (hx - 1.2, hy - 1.6);
+    c.line(ax, ay, ax - 1.6, ay - 5.6, 1, antler);
+    c.line(ax - 0.8, ay - 2.8, ax + 1.2, ay - 4.6, 1, antler);
+    c.line(ax - 1.4, ay - 5.0, ax - 3.4, ay - 6.4, 1, antler);
+    c.line(ax + 1.2, ay - 0.2, ax + 1.4, ay - 3.4, 1, antler * 0.8);
+    c
+}
+
+fn draw_fox(body: Rgb, pose: WildPose) -> Canvas {
+    let mut c = Canvas::new(28, 16);
+    let g = 15;
+    let dark = Rgb::hex(0x2a1a14);
+    let lift = if matches!(pose, WildPose::Kick(_)) { 1 } else { 0 };
+    let by = 9.6 - lift as f32;
+    wild_legs(&mut c, [17, 18, 9, 10], by as i32 + 1, g - lift, pose, dark, dark * 0.8, dark);
+    // the big brush of a tail, white at the tip, swishing
+    let swish = match pose {
+        WildPose::Walk(f) => f as f32 * 0.8,
+        _ => 0.0,
+    };
+    c.ellipse(5.0, by - 0.4 - swish, 4.2, 2.0, body);
+    c.ellipse(4.0, by + 0.4 - swish, 3.0, 1.2, body * 0.9);
+    c.ellipse(1.6, by - 0.2 - swish, 1.4, 1.2, WHITE);
+    // the body, lean, a white chest
+    c.ellipse(13.6, by, 6.4, 2.8, body);
+    c.ellipse(18.6, by + 1.0, 1.8, 1.8, WHITE);
+    c.line(10.0, by - 2.4, 16.0, by - 2.6, 1, body * 1.08);
+    let graze = matches!(pose, WildPose::Graze(_));
+    let (hx, hy) = if graze { (21.0, g as f32 - 2.4) } else { (21.0, by - 3.6) };
+    c.line(18.4, by - 0.6, hx - 1.0, hy + 0.6, 3, body);
+    // the head: pointed ears with dark backs, a long snout, white cheeks
+    c.ellipse(hx, hy, 2.4, 2.0, body);
+    c.line(hx + 1.0, hy + 0.4, hx + 4.4, hy + 1.0, 2, body);
+    c.set(hx as i32 + 5, hy as i32 + 1, dark);
+    c.line(hx - 0.4, hy + 1.6, hx + 3.0, hy + 2.0, 1, WHITE);
+    if !graze {
+        for (ex, h) in [(-1.2, 3.4), (0.8, 3.6)] {
+            c.line(hx + ex, hy - 1.0, hx + ex, hy - h, 1, dark);
+            c.set((hx + ex) as i32 + 1, (hy - 1.6) as i32, body);
+        }
+    }
+    let shut = matches!(pose, WildPose::Graze(1));
+    c.set(hx as i32 + 1, hy as i32 - 1 + graze as i32, if shut { body * 0.7 } else { EYE });
+    c
+}
+
+fn draw_rabbit(body: Rgb, pose: WildPose) -> Canvas {
+    let mut c = Canvas::new(16, 14);
+    let g = 13;
+    let dark = body * 0.7;
+    let hop = matches!(pose, WildPose::Walk(1));
+    let up = if hop { 2.0 } else { 0.0 };
+    // a round body, a big hind foot, a cotton tail
+    if hop {
+        c.ellipse(7.0, 9.0 - up, 4.6, 2.4, body);
+        c.line(3.0, 10.0 - up, 1.0, 11.6 - up, 2, dark);
+        c.line(10.0, 10.4 - up, 12.4, 11.8 - up, 1, dark);
+    } else {
+        c.ellipse(6.6, 9.4, 4.2, 3.0, body);
+        c.rect(4, g - 1, 5, 1, dark);
+        c.set(10, g - 1, dark);
+        c.set(10, g - 2, body);
+    }
+    c.ellipse(2.4, 8.4 - up, 1.5, 1.5, WHITE);
+    if matches!(pose, WildPose::Kick(_)) {
+        let k = matches!(pose, WildPose::Kick(1));
+        c.line(4.0, 11.0, if k { 2.0 } else { 5.0 }, 13.0, 1, dark);
+    }
+    // the head, the long ears (laid back when grazing), whiskers
+    let graze = matches!(pose, WildPose::Graze(_));
+    let (hx, hy) = if graze { (11.0, 10.0) } else { (10.4, 6.4 - up) };
+    c.ellipse(hx, hy, 2.4, 2.1, body);
+    if graze {
+        c.line(hx - 0.8, hy - 1.6, hx - 3.4, hy - 5.4, 2, body);
+        c.line(hx - 0.6, hy - 2.0, hx - 2.8, hy - 5.0, 1, PINK);
+        c.line(hx + 0.2, hy - 1.8, hx - 1.4, hy - 5.6, 1, body * 0.92);
+    } else {
+        c.line(hx - 1.0, hy - 1.6, hx - 1.8, hy - 6.0, 2, body);
+        c.line(hx - 0.6, hy - 2.0, hx - 1.2, hy - 5.4, 1, PINK);
+        c.line(hx + 0.6, hy - 1.6, hx + 0.8, hy - 5.6, 1, body * 0.92);
+    }
+    let chew = matches!(pose, WildPose::Graze(1));
+    c.set(hx as i32 + 2, hy as i32 + chew as i32, PINK);
+    c.set(hx as i32 + 1, hy as i32 - 1, EYE);
+    c.set(hx as i32 + 3, hy as i32 + 1, WHITE * 0.8);
+    c
 }

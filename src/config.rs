@@ -44,18 +44,19 @@ pub struct KeysCfg {
     pub centre: String,
     pub rest: String,
     pub todo: String,
+    pub online: String,
 }
 
 impl Default for KeysCfg {
     fn default() -> Self {
         let k = |s: &str| s.to_string();
-        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t") }
+        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t"), online: k("o") }
     }
 }
 
 /// What each key does, in the order the settings list them: (name, what
 /// it does).
-pub const KEY_ACTIONS: [(&str, &str); 9] = [
+pub const KEY_ACTIONS: [(&str, &str); 10] = [
     ("interact", "talk, use, pick up, help build"),
     ("jump", "jump (hold: higher), leap up onto things"),
     ("snowball", "scoop a snowball, then throw it"),
@@ -65,11 +66,12 @@ pub const KEY_ACTIONS: [(&str, &str); 9] = [
     ("centre", "the view back on the villager"),
     ("rest", "lie down in the snow (Space: a snow angel)"),
     ("todo", "things to do here"),
+    ("online", "friends & online"),
 ];
 
 impl KeysCfg {
     pub fn get(&self, i: usize) -> &str {
-        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo][i.min(8)]
+        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo, &self.online][i.min(9)]
     }
 
     pub fn set(&mut self, i: usize, v: String) {
@@ -82,7 +84,8 @@ impl KeysCfg {
             5 => &mut self.held,
             6 => &mut self.centre,
             7 => &mut self.rest,
-            _ => &mut self.todo,
+            8 => &mut self.todo,
+            _ => &mut self.online,
         };
         *slot = v;
     }
@@ -427,6 +430,9 @@ pub struct SceneCfg {
     pub player: bool,
     /// Left alone a while, the villager goes about their own day.
     pub autopilot: bool,
+    /// Only friends & family (the names set) come by as people; the
+    /// animals still do.
+    pub only_friends: bool,
     /// How fast the villager walks (multiplier).
     pub walk_speed: f32,
     /// Time of day: "auto" (real sunrise / sunset for the weather city),
@@ -647,7 +653,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
     }
 }
 

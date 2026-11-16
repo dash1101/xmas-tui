@@ -23,6 +23,8 @@ pub mod rng;
 pub mod scene;
 #[path = "../../src/save.rs"]
 pub mod save;
+#[path = "../../src/net/mod.rs"]
+pub mod net;
 #[path = "../../android/native/src/widgets.rs"]
 pub mod widgets;
 #[path = "../../android/native/src/game.rs"]
@@ -170,11 +172,147 @@ pub extern "C" fn pick(w: *mut Web, i: u32) -> usize {
     put_list(w, m)
 }
 
+/// The ☰ menu, in the village.
+#[no_mangle]
+pub extern "C" fn more(w: *mut Web) {
+    unsafe { &mut *w }.game.more(false);
+}
+
+/// The controls card (`keys`: the keyboard's; else the touch controls').
+#[no_mangle]
+pub extern "C" fn help(w: *mut Web, keys: u32) {
+    unsafe { &mut *w }.game.help(keys != 0);
+}
+
+/// Back (Esc): whether it closed something.
+#[no_mangle]
+pub extern "C" fn back(w: *mut Web) -> u32 {
+    unsafe { &mut *w }.game.back() as u32
+}
+
+/// Whether a menu or card is open in the village.
+#[no_mangle]
+pub extern "C" fn menu_open(w: *mut Web) -> u32 {
+    unsafe { &*w }.game.menu_open() as u32
+}
+
+/// The pointer over the village (not pressed).
+#[no_mangle]
+pub extern "C" fn hover(w: *mut Web, x: f32, y: f32) {
+    unsafe { &mut *w }.game.hover(x, y);
+}
+
+/// Something the page is asked to do (from the village's menus) into the
+/// text buffer ("settings"): its length (0: nothing).
+#[no_mangle]
+pub extern "C" fn ask(w: *mut Web) -> usize {
+    let w = unsafe { &mut *w };
+    w.text = w.game.take_ask().unwrap_or_default().into_bytes();
+    w.text.len()
+}
+
+/// The line typed for what was asked (in the scratch buffer, `len` bytes).
+#[no_mangle]
+pub extern "C" fn give_text(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    unsafe { &mut *w }.game.give_text(&String::from_utf8_lossy(&bytes));
+}
+
+/// Randomness from the page (its crypto), for codes and sealing.
+#[no_mangle]
+pub extern "C" fn entropy(a: u32, b: u32, c: u32, d: u32) {
+    net::seal::stir((a as u64) << 32 | b as u64);
+    net::seal::stir((c as u64) << 32 | d as u64);
+}
+
+/// Friends & online, as a menu in the village (O).
+#[no_mangle]
+pub extern "C" fn online(w: *mut Web) {
+    unsafe { &mut *w }.game.online_menu();
+}
+
+/// Off the relay politely (the page closing): its last bytes to send.
+#[no_mangle]
+pub extern "C" fn net_bye(w: *mut Web) -> usize {
+    let w = unsafe { &mut *w };
+    w.game.scene.online.goodbye();
+    w.text = w.game.scene.online.take_out();
+    w.text.len()
+}
+
+/// Whether the village wants to be online (the page opens a WebSocket).
+#[no_mangle]
+pub extern "C" fn net_want(w: *mut Web) -> u32 {
+    unsafe { &*w }.game.scene.online.wanted() as u32
+}
+
+/// The page's WebSocket to the relay: 1 open, 0 closed.
+#[no_mangle]
+pub extern "C" fn net_link(w: *mut Web, up: u32) {
+    let o = &mut unsafe { &mut *w }.game.scene.online;
+    if up != 0 {
+        o.connected();
+    } else {
+        o.disconnected();
+    }
+}
+
+/// Bytes from the relay (in the scratch buffer, `len` of them).
+#[no_mangle]
+pub extern "C" fn net_in(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    unsafe { &mut *w }.game.scene.online.feed(&bytes);
+}
+
+/// Bytes for the relay, into the text buffer: how many.
+#[no_mangle]
+pub extern "C" fn net_out(w: *mut Web) -> usize {
+    let w = unsafe { &mut *w };
+    w.text = w.game.scene.online.take_out();
+    w.text.len()
+}
+
+/// The next `n` frames of sound (48 kHz stereo, interleaved f32): where
+/// they are (2n floats).
+#[no_mangle]
+pub extern "C" fn audio(w: *mut Web, n: u32) -> *const f32 {
+    unsafe { &mut *w }.game.audio_pull(n as usize).as_ptr()
+}
+
+/// The sound's settings: on or off, and the volumes (0..1).
+#[no_mangle]
+pub extern "C" fn sound(w: *mut Web, on: u32, master: f32, music: f32, sfx: f32, ambience: f32) {
+    let g = &mut unsafe { &mut *w }.game;
+    let cfg = config::SoundCfg { enabled: on != 0, master, music, sfx, ambience, ..Default::default() };
+    g.set_sound(&cfg);
+}
+
 /// The save, as text (the page keeps it in the browser): its length.
 #[no_mangle]
 pub extern "C" fn save(w: *mut Web) -> usize {
     let w = unsafe { &mut *w };
     w.text = w.game.save_text().into_bytes();
+    w.text.len()
+}
+
+/// The villager in a save (its text in the scratch buffer, `len` bytes),
+/// as JSON into the text buffer (an import: their name, pet, friends):
+/// its length (0: none in it).
+#[no_mangle]
+pub extern "C" fn you_json(w: *mut Web, len: usize) -> usize {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    let w = unsafe { &mut *w };
+    let save: Option<save::Save> = toml::from_str(&String::from_utf8_lossy(&bytes)).ok();
+    w.text = save.and_then(|s| s.you).and_then(|y| serde_json::to_string(&y).ok()).unwrap_or_default().into_bytes();
     w.text.len()
 }
 

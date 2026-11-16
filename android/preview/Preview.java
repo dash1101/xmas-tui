@@ -23,7 +23,7 @@ public class Preview {
         int frames = a.length > 5 ? Integer.parseInt(a[5]) : 1;
         cfg.time = a.length > 6 ? a[6] : "night";
         cfg.dockStyle = a.length > 7 ? a[7] : "frost";
-        cfg.name = "Parker";
+        cfg.name = "Robin";
         cfg.petName = "Kitters";
         int scale = Math.max(2, Math.round(Math.min(sw, sh) / (float) cfg.detail));
         int w = (sw + scale - 1) / scale, h = (sh + scale - 1) / scale;

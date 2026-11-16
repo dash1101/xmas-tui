@@ -110,6 +110,19 @@ impl CtxMenu {
         (x > self.x && x < self.x + w - 1 && i >= 0 && (i as usize) < self.items.len()).then_some(i as usize)
     }
 
+    /// On its title bar (it's picked up there and moved).
+    pub fn on_title(&self, x: i32, y: i32) -> bool {
+        let (w, _) = self.size();
+        y == self.y && x >= self.x && x < self.x + w
+    }
+
+    /// Moved to (x, y) (its top-left), kept on a `w`×`h` screen.
+    pub fn move_to(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let (mw, mh) = self.size();
+        self.x = x.clamp(0, (w - mw).max(0));
+        self.y = y.clamp(0, (h - mh).max(0));
+    }
+
     /// Its outline on screen.
     pub fn rect(&self) -> crate::widgets::Rect {
         let (w, h) = self.size();
@@ -135,6 +148,8 @@ impl CtxMenu {
             }
         }
         f.text(self.x + 2, self.y, &format!(" {} ", self.title), pal::UI_TITLE, bg, 0.0);
+        // a grip: it can be dragged out of the way
+        f.text(self.x + w - 4, self.y, "⠿", pal::UI_DIM, bg, 0.0);
         for (i, (label, act)) in self.items.iter().enumerate() {
             let y = self.y + 1 + i as i32;
             let hot = self.hover == Some(i);

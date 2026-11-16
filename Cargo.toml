@@ -1,6 +1,6 @@
 [package]
 name = "xmas-tui"
-version = "1.16.0"
+version = "1.17.0"
 edition = "2021"
 description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
 license = "MIT"
@@ -11,6 +11,8 @@ crossterm = "0.28"
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+sha2 = "0.10"
 toml = "0.8"
 ureq = "2"
 fontdue = "0.9"

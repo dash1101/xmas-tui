@@ -259,6 +259,49 @@ impl Drop for Audio {
     }
 }
 
+/// The sound made on demand, with no thread of its own (the web page, where
+/// there are no threads): fed each frame's effects and the ambience, and
+/// asked for samples as the page's audio needs them.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub struct Pull {
+    mx: Mixer,
+    cfg: SoundCfg,
+    buf: Vec<[f32; 2]>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl Pull {
+    pub fn new(cfg: &SoundCfg) -> Pull {
+        let mut mx = Mixer::new(crate::app::random_seed());
+        mx.configure(cfg);
+        mx.set_awake(audible(cfg));
+        Pull { mx, cfg: cfg.clone(), buf: vec![] }
+    }
+
+    pub fn configure(&mut self, cfg: &SoundCfg) {
+        self.cfg = cfg.clone();
+        self.mx.configure(cfg);
+        self.mx.set_awake(audible(cfg));
+    }
+
+    pub fn frame(&mut self, events: Vec<SoundEvent>, state: AmbState) {
+        self.mx.set_state(state);
+        if audible(&self.cfg) {
+            for e in events {
+                self.mx.event(e.sfx, e.pan, e.gain);
+            }
+        }
+    }
+
+    /// `n` frames (48 kHz stereo), interleaved, into `out`.
+    pub fn render(&mut self, n: usize, out: &mut Vec<f32>) {
+        self.buf.resize(n, [0.0; 2]);
+        self.mx.render(&mut self.buf);
+        out.clear();
+        out.extend(self.buf.iter().flat_map(|f| [f[0], f[1]]));
+    }
+}
+
 /// Android: the app's AudioTrack takes what's been made (see `out::android`).
 #[cfg(target_os = "android")]
 pub fn take_android(out: &mut [i16]) -> usize {

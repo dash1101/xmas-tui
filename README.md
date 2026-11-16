@@ -28,10 +28,14 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   someone's home. A scorecard keeps count.
 - **Trips out**: the train from the station up to a ski lodge (skis from the shop, the chairlift, then a run down
   the mountain through the flags), and a night drive in the car parked by home.
+- **Friends and shared villages, online**: add friends by friend code, write to them, open a village to them or
+  walk into theirs, and see each other walk about, talk aloud and throw snowballs, in real time, on the desktop,
+  on the web and on a phone alike. Opt-in, through a free public relay, sealed end to end.
 - **Play in a browser**: the same village on the web at **[dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/)**,
-  with touch controls on a phone.
+  with sound, the same menus and settings, and touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
-  along, step inside houses, and spend "cheer" at the cocoa cabin.
+  along, step inside houses, and spend "cheer" at the cocoa cabin (a log cabin with a fire, tables, shelves of gifts
+  and the shopkeeper behind the counter).
 - **Townsfolk and wildlife**: named neighbours who hold real back-and-forth conversations about what's going
   on, react to shooting stars, Santa, fireworks and power cuts, gather for the light shows and step around
   each other; kids who build snowmen and igloos (and pile inside) and start snowball fights; deer, foxes and
@@ -101,7 +105,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
 | **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons, or a game controller); the live wallpaper is the same village on autopilot. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
-| **Web** | [dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone). Saves in the browser; no sound yet. |
+| **Web** | [dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone), with sound. Saves in the browser, and imports a desktop or phone save (the villager's name, pet and friends too). |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
 have a one-line installer straight from the repo. On **Linux** (no sudo):
@@ -145,9 +149,10 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
 | **E** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
-| **Space** | jump; held, higher (up to four times as high); steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
+| **Space** | jump; held, higher (up to twice as high); in the air, again: the Christmas spirit lifts the villager once more; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
 | **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
 | **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
+| **O** | friends & online: go online, the friend code, add a friend, write, open this village or go into a friend's |
 | **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
@@ -389,6 +394,30 @@ speaks StatusNotifierItem; the notification area on Windows).
 - **Quit wallpaper:** under the systemd service, this runs `systemctl --user stop xmas-tui` (a plain exit would
   just be restarted). Otherwise it exits cleanly.
 - The settings window also runs on its own: `xmas-tui --settings-window [--config PATH]`.
+## 🌐 Friends and shared villages (online)
+
+Off until asked for: **O** (or **✦ things to do → friends & online**, or ☰ on a phone) → *go online*.
+
+- **A friend code** (`XXXX-XXXX-XXXX`) is made for the villager and kept in the save. *My friend code* copies it to
+  give to a friend; *add a friend* takes theirs. They see the request (in the post, top left, and in their friends &
+  online menu) and say yes, and from then on each sees whether the other is online.
+- **Write** to a friend: their name in the menu → *write to…*. Messages show in the post.
+- **Shared villages:** *open this village to friends* makes a village code (copied) and shows friends a ⌂ by the
+  villager's name; they choose *into …'s village* (or anyone given the code, *into a village by its code*). Guests
+  walk into the host's own village, laid out the same on any screen from the host's seed, and arrive beside the
+  host. Everyone sees everyone else's villager walking, jumping and turning in real time with their name over them;
+  *say something to everyone* puts a speech bubble over the villager for all to see, and snowballs fly for everyone
+  (and hit). Closing the village, or the host going quiet, sends everyone home to their own village.
+- **How:** everyone talks through a free public MQTT broker (a relay that only passes messages along: broker.emqx.io,
+  then broker.hivemq.com, then test.mosquitto.org; the web page reads [`relays.json`](web/site/relays.json) beside it).
+  Everything is sealed end to end (ChaCha20-Poly1305, keys made from the codes by SHA-256) on topics named by hashes
+  of the codes: the relay, or anyone listening, can't read it or tell whose it is, though it does see that some
+  device is connected. A friend code is the key to a mailbox and to whether that villager's about, so it's for
+  friends only. Each village runs on its own player's machine; only where the villagers are, what they say and
+  their snowballs go between them. The neighbours, the animals and the weather are each player's own.
+- The desktop and the Android app connect over TCP (port 1883), the web page over a secure WebSocket. On Android the
+  game is online; the wallpaper stays off it.
+
 ## 🎶 Sound
 Every sound is synthesized live in code. There are no audio files and nothing copyrighted.
 - **Ambience:** wind that swells with gusts and blizzards, a soft snowfall hiss, a gently crackling
@@ -468,8 +497,10 @@ run), and pixel-art buttons do what the keys do on the desktop: **E** (talk, use
 conversation, the joystick up and down picks the answer and E says it), **jump** (held, higher; up against a house,
 a tree or a lamp post, a leap right up onto it), **❄** (scoop a snowball, then throw it), **✦** (things to do here:
 building, snow angels, carols, tag, light shows, fireworks, the ski trip, a drive, games indoors…), **☰** (pockets,
-the scorecard and the Christmas list, inviting someone along, what's in hand, lying down in the snow, settings, set as
-the wallpaper, the controls) and **◎** (the view back on the villager). *Hide the controls when not in use* in the
+the scorecard and the Christmas list, inviting someone along, what's in hand, lying down in the snow, friends &
+online, settings, set as the wallpaper, the controls) and **◎** (the view back on the villager). The menus are drawn
+in the village as on the desktop, with roomy rows for fingers: the joystick goes up and down them and E picks (or a
+tap), and they move by their title bars. *Hide the controls when not in use* in the
 settings fades them away when they're left alone. A game controller works too: the stick or d-pad walks, **A**
 jumps, **X** talks and uses, **Y** throws snowballs, **B** goes back, **Start** is ☰, **Select** is ✦, **L1** is ◎
 and **R1** lies down. Tapping people, animals and
@@ -482,13 +513,13 @@ button is touched) or sets the frame rate (30 fps by default).
 
 <p align="center"><img src="docs/android-game.png" width="100%" alt="The village on a phone held sideways: the big tree, the station, houses and the snowman, with a joystick on the left and E, jump, snowball and menu buttons on the right"></p>
 
-**The live wallpaper** is the game's own village, the villager on autopilot: the same village and the same save
-as the game, so opening the game carries on from what the wallpaper's villager was up to, and the wallpaper carries
-on from the game. Swiping between home screens looks along the village; a tap does what a tap does in the game.
-(*The wallpaper shows → classic* in the settings brings back the older wallpaper, with the snowy dock, described
-below.)
+**The live wallpaper** is the classic one (below), made for the home screen. *The wallpaper shows → village* in the
+settings shows the game's own village instead, the villager on autopilot: the same village and the same save as the
+game, so each carries on from the other.
 
 **The classic wallpaper** is a cut-down village for the phone's home screen, made to be watched rather than played:
+- **Its folk are the villager's friends & family** (from the settings, under their own names and in their own
+  colours, or only them), as many as *Folk on the classic wallpaper* allows.
 - **The village lives its own life.** Folk wander, stop to chat in speech bubbles, pop into each other's
   houses and gather by the tree. The villager (green bobble hat) is out among them: greeting everyone by name,
   playing with their pet, feeding the deer. Deer and rabbits wander through, kids end a chat with a snowball,
@@ -500,10 +531,18 @@ below.)
   lights, the sky gets a shooting star, and a tap on the dock knocks its snow off.
 - **Day and night** follow the phone's clock (or stay at a chosen time), and the village pans gently as the home
   screens are swiped.
-- **Settings** (the app's own screen, or the gear in the wallpaper picker): the frame rate (24 fps by default; it
-  only runs while the home screen is showing), snowfall, **size** (50% to 200%; the village keeps its size
-  whichever way the screen is turned, so a phone or tablet held sideways shows more of it), the villager's name, the
-  pet (cat, dog, bunny or none) and its name, speech bubbles, time of day, and the dock.
+**Settings** (⚙ in the game, or the gear in the wallpaper picker), a tab at a time as on the desktop:
+- **Village:** the villager's name, the pet, its coat and name, walking speed; time of day, snowfall, wind, the
+  northern lights, the lights' glow, size (50% to 200%; the village keeps its size whichever way the screen is
+  turned) and zoom; how many animals and people come by and the most at once, berry bushes, surprises, Santa's sleigh,
+  chattiness and how long speech bubbles stay up.
+- **Friends:** friends & family, each with a name, a kid or not, and their coat, hat, hair and skin; *only them*.
+- **Sound & looks:** sound on or off, the volumes, the music; the panels' and menus' look (classic, frosted, wood or
+  gift).
+- **Playing:** autopilot, hiding the controls, the frame rate.
+- **Wallpaper:** classic or the village, folk on the classic wallpaper, its frame rate, and the dock.
+- **Save:** export a copy, import one (from the desktop or the web too: the village, the pockets, and the villager's
+  name, pet and friends), or start a new village.
 
 **Install:** on the phone, download `xmas-tui-android.apk` from the newest
 [release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or
@@ -693,7 +732,10 @@ xmas-tui --export DIR --size 568x75 --frames 1 --at 20 --sleigh   # render frame
 xmas-tui --export X --frames 720 --fps 24 --clean --raw | ffmpeg -f rawvideo -pix_fmt rgb24 -s 5112x1425 -r 24 -i - out.mp4  # a video
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame
 xmas-tui --settings-window --export DIR                            # settings window + tray icons to PNG
-xmas-tui --export DIR --perch todo|rest|angel|igloo|chess|trip-ski|trip-drive …  # preview a new pass's scenes
+xmas-tui --export DIR --perch todo|rest|angel|igloo|chess|cabin|trip-ski|trip-drive …  # preview a new pass's scenes
+xmas-tui --export DIR --shop                                       # inside the cocoa cabin, at the counter
+xmas-tui --sprite-sheet OUT.png                                    # every pose of the people, pets and animals
+cargo test --release net::tests::through_the_real_relay -- --ignored   # two players through the real relay
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame (+ window fx on Linux)
 ```
 

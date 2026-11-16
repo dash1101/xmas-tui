@@ -654,29 +654,18 @@ impl Frame {
                 *d = src[c];
             }
         }
-        // the glow: bloomed at the drawing's own size, then scaled up
-        // smoothly (bilinear), so it stays a soft glow and not blocks
-        (spare.glow_near, spare.glow_far) = (self.glow_near, self.glow_far);
-        spare.bloom();
-        if self.pre.len() != pw * ph {
-            self.pre = vec![Rgb::BLACK; pw * ph];
-        }
-        let tap = |v: f32, n: usize| {
-            let f = (v - 0.5).clamp(0.0, (n - 1) as f32);
-            let i = f as usize;
-            (i, (i + 1).min(n - 1), f.fract())
-        };
-        let xt: Vec<(usize, usize, f32)> = (0..pw).map(|x| tap(x0 + (x as f32 + 0.5) / z, pw)).collect();
+        // the lights, magnified with everything else (and spread over the
+        // bigger area they cover), then bloomed here at full size: a tight
+        // glow round each light, not one blurry wash scaled up
+        let k = 1.0 / z.powf(1.5);
         for y in 0..ph {
-            let (a, b, ty) = tap(2.0 * y0 + (y as f32 + 0.5) / z, ph);
-            let (ra, rb) = (&spare.near[a * pw..(a + 1) * pw], &spare.near[b * pw..(b + 1) * pw]);
-            for (x, &(i0, i1, tx)) in xt.iter().enumerate() {
-                let top = ra[i0].lerp(ra[i1], tx);
-                let bot = rb[i0].lerp(rb[i1], tx);
-                self.pre[y * pw + x] = top.lerp(bot, ty);
+            let sy = ((2.0 * y0 + (y as f32 + 0.5) / z) as usize).min(ph - 1);
+            let (src, dst) = (&spare.light[sy * pw..(sy + 1) * pw], &mut self.light[y * pw..(y + 1) * pw]);
+            for (d, &c) in dst.iter_mut().zip(&cols) {
+                *d = src[c] * k;
             }
         }
-        self.pre_on = true;
+        self.pre_on = false;
         let (ox, oy) = (self.ox, self.oy);
         (self.ox, self.oy) = (0, 0);
         let (cw, chh) = (self.w as i32, self.h as i32);
@@ -746,6 +735,13 @@ impl Frame {
         (x0, y0)
     }
 
+    /// Nothing drawn in cell (x, y) on the screen (no glyph over it).
+    pub fn clear_glyph(&mut self, x: i32, y: i32) {
+        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
+            self.glyph[y as usize * self.w + x as usize] = None;
+        }
+    }
+
     /// Fill a pixel rectangle (fractions round to whole pixels) with `c`
     /// at opacity `a`.
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) {
@@ -795,6 +791,20 @@ impl Frame {
     pub fn light_px(&mut self, x: f32, y: f32, c: Rgb) {
         let x = x - self.ox as f32;
         let y = y + 2.0 * self.oy as f32;
+        // just off the edge: its glow still reaches in, fading with the
+        // distance (so a light coming into view doesn't pop on)
+        const EDGE: f32 = 14.0;
+        let (w, h) = (self.pw as f32, self.ph as f32);
+        let out = (-x).max(x - (w - 1.0)).max(0.0).max((-y).max(y - (h - 1.0)).max(0.0));
+        if out > 0.0 {
+            if out < EDGE && w > 0.0 && h > 0.0 {
+                let (cx, cy) = (x.clamp(0.0, w - 1.0) as usize, y.clamp(0.0, h - 1.0) as usize);
+                let k = (1.0 - out / EDGE).powi(2);
+                let i = cy * self.pw + cx;
+                self.light[i] += c * k;
+            }
+            return;
+        }
         let (fx, fy) = (x - 0.5, y - 0.5);
         let (ix, iy) = (fx.floor() as i32, fy.floor() as i32);
         let (tx, ty) = (fx - ix as f32, fy - iy as f32);

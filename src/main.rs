@@ -12,6 +12,7 @@ mod frame;
 mod icon;
 #[cfg(target_os = "linux")]
 mod linwall;
+mod net;
 mod platform;
 mod raster;
 mod rng;

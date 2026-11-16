@@ -2,11 +2,12 @@ package io.github.dash1101.xmastui;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.app.WallpaperManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Canvas;
@@ -120,7 +121,13 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         // (a new size: a new village to fit it; the wallpaper's moved
         // things on since: from its save)
         java.io.File save = new java.io.File(getFilesDir(), "save.toml");
-        if (game != 0 && (w != controls.gw || h != controls.gh || save.lastModified() > savedAt + 500)) {
+        // (a save imported, or a new village asked for, in the settings:
+        // this one goes without writing over it)
+        boolean replaced = save.lastModified() > savedAt + 500 || (!save.exists() && savedAt > 0);
+        if (game != 0 && replaced) {
+            Native.forget(game);
+        }
+        if (game != 0 && (w != controls.gw || h != controls.gh || replaced)) {
             Native.destroy(game);
             game = 0;
         }
@@ -158,6 +165,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 while (running) {
                     long now = System.nanoTime();
                     Native.frame(g, (now - last) / 1e9f);
+                    poll(g);
                     last = now;
                     long wait = step - (System.nanoTime() - now);
                     if (wait > 0) {
@@ -263,87 +271,84 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
 
     // ------------------------------------------------------------ menus
 
-    /** What can be done at (x, y), as a list to pick from. */
+    /** What can be done at (x, y): a menu in the village. */
     void longPress(float x, float y) {
-        if (game == 0) {
-            return;
+        if (game != 0) {
+            Native.menu(game, x, y);
         }
-        showMenu(Native.menu(game, x, y));
     }
 
-    /** Things to do right here (the ✦ button). */
+    /** Things to do right here (the ✦ button), in the village. */
     void todo() {
         if (game != 0) {
             Native.button(game, -1);
-            showMenu(Native.todo(game));
+            Native.todo(game);
         }
     }
 
-    /** A list from the village ({title, choice, ...}); a choice with more behind it shows the next list. */
-    private void showMenu(String[] m) {
-        if (m == null || m.length < 2) {
+    /** The ☰ menu, in the village. */
+    void more() {
+        if (game != 0) {
+            Native.more(game);
+        }
+    }
+
+    /** A line for the village to have (a friend's code, a message): typed, then handed over. */
+    private void typeLine(String question) {
+        final android.widget.EditText e = new android.widget.EditText(this);
+        e.setSingleLine(true);
+        e.setHint(question);
+        e.setTextColor(Color.WHITE);
+        int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(e);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(question)
+                .setView(box)
+                .setPositiveButton("OK", (d, w) -> {
+                    if (game != 0) Native.giveText(game, e.getText().toString());
+                })
+                .setNegativeButton("Never mind", (d, w) -> {
+                    if (game != 0) Native.giveText(game, "");
+                })
+                .setOnCancelListener(d -> {
+                    if (game != 0) Native.giveText(game, "");
+                })
+                .show();
+        e.requestFocus();
+    }
+
+    /** What the village asks of the app (from its menus), and what's showing. */
+    private void poll(final long g) {
+        final String ask = Native.ask(g);
+        final boolean pockets = (Native.state(g) & 1) != 0;
+        if (ask == null && pockets == controls.pockets) {
             return;
         }
-        String[] items = new String[m.length - 1];
-        System.arraycopy(m, 1, items, 0, items.length);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(m[0])
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int which) {
-                        final String[] next = Native.pick(game, which);
-                        if (next != null) {
-                            ui.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    showMenu(next);
-                                }
-                            });
-                        }
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                if (controls.pockets != pockets) {
+                    controls.pockets = pockets;
+                    controls.invalidate();
+                }
+                if ("wallpaper".equals(ask)) {
+                    setWallpaper();
+                } else if ("settings".equals(ask)) {
+                    startActivity(new Intent(GameActivity.this, SettingsActivity.class));
+                } else if (ask != null && ask.startsWith("text:")) {
+                    typeLine(ask.substring(5));
+                } else if (ask != null && ask.startsWith("copy:")) {
+                    String text = ask.substring(5);
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) {
+                        cm.setPrimaryClip(ClipData.newPlainText("xmas-tui", text));
                     }
-                })
-                .show();
-    }
-
-    /** The other things the keys do: pockets, inviting someone along, what's in hand… */
-    void more() {
-        final String[] items = {"Pockets, scorecard & Christmas list", "Invite along / say goodbye", "What's in hand (berries, cocoa…)", "Lie down in the snow / get up", "Close what's open", "Set as the live wallpaper", "Settings", "Controls"};
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int which) {
-                        switch (which) {
-                            case 0:
-                                Native.button(game, Native.POCKETS);
-                                controls.pockets = !controls.pockets;
-                                controls.invalidate();
-                                break;
-                            case 1:
-                                Native.button(game, Native.INVITE);
-                                break;
-                            case 2:
-                                Native.button(game, Native.HELD);
-                                break;
-                            case 3:
-                                Native.button(game, Native.REST);
-                                break;
-                            case 4:
-                                Native.button(game, Native.BACK);
-                                controls.pockets = false;
-                                controls.invalidate();
-                                break;
-                            case 5:
-                                setWallpaper();
-                                break;
-                            case 6:
-                                startActivity(new Intent(GameActivity.this, SettingsActivity.class));
-                                break;
-                            default:
-                                help();
-                        }
-                    }
-                })
-                .show();
+                    android.widget.Toast.makeText(GameActivity.this, "copied: " + text, android.widget.Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
     }
 
     private void setWallpaper() {
@@ -363,27 +368,14 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     void help() {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Playing in the village")
-                .setMessage("Joystick (left): walk about; push it all the way to run.\n\n"
-                        + "E: talk, use, pick up, help build (whatever's in front). In a conversation, push the joystick up or down to pick an answer, then E.\n"
-                        + "Jump: jump; hold it to go higher (up to four times as high). Up against a house, a tree or a lamp post, it leaps right up onto it. Lying down: a snow angel.\n"
-                        + "❄: scoop a snowball, then throw it\n"
-                        + "✦: things to do here: build a snowman or an igloo, a snow angel, a rest in the snow, a carol, tag, a light show, fireworks, a snowball fight, a game at the table indoors, the train to the ski slopes, a drive\n"
-                        + "☰: pockets & scorecard, invite someone along, lie down, settings, set as the wallpaper\n"
-                        + "◎: the view back on the villager\n\n"
-                        + "Tap people, animals and things as on the desktop. Press and hold anywhere for what can be done there. Drag people, animals and the pet to carry them. Two fingers look along the village. Back closes what's open, then leaves.\n\n"
-                        + "A game controller: stick or d-pad to walk, A jump, X talk/use, Y snowball, B back, Start ☰, Select ✦, L1 ◎, R1 lie down.")
-                .setPositiveButton("OK", null)
-                .show();
+        if (game != 0) {
+            Native.help(game);
+        }
     }
 
     @Override
     public void onBackPressed() {
-        if (controls.pockets && game != 0) {
-            Native.button(game, Native.BACK);
-            controls.pockets = false;
-            controls.invalidate();
+        if (game != 0 && Native.back(game)) {
             return;
         }
         super.onBackPressed();

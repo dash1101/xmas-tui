@@ -777,12 +777,12 @@ mod tests {
         let (x, y) = find(&p, "(click to set)");
         p.mouse(MouseIn::Down(Btn::Left), x, y);
         p.step(0.13, 0.03);
-        for c in "Parker".chars() {
+        for c in "Robin".chars() {
             p.key(KeyIn::Char(c));
         }
         p.key(KeyIn::Enter);
         p.step(0.14, 0.03);
-        assert_eq!(config::load(Some(&path.to_string_lossy())).scene.name, "Parker");
+        assert_eq!(config::load(Some(&path.to_string_lossy())).scene.name, "Robin");
         // the city field lives on the Widgets tab
         let (x, y) = find(&p, "Widgets");
         p.mouse(MouseIn::Down(Btn::Left), x, y);

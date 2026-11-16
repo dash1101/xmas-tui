@@ -55,6 +55,7 @@ pub enum F {
     Bushes,
     Player,
     Autopilot,
+    OnlyFriends,
     UpdCheck,
     Map,
     UpdAuto,
@@ -393,6 +394,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Bushes => cfg.scene.bushes ^= true,
                 F::Player => cfg.scene.player ^= true,
                 F::Autopilot => cfg.scene.autopilot ^= true,
+                F::OnlyFriends => cfg.scene.only_friends ^= true,
                 F::UpdCheck => cfg.updates.check ^= true,
                 F::Map => cfg.widgets.map ^= true,
                 F::Viz => cfg.widgets.visualizer ^= true,
@@ -584,6 +586,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Aurora => "The northern lights in the sky.",
         F::Bushes => "Berry bushes to pick berries from (animals love them).",
         F::Player => "The villager: walk about with WASD or the arrow keys.",
+        F::OnlyFriends => "Only the friends & family named here come by as people (the animals still wander through). Off: the village's own folk come by too.",
         F::Autopilot => "Left alone a while, the villager goes about their own day: snowmen and igloos, snowballs, feeding the animals, chats, tag with the kids. Any key takes over again.",
         F::WalkSpeed => "How fast the villager walks (Shift runs).",
         F::TalkTime => "How long speech bubbles stay up.",
@@ -1174,6 +1177,7 @@ impl Settings {
         self.section(f, lx, yy, "FRIENDS & FAMILY");
         yy += 1;
         f.text(lx, yy, "Each comes by as a villager of their own, and knows the villager.", pal::UI_DIM, BG, 0.0);
+        self.check(f, right - 22, yy, "only them", Act::Toggle(F::OnlyFriends), cfg.scene.only_friends);
         yy += 1;
         // two columns of five
         let colw = ((right - lx) / 2).max(30);

@@ -3,8 +3,9 @@
 //! what the keyboard and mouse do on the desktop.
 
 use crate::audio::{self, Audio};
+use crate::color::{pal, Rgb};
 use crate::config::Config;
-use crate::frame::{Cell, Frame, Placed};
+use crate::frame::{Bg, Cell, Frame, Glyph, Placed};
 use crate::raster::Raster;
 use crate::scene::{daylight, Do, Scene};
 
@@ -42,6 +43,9 @@ pub struct Game {
     zoom_xf: (f32, f32, f32),
     focus: Option<(f32, f32)>,
     audio: Option<Audio>,
+    /// No sound thread to be had (the web): the sound's made on demand.
+    pull: Option<audio::Pull>,
+    pcm: Vec<f32>,
     /// A finger down: where (cell), carrying someone, moved off.
     press: Option<(i32, i32)>,
     carrying: bool,
@@ -55,7 +59,239 @@ pub struct Game {
     /// The joystick's last up/down (a push, not a hold, steps through a
     /// conversation's answers).
     stick_y: f32,
+    /// A list to choose from, drawn in the village (as on the desktop).
+    menu: Option<Menu>,
+    /// A card of text (the controls), drawn in the village.
+    card: Option<Card>,
+    /// Held by its title bar: the menu or card, and the finger's offset.
+    lift: Option<(i32, i32)>,
+    /// Things for the app itself to do ("wallpaper", "settings",
+    /// "text:<question>" for a line typed, "copy:<text>").
+    asks: Vec<String>,
+    /// What a line asked for is for (see `give_text`).
+    text_for: Option<crate::scene::online::TextFor>,
+    /// The villager's own village (the scene may be a friend's).
+    own_seed: u32,
+    /// Online at all here (not on the wallpaper).
+    online_ok: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    link: Option<crate::net::tcp::Tcp>,
+    /// The controls card shows the keyboard's (a computer's web page).
+    help_keys: bool,
 }
+
+/// What a choice in a menu does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Act {
+    Scene(Do),
+    Button(i32),
+    /// Lie down (or get up again).
+    Rest,
+    /// The controls card.
+    Help,
+    /// For the app itself (see `asks`).
+    Ask(&'static str),
+    /// Friends & online.
+    Online,
+}
+
+/// Rows a choice takes (room for a finger).
+const GAP: i32 = 2;
+
+/// A list to choose from in the village: a title bar to move it by, the
+/// choice picked out (the joystick steps, E picks), a ✕ to close it.
+struct Menu {
+    x: i32,
+    y: i32,
+    title: String,
+    items: Vec<(String, Act)>,
+    hover: usize,
+    /// The choice a finger went down on.
+    down: Option<usize>,
+}
+
+impl Menu {
+    fn new(x: i32, y: i32, title: String, items: Vec<(String, Act)>, cols: i32, rows: i32) -> Menu {
+        let mut m = Menu { x, y, title, items, hover: 0, down: None };
+        m.move_to(x, y, cols, rows);
+        m
+    }
+
+    fn size(&self) -> (i32, i32) {
+        let w = self.items.iter().map(|i| i.0.chars().count()).chain(std::iter::once(self.title.chars().count() + 4)).max().unwrap_or(10) as i32 + 8;
+        (w, self.items.len() as i32 * GAP + 2)
+    }
+
+    fn move_to(&mut self, x: i32, y: i32, cols: i32, rows: i32) {
+        let (w, h) = self.size();
+        self.x = x.clamp(0, (cols - w).max(0));
+        self.y = y.clamp(0, (rows - h).max(0));
+    }
+
+    fn contains(&self, x: i32, y: i32) -> bool {
+        let (w, h) = self.size();
+        x >= self.x && x < self.x + w && y >= self.y - 1 && y < self.y + h
+    }
+
+    /// The title bar (a row of slack above it too: fingers are big).
+    fn on_title(&self, x: i32, y: i32) -> bool {
+        let (w, _) = self.size();
+        (y == self.y || y == self.y - 1) && x >= self.x && x < self.x + w - 4
+    }
+
+    fn on_close(&self, x: i32, y: i32) -> bool {
+        let (w, _) = self.size();
+        (y == self.y || y == self.y - 1) && x >= self.x + w - 4 && x < self.x + w
+    }
+
+    fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        let (w, h) = self.size();
+        if x < self.x || x >= self.x + w || y <= self.y || y >= self.y + h - 1 {
+            return None;
+        }
+        let i = ((y - self.y - 1) / GAP) as usize;
+        (i < self.items.len()).then_some(i)
+    }
+
+    fn rect(&self) -> crate::widgets::Rect {
+        let (w, h) = self.size();
+        crate::widgets::Rect { x: self.x, y: self.y, w, h }
+    }
+
+    fn draw(&self, f: &mut Frame, look: &str) {
+        let (w, h) = self.size();
+        let bg = Bg::Mix(pal::UI_PANEL, 0.95);
+        frame_box(f, self.x, self.y, w, h, bg);
+        f.text(self.x + 2, self.y, &format!(" {} ", self.title), pal::UI_TITLE, bg, 0.0);
+        f.text(self.x + w - 4, self.y, " ✕", pal::UI_DIM, bg, 0.0);
+        for (i, (label, _)) in self.items.iter().enumerate() {
+            let y = self.y + 1 + i as i32 * GAP;
+            let hot = self.hover == i;
+            let ibg = if hot { Bg::Mix(Rgb::hex(0x34406a), 0.95) } else { bg };
+            for yy in y..y + GAP {
+                for x in self.x + 1..self.x + w - 1 {
+                    f.put_g(x, yy, Glyph::new(' ', pal::UI_TEXT).bg(ibg).lit(0.0));
+                }
+            }
+            if hot {
+                f.text(self.x + 2, y, "▸", Rgb::hex(0xffd36b), ibg, 0.0);
+            }
+            f.text(self.x + 4, y, label, if hot { Rgb::hex(0xffd36b) } else { pal::UI_TEXT }, ibg, 0.0);
+        }
+        crate::widgets::looks::apply(f, self.rect(), look, bg, 5);
+    }
+}
+
+/// A card of text (the controls): moved by its title bar, closed by ✕, a
+/// tap anywhere else, E or Back.
+struct Card {
+    x: i32,
+    y: i32,
+    title: String,
+    lines: Vec<String>,
+}
+
+impl Card {
+    fn size(&self) -> (i32, i32) {
+        let w = self.lines.iter().map(|l| l.chars().count()).chain(std::iter::once(self.title.chars().count() + 4)).max().unwrap_or(10) as i32 + 4;
+        (w, self.lines.len() as i32 + 3)
+    }
+
+    fn move_to(&mut self, x: i32, y: i32, cols: i32, rows: i32) {
+        let (w, h) = self.size();
+        self.x = x.clamp(0, (cols - w).max(0));
+        self.y = y.clamp(0, (rows - h).max(0));
+    }
+
+    fn on_title(&self, x: i32, y: i32) -> bool {
+        let (w, _) = self.size();
+        (y == self.y || y == self.y - 1) && x >= self.x && x < self.x + w - 4
+    }
+
+    fn rect(&self) -> crate::widgets::Rect {
+        let (w, h) = self.size();
+        crate::widgets::Rect { x: self.x, y: self.y, w, h }
+    }
+
+    fn draw(&self, f: &mut Frame, look: &str) {
+        let (w, h) = self.size();
+        let bg = Bg::Mix(pal::UI_PANEL, 0.95);
+        frame_box(f, self.x, self.y, w, h, bg);
+        f.text(self.x + 2, self.y, &format!(" {} ", self.title), pal::UI_TITLE, bg, 0.0);
+        f.text(self.x + w - 4, self.y, " ✕", pal::UI_DIM, bg, 0.0);
+        for (i, l) in self.lines.iter().enumerate() {
+            // "key: what it does": the key picked out
+            let y = self.y + 1 + i as i32;
+            match l.split_once(": ") {
+                Some((k, rest)) if k.chars().count() < 14 => {
+                    let x = f.text(self.x + 2, y, k, Rgb::hex(0xffd36b), bg, 0.0);
+                    f.text(x + 1, y, rest, pal::UI_TEXT, bg, 0.0);
+                }
+                _ => {
+                    f.text(self.x + 2, y, l, pal::UI_DIM, bg, 0.0);
+                }
+            }
+        }
+        crate::widgets::looks::apply(f, self.rect(), look, bg, 7);
+    }
+}
+
+/// A panel's border, the panel colour inside.
+fn frame_box(f: &mut Frame, x0: i32, y0: i32, w: i32, h: i32, bg: Bg) {
+    let border = Rgb::hex(0xffd36b) * 0.8;
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
+                (true, _, true, _) => '╭',
+                (_, true, true, _) => '╮',
+                (true, _, _, true) => '╰',
+                (_, true, _, true) => '╯',
+                (_, _, true, _) | (_, _, _, true) => '─',
+                (true, _, _, _) | (_, true, _, _) => '│',
+                _ => ' ',
+            };
+            f.put_g(x, y, Glyph::new(ch, border).bg(bg).lit(0.0));
+        }
+    }
+}
+
+/// The keys, on the card (a computer's web page).
+const HELP_KEYS: &[&str] = &[
+    "WASD / arrows: walk (Shift: run); choose in menus",
+    "Space: jump (hold: higher; in the air, again: the",
+    "       Christmas spirit lifts the villager once more)",
+    "E / Enter: talk, use, pick up, help build; pick",
+    "R: a snowball · F: ask along · Z: lie in the snow",
+    "T: things to do · I: pockets & scorecard · Q: in hand",
+    "C: back to the villager · Esc: close · 1-9: choose",
+    "click: people, animals, the sky, Santa",
+    "right-click (or hold): what can be done there",
+    "drag: carry people, animals and the pet",
+    "the wheel: look along the village",
+    "",
+    "menus and cards move by their title bars",
+];
+
+/// The controls, on the card.
+const HELP: &[&str] = &[
+    "joystick: walk about (all the way: run); in a menu or a",
+    "          conversation, up and down to choose",
+    "E: talk, use, pick up, help build; picks in menus",
+    "jump: jump (hold: higher; in the air, again: the",
+    "      Christmas spirit lifts the villager once more)",
+    "❄: scoop a snowball, then throw it",
+    "✦: things to do right here",
+    "☰: pockets, scorecard, invite along, lie down, settings",
+    "◎: the view back on the villager",
+    "tap: people, animals and things, as a click",
+    "press and hold: what can be done there",
+    "drag: carry people, animals and the pet",
+    "two fingers: look along the village",
+    "controller: stick walks, A jump, X use, Y snowball,",
+    "            B back, Start ☰, Select ✦, L1 ◎, R1 lie down",
+    "",
+    "menus and cards move by their title bars",
+];
 
 /// Cells for a screen: rows from the short side (about 18 px a row at
 /// "size" 100), the width to match.
@@ -74,27 +310,31 @@ impl Game {
 
     /// From a save already read (the web page keeps its own); `save`: where
     /// to write it (none: `save_text` hands it back instead).
-    pub fn new_saved(pw: usize, ph: usize, size: f32, cfg: Config, saved: Option<crate::save::Save>, save: Option<std::path::PathBuf>) -> Game {
+    pub fn new_saved(pw: usize, ph: usize, size: f32, mut cfg: Config, saved: Option<crate::save::Save>, save: Option<std::path::PathBuf>) -> Game {
         crate::frame::set_pictures_ok(true);
+        // the villager's name, the pet's, friends: from the save where unset
+        if let Some(you) = saved.as_ref().and_then(|s| s.you.as_ref()) {
+            you.fill(&mut cfg);
+        }
         let (cw, ch, cols, rows) = grid(pw, ph, size);
         // the same village each time (and the same in the game and on the
         // wallpaper): the save's
         let seed = if cfg.seed != 0 { cfg.seed as u32 } else { saved.as_ref().map(|s| s.seed).unwrap_or_else(crate::app::random_seed) };
-        let mut scene = Scene::new(cols, rows, seed, &cfg.scene);
+        let mut scene = Self::make_scene(cols, rows, seed, &cfg);
+        // online: the friend code and friends (the villager's, whichever
+        // village the save's for)
+        let book = saved.as_ref().and_then(|s| s.online.clone()).unwrap_or_default();
+        scene.put_online(crate::net::Online::new(book, &cfg.scene.name));
         if let Some(s) = saved.filter(|s| s.seed == seed) {
             scene.set_pockets(s.pockets);
             scene.place_player(s.player);
         }
-        scene.set_autopilot(cfg.scene.autopilot);
-        scene.set_live(cfg.scene.walk_speed, false, cfg.scene.most_at_once);
-        scene.set_pet(&cfg.scene.pet);
-        scene.set_name(&cfg.scene.name);
-        scene.set_friends(&cfg.scene.friends);
         let mut frame = Frame::new(cols, rows);
         frame.glow_near = cfg.scene.glow;
         frame.glow_far = cfg.scene.glow;
         frame.cell_aspect = ch as f32 / cw as f32;
-        let audio = if cfg.sound.enabled { Audio::start(&cfg.sound) } else { None };
+        let audio = if cfg.sound.enabled && !cfg!(target_arch = "wasm32") { Audio::start(&cfg.sound) } else { None };
+        let pull = cfg!(target_arch = "wasm32").then(|| audio::Pull::new(&cfg.sound));
         Game {
             scene,
             frame,
@@ -112,6 +352,8 @@ impl Game {
             zoom_xf: (1.0, 0.0, 0.0),
             focus: None,
             audio,
+            pull,
+            pcm: vec![],
             press: None,
             carrying: false,
             moved: false,
@@ -119,8 +361,186 @@ impl Game {
             save,
             saved_at: 0.0,
             stick_y: 0.0,
+            menu: None,
+            card: None,
+            lift: None,
+            asks: vec![],
+            text_for: None,
+            own_seed: seed,
+            online_ok: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            link: None,
+            help_keys: false,
             cfg,
         }
+    }
+
+    /// Open a menu in the village at (x, y) (cells).
+    fn open(&mut self, x: i32, y: i32, title: String, items: Vec<(String, Act)>) {
+        if items.is_empty() {
+            return;
+        }
+        self.card = None;
+        self.menu = Some(Menu::new(x, y, title, items, self.cols as i32, self.rows as i32));
+    }
+
+    fn scene_items(items: Vec<(String, Do)>) -> Vec<(String, Act)> {
+        items.into_iter().map(|(l, d)| (l, Act::Scene(d))).collect()
+    }
+
+    /// A choice in the menu: done, or (a "▸") the next list in its place.
+    fn choose(&mut self, i: usize) {
+        let Some(m) = self.menu.take() else { return };
+        let Some(&(_, act)) = m.items.get(i) else { return };
+        self.scene.woke();
+        match act {
+            Act::Scene(Do::More(k)) => {
+                let (title, items) = self.scene.more_menu(k);
+                self.open(m.x, m.y, title, Self::scene_items(items));
+            }
+            Act::Scene(d) => self.scene.act(d),
+            Act::Button(b) => self.button(b),
+            Act::Rest => self.scene.rest(),
+            Act::Help => self.help(self.help_keys),
+            Act::Ask(what) => self.asks.push(what.to_string()),
+            Act::Online => {
+                let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
+                self.open(m.x, m.y, title, Self::scene_items(items));
+            }
+        }
+    }
+
+    /// The ☰ menu: the other things the keys do, and the app's own
+    /// (`phone`: the Android app, which can be the wallpaper).
+    pub fn more(&mut self, phone: bool) {
+        let mut items = vec![
+            ("pockets, scorecard & Christmas list".to_string(), Act::Button(BTN_POCKETS)),
+            ("invite along / say goodbye".to_string(), Act::Button(BTN_INVITE)),
+            ("what's in hand (berries, cocoa…)".to_string(), Act::Button(BTN_HELD)),
+            ("lie down in the snow / get up".to_string(), Act::Rest),
+        ];
+        if phone {
+            items.push(("set as the live wallpaper".to_string(), Act::Ask("wallpaper")));
+        }
+        items.push(("✉ friends & online".to_string(), Act::Online));
+        items.push(("settings".to_string(), Act::Ask("settings")));
+        items.push(("the controls".to_string(), Act::Help));
+        let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
+        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 6, "☰ more".into(), items);
+    }
+
+    /// Friends & online (O on a keyboard).
+    pub fn online_menu(&mut self) {
+        let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
+        let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
+        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 8, title, Self::scene_items(items));
+    }
+
+    /// The controls card (`keys`: the keyboard's; else the touch controls').
+    pub fn help(&mut self, keys: bool) {
+        self.menu = None;
+        self.help_keys = keys;
+        let lines = if keys { HELP_KEYS } else { HELP };
+        let mut c = Card { x: 0, y: 0, title: "⌨ playing in the village".into(), lines: lines.iter().map(|s| s.to_string()).collect() };
+        let (w, h) = c.size();
+        c.move_to((self.cols as i32 - w) / 2, (self.rows as i32 - h) / 3, self.cols as i32, self.rows as i32);
+        self.card = Some(c);
+    }
+
+    /// The pointer over the village (not pressed): over a menu, the choice
+    /// under it is picked out.
+    pub fn hover(&mut self, x: f32, y: f32) {
+        let c = self.cell(x, y);
+        if let Some(m) = &mut self.menu {
+            if let Some(i) = m.row_at(c.0, c.1) {
+                m.hover = i;
+            }
+        }
+    }
+
+    /// Whether a menu or card is open.
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some() || self.card.is_some()
+    }
+
+    /// Something for the app itself to do, if anything's asked.
+    pub fn take_ask(&mut self) -> Option<String> {
+        (!self.asks.is_empty()).then(|| self.asks.remove(0))
+    }
+
+    /// The line typed for what was asked (empty: never mind).
+    pub fn give_text(&mut self, text: &str) {
+        if let Some(what) = self.text_for.take() {
+            self.scene.woke();
+            self.scene.give_text(what, text);
+        }
+    }
+
+    /// Not online here (the wallpaper: the game's the one that is).
+    pub fn set_online_ok(&mut self, ok: bool) {
+        // (the book's left as it is: it's the game's, shared in the save)
+        self.online_ok = ok;
+    }
+
+    /// Online: the link, what's asked of the app, into a friend's village
+    /// (or home again).
+    fn update_online(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.online_ok {
+            crate::net::tcp::pump(&mut self.scene.online, &mut self.link);
+        }
+        if std::mem::take(&mut self.scene.online.dirty) {
+            self.saved_at = self.saved_at.min(self.t - 55.0);
+        }
+        if let Some((what, ask)) = self.scene.take_text_ask() {
+            self.text_for = Some(what);
+            self.asks.push(format!("text:{ask}"));
+        }
+        if let Some(text) = self.scene.take_copy() {
+            self.asks.push(format!("copy:{text}"));
+        }
+        if let Some(to) = self.scene.take_village() {
+            let seed = to.unwrap_or(self.own_seed);
+            let pockets = self.scene.take_pockets();
+            let online = self.scene.take_online();
+            self.scene = Self::make_scene(self.cols, self.rows, seed, &self.cfg);
+            self.scene.set_pockets(pockets);
+            self.scene.put_online(online);
+            self.scene.set_own_seed(self.own_seed);
+            self.scene.arrive_by_host();
+            self.menu = None;
+            self.focus = None;
+        }
+    }
+
+    fn make_scene(cols: usize, rows: usize, seed: u32, cfg: &Config) -> Scene {
+        let mut scene = Scene::new(cols, rows, seed, &cfg.scene);
+        scene.set_autopilot(cfg.scene.autopilot);
+        scene.set_live(cfg.scene.walk_speed, false, cfg.scene.most_at_once);
+        scene.set_pet(&cfg.scene.pet);
+        scene.set_name(&cfg.scene.name);
+        scene.set_friends(&cfg.scene.friends);
+        scene.set_only_friends(cfg.scene.only_friends);
+        scene.set_ui_look(&cfg.ui.look);
+        scene
+    }
+
+    /// Back: close the menu, the card, or what's open in the village;
+    /// whether anything was.
+    pub fn back(&mut self) -> bool {
+        if self.menu.take().is_some() || self.card.take().is_some() {
+            return true;
+        }
+        if self.scene.at_table() {
+            self.scene.table_key(None);
+            return true;
+        }
+        self.scene.close_panels()
+    }
+
+    /// What's showing: 1 the pockets, 2 a menu or card.
+    pub fn state(&self) -> i32 {
+        (self.scene.pockets_shown() as i32) | (((self.menu.is_some() || self.card.is_some()) as i32) << 1)
     }
 
     /// Write the save file (every minute, when paused, and at the end).
@@ -128,6 +548,11 @@ impl Game {
         self.saved_at = self.t;
         let Some(p) = self.save.clone() else { return };
         let _ = crate::save::write(&p, &self.saved());
+    }
+
+    /// No more writing the save file (another's taken its place).
+    pub fn forget(&mut self) {
+        self.save = None;
     }
 
     /// The save as text (the web page keeps it in the browser).
@@ -138,16 +563,14 @@ impl Game {
     fn saved(&self) -> crate::save::Save {
         crate::save::Save {
             version: 1,
-            seed: self.scene_seed(),
+            seed: self.own_seed,
             name: self.cfg.scene.name.clone(),
             saved: crate::clock::now().format("%Y-%m-%d %H:%M").to_string(),
             player: self.scene.player_at(),
             pockets: self.scene.pockets().clone(),
+            you: Some(crate::save::You::of(&self.cfg)),
+            online: Some(self.scene.online.book.clone()),
         }
-    }
-
-    fn scene_seed(&self) -> u32 {
-        self.scene.seed()
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -166,12 +589,20 @@ impl Game {
             self.scene.set_daylight(daylight::compute(&self.cfg.scene.time, mins, 450.0, 1020.0));
         }
         self.scene.update(dt, t);
+        // the pet named (or recoloured) in the village: kept, and saved
+        if let Some(p) = self.scene.take_pet_change() {
+            self.cfg.scene.pet = p;
+            self.saved_at = -1e9;
+        }
+        self.update_online();
         if t - self.saved_at > 60.0 {
             self.save();
         }
         let sounds = self.scene.take_sounds();
         if let Some(a) = &self.audio {
             a.frame(sounds, self.scene.audio_state(t));
+        } else if let Some(p) = &mut self.pull {
+            p.frame(sounds, self.scene.audio_state(t));
         }
         self.frame.clear();
         let want = self.scene.zoom_focus();
@@ -184,6 +615,15 @@ impl Game {
         };
         self.focus = Some(f);
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+        let look = self.cfg.ui.look.clone();
+        // (a menu or card hides the people and pets under it)
+        self.frame.cover_pictures = true;
+        if let Some(m) = &self.menu {
+            m.draw(&mut self.frame, &look);
+        }
+        if let Some(c) = &self.card {
+            c.draw(&mut self.frame, &look);
+        }
         self.frame.compose();
         self.draw();
     }
@@ -243,6 +683,16 @@ impl Game {
 
     /// The joystick: -1..1 each way; pushed all the way, a run.
     pub fn steer(&mut self, mx: f32, my: f32, run: bool) {
+        // a menu open: up and down choose (a push at a time)
+        if let Some(m) = &mut self.menu {
+            if my != 0.0 && my != self.stick_y {
+                let n = m.items.len() as i32;
+                m.hover = (m.hover as i32 + my.signum() as i32).rem_euclid(n.max(1)) as usize;
+            }
+            self.stick_y = my;
+            self.scene.set_move(0.0, 0.0);
+            return;
+        }
         // a conversation's answers: the joystick pushed up or down steps
         // through them (the E button picks)
         if self.scene.convo_choosing() || self.scene.at_table() {
@@ -271,6 +721,30 @@ impl Game {
         if !matches!(b, BTN_CENTRE | BTN_BACK) {
             self.scene.woke();
         }
+        // a menu or card open: E picks (or closes the card), Back closes
+        if self.menu.is_some() || self.card.is_some() {
+            match b {
+                // 1-9: that choice
+                n if self.menu.is_some() && (BTN_NUM + 1..=BTN_NUM + 9).contains(&n) => self.choose((n - BTN_NUM - 1) as usize),
+                BTN_E | BTN_JUMP => {
+                    if let Some(i) = self.menu.as_ref().map(|m| m.hover) {
+                        self.choose(i);
+                    } else {
+                        self.card = None;
+                    }
+                }
+                BTN_BACK => {
+                    self.back();
+                }
+                BTN_JUMP_UP => {}
+                _ => {
+                    self.menu = None;
+                    self.card = None;
+                    self.button(b);
+                }
+            }
+            return;
+        }
         match b {
             // (at the table: E plays; in a conversation, the answer the
             // joystick picked out)
@@ -287,7 +761,7 @@ impl Game {
             BTN_HELD => self.scene.cycle_held(),
             BTN_BACK if self.scene.at_table() => self.scene.table_key(None),
             BTN_BACK => {
-                self.scene.close_panels();
+                self.back();
             }
             BTN_CENTRE => self.scene.recenter(),
             n if (BTN_NUM + 1..=BTN_NUM + 5).contains(&n) => self.scene.number((n - BTN_NUM) as usize),
@@ -301,6 +775,10 @@ impl Game {
         let c = self.cell(x, y);
         let w = self.world(c);
         let t = self.t;
+        // the menu or card takes its own touches
+        if self.menu_touch(action, c) {
+            return;
+        }
         match action {
             0 => {
                 self.moved = false;
@@ -346,6 +824,66 @@ impl Game {
         }
     }
 
+    /// A touch on the open menu or card (screen cell `c`): whether it took
+    /// it. Its title bar moves it, ✕ closes it, a choice is picked when the
+    /// finger lifts on it; a tap elsewhere closes it.
+    fn menu_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
+        let (cols, rows) = (self.cols as i32, self.rows as i32);
+        if let Some((dx, dy)) = self.lift {
+            if let Some(m) = &mut self.menu {
+                m.move_to(c.0 - dx, c.1 - dy, cols, rows);
+            } else if let Some(k) = &mut self.card {
+                k.move_to(c.0 - dx, c.1 - dy, cols, rows);
+            }
+            if action >= 2 {
+                self.lift = None;
+            }
+            return true;
+        }
+        if let Some(m) = &mut self.menu {
+            match action {
+                0 if m.on_close(c.0, c.1) => self.menu = None,
+                0 if m.on_title(c.0, c.1) => self.lift = Some((c.0 - m.x, c.1 - m.y)),
+                0 => match m.row_at(c.0, c.1) {
+                    Some(i) => {
+                        m.hover = i;
+                        m.down = Some(i);
+                    }
+                    None if m.contains(c.0, c.1) => {}
+                    None => {
+                        // a tap away from it: it closes (and the tap's spent)
+                        self.menu = None;
+                        self.press = None;
+                    }
+                },
+                1 => {
+                    if let (Some(i), true) = (m.row_at(c.0, c.1), m.down.is_some()) {
+                        m.hover = i;
+                    }
+                }
+                2 => {
+                    let pick = m.down.take().filter(|&d| m.row_at(c.0, c.1) == Some(d));
+                    if let Some(i) = pick {
+                        self.choose(i);
+                    }
+                }
+                _ => m.down = None,
+            }
+            return true;
+        }
+        if let Some(k) = &self.card {
+            if action == 0 {
+                if k.on_title(c.0, c.1) {
+                    self.lift = Some((c.0 - k.x, c.1 - k.y));
+                } else {
+                    self.card = None;
+                }
+            }
+            return true;
+        }
+        false
+    }
+
     /// Two fingers sliding along: look along the village (pixels).
     pub fn pan(&mut self, dx: f32) {
         self.scene.pan(-dx / self.raster.cw as f32);
@@ -353,25 +891,22 @@ impl Game {
 
     /// A long press at (x, y): what can be done there (its title, then the
     /// choices); `pick` does one.
+    /// (It opens in the village; nothing's handed back.)
     pub fn menu(&mut self, x: f32, y: f32) -> Option<(String, Vec<String>)> {
         let c = self.cell(x, y);
         let w = self.world(c);
         let (title, items) = self.scene.menu_at(w.0, w.1);
-        if items.is_empty() {
-            return None;
-        }
-        self.choices = items.iter().map(|(_, d)| *d).collect();
-        Some((title, items.into_iter().map(|(l, _)| l).collect()))
+        self.press = None;
+        self.open(c.0 - 2, c.1 + 1, title, Self::scene_items(items));
+        None
     }
 
-    /// Things to do here (the ✦ button; T on the desktop).
+    /// Things to do here (the ✦ button; T on the desktop), in the village.
     pub fn todo(&mut self) -> Option<(String, Vec<String>)> {
         let (title, items) = self.scene.todo_menu();
-        if items.is_empty() {
-            return None;
-        }
-        self.choices = items.iter().map(|(_, d)| *d).collect();
-        Some((title, items.into_iter().map(|(l, _)| l).collect()))
+        let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
+        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 6, title, Self::scene_items(items));
+        None
     }
 
     /// One of the choices: done, or (a "▸") a further list to choose from.
@@ -390,6 +925,24 @@ impl Game {
                 None
             }
             None => None,
+        }
+    }
+
+    /// The next `n` frames of sound (48 kHz stereo, interleaved), made now
+    /// (the web page's audio asking): where they are.
+    pub fn audio_pull(&mut self, n: usize) -> &[f32] {
+        match &mut self.pull {
+            Some(p) => p.render(n.min(16384), &mut self.pcm),
+            None => self.pcm.clear(),
+        }
+        &self.pcm
+    }
+
+    /// The sound's settings changed (the web page's volume, on or off).
+    pub fn set_sound(&mut self, cfg: &crate::config::SoundCfg) {
+        self.cfg.sound = cfg.clone();
+        if let Some(p) = &mut self.pull {
+            p.configure(cfg);
         }
     }
 
@@ -414,5 +967,11 @@ pub fn audio_take(out: &mut [i16]) -> usize {
 impl Drop for Game {
     fn drop(&mut self) {
         self.save();
+        // off the relay politely ("gone", for friends)
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(l) = self.link.take() {
+            self.scene.online.goodbye();
+            l.close(self.scene.online.take_out());
+        }
     }
 }

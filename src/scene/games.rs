@@ -74,6 +74,11 @@ pub struct Table {
     think_until: f32,
     /// Where the board was drawn (for clicks): x, y.
     origin: std::cell::Cell<(i32, i32)>,
+    /// Moved somewhere (its top-left), and where it's held while moving.
+    pub pos: Option<(i32, i32)>,
+    pub held: Option<(i32, i32)>,
+    /// Where it was last drawn: (x, y, w).
+    at: std::cell::Cell<(i32, i32, i32)>,
     /// The pixel-art picture of the game, and what it showed.
     pic: std::cell::RefCell<Option<(u64, std::sync::Arc<crate::frame::Picture>)>>,
 }
@@ -100,7 +105,7 @@ impl Table {
             Kind::Snowflakes => "match the colour or the number · ← → choose · Enter play · D draw".to_string(),
             Kind::TwentyOne => "nearer 21 than them, without going over".to_string(),
         };
-        Table { kind, them: them.to_string(), game, rng, status, result: None, scored: false, think_until: 0.0, origin: std::cell::Cell::new((0, 0)), pic: std::cell::RefCell::new(None) }
+        Table { kind, them: them.to_string(), game, rng, status, result: None, scored: false, think_until: 0.0, origin: std::cell::Cell::new((0, 0)), pos: None, held: None, at: std::cell::Cell::new((0, 0, 0)), pic: std::cell::RefCell::new(None) }
     }
 
     /// Their turn?
@@ -139,6 +144,18 @@ impl Table {
         }
         self.think_until = t + 0.9;
         self.check_over();
+    }
+
+    /// On its title bar (picked up there, and moved).
+    pub fn on_title(&self, x: i32, y: i32) -> bool {
+        let (x0, y0, w) = self.at.get();
+        y == y0 && x >= x0 && x < x0 + w
+    }
+
+    /// Where it's drawn (its top-left).
+    pub fn corner(&self) -> (i32, i32) {
+        let (x0, y0, _) = self.at.get();
+        (x0, y0)
     }
 
     /// A click on the board (screen cell): picks what's there.
@@ -205,7 +222,11 @@ impl Table {
     /// The table: a panel in the middle of the screen.
     pub fn draw(&self, f: &mut Frame, look: &str) {
         let (w, h) = (54, 24);
-        let (x0, y0) = ((f.w as i32 - w) / 2, ((f.h as i32 - h) / 2).max(0));
+        let (x0, y0) = match self.pos {
+            Some((x, y)) => (x.clamp(0, (f.w as i32 - w).max(0)), y.clamp(0, (f.h as i32 - h).max(0))),
+            None => ((f.w as i32 - w) / 2, ((f.h as i32 - h) / 2).max(0)),
+        };
+        self.at.set((x0, y0, w));
         let bg = Bg::Mix(pal::UI_PANEL, 0.95);
         let border = Rgb::hex(0xffd36b) * 0.8;
         for y in y0..y0 + h {
@@ -225,6 +246,7 @@ impl Table {
         let title = format!(" {} {} with {} ", self.kind.icon(), self.kind.name(), self.them);
         f.text(x0 + 2, y0, &title, pal::UI_TITLE, bg, 0.0);
         f.text(x0 + w - 13, y0, " Esc: leave ", pal::UI_DIM, bg, 0.0);
+        f.text(x0 + w - 16, y0, "⠿", pal::UI_DIM, bg, 0.0);
         let (bx, by) = (x0 + 2, y0 + 2);
         self.origin.set((bx, by));
         if crate::frame::pictures_ok() {

@@ -1,0 +1,5 @@
+{
+  "about": "The relays the village talks through when online: free public MQTT brokers, tried in turn. Everything sent through them is sealed end to end; they only pass it along.",
+  "ws": ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt", "wss://test.mosquitto.org:8081/mqtt"],
+  "tcp": [["broker.emqx.io", 1883], ["broker.hivemq.com", 1883], ["test.mosquitto.org", 1883]]
+}

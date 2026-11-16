@@ -49,6 +49,33 @@ final class Native {
     /** Things to do right here: {title, choice, ...}, or null. */
     static native String[] todo(long game);
 
+    /** The ☰ menu, drawn in the village. */
+    static native void more(long game);
+
+    /** The controls card, drawn in the village. */
+    static native void help(long game);
+
+    /** Back: whether it closed something (a menu, a card, the pockets…). */
+    static native boolean back(long game);
+
+    /** What's showing: 1 the pockets, 2 a menu or card. */
+    static native int state(long game);
+
+    /** Something for the app to do ("wallpaper", "settings", "text:<question>", "copy:<text>"), or null. */
+    static native String ask(long game);
+
+    /** The line typed for a "text:" ask ("" for never mind). */
+    static native void giveText(long game, String text);
+
+    /** A save's seed (its text), or 0 when it isn't one. */
+    static native long saveSeed(String text);
+
+    /** The villager in a save (its text) as JSON: name, pet, friends, look; or null. */
+    static native String youJson(String text);
+
+    /** Let go of the save file (another's been put in its place): nothing more is written to it. */
+    static native void forget(long game);
+
     /** Write the save file now (shared by the game and the wallpaper). */
     static native void save(long game);
 

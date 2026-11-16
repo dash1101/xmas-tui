@@ -104,7 +104,13 @@ public final class Village {
     public void setConfig(Config c) {
         boolean dockMoved = c.dock != cfg.dock || c.dockLift != cfg.dockLift || c.dockHeight != cfg.dockHeight || c.dockWidth != cfg.dockWidth;
         String oldPet = cfg.pet;
+        boolean recast = c.folkDiffer(cfg);
         cfg = c.copy();
+        if (recast && you != null) {
+            people.clear();
+            people.add(you);
+            castFolk();
+        }
         if (dockMoved) layoutDock();
         if (!oldPet.equals(cfg.pet)) pet = "none".equals(cfg.pet) ? null : new PetSim(cfg.pet, you.x - 6, you.y);
         if (you != null) you.name = cfg.you();
@@ -169,22 +175,62 @@ public final class Village {
         you.x = (ww - this.w) / 2f + this.w * 0.35f;
         you.y = base + 12;
         people.add(you);
+        castFolk();
+        if (!"none".equals(cfg.pet)) pet = new PetSim(cfg.pet, you.x - 6, you.y);
+    }
+
+    /** Colour names as the desktop's friends & family list has them. */
+    static int named(String name, String[] names, int[] cols, int fallback) {
+        for (int i = 0; i < names.length; i++) if (names[i].equalsIgnoreCase(name.trim())) return cols[i];
+        return fallback;
+    }
+
+    static final String[] COAT_NAMES = {"red", "green", "blue", "purple", "gold", "pink", "grey", "white"};
+    static final int[] COAT_COLS = {0xb3202a, 0x1f6e3a, 0x2a4c8a, 0x6a3a8a, 0xc8862a, 0xc8588a, 0x5a5e68, 0xd8d8e0};
+    static final String[] HAT_NAMES = {"red", "green", "blue", "gold", "pink", "white"};
+    static final int[] HAT_COLS = {0xd8283a, 0x2fae5c, 0x4a8dff, 0xffc23a, 0xff7ae0, 0xf0f0f4};
+
+    /**
+     * The folk about the village: friends & family first, under their own
+     * names and in their own colours, then neighbours (unless it's only
+     * friends), no more than the most allowed.
+     */
+    private void castFolk() {
         int n = Math.max(5, Math.min(8, ww / 36));
+        if (cfg.mostPeople > 0) n = Math.min(cfg.mostPeople, 12);
         List<String> names = new ArrayList<>();
         for (String s : NAMES) names.add(s);
-        for (int i = 0; i < n; i++) {
+        int made = 0;
+        for (Config.Friend f : cfg.friends) {
+            if (made >= n) break;
+            names.remove(f.name);
+            Person p = new Person(f.name, false, f.kid);
+            int coat = COATS[rnd.i(0, COATS.length)];
+            p.coat = Pix.hex(f.coat.isEmpty() ? coat : named(f.coat, COAT_NAMES, COAT_COLS, coat));
+            int hat = HATS[rnd.i(0, HATS.length)];
+            p.hat = "none".equals(f.hat) ? 0 : Pix.hex(f.hat.isEmpty() ? hat : named(f.hat, HAT_NAMES, HAT_COLS, hat));
+            p.hair = Pix.hex(HAIR[rnd.i(0, HAIR.length)]);
+            p.known = true;
+            place(p);
+            made++;
+        }
+        if (cfg.onlyFriends) return;
+        for (int i = made; i < n && !names.isEmpty(); i++) {
             String name = names.remove(rnd.i(0, names.size()));
             boolean kid = i % 3 == 2;
             Person p = new Person(name, false, kid);
             p.coat = Pix.hex(COATS[rnd.i(0, COATS.length)]);
             p.hat = rnd.chance(0.6f) || kid ? Pix.hex(HATS[rnd.i(0, HATS.length)]) : 0;
             p.hair = Pix.hex(HAIR[rnd.i(0, HAIR.length)]);
-            p.x = rnd.range(10, ww - 10);
-            p.y = rnd.range(base + 6, fieldBot);
-            p.lantern = !kid && rnd.chance(0.5f);
-            people.add(p);
+            place(p);
         }
-        if (!"none".equals(cfg.pet)) pet = new PetSim(cfg.pet, you.x - 6, you.y);
+    }
+
+    private void place(Person p) {
+        p.x = rnd.range(10, ww - 10);
+        p.y = rnd.range(base + 6, fieldBot);
+        p.lantern = !p.kid && rnd.chance(0.5f);
+        people.add(p);
     }
 
     // ------------------------------------------------------------------ simulation
@@ -724,7 +770,9 @@ public final class Village {
         float hr;
         if ("night".equals(mode)) hr = 22f;
         else if ("dusk".equals(mode)) hr = 17.2f;
-        else if ("day".equals(mode)) hr = 13f;
+        else if ("day".equals(mode) || "noon".equals(mode)) hr = 13f;
+        else if ("morning".equals(mode)) hr = 9.5f;
+        else if ("afternoon".equals(mode)) hr = 15.5f;
         else if ("dawn".equals(mode)) hr = 7.2f;
         else {
             Calendar c = Calendar.getInstance();
@@ -1168,6 +1216,9 @@ public final class Village {
         Person friend;
         Animal target;
         Chat chat;
+
+        /** Friends & family (knows the villager well). */
+        boolean known;
 
         Person(String name, boolean you, boolean kid) {
             this.name = name;

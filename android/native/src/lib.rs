@@ -25,6 +25,8 @@ pub mod rng;
 pub mod scene;
 #[path = "../../../src/save.rs"]
 pub mod save;
+#[path = "../../../src/net/mod.rs"]
+pub mod net;
 
 /// The widgets' looks (the scene's panels are drawn in them too).
 pub mod widgets;

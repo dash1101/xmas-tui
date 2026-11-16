@@ -145,7 +145,7 @@ impl Scene {
                 match self.auto.plan {
                     Some(Plan::Linger { until }) if t < until => {}
                     Some(Plan::Linger { .. }) => {
-                        self.leave();
+                        self.soon(super::play::Pending::Leave);
                         self.auto_done(t, 2.0, 5.0);
                     }
                     _ => self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(10.0, 18.0) }),

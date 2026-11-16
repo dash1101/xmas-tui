@@ -99,7 +99,12 @@ public class VillageWallpaper extends WallpaperService {
                 return;
             }
             String cfg = Prefs.toml(VillageWallpaper.this, true);
-            boolean newer = saveFile().lastModified() > savedAt + 500;
+            boolean newer = saveFile().lastModified() > savedAt + 500 || (!saveFile().exists() && savedAt > 0);
+            if (game != 0 && newer) {
+                // (the game's moved things on, or a save's been imported:
+                // this one goes without writing over it)
+                Native.forget(game);
+            }
             if (game != 0 && (fresh || newer || !cfg.equals(cfgUsed))) {
                 natStop();
                 Native.destroy(game);

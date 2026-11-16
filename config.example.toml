@@ -133,6 +133,7 @@ held = "q"
 centre = "c"
 rest = "z"            # lie down in the snow (then jump: a snow angel)
 todo = "t"            # things to do right here
+online = "o"          # friends & online
 
 [ui]
 look = "classic"      # the app's own panels, menus and conversations: "classic",

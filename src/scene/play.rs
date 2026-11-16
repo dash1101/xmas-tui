@@ -41,10 +41,101 @@ impl Carol {
     }
 }
 
+/// A change of place, made while the view's shut.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pending {
+    Enter(usize),
+    Igloo(usize),
+    Leave,
+    /// In at the cocoa cabin's door.
+    Cabin,
+    /// A trip out (true: skiing), or back from one.
+    Trip(bool),
+    TripEnd,
+}
+
+/// How long the view takes to close (and again to open).
+pub const IRIS: f32 = 0.35;
+
 const TAG_START: &[&str] = &["tag! bet I can catch you!", "let's play tag!", "ready or not — tag!"];
 const TAG_END: &[&str] = &["good game!", "phew, you win!", "that was fun!", "you're fast!"];
 
 impl Scene {
+    /// Go somewhere: the view closes round the villager, and opens on it.
+    pub(super) fn soon(&mut self, what: Pending) {
+        if self.pending.is_some() {
+            return;
+        }
+        let t = self.now();
+        let (x, y) = self.zoom_focus();
+        self.iris = Some((t, x, y));
+        self.pending = Some((t + IRIS, what));
+        self.goal = None;
+    }
+
+    /// The change, once the view's shut; the view open again after.
+    pub(super) fn update_iris(&mut self, t: f32) {
+        if let Some((at, what)) = self.pending {
+            if t >= at {
+                self.pending = None;
+                match what {
+                    Pending::Enter(i) => self.enter(i),
+                    Pending::Igloo(i) => self.enter_igloo(i, t),
+                    Pending::Leave => self.leave(),
+                    Pending::Cabin => self.enter_cabin(t),
+                    Pending::Trip(ski) => self.start_trip(ski),
+                    Pending::TripEnd => self.finish_trip(),
+                }
+                // (opening round where the villager is now)
+                let (x, y) = self.zoom_focus();
+                if let Some(ir) = &mut self.iris {
+                    (ir.1, ir.2) = (x, y);
+                }
+            }
+        }
+        if self.iris.is_some_and(|ir| t - ir.0 > IRIS * 2.0) {
+            self.iris = None;
+        }
+    }
+
+    /// The view closing (or opening): dark beyond a circle round the
+    /// villager, a gold ring at its edge.
+    pub fn draw_iris(&self, f: &mut crate::frame::Frame) {
+        let Some((at, cx, cy)) = self.iris else { return };
+        let t = self.now();
+        let u = ((t - at) / IRIS).clamp(0.0, 2.0);
+        let k = if u < 1.0 { 1.0 - u } else { u - 1.0 };
+        let k = k * k * (3.0 - 2.0 * k);
+        let (w, h) = (f.w as f32, f.h as f32);
+        let r = k * (w * w + 4.0 * h * h).sqrt() * 0.6;
+        let (ox, oy) = (f.ox, f.oy);
+        (f.ox, f.oy) = (0, 0);
+        let (pcx, pcy) = (cx, cy * 2.0);
+        for py in 0..f.ph as i32 {
+            for px in 0..f.pw as i32 {
+                let d = ((px as f32 + 0.5 - pcx).powi(2) + (py as f32 + 0.5 - pcy).powi(2)).sqrt();
+                if d > r {
+                    f.px_set(px, py, Rgb::hex(0x03050f));
+                } else if d > r - 1.5 && r > 2.0 {
+                    f.px_set(px, py, Rgb::hex(0xffd36b) * 0.7);
+                }
+            }
+        }
+        for cy2 in 0..f.h as i32 {
+            for cx2 in 0..f.w as i32 {
+                let d = ((cx2 as f32 + 0.5 - pcx).powi(2) + ((cy2 as f32 + 0.5) * 2.0 - pcy).powi(2)).sqrt();
+                if d > r {
+                    f.clear_glyph(cx2, cy2);
+                }
+            }
+        }
+        f.pictures.retain(|p| {
+            let (x, y) = ((p.x + p.cols / 2) as f32, ((p.y + p.rows / 2) as f32) * 2.0);
+            ((x - pcx).powi(2) + (y - pcy).powi(2)).sqrt() < r
+        });
+        (f.ox, f.oy) = (ox, oy);
+    }
+
     /// Tag with kid `id`: they run off, and the villager's "it".
     pub(super) fn start_tag(&mut self, id: u64, secs: f32) {
         let t = self.now();
@@ -207,6 +298,12 @@ impl Scene {
 
     /// The further choices behind a "▸" (title, choices).
     pub fn more_menu(&self, k: u8) -> (String, Vec<(String, Do)>) {
+        if k == super::online::MORE_ONLINE {
+            return self.online_menu();
+        }
+        if k >= super::online::MORE_FRIEND {
+            return self.friend_menu((k - super::online::MORE_FRIEND) as usize);
+        }
         match k {
             0 => (
                 "a light show".into(),
@@ -269,6 +366,36 @@ impl Scene {
     /// At the table (keys and clicks go to the game).
     pub fn at_table(&self) -> bool {
         self.table.is_some()
+    }
+
+    /// The table picked up by its title bar (true): it moves with the
+    /// pointer until let go.
+    pub fn table_grab(&mut self, x: i32, y: i32) -> bool {
+        let Some(tb) = &mut self.table else { return false };
+        if !tb.on_title(x, y) {
+            return false;
+        }
+        let (x0, y0) = tb.corner();
+        tb.held = Some((x - x0, y - y0));
+        true
+    }
+
+    pub fn table_dragging(&self) -> bool {
+        self.table.as_ref().is_some_and(|t| t.held.is_some())
+    }
+
+    pub fn table_drag_to(&mut self, x: i32, y: i32) {
+        if let Some(tb) = &mut self.table {
+            if let Some((dx, dy)) = tb.held {
+                tb.pos = Some((x - dx, y - dy));
+            }
+        }
+    }
+
+    pub fn table_drop(&mut self) {
+        if let Some(tb) = &mut self.table {
+            tb.held = None;
+        }
     }
 
     /// The game at the table is on a board (chess, checkers).
@@ -342,6 +469,16 @@ impl Scene {
         for (sfx, v) in tr.take_sounds() {
             self.director.sound(sfx, self.cam + self.w as f32 / 2.0, v);
         }
+        if tr.done.is_none() {
+            return;
+        }
+        self.soon(Pending::TripEnd);
+    }
+
+    /// Back from the trip (the view shut): where it started.
+    pub(super) fn finish_trip(&mut self) {
+        let t = self.now();
+        let Some(tr) = &self.trip else { return };
         let Some(back) = tr.done else { return };
         let (runs, best, km) = (tr.runs, tr.best, tr.km);
         self.trip = None;
@@ -363,6 +500,20 @@ impl Scene {
         }
         let line = if back == super::trips::Back::Station { "home again — what a day!" } else { "nice drive. home sweet home" };
         self.you_say(line, t + 0.3);
+    }
+
+    /// The shuttle stop on the snowfield below the station: a post and a
+    /// sign (the shuttle sleigh runs from here up to the trains).
+    pub(super) fn draw_stop(&self, f: &mut crate::frame::Frame, glow: f32) {
+        let Some((x, y)) = self.trip_spot(true) else { return };
+        let (x, y) = (x.round() as i32 + 3, y as i32 - 1);
+        for row in y - 5..=y {
+            f.put_g(x, row, crate::frame::Glyph::new('┃', Rgb::hex(0x4a3a2a)).lit(0.5));
+        }
+        let bg = crate::frame::Bg::Solid(Rgb::hex(0x2a4c8a));
+        f.text(x - 4, y - 6, " ⇄ SHUTTLE ", Rgb::hex(0xffd36b), bg, 0.3);
+        f.text(x - 4, y - 5, " to trains ", Rgb::hex(0xdfe7f4), bg, 0.3);
+        f.light_cell(x, y - 6, Rgb::hex(0xffb050) * (0.8 * glow));
     }
 
     /// The villager's car, parked by their home.
@@ -469,7 +620,7 @@ impl Scene {
             v.push(("◡ cocoa at the cabin".into(), Do::Shop));
         }
         if self.ctx.station.is_some() {
-            v.push(("⇄ the train up to the ski slopes".into(), Do::Trip(true)));
+            v.push(("⇄ the shuttle to the station, and the train up to the slopes".into(), Do::Trip(true)));
         }
         if self.home.is_some() {
             v.push(("⚐ a drive in the car".into(), Do::Trip(false)));
@@ -480,6 +631,7 @@ impl Scene {
         if self.daylight.sun < 0.25 {
             v.push(("✦ wish on a star".into(), Do::Wish));
         }
+        v.push(("✉ friends & online ▸".into(), Do::More(super::online::MORE_ONLINE)));
         ("things to do".into(), v)
     }
 }

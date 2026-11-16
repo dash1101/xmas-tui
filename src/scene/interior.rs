@@ -29,6 +29,18 @@ use crate::color::Rgb;
 use crate::frame::{Frame, Glyph, Layer};
 use crate::rng::{h01, hash, hash2, hash3, noise1, Rng};
 
+/// The top `rows` of a picture (cached: the same crop is the same picture).
+fn top_of(pic: &std::sync::Arc<crate::frame::Picture>, rows: usize) -> std::sync::Arc<crate::frame::Picture> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CROPS: OnceLock<Mutex<HashMap<(u64, usize), Arc<crate::frame::Picture>>>> = OnceLock::new();
+    let mut m = CROPS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 64 {
+        m.clear();
+    }
+    m.entry((pic.id, rows)).or_insert_with(|| Arc::new(crate::frame::Picture::new(pic.w, rows, pic.rgba[..pic.w * rows * 4].to_vec()))).clone()
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Thing {
     Door,
@@ -59,6 +71,8 @@ pub enum Thing {
     /// Stairs (true: going up) and doorways (true: to the right).
     Stairs(bool),
     Doorway(bool),
+    /// The cocoa cabin's counter (and the gifts behind it): the shop.
+    Counter,
 }
 
 /// What poking at something leads to (for the scene to act on).
@@ -79,6 +93,8 @@ pub enum Outcome {
     Cozy,
     /// A little job done for the host, or something nice: cheer.
     Cheer(u32),
+    /// At the cocoa cabin's counter: the shop's open.
+    Shop,
 }
 
 /// A view out of a window: how far along the village it looks (screens,
@@ -123,6 +139,8 @@ pub enum RoomKind {
     Church,
     /// Inside a snow igloo: a dome of snow blocks, furs, a little lamp.
     Igloo,
+    /// The cocoa cabin: log walls, a counter, gifts, tables by the fire.
+    Cabin,
 }
 
 impl RoomKind {
@@ -134,6 +152,7 @@ impl RoomKind {
             RoomKind::Attic => "the attic",
             RoomKind::Igloo => "the igloo",
             RoomKind::Church => "the church",
+            RoomKind::Cabin => "the cocoa cabin",
         }
     }
 }
@@ -388,6 +407,10 @@ pub struct Interior {
     star_off: bool,
     stocking_found: bool,
     ornaments: u32,
+    /// The cocoa cabin's shopkeeper (a resident), who stays at the counter.
+    keeper: Option<usize>,
+    /// The counter: (left, right, top) pixels.
+    counter: Option<(i32, i32, i32)>,
 }
 
 impl Interior {
@@ -521,9 +544,78 @@ impl Interior {
             star_off: false,
             stocking_found: false,
             ornaments: 0,
+            keeper: None,
+            counter: None,
         };
         room.build();
         room
+    }
+
+    /// Inside the cocoa cabin (`keeper`: the shopkeeper's name; `cat`: the
+    /// cabin cat, by the fire).
+    pub fn cabin(w: usize, h: usize, seed: u32, outside: (f32, f32), t: f32, keeper: &'static str) -> Self {
+        let mut inn = Interior::new(usize::MAX - 1, false, false, Rgb::hex(0x7a4a28), w, h, seed, outside, t);
+        inn.rooms = vec![RoomKind::Cabin];
+        let floor = inn.floor;
+        let kx = w as f32 * 0.74;
+        let mut people = vec![Resident {
+            name: keeper,
+            kid: false,
+            temper: temper_of(0xcab1, false),
+            coat: Rgb::hex(0x2a6a3a),
+            hair: Rgb::hex(0xd8d0c0),
+            x: kx,
+            feet: floor / 2 + 3,
+            target: kx,
+            then: Doing::Stand,
+            doing: Doing::Stand,
+            until: t + 6.0,
+            dir: -1.0,
+        }];
+        // a customer or two, about the tables
+        let mut rng = Rng::new(seed as u64 ^ 0xcab1);
+        let coats = [0xb3202a, 0x2a4c8a, 0x6a3a8a, 0xc8862a, 0x3a6a6a];
+        for k in 0..1 + rng.chance(0.5) as usize {
+            let kid = rng.chance(0.3);
+            people.push(Resident {
+                name: super::dialogue::name(&mut rng, kid),
+                kid,
+                temper: temper_of(hash(seed ^ (k as u32 + 9) * 7919) as u64, kid),
+                coat: Rgb::hex(*rng.pick(&coats)),
+                hair: Rgb::hex(*rng.pick(&[0x3a2a1a, 0x8a5a2a, 0x1a1a1a, 0xa8462a])),
+                x: w as f32 * (0.36 + 0.1 * k as f32),
+                feet: floor / 2 + 6 + k as i32,
+                target: 0.0,
+                then: Doing::Stand,
+                doing: Doing::Stand,
+                until: t + 2.0 + k as f32 * 3.0,
+                dir: 1.0,
+            });
+        }
+        inn.residents = people;
+        inn.keeper = Some(0);
+        // the cabin cat, asleep by the fire
+        if let Some(pet) = &mut inn.pet {
+            pet.x = w as f32 * 0.22;
+            pet.name = "Cinnamon".to_string();
+        }
+        inn.build();
+        inn
+    }
+
+    /// The cocoa cabin (not a house).
+    pub fn is_cabin(&self) -> bool {
+        self.rooms.first() == Some(&RoomKind::Cabin)
+    }
+
+    /// The shopkeeper's head (column, row), for what they say.
+    pub fn keeper_head(&self) -> Option<(i32, i32)> {
+        self.keeper.and_then(|k| self.head_of(k))
+    }
+
+    /// Over the counter (column, row), for the shop's menu.
+    pub fn counter_at(&self) -> Option<(i32, i32)> {
+        self.counter.map(|(x0, x1, top)| ((x0 + x1) / 2, top / 2))
     }
 
     /// Inside the igloo at world column `outside.0`: just the villager (and
@@ -557,6 +649,32 @@ impl Interior {
             .collect();
         inn.build();
         inn
+    }
+
+    /// Whoever walked in with the villager (name, a kid, coat): in by the
+    /// door, and about the room from then on.
+    pub fn add_guests(&mut self, guests: &[(&'static str, bool, Rgb)], t: f32) {
+        let floor = self.floor;
+        for (k, &(name, kid, coat)) in guests.iter().enumerate().take(4) {
+            let id = hash(self.seed ^ (k as u32 + 31) * 7919) as u64;
+            let x = 24.0 + k as f32 * 9.0;
+            self.residents.push(Resident {
+                name,
+                kid,
+                temper: temper_of(id, kid),
+                coat,
+                hair: Rgb::hex([0x3a2a1a, 0x8a5a2a, 0xa8462a, 0xe0c080][k % 4]),
+                x,
+                feet: floor / 2 + 6 + (k as i32 % 2) * 2,
+                target: x,
+                then: Doing::Stand,
+                doing: Doing::Stand,
+                until: t + 2.0 + k as f32,
+                dir: 1.0,
+            });
+            let i = self.residents.len() - 1;
+            self.things.push((Thing::Person(i), x as i32 + 1, floor / 2 - 5));
+        }
     }
 
     /// The igloo (not a house).
@@ -626,8 +744,9 @@ impl Interior {
             RoomKind::Bedroom => self.build_bedroom(),
             RoomKind::Attic => self.build_attic(),
             RoomKind::Igloo => self.build_igloo(),
+            RoomKind::Cabin => self.build_cabin(),
         }
-        if !matches!(kind, RoomKind::Church | RoomKind::Igloo) {
+        if !matches!(kind, RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin) {
             self.decorate(kind);
         }
         for (i, r) in self.residents.iter().enumerate() {
@@ -840,6 +959,11 @@ impl Interior {
     fn build_shell(&mut self, kind: RoomKind) {
         if kind == RoomKind::Igloo {
             return self.igloo_shell();
+        }
+        if kind == RoomKind::Cabin {
+            self.cabin_shell();
+            self.front_door();
+            return;
         }
         let (w, ph, floor) = (self.w, self.h * 2, self.floor);
         let seed = self.seed;
@@ -1150,6 +1274,310 @@ impl Interior {
         let (sw, sh) = (w as f32, (self.h * 2) as f32);
         self.windows.push(((wx - r * 2, wy - r, r * 4, r * 2), Look { dx: 0.0, lift: 0.0, hole: Hole::Round(wx as f32 / sw, wy as f32 / sh, (r as f32 / sh * 3.5).min(0.4)), telescope: false }));
         self.things.push((Thing::Window(k), wx, (wy - r) / 2 - 1));
+    }
+
+    /// The cocoa cabin's walls: courses of round logs, notched at the
+    /// corners, a heavy beam along the top, wide old floorboards.
+    fn cabin_shell(&mut self) {
+        let (w, ph, floor) = (self.w, self.h * 2, self.floor);
+        let seed = self.seed as i32;
+        let l = &mut self.room;
+        for y in 0..floor {
+            for x in 0..w {
+                let course = y / 5;
+                let v = (y % 5) as f32 / 4.0;
+                // round logs: lit along the top, shadowed underneath
+                let round = 0.72 + 0.32 * (1.0 - (v * 2.0 - 0.8).powi(2)).max(0.0);
+                let grain = 0.92 + 0.12 * h01(hash2(x / 7 + course * 13, seed));
+                let tone = [0x7a4a28, 0x6e4224, 0x84522c][(hash2(course, seed) % 3) as usize];
+                let mut c = Rgb::hex(tone) * (round * grain);
+                if y % 5 == 4 {
+                    // chinking between the logs
+                    c = Rgb::hex(0xc8b89a) * 0.6;
+                }
+                // a knot here and there
+                if hash2(x / 3, course * 7 + seed) % 97 == 0 && y % 5 == 2 {
+                    c = c * 0.6;
+                }
+                l.set(x, y, c);
+            }
+        }
+        // the beam along the top, and its posts
+        for y in 0..5 {
+            for x in 0..w {
+                l.set(x, y, Rgb::hex(0x3a2214) * (0.8 + 0.08 * y as f32));
+            }
+        }
+        for px in [w / 3, 2 * w / 3] {
+            for y in 0..floor {
+                for x in px - 2..px + 2 {
+                    l.set(x, y, Rgb::hex(0x4a2a16) * (0.85 + 0.1 * (x - px + 2) as f32 / 3.0));
+                }
+            }
+        }
+        // floorboards
+        for y in floor..ph {
+            let depth = (y - floor) as f32 / (ph - floor).max(1) as f32;
+            for x in 0..w {
+                let board = (x + (y - floor) * 2) / 14;
+                let seam = (x + (y - floor) * 2) % 14 == 0;
+                let c = Rgb::hex(0x8a5a32) * (0.85 + 0.15 * h01(hash2(board, seed)));
+                l.set(x, y, if seam { c * 0.6 } else { c } * (0.7 + 0.35 * depth));
+            }
+        }
+        for x in 0..w {
+            l.set(x, floor - 1, Rgb::hex(0x2a1a10));
+        }
+    }
+
+    /// The cabin: the fire and a sleepy cat by the door, tables and chairs
+    /// under the window, the long counter with the shopkeeper behind it,
+    /// shelves of gifts, the stove with the cocoa pot, lanterns, lights.
+    fn build_cabin(&mut self) {
+        let (w, floor) = (self.w, self.floor);
+        let fx = |f: f32| (w as f32 * f) as i32;
+        let wtop = (floor as f32 * 0.22) as i32;
+        let wh = (floor as f32 * 0.38) as i32;
+        self.fireplace(fx(0.24));
+        self.rug(fx(0.24), 22.0);
+        // the window over the tables, looking out at the village
+        self.window_at(fx(0.46), wtop, 20, wh, false, Self::street_look(-0.1));
+        self.candles.push((fx(0.46) + 7, wtop + wh));
+        // two little round tables and their chairs
+        for (k, cx) in [fx(0.40), fx(0.53)].into_iter().enumerate() {
+            let (mx, my) = self.table(cx - 5, 10);
+            if k == 0 {
+                self.mug_at(mx, my);
+            } else {
+                let l = &mut self.room;
+                // a plate of cookies
+                for x in mx - 2..mx + 3 {
+                    l.set(x, my, Rgb::hex(0xe8e0d0));
+                }
+                l.set(mx - 1, my - 1, Rgb::hex(0xc8803a));
+                l.set(mx + 1, my - 1, Rgb::hex(0xa86a30));
+            }
+            for (j, sx) in [cx - 9, cx + 9].into_iter().enumerate() {
+                let l = &mut self.room;
+                for y in floor - 14..floor + 1 {
+                    for x in sx - 2..sx + 3 {
+                        let back = y < floor - 6 && (if j == 0 { x == sx - 2 } else { x == sx + 2 });
+                        let seat = y == floor - 6 || y == floor - 5;
+                        let leg = y > floor - 5 && (x == sx - 2 || x == sx + 2);
+                        if back || seat || leg {
+                            l.set(x, y, Rgb::hex(0x5a3420) * (0.9 + 0.1 * j as f32));
+                        }
+                    }
+                }
+                let n = self.seats.len();
+                self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
+                self.things.push((Thing::Seat(n), sx, (floor - 14) / 2 - 1));
+                self.spots.push((sx as f32, Doing::Sit(n)));
+            }
+        }
+        self.spots.push((fx(0.30) as f32, Doing::Warm));
+        // shelves of gifts on the back wall, behind the counter
+        let (gx0, gx1) = (fx(0.64), fx(0.95));
+        {
+            let l = &mut self.room;
+            let gifts = [0xc8202a, 0x2a8a4a, 0x2a5aa8, 0xc8a040, 0x8a3a8a, 0xe8e0d0];
+            for (k, sy) in [floor - 40, floor - 30].into_iter().enumerate() {
+                for x in gx0..gx1 {
+                    l.set(x, sy, Rgb::hex(0x4a2a16));
+                    l.set(x, sy + 1, Rgb::hex(0x2a1a10));
+                }
+                // the things on it: wrapped boxes, jars of candy canes,
+                // teddies, a little lantern, scarves folded up
+                let mut x = gx0 + 2;
+                let mut i = k * 3;
+                while x < gx1 - 6 {
+                    let what = (hash2(i as i32, 77) % 5) as u8;
+                    let c = Rgb::hex(gifts[(i * 7 + k) % gifts.len()]);
+                    let wdt = match what {
+                        0 => {
+                            // a wrapped present, ribbon and bow
+                            let (bw, bh) = (5, 4 + (i % 2) as i32);
+                            for yy in sy - bh..sy {
+                                for xx in x..x + bw {
+                                    l.set(xx, yy, if xx == x + bw / 2 || yy == sy - bh / 2 - 1 { Rgb::hex(0xffd36b) } else { c });
+                                }
+                            }
+                            l.set(x + bw / 2 - 1, sy - bh - 1, Rgb::hex(0xffd36b));
+                            l.set(x + bw / 2 + 1, sy - bh - 1, Rgb::hex(0xffd36b));
+                            bw
+                        }
+                        1 => {
+                            // a jar of candy canes
+                            for yy in sy - 5..sy {
+                                for xx in x..x + 4 {
+                                    l.set(xx, yy, Rgb::hex(0xbfe0ff) * 0.7);
+                                }
+                            }
+                            for xx in [x, x + 2] {
+                                l.set(xx + 1, sy - 6, Rgb::hex(0xf4f0ea));
+                                l.set(xx + 1, sy - 7, Rgb::hex(0xd8202a));
+                                l.set(xx + 2, sy - 7, Rgb::hex(0xf4f0ea));
+                            }
+                            4
+                        }
+                        2 => {
+                            // a teddy
+                            let tb = Rgb::hex(0x9a6a3a);
+                            for (dx, dy) in [(1, -6), (2, -6), (0, -7), (3, -7), (1, -5), (2, -5), (0, -4), (1, -4), (2, -4), (3, -4), (0, -3), (1, -3), (2, -3), (3, -3), (0, -1), (3, -1), (1, -2), (2, -2)] {
+                                l.set(x + dx, sy + dy, tb);
+                            }
+                            l.set(x + 1, sy - 5, Rgb::hex(0x1a1a1a));
+                            l.set(x + 1, sy - 4, Rgb::hex(0xd8202a));
+                            l.set(x + 2, sy - 4, Rgb::hex(0xd8202a));
+                            4
+                        }
+                        3 => {
+                            // a lantern
+                            for yy in sy - 5..sy {
+                                l.set(x, yy, Rgb::hex(0x2a2a2a));
+                                l.set(x + 2, yy, Rgb::hex(0x2a2a2a));
+                                l.set(x + 1, yy, Rgb::hex(0xffd27a));
+                            }
+                            l.set(x + 1, sy - 6, Rgb::hex(0x2a2a2a));
+                            3
+                        }
+                        _ => {
+                            // folded scarves, striped
+                            for yy in sy - 4..sy {
+                                for xx in x..x + 6 {
+                                    l.set(xx, yy, if (yy - sy) % 2 == 0 { c } else { Rgb::hex(0xf4f0ea) * 0.9 });
+                                }
+                            }
+                            6
+                        }
+                    };
+                    x += wdt + 2;
+                    i += 1;
+                }
+            }
+            // a chalk menu board above, between the shelves and the beam
+            let (bx0, bx1, by0, by1) = (gx0 + 4, gx0 + 34, floor - 60, floor - 46);
+            if by0 > 6 {
+                for y in by0..by1 {
+                    for x in bx0..bx1 {
+                        let edge = y == by0 || y == by1 - 1 || x == bx0 || x == bx1 - 1;
+                        l.set(x, y, if edge { Rgb::hex(0x6a4428) } else { Rgb::hex(0x1e2a26) });
+                    }
+                }
+                for (row, len) in [(by0 + 3, 18), (by0 + 6, 22), (by0 + 9, 14)] {
+                    for x in bx0 + 3..bx0 + 3 + len {
+                        if hash2(x, row) % 4 != 0 {
+                            l.set(x, row, Rgb::hex(0xe8e8e0) * 0.75);
+                        }
+                    }
+                    l.set(bx1 - 5, row, Rgb::hex(0xffd36b));
+                }
+            }
+        }
+        self.things.push((Thing::Counter, fx(0.86), (floor - 40) / 2 - 2));
+        // the stove at the end, the cocoa pot on it, steaming
+        let sx = fx(0.96);
+        {
+            let l = &mut self.room;
+            for y in floor - 16..floor + 2 {
+                for x in sx - 5..sx + 5 {
+                    let bulge = if y > floor - 12 && y < floor - 2 { 0 } else { 1 };
+                    if (x - sx).abs() < 5 - bulge {
+                        l.set(x, y, Rgb::hex(0x22201e) * (0.9 + 0.2 * h01(hash2(x, y))));
+                    }
+                }
+            }
+            for x in sx - 2..sx + 2 {
+                l.set(x, floor - 8, Rgb::hex(0xff8a30));
+            }
+            for y in 0..floor - 16 {
+                l.set(sx - 1, y, Rgb::hex(0x2a2a2a));
+                l.set(sx, y, Rgb::hex(0x3a3a3a));
+            }
+            for y in floor - 21..floor - 16 {
+                for x in sx - 3..sx + 3 {
+                    l.set(x, y, Rgb::hex(0xb8743a) * (0.85 + 0.1 * (x - sx + 3) as f32 / 3.0));
+                }
+            }
+        }
+        self.lamps.push((sx, floor - 10));
+        // the counter, along the front of the shelves (the keeper behind)
+        let (cx0, cx1, ctop) = (fx(0.64), fx(0.90), floor + 1);
+        self.counter = Some((cx0, cx1, ctop));
+        // the cocoa pot's steam, and a mug on the counter (cocoa's on the house)
+        self.mug = Some((sx, floor - 22));
+        self.things.push((Thing::Cocoa, cx0 + 6, (ctop - 4) / 2 - 2));
+        // lanterns hanging from the beam, lights strung between them
+        for lx in [fx(0.34), fx(0.58), fx(0.80)] {
+            let l = &mut self.room;
+            for y in 5..12 {
+                l.set(lx, y, Rgb::hex(0x2a2a2a));
+            }
+            for y in 12..17 {
+                l.set(lx - 1, y, Rgb::hex(0x2a2a2a));
+                l.set(lx + 1, y, Rgb::hex(0x2a2a2a));
+                l.set(lx, y, Rgb::hex(0xffd27a));
+            }
+            self.lamps.push((lx, 14));
+        }
+        let colours = [0xff4a4a, 0xffd36b, 0x4ad06a, 0x4aa0ff, 0xff8ad8];
+        for (k, x) in (6..w - 4).step_by(7).enumerate() {
+            let sag = ((x as f32 / w as f32 * std::f32::consts::PI * 6.0).sin().abs() * 3.0) as i32;
+            self.bulbs.push((x, 6 + sag, Rgb::hex(colours[k % 5]), k as f32 * 1.3));
+        }
+    }
+
+    /// The counter's front (over the keeper's legs), and the keeper behind.
+    fn draw_keeper(&self, f: &mut Frame, t: f32) {
+        let (Some(k), Some((x0, x1, top))) = (self.keeper, self.counter) else { return };
+        let Some(r) = self.residents.get(k) else { return };
+        let b = Big { x: r.x + 1.0, feet: r.feet, dir: r.dir, step: false, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit: None, kid: false, arms_up: false, outdoor: false };
+        if crate::frame::pictures_ok() {
+            // just the top of them shows over the counter
+            use super::sprites::{self, Look, Pose};
+            let look = Look { kid: false, coat: b.coat, hat: None, hair: b.hair, scarf: None, skin: Rgb::hex(0xe8c39e), mittens: b.coat * 0.8, holding: None, lantern: false };
+            let pic = sprites::person(&look, Pose::Stand, b.dir, 1.0);
+            let rows = sprites::rows_of(&pic, 2.0);
+            let feet = r.feet as f32 + 1.0;
+            let cut = top as f32 / 2.0;
+            let frac = ((cut - (feet - rows)) / rows).clamp(0.2, 1.0);
+            let keep = ((pic.h as f32 * frac).round() as usize).clamp(1, pic.h);
+            f.sprite(b.x, cut, rows * keep as f32 / pic.h as f32, top_of(&pic, keep));
+        } else {
+            b.draw(f, t);
+        }
+        // the counter: a polished top, panelled front, a till and a bell
+        for y in top..top + 14 {
+            for x in x0..x1 {
+                let c = if y < top + 2 {
+                    Rgb::hex(0xa8743a) * (1.0 - 0.15 * (y - top) as f32)
+                } else {
+                    let u = (x - x0) % 16;
+                    let panel = (3..13).contains(&u) && (5..11).contains(&(y - top));
+                    Rgb::hex(0x6a3e22) * if panel { 1.1 } else { 0.9 + 0.08 * h01(hash2(x, 5)) }
+                };
+                f.px_set(x, y, c);
+            }
+        }
+        let tx = x1 - 10;
+        for y in top - 4..top {
+            for x in tx..tx + 6 {
+                f.px_set(x, y, Rgb::hex(0x8a8a90) * if y == top - 4 { 1.2 } else { 1.0 });
+            }
+        }
+        f.px_set(x0 + 14, top - 1, Rgb::hex(0xd8b040));
+        f.px_set(x0 + 15, top - 2, Rgb::hex(0xffd36b));
+        f.px_set(x0 + 16, top - 1, Rgb::hex(0xd8b040));
+        // a mug of cocoa waiting on the counter
+        let mx = x0 + 6;
+        for y in top - 3..top {
+            for x in mx - 1..mx + 2 {
+                f.px_set(x, y, Rgb::hex(0xc8202a));
+            }
+        }
+        f.px_set(mx + 2, top - 2, Rgb::hex(0xc8202a));
+        let age = (t * 0.7).fract();
+        f.px_disc(mx as f32 + (age * 6.0).sin(), (top - 4) as f32 - age * 6.0, 0.6 + age, Rgb::hex(0xe8eaf0), (1.0 - age) * 0.4);
     }
 
     fn front_door(&mut self) {
@@ -2159,7 +2587,7 @@ impl Interior {
         self.director.track(&who);
         self.director.update(dt, t, &self.ctx);
         // walking back out through the front door
-        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church | RoomKind::Igloo) && mx < 0.0 && p.x <= 1.5
+        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin) && mx < 0.0 && p.x <= 1.5
     }
 
     /// Into another room of the home (`from_left`: walked in from its left).
@@ -2296,6 +2724,13 @@ impl Interior {
                 continue;
             }
             if t < r.until {
+                continue;
+            }
+            // the shopkeeper stays behind the counter, keeping an eye out
+            if self.keeper == Some(i) {
+                r.doing = Doing::Stand;
+                r.dir = if (px - r.x).abs() < 40.0 { (px - r.x).signum() } else { -r.dir };
+                r.until = t + 3.0 + h01(hash2(t as i32, 3)) * 4.0;
                 continue;
             }
             // done here: get up, pick somewhere new
@@ -2661,6 +3096,16 @@ impl Interior {
                 say(d, &mut self.rng, BOXES);
                 d.sound(Sfx::Rustle, px as f32, 0.5);
             }
+            Thing::Counter => {
+                if let Some(k) = self.keeper {
+                    let line = *self.rng.pick(&["welcome in! cocoa's hot", "what'll it be, dear?", "warm yourself up — what can I get you?", "fresh marshmallows today!"]);
+                    if let Some((hx, hy)) = self.head_of(k) {
+                        self.director.say(hx, hy, line, t, 2.6, 40);
+                    }
+                    self.director.sound(Sfx::Greet, px as f32, 0.6);
+                }
+                return Outcome::Shop;
+            }
         }
         Outcome::None
     }
@@ -2869,7 +3314,9 @@ impl Interior {
         let mut people: Vec<(i32, Big)> = self
             .residents
             .iter()
-            .map(|r| {
+            .enumerate()
+            .filter(|(i, _)| self.keeper != Some(*i))
+            .map(|(_, r)| {
                 let sit = match r.doing {
                     Doing::Sit(n) => self.seats.get(n).map(|s| s.top),
                     _ => None,
@@ -2884,6 +3331,7 @@ impl Interior {
             people.push((p.y.round() as i32, Big { x: p.centre(), feet: p.y.round() as i32, dir: p.dir, step: walking, hat: Some(Rgb::hex(0x2fae5c)), hair: Rgb::hex(0x3a2a1a), coat: Rgb::hex(0xe0a030), scarf: Some(Rgb::hex(0xd8283a)), sit, kid: false, arms_up: false, outdoor: false }));
         }
         people.sort_by_key(|(feet, _)| *feet);
+        self.draw_keeper(f, t);
         for (_, b) in &people {
             if crate::frame::pictures_ok() {
                 // the same detailed people as out in the village (drawn at
@@ -2969,6 +3417,12 @@ impl Interior {
                 }
             }
         };
+        // the people out there are seen through the window, never over the
+        // wall round it
+        f.pictures.retain(|p| {
+            let cx = p.x + p.cols / 2;
+            inside(cx, p.y) && inside(cx, p.y + p.rows - 1)
+        });
         let edge = |x: i32, y: i32| -> bool { inside(x, y) && (!inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1)) };
         for y in 0..h {
             for x in 0..w {

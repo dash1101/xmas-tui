@@ -22,6 +22,66 @@ pub struct Save {
     pub player: Option<[f32; 2]>,
     /// Pockets, stats, the scorecard and the Christmas list.
     pub pockets: crate::scene::shop::Pockets,
+    /// The villager themself (their name, pet, friends & family, keys).
+    pub you: Option<You>,
+    /// Online: the friend code, friends (see `crate::net`).
+    pub online: Option<crate::net::Book>,
+}
+
+/// The villager themself: their name, their pet, friends & family, which
+/// keys do what and the panels' look. A save carried to another computer,
+/// the web or a phone brings them along.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct You {
+    pub name: String,
+    pub pet: crate::config::PetCfg,
+    pub friends: Vec<crate::config::FriendCfg>,
+    pub only_friends: bool,
+    /// The panels' and menus' look (Settings → Widgets).
+    pub look: String,
+    pub keys: Option<crate::config::KeysCfg>,
+}
+
+impl You {
+    pub fn of(cfg: &crate::config::Config) -> You {
+        You {
+            name: cfg.scene.name.clone(),
+            pet: cfg.scene.pet.clone(),
+            friends: cfg.scene.friends.clone(),
+            only_friends: cfg.scene.only_friends,
+            look: cfg.ui.look.clone(),
+            keys: Some(cfg.keys.clone()),
+        }
+    }
+
+    /// All of it into a config (a save imported).
+    pub fn apply(&self, cfg: &mut crate::config::Config) {
+        cfg.scene.name = self.name.clone();
+        cfg.scene.pet = self.pet.clone();
+        cfg.scene.friends = self.friends.clone();
+        cfg.scene.only_friends = self.only_friends;
+        if !self.look.is_empty() {
+            cfg.ui.look = self.look.clone();
+        }
+        if let Some(k) = &self.keys {
+            cfg.keys = k.clone();
+        }
+    }
+
+    /// Whatever a config leaves unset, from here (the villager's name, the
+    /// pet's name, friends & family): picking up where the save left off.
+    pub fn fill(&self, cfg: &mut crate::config::Config) {
+        if cfg.scene.name.is_empty() {
+            cfg.scene.name = self.name.clone();
+        }
+        if cfg.scene.pet.name.is_empty() && !self.pet.name.is_empty() {
+            cfg.scene.pet = self.pet.clone();
+        }
+        if cfg.scene.friends.is_empty() {
+            cfg.scene.friends = self.friends.clone();
+        }
+    }
 }
 
 /// Where it's kept: ~/.local/share/xmas-tui/save.toml (%APPDATA%\xmas-tui
@@ -133,6 +193,24 @@ mod tests {
         assert_eq!((back.seed, back.pockets.cheer, back.pockets.fights_won, back.pockets.ski_best), (1234, 42, 3, Some(61.5)));
         assert_eq!(back.player, Some([400.5, 60.0]));
         assert_eq!(back.pockets.houses, vec![2, 5]);
+        // the villager comes along: name, pet, friends, keys
+        let mut cfg = crate::config::Config::default();
+        cfg.scene.name = "Robin".into();
+        cfg.scene.pet = crate::config::PetCfg { kind: "cat".into(), coat: "ginger".into(), name: "Biscuit".into() };
+        cfg.scene.friends = vec![crate::config::FriendCfg { name: "Sam".into(), kid: true, ..Default::default() }];
+        cfg.keys.jump = "k".into();
+        s.you = Some(You::of(&cfg));
+        write(&p, &s).unwrap();
+        let back = read(&p).expect("unreadable");
+        let mut there = crate::config::Config::default();
+        back.you.as_ref().unwrap().apply(&mut there);
+        assert_eq!((there.scene.name.as_str(), there.scene.pet.name.as_str(), there.scene.pet.kind.as_str()), ("Robin", "Biscuit", "cat"));
+        assert_eq!((there.scene.friends.len(), there.keys.jump.as_str()), (1, "k"));
+        // filling in only what's unset
+        let mut mine = crate::config::Config::default();
+        mine.scene.name = "Alex".into();
+        back.you.as_ref().unwrap().fill(&mut mine);
+        assert_eq!((mine.scene.name.as_str(), mine.scene.pet.name.as_str()), ("Alex", "Biscuit"));
         // something that isn't a save
         std::fs::write(&p, "fps = 30").unwrap();
         assert!(read(&p).is_none());

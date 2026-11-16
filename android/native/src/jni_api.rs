@@ -99,9 +99,12 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_create(mut env: JN
         #[serde(default)]
         struct Extra {
             save_path: Option<String>,
+            /// Online here (not on the wallpaper).
+            online: Option<bool>,
         }
         let extra: Extra = toml::from_str(&text).unwrap_or_default();
-        let g = Game::new(w.max(64) as usize, h.max(64) as usize, size, cfg, extra.save_path.map(std::path::PathBuf::from));
+        let mut g = Game::new(w.max(64) as usize, h.max(64) as usize, size, cfg, extra.save_path.map(std::path::PathBuf::from));
+        g.set_online_ok(extra.online.unwrap_or(true));
         Box::into_raw(Box::new(Handle { game: Mutex::new(g), win: Mutex::new(None) })) as jlong
     })
 }
@@ -224,6 +227,72 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_pick(mut env: JNIE
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_todo(mut env: JNIEnv, _: JClass, h: jlong) -> jobjectArray {
     let Some((title, items)) = with_game(h, "todo", None, |g| g.todo()) else { return std::ptr::null_mut() };
     strings(&mut env, std::iter::once(title).chain(items).collect())
+}
+
+/// The ☰ menu, in the village.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_more(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "more", (), |g| g.more(true));
+}
+
+/// The controls card, in the village.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_help(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "help", (), |g| g.help(false));
+}
+
+/// Back: whether it closed something (a menu, a card, the pockets…).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_back(_: JNIEnv, _: JClass, h: jlong) -> jboolean {
+    with_game(h, "back", false, |g| g.back()) as jboolean
+}
+
+/// What's showing: 1 the pockets, 2 a menu or card.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_state(_: JNIEnv, _: JClass, h: jlong) -> jint {
+    with_game(h, "state", 0, |g| g.state())
+}
+
+/// Something the app itself is asked to do ("wallpaper", "settings"), or
+/// null.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_ask(env: JNIEnv, _: JClass, h: jlong) -> jni::sys::jstring {
+    match with_game(h, "ask", None, |g| g.take_ask()) {
+        Some(s) => env.new_string(&s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The line typed for what the village asked ("text:…"; empty: never mind).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_giveText(mut env: JNIEnv, _: JClass, h: jlong, text: JString) {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    with_game(h, "giveText", (), |g| g.give_text(&text));
+}
+
+/// A save (its text): its seed, or 0 when it isn't one.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_saveSeed(mut env: JNIEnv, _: JClass, text: JString) -> jlong {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    guard("saveSeed", 0, || toml::from_str::<crate::save::Save>(&text).map(|s| s.seed as jlong).unwrap_or(0))
+}
+
+/// The villager in a save (its text), as JSON (name, pet, friends, look),
+/// or null.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_youJson(mut env: JNIEnv, _: JClass, text: JString) -> jni::sys::jstring {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    let json = guard("youJson", None, || toml::from_str::<crate::save::Save>(&text).ok().and_then(|s| s.you).and_then(|y| serde_json::to_string(&y).ok()));
+    match json {
+        Some(s) => env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Let go of the save file (another's been put in its place).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_forget(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "forget", (), |g| g.forget());
 }
 
 /// Write the save file now (the wallpaper going out of sight).
