@@ -1,6 +1,8 @@
-//! In-wallpaper settings panel. Opened by the ⚙ button (top-right corner)
-//! or a right-click anywhere. Mouse-driven: click ◂ ▸ or scroll on a row to
-//! adjust, click checkboxes to toggle; the city field takes keyboard input.
+//! In-wallpaper settings panel (and the tray's settings window, which draws
+//! the same one). Opened by the ⚙ button (top-right corner) or from a
+//! right-click menu. Mouse-driven: click or drag along a slider, click ◂ ▸
+//! or scroll on a row to step it, click checkboxes to toggle; the text
+//! fields take the keyboard. Hovering over a setting says what it does.
 
 use crate::color::{pal, Rgb};
 use crate::config::Config;
@@ -80,9 +82,11 @@ pub enum Act {
     Dec(F),
     Inc(F),
     Toggle(F),
-    EditCity,
-    EditPetName,
-    EditName,
+    /// A slider set by clicking (or dragging) along its bar: to this
+    /// fraction of its range.
+    Set(F, f32),
+    /// Start typing in a text field.
+    Edit(Field),
     Close,
     ResetLayout,
     /// Open the village in its own window / full screen (as a game).
@@ -103,7 +107,6 @@ pub enum Act {
     DismissUpdate,
     /// The shelves (Shelves tab): rename shelf i, change its look or icons,
     /// open its folder, remove it; or make a new one.
-    ShelfName(u8),
     ShelfStyle(u8, i8),
     ShelfIcons(u8),
     ShelfOpen(u8),
@@ -122,20 +125,39 @@ pub enum Act {
     LockScreen,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     LockRedraw,
+    /// Widget i's look, one along (or back).
+    Look(u8, i8),
+    /// Friend i: comes as a kid / a grown-up; off the list.
+    FriendKid(u8),
+    FriendRemove(u8),
 }
+
+/// The text fields.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Field {
+    City,
+    Name,
+    PetName,
+    Shelf(u8),
+    Friend(u8),
+    /// A new name for the friends & family list.
+    NewFriend,
+}
+
+/// How many friends & family fit on the list.
+pub const MAX_FRIENDS: usize = 10;
 
 #[derive(Default)]
 pub struct Settings {
     pub open: bool,
-    /// Some(text) while the city field (or the pet's name) is being edited.
+    /// Some(text) while a text field is being typed in, and which one.
     pub editing: Option<String>,
-    /// The field being edited is the pet's name.
-    pub editing_pet: bool,
-    /// The field being edited is the villager's own name.
-    pub editing_name: bool,
-    /// The field being edited is shelf i's name.
-    pub editing_shelf: Option<usize>,
+    pub edit: Option<Field>,
     regions: Vec<(Rect, Act)>,
+    /// Labels (not clickable): hovering one explains its setting.
+    hints: Vec<(Rect, Act)>,
+    /// A slider being dragged along.
+    pub slider_drag: Option<F>,
     banner: Vec<(Rect, Act)>,
     pub rect: Option<Rect>,
     pub hover: (i32, i32),
@@ -178,11 +200,19 @@ pub struct Settings {
     pub help: bool,
 }
 
-pub const TABS: [&str; 7] = ["Scene", "Display", "Sound", "Effects", "Windows", "Shelves", "Desktop"];
+pub const TABS: [&str; 8] = ["Village", "You", "Widgets", "Shelves", "Sound", "Effects", "Windows", "Desktop"];
+pub const TAB_VILLAGE: usize = 0;
+pub const TAB_YOU: usize = 1;
+pub const TAB_WIDGETS: usize = 2;
+pub const TAB_SHELVES: usize = 3;
+pub const TAB_SOUND: usize = 4;
+pub const TAB_EFFECTS: usize = 5;
+pub const TAB_WINDOWS: usize = 6;
+pub const TAB_DESKTOP: usize = 7;
 const LIGHT_COUNTS: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const AMB_ROWS: [&str; 5] = ["Wind", "Snowfall hiss", "Fireplace", "Wind chimes", "Aurora shimmer"];
-const PANEL_W: i32 = 66;
-const PANEL_H: i32 = 28;
+const PANEL_W: i32 = 76;
+const PANEL_H: i32 = 30;
 
 const SLEIGH_STEPS: [f32; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 10.0, 15.0, 30.0];
 const FPS_STEPS: [f32; 6] = [15.0, 20.0, 24.0, 30.0, 45.0, 60.0];
@@ -359,6 +389,34 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             }
             true
         }
+        Act::Set(f, frac) => {
+            let Some((v, max, lo, st)) = slider_val(cfg, f) else { return false };
+            let new = ((frac.clamp(0.0, 1.0) * max / st).round() * st).clamp(lo, max);
+            let new = (new * 100.0).round() / 100.0;
+            if (new - *v).abs() < 1e-4 {
+                return false;
+            }
+            *v = new;
+            true
+        }
+        Act::Look(i, d) => {
+            let Some(l) = cfg.widgets.looks.get_mut(i as usize) else { return false };
+            *l = crate::widgets::looks::step(l, d as i32).into();
+            true
+        }
+        Act::FriendKid(i) => {
+            let Some(fr) = cfg.scene.friends.get_mut(i as usize) else { return false };
+            fr.kid ^= true;
+            true
+        }
+        Act::FriendRemove(i) => {
+            if (i as usize) < cfg.scene.friends.len() {
+                cfg.scene.friends.remove(i as usize);
+                true
+            } else {
+                false
+            }
+        }
         Act::ResetLayout => {
             for i in [0, 1, 2, 3, 5] {
                 cfg.layout.set(i, None);
@@ -389,8 +447,148 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw => false,
+        Act::Shuffle | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw => false,
     }
+}
+
+/// A slider's value: (the value, the bar's full scale, its lowest, its step).
+fn slider_val(cfg: &mut Config, f: F) -> Option<(&mut f32, f32, f32, f32)> {
+    let w = &mut cfg.windows;
+    Some(match f {
+        F::Snow => (&mut cfg.scene.snow, 3.0, 0.0, 0.25),
+        F::Wind => (&mut cfg.scene.wind, 3.0, 0.0, 0.25),
+        F::Glow => (&mut cfg.scene.glow, 2.0, 0.0, 0.1),
+        F::Events => (&mut cfg.scene.events, 3.0, 0.0, 0.25),
+        F::Critters => (&mut cfg.scene.critters, 3.0, 0.0, 0.25),
+        F::WalkSpeed => (&mut cfg.scene.walk_speed, 6.0, 0.25, 0.25),
+        F::TalkTime => (&mut cfg.scene.talk_time, 3.0, 0.5, 0.25),
+        F::Chatty => (&mut cfg.scene.chattiness, 2.0, 0.0, 0.25),
+        F::SoundMaster => (&mut cfg.sound.master, 1.0, 0.0, 0.05),
+        F::SoundMusic => (&mut cfg.sound.music, 1.0, 0.0, 0.05),
+        F::SoundSfx => (&mut cfg.sound.sfx, 1.0, 0.0, 0.05),
+        F::SoundAmb => (&mut cfg.sound.ambience, 1.0, 0.0, 0.05),
+        F::Amb(i) => {
+            let m = &mut cfg.sound.ambience_mix;
+            let v = match i {
+                0 => &mut m.wind,
+                1 => &mut m.snowfall,
+                2 => &mut m.fire,
+                3 => &mut m.chimes,
+                _ => &mut m.aurora,
+            };
+            (v, 1.5, 0.0, 0.05)
+        }
+        F::Fx(i) => {
+            let key = crate::config::EffectVolumes::ROWS[(i as usize).min(15)].0;
+            (cfg.sound.effects.get_mut(key)?, 1.5, 0.0, 0.05)
+        }
+        F::WinPile => (&mut w.pile_rows, 4.0, 0.25, 0.25),
+        F::WinDensity => (&mut w.density, 3.0, 0.0, 0.25),
+        F::WinSettle => (&mut w.settle, 4.0, 0.0, 0.25),
+        F::WinFall => (&mut w.fall, 3.0, 0.25, 0.25),
+        F::WinWind => (&mut w.wind, 3.0, 0.0, 0.25),
+        F::WinShake => (&mut w.shake, 3.0, 0.0, 0.25),
+        F::WinMelt => (&mut w.melt, 3.0, 0.0, 0.25),
+        F::WinDockPile => (&mut w.dock_rows, 4.0, 0.0, 0.25),
+        F::WinLightGlow => (&mut w.light_glow, 2.0, 0.0, 0.1),
+        _ => return None,
+    })
+}
+
+/// What a setting does, shown at the bottom of the panel while the pointer
+/// is over it.
+fn tip(a: Act) -> Option<&'static str> {
+    let f = match a {
+        Act::Inc(f) | Act::Dec(f) | Act::Toggle(f) | Act::Set(f, _) => f,
+        Act::Edit(Field::City) => return Some("The weather widget's city (and the real sunrise, sunset and side of the road)."),
+        Act::Edit(Field::Name) => return Some("What the village calls the villager. Word gets round once it's set."),
+        Act::Edit(Field::PetName) => return Some("The pet's name. People mention it, and it answers to it."),
+        Act::Edit(Field::Shelf(_)) => return Some("The shelf's name (its folder is renamed with it)."),
+        Act::Edit(Field::Friend(_)) => return Some("Their name in the village. Clear it to take them off the list."),
+        Act::Edit(Field::NewFriend) => return Some("A friend or family member: some visitors take these names and know the villager."),
+        Act::FriendKid(_) => return Some("Whether they come to the village as a grown-up or as a kid."),
+        Act::FriendRemove(_) => return Some("Take them off the list."),
+        Act::Look(..) => return Some("The widget's look: classic, frosted with snow, a wooden frame, or a gift box."),
+        Act::ShelfStyle(..) => return Some("The shelf's look: frosted with snow, a wooden shelf, or a gift box."),
+        Act::ShelfIcons(_) => return Some("Each item's real icon (album art, thumbnails), or its icon as pixel art."),
+        Act::ShelfOpen(_) => return Some("Open the shelf's folder in the file manager."),
+        Act::ShelfFolder(_) => return Some("Pick another folder for this shelf to show."),
+        Act::ShelfRemove(_) => return Some("Take the shelf away (its folder and files stay)."),
+        Act::ShelfNew | Act::ShelfNewFrom => return Some("A new shelf: in its own new folder, or showing a folder picked now."),
+        Act::Shuffle => return Some("A new village: the houses, trees and folk are laid out afresh."),
+        Act::ResetLayout => return Some("Put the widgets back where they started."),
+        Act::PopOut => return Some("Open the village in a window of its own, to play in."),
+        Act::FullScreen => return Some("The village full screen, to play in (F11 again comes back)."),
+        Act::BackToWallpaper => return Some("Back behind the desktop icons."),
+        Act::Autostart => return Some("Start the wallpaper when the computer starts."),
+        Act::Quit => return Some("Stop the wallpaper (the desktop goes back to normal)."),
+        Act::SetWallpaper => return Some("Make the village the desktop wallpaper (sets up the service that keeps it running)."),
+        Act::LockScreen | Act::LockRedraw => return Some("Show a looping video of the village on KDE's lock screen."),
+        Act::CheckUpdate | Act::InstallUpdate => return Some("Look for a newer xmas-tui on GitHub (downloads are checked before installing)."),
+        _ => return None,
+    };
+    Some(match f {
+        F::Snow => "How much snow falls.",
+        F::Wind => "How hard the wind blows the snow (and the smoke from the chimneys).",
+        F::Glow => "The glow round lights, windows and the tree.",
+        F::Events => "How often something happens: the train, fireworks, shooting stars, a sleigh…",
+        F::Critters => "How many people and animals come and go.",
+        F::MostAtOnce => "The most people and animals in the village at once.",
+        F::Sleigh => "How often Santa's sleigh flies over.",
+        F::Traffic => "Which side of the road the cars keep to (auto: from the weather city's country).",
+        F::TimeOfDay => "Day and night: following the real sun (auto), or one time of day always.",
+        F::Fps => "Frames a second. Lower is lighter on the computer.",
+        F::Aurora => "The northern lights in the sky.",
+        F::Bushes => "Berry bushes to pick berries from (animals love them).",
+        F::Player => "The villager: walk about with WASD or the arrow keys.",
+        F::WalkSpeed => "How fast the villager walks (Shift runs).",
+        F::TalkTime => "How long speech bubbles stay up.",
+        F::Chatty => "How often people stop to chat and remark on things.",
+        F::PetKind => "The villager's pet: a dog, a cat, a bunny, or none.",
+        F::PetCoat => "The pet's colour.",
+        F::Clock => "The big clock.",
+        F::Hour24 => "A 24-hour clock.",
+        F::Seconds => "Seconds on the clock.",
+        F::Countdown => "The countdown to Christmas under the clock.",
+        F::System => "CPU, GPU, memory, disk and network.",
+        F::Music => "What's playing, from any music player.",
+        F::Weather => "The weather in the weather city.",
+        F::Map => "A strip map of the village: where the villager is.",
+        F::Viz => "Bars dancing to whatever's playing (it listens to the sound output; nothing is recorded).",
+        F::VizKhz => "Each bar's frequency under it.",
+        F::Units => "°F and mph, or °C and km/h.",
+        F::Locked => "Stop the widgets being dragged about by accident.",
+        F::Scale => "Finer or coarser detail (more or fewer, smaller or bigger characters).",
+        F::Zoom => "Magnify the whole village.",
+        F::Sound => "All of the sound.",
+        F::SoundCursor => "A soft sparkle as the pointer moves.",
+        F::SoundMedia => "Fade out while other music or video plays.",
+        F::SoundMaster => "The overall volume.",
+        F::SoundMusic => "The music's volume.",
+        F::SoundSfx => "All the sound effects (each one's in the Effects tab).",
+        F::SoundAmb => "The background: wind, snowfall, the fire, chimes.",
+        F::SoundTrack => "Which music plays.",
+        F::Amb(_) => "This part of the background sound.",
+        F::Fx(_) => "This sound effect's volume.",
+        F::UpdCheck => "Look for new versions now and then.",
+        F::UpdAuto => "Install new versions without asking.",
+        F::WinSnow => "Snow settles on top of open windows.",
+        F::WinFront => "The snow falls in front of windows too.",
+        F::WinBrush => "Moving the pointer through the snow sweeps it away.",
+        F::WinDocks => "Snow on the taskbar.",
+        F::WinLights => "Christmas lights round the open windows.",
+        F::WinPile => "How deep the snow piles up on windows.",
+        F::WinDockPile => "How deep the snow piles up on the taskbar.",
+        F::WinDensity => "How much snow falls over the windows.",
+        F::WinSettle => "How fast the snow settles on windows.",
+        F::WinFall => "How fast the flakes fall.",
+        F::WinWind => "How hard the wind blows the flakes.",
+        F::WinShake => "How much snow falls off when a window is moved.",
+        F::WinMelt => "How fast settled snow melts away.",
+        F::WinLightStyle => "The lights' colours.",
+        F::WinLightCount => "How many windows get lights (the ones in front).",
+        F::WinLightGlow => "How bright the lights are.",
+    })
 }
 
 /// The settings button: always there, top right.
@@ -426,6 +624,90 @@ const CONTROLS: [(&str, &str); 18] = [
 ];
 
 impl Settings {
+    /// Start typing in `which` (whatever was being typed elsewhere is put
+    /// in place first).
+    pub fn begin_edit(&mut self, cfg: &mut Config, which: Field) {
+        if self.edit == Some(which) && self.editing.is_some() {
+            return;
+        }
+        self.commit(cfg);
+        let text = match which {
+            Field::City => cfg.weather.city.clone(),
+            Field::Name => cfg.scene.name.clone(),
+            Field::PetName => cfg.scene.pet.name.clone(),
+            Field::Shelf(i) => cfg.shelves.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
+            Field::Friend(i) => cfg.scene.friends.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
+            Field::NewFriend => String::new(),
+        };
+        self.edit = Some(which);
+        self.editing = Some(text);
+    }
+
+    /// Put what's been typed where it belongs (and stop typing).
+    pub fn commit(&mut self, cfg: &mut Config) {
+        let (which, text) = (self.edit.take(), self.editing.take());
+        let (Some(which), Some(text)) = (which, text) else { return };
+        let text = text.trim();
+        let short = || text.chars().take(16).collect::<String>();
+        match which {
+            Field::City => {
+                if text != cfg.weather.city {
+                    cfg.weather.city = text.to_string();
+                    cfg.weather.latitude = None;
+                    cfg.weather.longitude = None;
+                }
+            }
+            Field::Name => cfg.scene.name = short(),
+            Field::PetName => {
+                if !text.is_empty() {
+                    cfg.scene.pet.name = short();
+                }
+            }
+            Field::Shelf(i) => crate::widgets::shelf::rename(cfg, i as usize, text),
+            Field::Friend(i) => {
+                let i = i as usize;
+                if text.is_empty() {
+                    if i < cfg.scene.friends.len() {
+                        cfg.scene.friends.remove(i);
+                    }
+                } else if let Some(fr) = cfg.scene.friends.get_mut(i) {
+                    fr.name = short();
+                }
+            }
+            Field::NewFriend => {
+                if !text.is_empty() && cfg.scene.friends.len() < MAX_FRIENDS {
+                    cfg.scene.friends.push(crate::config::FriendCfg { name: short(), kid: false });
+                }
+            }
+        }
+    }
+
+    /// Stop typing, keeping nothing.
+    pub fn cancel_edit(&mut self) {
+        self.edit = None;
+        self.editing = None;
+    }
+
+    /// A slider being dragged along: the setting under (x, y) on its row.
+    pub fn drag_slider(&self, x: i32, y: i32) -> Option<Act> {
+        let f = self.slider_drag?;
+        let on_row: Vec<(Rect, f32)> = self.regions.iter().filter_map(|(r, a)| match a {
+            Act::Set(g, frac) if *g == f => Some((*r, *frac)),
+            _ => None,
+        }).collect();
+        let (first, last) = (on_row.first()?, on_row.last()?);
+        let _ = y;
+        // past either end: the end
+        let frac = if x < first.0.x {
+            0.0
+        } else if x >= last.0.x {
+            1.0
+        } else {
+            on_row.iter().find(|(r, _)| r.x == x).map(|(_, v)| *v)?
+        };
+        Some(Act::Set(f, frac))
+    }
+
     /// On the title bar (where the panel can be picked up), not its ✕.
     pub fn on_title(&self, x: i32, y: i32) -> bool {
         self.rect.is_some_and(|r| y == r.y && x >= r.x && x < r.x + r.w - 5)
@@ -553,6 +835,7 @@ impl Settings {
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
         self.regions.clear();
+        self.hints.clear();
         self.rect = None;
         if !self.open {
             return;
@@ -595,9 +878,9 @@ impl Settings {
         self.regions.push((close, Act::Close));
 
         // tab bar
-        let tabs: Vec<usize> = (0..TABS.len()).filter(|&i| i != 4 || self.window_fx).collect();
+        let tabs: Vec<usize> = (0..TABS.len()).filter(|&i| i != TAB_WINDOWS || self.window_fx).collect();
         if !tabs.contains(&self.tab) {
-            self.tab = 0;
+            self.tab = TAB_VILLAGE;
         }
         let mut tx = x + 3;
         // a gap between the tabs, while they fit with one
@@ -627,22 +910,54 @@ impl Settings {
         let vx = x + 20;
         let yy = y + 4;
         match self.tab {
-            0 => self.tab_scene(f, cfg, lx, vx, yy, t),
-            1 => self.tab_display(f, cfg, lx, vx, yy, t),
-            2 => self.tab_sound(f, cfg, lx, vx, yy, t),
-            3 => self.tab_effects(f, cfg, lx, x + 28, yy, t),
-            4 => self.tab_windows(f, cfg, lx, vx, yy, t),
-            6 => self.tab_desktop(f, cfg, lx, yy, x + w - 1, t),
-            _ => self.tab_shelves(f, cfg, lx, yy, x + w - 1, t),
+            TAB_YOU => self.tab_you(f, cfg, lx, vx, yy, x + w - 1, t),
+            TAB_WIDGETS => self.tab_widgets(f, cfg, lx, vx, yy, t),
+            TAB_SHELVES => self.tab_shelves(f, cfg, lx, yy, x + w - 1, t),
+            TAB_SOUND => self.tab_sound(f, cfg, lx, vx, yy, t),
+            TAB_EFFECTS => self.tab_effects(f, cfg, lx, x + 28, yy, t),
+            TAB_WINDOWS => self.tab_windows(f, cfg, lx, vx, yy, t),
+            TAB_DESKTOP => self.tab_desktop(f, cfg, lx, yy, x + w - 1, t),
+            _ => self.tab_village(f, cfg, lx, vx, yy, t),
+        }
+        // what the setting under the pointer does, in place of the tips
+        let (hx, hy) = self.hover;
+        let under = self.regions.iter().rev().chain(self.hints.iter()).find(|(r, _)| r.contains(hx, hy)).map(|(_, a)| *a);
+        if let Some(text) = under.and_then(tip) {
+            let width = (x + w - 1 - lx) as usize;
+            let mut lines: Vec<String> = vec![String::new()];
+            for word in text.split(' ') {
+                let cur = lines.last_mut().unwrap();
+                if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width - 2 {
+                    lines.push(word.to_string());
+                } else {
+                    if !cur.is_empty() {
+                        cur.push(' ');
+                    }
+                    cur.push_str(word);
+                }
+            }
+            for (k, l) in lines.iter().take(2).enumerate() {
+                let yy = y + h - 3 + k as i32;
+                for xx in lx..x + w - 1 {
+                    f.put_g(xx, yy, Glyph::new(' ', pal::UI_TEXT).bg(BG).lit(0.0));
+                }
+                if k == 0 {
+                    f.put_g(lx, yy, Glyph::new('✦', Rgb::hex(0xffd36b)).bg(BG).lit(0.0));
+                }
+                f.text(lx + 2, yy, l, pal::UI_TEXT * 0.95, BG, 0.0);
+            }
+            return;
         }
 
         let tips = [
-            "drag any widget to move it  ·  scroll on a value to adjust",
-            if self.extras {
-                "pick up animals & people  ·  hold a click for a right-click menu"
+            "point at a setting to see what it does  ·  click or drag along a slider",
+            if self.standalone {
+                "changes reach the wallpaper straight away  ·  Esc closes this window"
+            } else if self.extras {
+                "drag widgets to move them  ·  hold a click for a right-click menu"
             } else {
-                // (≤ 62 cells: the inner width from lx to the right border)
-                "drag the title bar to move this  ·  hold a click = right-click"
+                // (≤ 72 cells: the inner width from lx to the right border)
+                "drag widgets to move them  ·  drag the title bar to move this panel"
             },
         ];
         for (k, tip) in tips.iter().enumerate() {
@@ -656,10 +971,10 @@ impl Settings {
         }
     }
 
-    fn tab_scene(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
-        self.section(f, lx, yy, "SCENE");
-        yy += 1;
+    fn tab_village(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
         let pct = |v: f32, hi: f32| v / hi;
+        self.section(f, lx, yy, "THE VILLAGE");
+        yy += 1;
         self.slider(f, lx, vx, yy, "Snowfall", F::Snow, pct(cfg.scene.snow, 3.0), &format!("{:.2}×", cfg.scene.snow), t);
         yy += 1;
         self.slider(f, lx, vx, yy, "Wind", F::Wind, pct(cfg.scene.wind, 3.0), &format!("{:.2}×", cfg.scene.wind), t);
@@ -668,15 +983,11 @@ impl Settings {
         yy += 1;
         self.slider(f, lx, vx, yy, "Surprises", F::Events, pct(cfg.scene.events, 3.0), &format!("{:.2}×", cfg.scene.events), t);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Animals & people", F::Critters, pct(cfg.scene.critters, 3.0), &format!("{:.2}×", cfg.scene.critters), t);
-        yy += 1;
-        let most = cfg.scene.most_at_once.max(1);
-        self.stepper(f, lx, vx, yy, "  most at once", F::MostAtOnce, &format!("{most} {}", if most == 1 { "visitor" } else { "visitors" }));
-        yy += 1;
         let sl = if cfg.scene.sleigh_minutes <= 0.0 { "never".to_string() } else { format!("every ~{:.0} min", cfg.scene.sleigh_minutes) };
         self.stepper(f, lx, vx, yy, "Santa's sleigh", F::Sleigh, &sl);
         yy += 1;
-        self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 6.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
+        let tod = if cfg.scene.time == "auto" { "auto (real sunrise & sunset)".to_string() } else { cfg.scene.time.clone() };
+        self.stepper(f, lx, vx, yy, "Time of day", F::TimeOfDay, &tod);
         yy += 1;
         let side = match cfg.scene.traffic.as_str() {
             "left" => "keep left",
@@ -685,32 +996,40 @@ impl Settings {
         };
         self.stepper(f, lx, vx, yy, "Traffic", F::Traffic, side);
         yy += 1;
-        let tod = if cfg.scene.time == "auto" { "auto (real sunrise & sunset)".to_string() } else { cfg.scene.time.clone() };
-        self.stepper(f, lx, vx, yy, "Time of day", F::TimeOfDay, &tod);
+        let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
+        self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes);
+        yy += 2;
+        self.section(f, lx, yy, "VISITORS");
         yy += 1;
-        let fps = match self.fps_override {
-            Some(o) => format!("{o:.0} fps (--fps)"),
-            None => format!("{:.0} fps", cfg.fps),
-        };
-        self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
+        self.slider(f, lx, vx, yy, "Animals & people", F::Critters, pct(cfg.scene.critters, 3.0), &format!("{:.2}×", cfg.scene.critters), t);
+        yy += 1;
+        let most = cfg.scene.most_at_once.max(1);
+        self.stepper(f, lx, vx, yy, "Most at once", F::MostAtOnce, &format!("{most} {}", if most == 1 { "visitor" } else { "visitors" }));
+        yy += 1;
+        f.text(lx, yy, "(friends & family, who visit too, are in the You tab)", pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        self.button(f, lx, yy, "↻ a new village", Act::Shuffle);
+    }
+
+    fn tab_you(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, t: f32) {
+        let pct = |v: f32, hi: f32| v / hi;
+        self.section(f, lx, yy, "THE VILLAGER");
+        yy += 1;
+        f.text(lx, yy, "Your name", pal::UI_TEXT, BG, 0.0);
+        let editing = self.edit == Some(Field::Name) && self.editing.is_some();
+        let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.scene.name.is_empty() { "(click to set)".into() } else { cfg.scene.name.clone() };
+        self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::Edit(Field::Name), t);
+        self.check(f, vx + 21, yy, "Walk about (WASD)", Act::Toggle(F::Player), cfg.scene.player);
+        yy += 1;
+        self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 6.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
         yy += 1;
         self.slider(f, lx, vx, yy, "Speech bubbles", F::TalkTime, pct(cfg.scene.talk_time, 3.0), &format!("{:.2}× as long", cfg.scene.talk_time), t);
         yy += 1;
         let chat = if cfg.scene.chattiness <= 0.0 { "quiet".to_string() } else { format!("{:.2}×", cfg.scene.chattiness) };
         self.slider(f, lx, vx, yy, "Chattiness", F::Chatty, pct(cfg.scene.chattiness, 2.0), &chat, t);
         yy += 2;
-        let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
-        let cx = self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes) + 3;
-        self.check(f, cx, yy, "Villager (WASD)", Act::Toggle(F::Player), cfg.scene.player);
+        self.section(f, lx, yy, "THE PET");
         yy += 1;
-        f.text(lx, yy, "Your name", pal::UI_TEXT, BG, 0.0);
-        let (txt, editing) = match (&self.editing, self.editing_name) {
-            (Some(s), true) => (s.clone(), true),
-            _ => (if cfg.scene.name.is_empty() { "(click to set)".into() } else { cfg.scene.name.clone() }, false),
-        };
-        self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::EditName, t);
-        yy += 2;
-        // the villager's pet: kind, colour, name
         self.stepper(f, lx, vx, yy, "Pet", F::PetKind, &cfg.scene.pet.kind);
         if cfg.scene.pet.kind != "none" {
             let cx = vx + 13;
@@ -718,20 +1037,46 @@ impl Settings {
             self.arrow(f, cx + 7, yy, '◂', Act::Dec(F::PetCoat));
             let c = f.text(cx + 9, yy, &cfg.scene.pet.coat, pal::UI_TITLE, BG, 0.0);
             self.arrow(f, c + 1, yy, '▸', Act::Inc(F::PetCoat));
-        }
-        yy += 1;
-        if cfg.scene.pet.kind != "none" {
+            yy += 1;
             f.text(lx, yy, "Pet's name", pal::UI_TEXT, BG, 0.0);
-            let (txt, editing) = match (&self.editing, self.editing_pet) {
-                (Some(s), true) => (s.clone(), true),
-                _ => (if cfg.scene.pet.name.is_empty() { "(not named yet)".into() } else { cfg.scene.pet.name.clone() }, false),
-            };
-            self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::EditPetName, t);
+            let editing = self.edit == Some(Field::PetName) && self.editing.is_some();
+            let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.scene.pet.name.is_empty() { "(not named yet)".into() } else { cfg.scene.pet.name.clone() };
+            self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::Edit(Field::PetName), t);
         }
-        self.button(f, vx + 22, yy, "↻ shuffle scene", Act::Shuffle);
+        yy += 2;
+        self.section(f, lx, yy, "FRIENDS & FAMILY");
+        yy += 1;
+        f.text(lx, yy, "Some of the folk who come by take these names, and know the villager.", pal::UI_DIM, BG, 0.0);
+        yy += 1;
+        // two columns of five
+        let colw = ((right - lx) / 2).max(30);
+        let slot = |k: usize| (lx + (k / 5) as i32 * colw, yy + (k % 5) as i32);
+        let n = cfg.scene.friends.len().min(MAX_FRIENDS);
+        for (k, fr) in cfg.scene.friends.iter().take(MAX_FRIENDS).enumerate() {
+            let (x, y) = slot(k);
+            let k8 = k as u8;
+            f.put_g(x, y, Glyph::new('♥', Rgb::hex(0xff7a9a)).bg(BG).lit(0.0));
+            let editing = self.edit == Some(Field::Friend(k8)) && self.editing.is_some();
+            let txt = if editing { self.editing.clone().unwrap_or_default() } else { fr.name.clone() };
+            self.field(f, Rect { x: x + 2, y, w: 13, h: 1 }, &txt, editing, Act::Edit(Field::Friend(k8)), t);
+            let age = if fr.kid { "kid     " } else { "grown-up" };
+            self.button(f, x + 16, y, age, Act::FriendKid(k8));
+            self.button(f, x + 27, y, "✕", Act::FriendRemove(k8));
+        }
+        if n < MAX_FRIENDS {
+            let (x, y) = slot(n);
+            if self.edit == Some(Field::NewFriend) && self.editing.is_some() {
+                f.put_g(x, y, Glyph::new('♥', Rgb::hex(0xff7a9a)).bg(BG).lit(0.0));
+                let txt = self.editing.clone().unwrap_or_default();
+                self.field(f, Rect { x: x + 2, y, w: 13, h: 1 }, &txt, true, Act::Edit(Field::NewFriend), t);
+                f.text(x + 16, y, "⏎ add", pal::UI_DIM, BG, 0.0);
+            } else {
+                self.button(f, x, y, "+ add someone", Act::Edit(Field::NewFriend));
+            }
+        }
     }
 
-    fn tab_display(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
+    fn tab_widgets(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
         self.section(f, lx, yy, "CLOCK");
         yy += 1;
         let mut cx = self.check(f, lx, yy, "Show clock", Act::Toggle(F::Clock), cfg.clock.enabled) + 3;
@@ -741,36 +1086,36 @@ impl Settings {
         yy += 2;
         self.section(f, lx, yy, "WIDGETS");
         yy += 1;
-        let mut cx = self.check(f, lx, yy, "System", Act::Toggle(F::System), cfg.widgets.system) + 3;
-        cx = self.check(f, cx, yy, "Music", Act::Toggle(F::Music), cfg.widgets.music) + 3;
-        cx = self.check(f, cx, yy, "Weather", Act::Toggle(F::Weather), cfg.widgets.weather) + 3;
-        self.check(f, cx, yy, "Map", Act::Toggle(F::Map), cfg.widgets.map);
-        yy += 1;
-        // the visualizer listens to the audio output: say so where it's
-        // switched on
-        cx = self.check(f, lx, yy, "Visualizer", Act::Toggle(F::Viz), cfg.widgets.visualizer) + 3;
-        if cfg.widgets.visualizer {
-            cx = self.check(f, cx, yy, "kHz labels", Act::Toggle(F::VizKhz), cfg.widgets.visualizer_khz) + 3;
+        let w = &cfg.widgets;
+        for (i, label, field, on) in [(1u8, "System", F::System, w.system), (2, "Music", F::Music, w.music), (3, "Weather", F::Weather, w.weather), (4, "Map", F::Map, w.map), (5, "Visualizer", F::Viz, w.visualizer)] {
+            self.check(f, lx, yy, label, Act::Toggle(field), on);
+            let look = w.looks.get(i as usize).unwrap_or("classic");
+            let name = match look {
+                "frosted" => "frosted",
+                "wood" => "wooden",
+                "gift" => "gift box",
+                _ => "classic",
+            };
+            let r = Rect { x: vx, y: yy, w: 4, h: 1 };
+            f.text(vx, yy, "look", if on { pal::UI_TEXT } else { pal::UI_DIM }, BG, 0.0);
+            self.hints.push((r, Act::Look(i, 1)));
+            self.arrow(f, vx + 5, yy, '◂', Act::Look(i, -1));
+            let e = f.text(vx + 7, yy, &format!("{name:<8}"), if on { pal::UI_TITLE } else { pal::UI_DIM }, BG, 0.0);
+            self.arrow(f, e + 1, yy, '▸', Act::Look(i, 1));
+            if i == 5 && on {
+                self.check(f, e + 4, yy, "kHz labels", Act::Toggle(F::VizKhz), w.visualizer_khz);
+            }
+            yy += 1;
         }
-        f.text(cx, yy, "(listens to what's playing)", pal::UI_DIM, BG, 0.0);
+        f.text(lx, yy, "(the shelves' looks are in the Shelves tab)", pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        self.section(f, lx, yy, "WEATHER");
         yy += 1;
-        f.text(lx, yy, "Weather city", pal::UI_TEXT, BG, 0.0);
+        f.text(lx, yy, "City", pal::UI_TEXT, BG, 0.0);
         let field = Rect { x: vx, y: yy, w: 30, h: 1 };
-        let (txt, editing) = match (&self.editing, self.editing_pet || self.editing_name) {
-            (Some(s), false) => (s.clone(), true),
-            _ => (if cfg.weather.city.is_empty() { "(click to set)".into() } else { cfg.weather.city.clone() }, false),
-        };
-        for i in 0..field.w {
-            let fg = if editing { pal::UI_TITLE } else { pal::UI_TEXT };
-            let bgc = if editing { Rgb::hex(0x24305a) } else { Rgb::hex(0x1a2242) };
-            let ch = txt.chars().nth(i as usize).unwrap_or(' ');
-            f.put_g(field.x + i, yy, Glyph::new(ch, fg).solid(bgc).lit(0.0));
-        }
-        if editing && (t * 2.0) as i32 % 2 == 0 {
-            let cx = field.x + txt.chars().count().min(field.w as usize - 1) as i32;
-            f.put_g(cx, yy, Glyph::new('▏', Rgb::hex(0xffd36b)).solid(Rgb::hex(0x1a2240)).lit(0.0));
-        }
-        self.regions.push((field, Act::EditCity));
+        let editing = self.edit == Some(Field::City) && self.editing.is_some();
+        let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.weather.city.is_empty() { "(click to set)".into() } else { cfg.weather.city.clone() };
+        self.field(f, field, &txt, editing, Act::Edit(Field::City), t);
         if editing {
             f.text(field.x + field.w + 1, yy, "⏎ save", pal::UI_DIM, BG, 0.0);
         } else if !self.keyboard {
@@ -784,15 +1129,25 @@ impl Settings {
         yy += 1;
         let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
-        yy += 2;
-        // resolution: finer detail at the same size; zoom: bigger
+    }
+
+    /// Resolution, zoom, frame rate, and playing it in a window.
+    fn display_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32) -> i32 {
         let res = format!("{:.2}× detail", resolution(cfg.scale));
         self.stepper(f, lx, vx, yy, "Resolution", F::Scale, &res);
         let zx = vx + 22;
+        let r = Rect { x: zx, y: yy, w: 4, h: 1 };
         f.text(zx, yy, "Zoom", pal::UI_TEXT, BG, 0.0);
+        self.hints.push((r, Act::Inc(F::Zoom)));
         self.arrow(f, zx + 5, yy, '◂', Act::Dec(F::Zoom));
         let c = f.text(zx + 7, yy, &format!("{:.2}×", cfg.zoom), pal::UI_TITLE, BG, 0.0);
         self.arrow(f, c + 1, yy, '▸', Act::Inc(F::Zoom));
+        yy += 1;
+        let fps = match self.fps_override {
+            Some(o) => format!("{o:.0} fps (--fps)"),
+            None => format!("{:.0} fps", cfg.fps),
+        };
+        self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
         yy += 1;
         // play it like a game: in a window of its own, or full screen
         if !self.standalone {
@@ -806,7 +1161,10 @@ impl Settings {
                 self.button(f, bx, yy, "▸ pop out", Act::PopOut);
                 self.button(f, nx, yy, "▣ full screen (F11)", Act::FullScreen);
             }
+            f.text(lx, yy, "Play", pal::UI_TEXT, BG, 0.0);
+            yy += 1;
         }
+        yy
     }
 
     /// The wallpaper itself: setting it up (Linux), the lock screen (KDE),
@@ -867,6 +1225,10 @@ impl Settings {
         if self.autostart.is_some() || self.extras {
             yy += 1;
         }
+        yy += 1;
+        self.section(f, lx, yy, "DISPLAY");
+        yy += 1;
+        yy = self.display_rows(f, cfg, lx, lx + 17, yy);
         #[cfg(target_os = "linux")]
         {
             use crate::linwall::Job;
@@ -928,7 +1290,7 @@ impl Settings {
             Some(Status::Installed(v)) => (format!("{v} installed · restarting…"), None),
             Some(Status::Failed(e)) => (format!("update: {e}"), Some(("retry", Act::CheckUpdate))),
         };
-        let msg: String = msg.chars().take(44).collect();
+        let msg: String = msg.chars().take(58).collect();
         let cx = f.text(lx, yy, &msg, pal::UI_DIM, BG, 0.0);
         if let Some((label, a)) = act {
             self.button(f, cx + 2, yy, label, a);
@@ -1015,9 +1377,9 @@ impl Settings {
         let room = (right - lx - 1).max(10) as usize;
         for (i, c) in cfg.shelves.iter().enumerate().take(5) {
             let i8 = i as u8;
-            let editing = self.editing_shelf == Some(i) && self.editing.is_some();
+            let editing = self.edit == Some(Field::Shelf(i8)) && self.editing.is_some();
             let txt = if editing { self.editing.clone().unwrap_or_default() } else { c.name.clone() };
-            self.field(f, Rect { x: lx, y: yy, w: 14, h: 1 }, &txt, editing, Act::ShelfName(i8), t);
+            self.field(f, Rect { x: lx, y: yy, w: 14, h: 1 }, &txt, editing, Act::Edit(Field::Shelf(i8)), t);
             let style = match c.style.as_str() {
                 "wood" => "wooden",
                 "gift" => "gift box",
@@ -1123,8 +1485,10 @@ impl Settings {
 
     fn section(&self, f: &mut Frame, x: i32, y: i32, s: &str) {
         let c = f.text(x, y, s, Rgb::hex(0xffd36b), BG, 0.0);
-        for i in 0..(58 - s.len() as i32) {
-            f.put_g(c + 1 + i, y, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
+        // a rule along to the panel's right side
+        let end = self.rect.map(|r| r.x + r.w - 3).unwrap_or(x + 60);
+        for xx in c + 1..end {
+            f.put_g(xx, y, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
         }
     }
 
@@ -1138,8 +1502,13 @@ impl Settings {
     #[allow(clippy::too_many_arguments)]
     fn slider(&mut self, f: &mut Frame, lx: i32, vx: i32, y: i32, label: &str, field: F, frac: f32, val: &str, t: f32) {
         f.text(lx, y, label, pal::UI_TEXT, BG, 0.0);
+        self.hints.push((Rect { x: lx, y, w: (vx - lx - 1).max(1), h: 1 }, Act::Inc(field)));
         self.arrow(f, vx, y, '◂', Act::Dec(field));
         let bw = 20;
+        // click (or drag) anywhere along the bar
+        for i in 0..bw {
+            self.regions.push((Rect { x: vx + 2 + i, y, w: 1, h: 1 }, Act::Set(field, i as f32 / (bw - 1) as f32)));
+        }
         let n = (frac.clamp(0.0, 1.0) * bw as f32).round() as i32;
         let shift = (t * 3.0) as i32;
         for i in 0..bw {
@@ -1156,6 +1525,7 @@ impl Settings {
 
     fn stepper(&mut self, f: &mut Frame, lx: i32, vx: i32, y: i32, label: &str, field: F, val: &str) {
         f.text(lx, y, label, pal::UI_TEXT, BG, 0.0);
+        self.hints.push((Rect { x: lx, y, w: (vx - lx - 1).max(1), h: 1 }, Act::Inc(field)));
         self.arrow(f, vx, y, '◂', Act::Dec(field));
         let c = f.text(vx + 2, y, val, pal::UI_TITLE, BG, 0.0);
         self.arrow(f, c + 1, y, '▸', Act::Inc(field));
@@ -1188,6 +1558,58 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text on row y of a frame.
+    fn row(f: &Frame, y: i32) -> String {
+        (0..f.w as i32).map(|x| f.get_g(x, y).map(|g| g.ch).unwrap_or(' ')).collect()
+    }
+
+    #[test]
+    fn pointing_at_a_setting_says_what_it_does_and_its_bar_can_be_clicked() {
+        let mut cfg = Config::default();
+        let mut s = Settings { open: true, ..Default::default() };
+        let mut f = Frame::new(200, 50);
+        s.draw(&mut f, &cfg, 0.0);
+        let r = s.rect.unwrap();
+        // the Snowfall row: its label, then its bar
+        let y = (0..f.h as i32).find(|&y| row(&f, y).contains("Snowfall")).unwrap();
+        let lx = row(&f, y).find("Snowfall").unwrap() as i32;
+        s.hover = (lx + 2, y);
+        s.draw(&mut f, &cfg, 0.0);
+        assert!(row(&f, r.y + r.h - 3).contains("How much snow falls"), "{}", row(&f, r.y + r.h - 3));
+        // the end of its bar: all the way up
+        let end = s.regions.iter().filter_map(|(rr, a)| matches!(a, Act::Set(F::Snow, _)).then_some(*rr)).max_by_key(|rr| rr.x).unwrap();
+        let a = s.click(end.x, end.y).unwrap();
+        assert!(apply(&mut cfg, a));
+        assert_eq!(cfg.scene.snow, 3.0);
+        // and dragged off the start: none
+        s.slider_drag = Some(F::Snow);
+        let a = s.drag_slider(r.x, end.y).unwrap();
+        assert!(apply(&mut cfg, a));
+        assert_eq!(cfg.scene.snow, 0.0);
+    }
+
+    #[test]
+    fn friends_are_added_renamed_and_removed_through_their_fields() {
+        let mut cfg = Config::default();
+        let mut s = Settings::default();
+        s.begin_edit(&mut cfg, Field::NewFriend);
+        s.editing = Some("  Sam ".into());
+        s.begin_edit(&mut cfg, Field::NewFriend);
+        // (starting another field puts the first one in place)
+        s.begin_edit(&mut cfg, Field::City);
+        assert_eq!(cfg.scene.friends.len(), 1);
+        assert_eq!(cfg.scene.friends[0].name, "Sam");
+        s.cancel_edit();
+        assert!(apply(&mut cfg, Act::FriendKid(0)));
+        assert!(cfg.scene.friends[0].kid);
+        s.begin_edit(&mut cfg, Field::Friend(0));
+        assert_eq!(s.editing.as_deref(), Some("Sam"));
+        s.editing = Some(String::new());
+        s.commit(&mut cfg);
+        assert!(cfg.scene.friends.is_empty(), "cleared: off the list");
+        assert!(!apply(&mut cfg, Act::FriendRemove(0)));
+    }
 
     #[test]
     fn steppers_move_the_way_the_arrow_points_for_off_list_values() {

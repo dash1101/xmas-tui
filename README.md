@@ -204,7 +204,7 @@ always be found in Explorer or Dolphin.
 ## 🖱️ Interacting in detail
 **Walking around** (click the desktop first so it has keyboard focus)
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
-  The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the Scene tab.
+  The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the You tab.
 - **Parkour.** **W** at the back of the snowfield, up against a house, a tree, a lamp post, the station, the cocoa
   cabin, a present or the snowman, climbs it hand over hand. On top, **A** / **D** walk along it, up and down the
   slopes of a roof (a chimney or the steeple is a wall), and off the end drops back down into the snow. **Space**
@@ -253,7 +253,7 @@ always be found in Explorer or Dolphin.
     with a stick; a cat bats the yarn about, unravels it, or curls up round it. Left standing about a while, the pet
     naps. Out in the village a dog chases rabbits and foxes, a cat stalks them, a bunny hops along with rabbits, and
     pets meeting other people's pets have a happy bounce together. With a carrot or gingerbread in hand (**Q**), E
-    gives it a treat. Its kind, colour and name live in the Scene tab (and are remembered);
+    gives it a treat. Its kind, colour and name live in the You tab (and are remembered);
   - **the cocoa cabin:** opens its menu;
   - **presents, trees, lamps, houses, the station and the snowman:** the same as clicking them.
 - **F** invites the person in front to come along (animals need a berry). Companions follow the villager around.
@@ -265,7 +265,7 @@ always be found in Explorer or Dolphin.
   glow), gingerbread and candy canes (to give away), carrots (a deer or rabbit becomes a friend) and a lantern.
   **I** shows the pockets; **1**–**5** use what's in them. **Q** picks what's in hand (berries, or anything in the
   pockets; it shows at the bottom left): E then gives it to whoever's in front, or uses it with nobody there.
-- **People know the villager's name** once one is set (Scene tab → Your name): they say it when they see the
+- **People know the villager's name** once one is set (You tab → Your name): they say it when they see the
   villager again, and word gets round.
 - **Right-click** (or **press and hold** the left button for a moment, which works everywhere) shows what can be
   done with whatever's under the pointer, and the villager walks over to do it. On the Windows desktop, right-click
@@ -284,7 +284,7 @@ always be found in Explorer or Dolphin.
   giving a gift, landing snowballs, watching a light show, finding constellations, walking the village end to end,
   and waving down Santa's sleigh.
   Each pays cheer when it's done.
-- The villager can be turned off with **Villager (WASD)** in the Scene tab; **Walk speed** goes up to 6×.
+- The villager can be turned off with **Walk about (WASD)** in the You tab; **Walk speed** goes up to 6×.
 
 **Mouse**
 - **Drag any widget** to move it. Positions are saved, and can be locked or reset in settings.
@@ -521,28 +521,26 @@ stick around for a few minutes. They also interact:
 to drop them back in the snow; people get a little dizzy. A click without dragging is a pat or a friendly hello. Clicking
 a bush rustles it, and sometimes a cardinal flies out or a rabbit pops out.
 
-The Scene tab sets how many visitors come by ("Animals & people"), the most out at once, and turns the bushes on
+The Village tab sets how many visitors come by ("Animals & people"), the most out at once, and turns the bushes on
 or off.
 
 ## ⚙️ Settings
-<img src="docs/settings.png" align="right" width="360" alt="The settings panel, Scene tab: snowfall, wind, glow, surprises, visitors, sleigh and frame rate">
+<img src="docs/settings.png" align="right" width="360" alt="The settings panel, You tab: the villager, the pet, and friends &amp; family">
 
 The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
-window, which shows the live sound levels too) can be dragged anywhere by its title bar. It has six tabs:
-- **Scene:** snow, wind, glow, surprises, visitors and the **most out at once**, sleigh, walk speed, which side of the road traffic keeps to,
-  **time of day** (auto from the real sunrise and sunset, or night, dawn, morning, noon, afternoon, dusk), frame
-  rate, **speech bubbles** (how long they stay up; longer lines always stay longer), **chattiness** (how often people
-  stop to talk and remark on things), aurora, bushes, the villager and **their name**, and the villager's **pet**
-  (dog, cat, bunny or none, its colour and its name).
-- **Display:** clock, widgets (including the map, and the visualizer with its kHz labels), weather city and units,
-  widget layout, **resolution** (0.5× to 2× in 0.05 steps: more detail, with everything the same size; Ctrl
-  Shift +/-), **zoom** (1× to 3×, centred on
-  the villager; Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger
-  size, speech bubbles kept readable), **pop out** (the village in a window of its own, to play it like a game; the wallpaper
-  rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the keyboard, and **back
-  to wallpaper** returns it; F11 does both). In the kitty wallpaper a new resolution applies live; if kitty can't
-  change its font, a banner asks before restarting. Then updates and run at startup. A window also works from the
-  command line: `xmas-tui --windowed` and `xmas-tui --fullscreen`.
+window, which shows the live sound levels too) can be dragged anywhere by its title bar. Pointing at any setting
+shows what it does along the bottom of the panel. Sliders can be clicked or dragged anywhere along their bar, as
+well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
+- **Village:** snow, wind, glow, surprises, Santa's sleigh, **time of day** (auto from the real sunrise and sunset,
+  or night, dawn, morning, noon, afternoon, dusk), which side of the road traffic keeps to, aurora and berry bushes;
+  how many visitors come by and the **most out at once**; and *a new village* (laid out afresh).
+- **You:** the villager (on or off, **their name**, walk speed), **speech bubbles** (how long they stay up; longer
+  lines always stay longer) and **chattiness** (how often people stop to talk and remark on things), the
+  villager's **pet** (dog, cat, bunny or none, its colour and its name), and **friends & family**.
+- **Widgets:** the clock, each widget on or off and its **look**, the visualizer's kHz labels, the weather city and
+  units, and the widget layout.
+- **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
+  and *+ new shelf*.
 - **Sound:** master, music, effects and ambience volumes, music style, a per-layer ambience mix, and **Quiet while
   other media plays**. When on, the sound fades out as soon as a browser video or music player starts, and comes
   back a few seconds after it stops.
@@ -552,8 +550,23 @@ window, which shows the live sound levels too) can be dragged anywhere by its ti
   - **falling snow in front of windows** on/off (piles still grow when it's off), and cursor sweeping
   - snow on the taskbar, with its own pile height
   - light colours (multicolour, warm white, icy blue, candy cane), how many windows get lights, and brightness
-- **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
-  and *+ new shelf*.
+- **Desktop:** setting the village up as the wallpaper (Linux), run at startup, **resolution** (0.5× to 2× in 0.05
+  steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on the villager;
+  Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger size, speech
+  bubbles kept readable), the frame rate, **pop out** (the village in a window of its own, to play it like a game;
+  the wallpaper rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the
+  keyboard, and **back to wallpaper** returns it; F11 does both), the KDE lock screen, and updates. In the kitty
+  wallpaper a new resolution applies live; if kitty can't change its font, a banner asks before restarting. A
+  window also works from the command line: `xmas-tui --windowed` and `xmas-tui --fullscreen`.
+
+**Widget looks.** Like the shelves, every widget panel can have a look of its own: the **classic** panel, **frosted**
+(icy edges with snow piled along the top), a **wooden** frame (a snowy board for the title, a plank along the
+bottom) or a **gift box** (a gold ribbon all round and a bow on top). Pick one in the Widgets tab, or right-click a
+widget (*look: … ▸*), whose menu can also hide it or lock the widgets in place.
+
+**Friends & family.** Names added under You → Friends & family (up to ten, each a grown-up or a kid) turn up in
+the village: some of the folk who come by take those names, one of each at a time. They know the villager: they
+call out with a ♥ as they pass, and say hello like old friends.
 
 ## 🔁 Staying on
 It runs as a systemd user service (`xmas-tui.service`) that starts with the graphical session.

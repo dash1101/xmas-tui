@@ -421,38 +421,9 @@ impl App {
         self.scene.set_pockets(pockets);
     }
 
+    /// Put whatever's being typed in a settings field where it belongs.
     fn commit_city(&mut self) {
-        if let Some(i) = self.settings.editing_shelf.take() {
-            if let Some(text) = self.settings.editing.take() {
-                crate::widgets::shelf::rename(&mut self.cfg, i, &text);
-            }
-            return;
-        }
-        if self.settings.editing_name {
-            self.settings.editing_name = false;
-            if let Some(text) = self.settings.editing.take() {
-                self.cfg.scene.name = text.trim().chars().take(16).collect();
-            }
-            return;
-        }
-        if self.settings.editing_pet {
-            self.settings.editing_pet = false;
-            if let Some(text) = self.settings.editing.take() {
-                let name: String = text.trim().chars().take(16).collect();
-                if !name.is_empty() {
-                    self.cfg.scene.pet.name = name;
-                }
-            }
-            return;
-        }
-        if let Some(text) = self.settings.editing.take() {
-            let city = text.trim().to_string();
-            if city != self.cfg.weather.city {
-                self.cfg.weather.city = city;
-                self.cfg.weather.latitude = None;
-                self.cfg.weather.longitude = None;
-            }
-        }
+        self.settings.commit(&mut self.cfg);
     }
 
     pub fn mouse(&mut self, ev: MouseIn, x: i32, y: i32) {
@@ -476,6 +447,12 @@ impl App {
                 let m = self.menu.take().unwrap();
                 match m.hit(x, y).map(|i| m.items[i].1) {
                     Some(crate::ctxmenu::MenuAct::Settings) => self.settings.open = true,
+                    Some(crate::ctxmenu::MenuAct::Look(i)) => self.acts.push(Act::Look(i, 1)),
+                    Some(crate::ctxmenu::MenuAct::Hide(i)) => {
+                        let f = [settings::F::Clock, settings::F::System, settings::F::Music, settings::F::Weather, settings::F::Map, settings::F::Viz][(i as usize).min(5)];
+                        self.acts.push(Act::Toggle(f));
+                    }
+                    Some(crate::ctxmenu::MenuAct::LockWidgets) => self.acts.push(Act::Toggle(settings::F::Locked)),
                     Some(crate::ctxmenu::MenuAct::Scene(d)) => self.scene.act(d),
                     Some(crate::ctxmenu::MenuAct::Shelf(a)) => self.shelf_act(a),
                     Some(crate::ctxmenu::MenuAct::Desktop) => self.desktop_menu = true,
@@ -491,9 +468,15 @@ impl App {
                     self.settings.start_drag(x, y);
                 } else if self.settings.open && in_panel {
                     match self.settings.click(x, y) {
-                        Some(Act::EditCity) => self.acts.push(Act::EditCity),
-                        // clicking back into the shelf name being typed keeps it going
-                        Some(Act::ShelfName(i)) if self.settings.editing_shelf == Some(i as usize) && self.settings.editing.is_some() => {}
+                        // clicking into a text field (or back into the one
+                        // being typed in) doesn't put away what's typed
+                        Some(Act::Edit(w)) => self.acts.push(Act::Edit(w)),
+                        // along a slider: set it, and follow a drag
+                        Some(a @ Act::Set(f, _)) => {
+                            self.commit_city();
+                            self.settings.slider_drag = Some(f);
+                            self.acts.push(a);
+                        }
                         Some(a) => {
                             self.commit_city();
                             self.acts.push(a)
@@ -531,6 +514,11 @@ impl App {
                         // nobody to pick up here: an ordinary click on the scene
                         self.scene.click(wx, wy, t);
                     }
+                }
+            }
+            MouseIn::Drag if self.settings.slider_drag.is_some() => {
+                if let Some(a) = self.settings.drag_slider(x, y) {
+                    self.acts.push(a);
                 }
             }
             MouseIn::Drag => {
@@ -647,6 +635,7 @@ impl App {
                     (c.size, c.pos) = (w.size, w.pos);
                 }
             }
+            MouseIn::Up(Btn::Left) if self.settings.slider_drag.take().is_some() => {}
             MouseIn::Up(Btn::Left) => {
                 if let Some((4, ..)) = self.drag.filter(|_| (x, y) == self.press_at) {
                     // a click on the map (no drag): look over there
@@ -784,7 +773,7 @@ impl App {
                     buf.pop();
                 }
                 KeyIn::Enter => self.commit_city(),
-                KeyIn::Esc => self.settings.editing = None,
+                KeyIn::Esc => self.settings.cancel_edit(),
                 _ => {}
             }
         } else if self.settings.help && k == KeyIn::Esc {
@@ -828,7 +817,7 @@ impl App {
             "grab"
         } else if self.settings.open && self.settings.rect.map(|r| r.contains(hx, hy)).unwrap_or(false) {
             match self.settings.click(hx, hy) {
-                Some(Act::EditCity) if self.keyboard => "text",
+                Some(Act::Edit(_)) if self.keyboard => "text",
                 Some(_) => "pointer",
                 None => "default",
             }
@@ -933,10 +922,34 @@ impl App {
             items.push((format!("icons: {} ▸", if c.icons == "real" { "real" } else { "pixel art" }), MenuAct::Shelf(S::Icons(s))));
             items.push((if c.rolled { "unroll" } else { "roll up" }.into(), MenuAct::Shelf(S::Roll(s))));
             items.push(("remove the shelf (its files stay)".into(), MenuAct::Shelf(S::Remove(s))));
+            self.settings.tab = settings::TAB_SHELVES;
             if cfg!(windows) && !self.keyboard {
                 items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
             }
             self.menu = Some(CtxMenu::with(x, y, title, items, w, h));
+            return;
+        }
+        // a widget: its look, hiding it, its settings
+        if let Some(i) = self.widgets.hit(x, y).filter(|&i| i < crate::widgets::BUILTIN) {
+            let names = ["the clock", "system", "now playing", "weather", "map", "visualizer"];
+            let mut items: Vec<(String, MenuAct)> = vec![];
+            if let Some(look) = self.cfg.widgets.looks.get(i) {
+                let shown = match look {
+                    "frosted" => "frosted",
+                    "wood" => "wooden",
+                    "gift" => "gift box",
+                    _ => "classic",
+                };
+                items.push((format!("look: {shown} ▸"), MenuAct::Look(i as u8)));
+            }
+            items.push(("hide it".into(), MenuAct::Hide(i as u8)));
+            items.push((if self.cfg.layout.locked { "unlock the widgets" } else { "lock the widgets in place" }.into(), MenuAct::LockWidgets));
+            // ("settings…", at the bottom, opens on the Widgets tab)
+            self.settings.tab = settings::TAB_WIDGETS;
+            if cfg!(windows) && !self.keyboard {
+                items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
+            }
+            self.menu = Some(CtxMenu::with(x, y, names[i].to_string(), items, w, h));
             return;
         }
         let (wx, wy) = self.world_pt(x, y);
@@ -1231,34 +1244,6 @@ impl App {
                     self.commit_city();
                     self.settings.open = false;
                 }
-                Act::EditPetName => {
-                    if self.keyboard {
-                        if !self.settings.editing_pet || self.settings.editing.is_none() {
-                            self.commit_city();
-                            self.settings.editing_pet = true;
-                            self.settings.editing = Some(self.cfg.scene.pet.name.clone());
-                        }
-                    } else {
-                        if !self.sync.path().exists() {
-                            self.sync.save_now(&self.cfg);
-                        }
-                        platform::open_in_editor(self.sync.path());
-                    }
-                }
-                Act::ShelfName(i) => {
-                    if self.keyboard {
-                        if self.settings.editing_shelf != Some(i as usize) || self.settings.editing.is_none() {
-                            self.commit_city();
-                            self.settings.editing_shelf = Some(i as usize);
-                            self.settings.editing = self.cfg.shelves.get(i as usize).map(|c| c.name.clone());
-                        }
-                    } else {
-                        if !self.sync.path().exists() {
-                            self.sync.save_now(&self.cfg);
-                        }
-                        platform::open_in_editor(self.sync.path());
-                    }
-                }
                 Act::ShelfOpen(i) => {
                     if let Some(c) = self.cfg.shelves.get(i as usize) {
                         open_detached(crate::widgets::shelf::folder_of(c));
@@ -1266,31 +1251,12 @@ impl App {
                 }
                 Act::ShelfFolder(i) => self.pick_folder(Pick::Change(i as usize)),
                 Act::ShelfNewFrom => self.pick_folder(Pick::New(self.w as i32 / 3, self.h as i32 / 3)),
-                Act::EditName => {
+                Act::Edit(w) => {
                     if self.keyboard {
-                        if !self.settings.editing_name || self.settings.editing.is_none() {
-                            self.commit_city();
-                            self.settings.editing_name = true;
-                            self.settings.editing = Some(self.cfg.scene.name.clone());
-                        }
-                    } else {
-                        if !self.sync.path().exists() {
-                            self.sync.save_now(&self.cfg);
-                        }
-                        platform::open_in_editor(self.sync.path());
-                    }
-                }
-                Act::EditCity => {
-                    if self.settings.editing_pet || self.settings.editing_name || self.settings.editing_shelf.is_some() {
-                        self.commit_city();
-                    }
-                    if self.keyboard {
-                        // clicking back into the field while typing keeps the text
-                        if self.settings.editing.is_none() {
-                            self.settings.editing = Some(self.cfg.weather.city.clone());
-                        }
+                        self.settings.begin_edit(&mut self.cfg, w);
                     } else {
                         // no keyboard behind the desktop icons: edit the file instead
+                        self.commit_city();
                         if !self.sync.path().exists() {
                             self.sync.save_now(&self.cfg);
                         }
@@ -1322,7 +1288,7 @@ impl App {
                     // show how it's going (in the Desktop tab)
                     self.settings.wall_offer = false;
                     self.settings.open = true;
-                    self.settings.tab = 6;
+                    self.settings.tab = settings::TAB_DESKTOP;
                     #[cfg(target_os = "linux")]
                     crate::linwall::start_wallpaper();
                 }
@@ -1434,6 +1400,7 @@ impl App {
         crate::scene::events::set_talk(self.cfg.scene.talk_time, self.cfg.scene.chattiness);
         self.scene.set_pet(&self.cfg.scene.pet);
         self.scene.set_name(&self.cfg.scene.name);
+        self.scene.set_friends(&self.cfg.scene.friends);
         if let Some((sc, at)) = self.scale_pending {
             if t - at > 0.6 {
                 self.scale_pending = None;
@@ -1535,6 +1502,38 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_widget_has_its_own_menu_with_its_look() {
+        let dir = std::env::temp_dir().join(format!("xmas-widget-menu-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.scene.critters = 0.0;
+        cfg.sound.enabled = false;
+        (cfg.widgets.music, cfg.widgets.weather, cfg.widgets.map, cfg.clock.enabled) = (false, false, false, false);
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.step();
+        let r = app.widgets.rects[1].expect("the system widget");
+        assert!(app.right_click(r.x + 3, r.y + 2));
+        let m = app.menu.as_ref().expect("a menu");
+        assert_eq!(m.title, "system");
+        assert!(m.items[0].0.starts_with("look: classic"), "{:?}", m.items.iter().map(|i| &i.0).collect::<Vec<_>>());
+        let (mx, my) = (m.x + 2, m.y + 1);
+        app.mouse(MouseIn::Down(Btn::Left), mx, my);
+        app.mouse(MouseIn::Up(Btn::Left), mx, my);
+        app.step();
+        assert_eq!(app.cfg.widgets.looks.system, "frosted");
+        // its "settings…" opens on the Widgets tab
+        assert!(app.right_click(r.x + 3, r.y + 2));
+        let m = app.menu.as_ref().unwrap();
+        let (mx, my) = (m.x + 2, m.y + m.items.len() as i32);
+        assert_eq!(m.items.last().unwrap().0, "settings…");
+        app.mouse(MouseIn::Down(Btn::Left), mx, my);
+        app.mouse(MouseIn::Up(Btn::Left), mx, my);
+        assert!(app.settings.open && app.settings.tab == settings::TAB_WIDGETS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Press on a character, drag them up into the sky and let go: the
     /// app routes it to the scene (not to a scene click or a widget drag),
@@ -1811,6 +1810,7 @@ mod tests {
         assert!((app.scene.player_x().unwrap() - x5).abs() < 0.01, "kept walking after both released");
         let x3 = x5;
         // typing the city in settings never moves anyone
+        app.settings.edit = Some(settings::Field::City);
         app.settings.editing = Some(String::new());
         app.key(KeyIn::Char('a'));
         pause(&mut app, 300);

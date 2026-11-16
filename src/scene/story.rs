@@ -454,6 +454,28 @@ pub fn temper_of(id: u64, kid: bool) -> Temper {
 /// A hello with the villager's name in it (when they've picked one): on a
 /// first meeting, now and then word has got round; after that, people
 /// greet them by name.
+/// A friend's (or family member's) first words: they know the villager.
+pub fn friend_hello(you: &str, me: &str, kid: bool, roll: u32) -> String {
+    let lines: &[&str] = match (kid, you.is_empty()) {
+        (false, false) => &["{you}! so good to see you", "{you}! I was hoping I'd bump into you", "there you are, {you}! isn't the village lovely?", "{you}! it's me, {me}. fancy meeting you here"],
+        (true, false) => &["{you}!! it's me, {me}!", "{you}! come and play!", "{you}!! I came to see the big tree!", "{you}! guess what? it's nearly Christmas!"],
+        (false, true) => &["there you are! so good to see you", "oh, it's you! hello, old friend", "it's me, {me}! I was hoping I'd see you"],
+        (true, true) => &["it's me, {me}! come and play!", "hi!! I came to see the big tree!", "it's you!! hi!!"],
+    };
+    lines[roll as usize % lines.len()].replace("{you}", you).replace("{me}", me)
+}
+
+/// A friend calling out as they come by.
+pub fn friend_call(you: &str, kid: bool, roll: u32) -> String {
+    let lines: &[&str] = match (kid, you.is_empty()) {
+        (false, false) => &["{you}! hello!", "{you}! over here!", "oh, {you}! merry Christmas!"],
+        (true, false) => &["{you}!! hi!!", "{you}! {you}! over here!", "hi {you}!!"],
+        (false, true) => &["hello, you! over here!", "oh, it's you! merry Christmas!"],
+        (true, true) => &["hi!! over here!", "it's you!! hi!!"],
+    };
+    lines[roll as usize % lines.len()].replace("{you}", you)
+}
+
 pub fn by_name(line: &str, you: &str, first: bool, kid: bool, roll: u32) -> String {
     if you.is_empty() {
         return line.to_string();

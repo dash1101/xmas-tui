@@ -25,6 +25,14 @@ talk_time = 1.0       # how long speech bubbles stay up (0.5..3; longer lines al
 chattiness = 1.0      # how often people stop to talk and remark on things (0 = quiet .. 2)
 name = ""             # the villager's name (people use it); empty: "neighbour"
 
+# friends & family: some of the folk who come by take these names (one of each
+# at a time) and know the villager. Up to ten; kid = true comes as a kid.
+# [[scene.friends]]
+# name = "Sam"
+# [[scene.friends]]
+# name = "Bea"
+# kid = true
+
 [scene.pet]           # the villager's own pet (named in the village, or here)
 kind = "dog"          # "dog", "cat", "bunny" or "none"
 coat = "golden"       # dog: golden chocolate black snowy spotty grey red
@@ -46,6 +54,13 @@ map = true            # a strip map of the whole village
 visualizer = false    # bars dancing to whatever's playing (listens to the default audio output)
 visualizer_khz = false # each bar's frequency in kHz under it
 disk = "/"            # mount point shown in the DISK row
+
+[widgets.looks]       # each widget's look: "classic", "frosted", "wood" or "gift"
+system = "classic"
+music = "classic"
+weather = "classic"
+map = "classic"
+visualizer = "classic"
 
 [weather]
 city = ""             # e.g. "Oslo" or "Denver, CO" — looked up via Open-Meteo (no API key)

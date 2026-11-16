@@ -12,6 +12,10 @@ pub enum MenuAct {
     /// Windows desktop: show Windows' own desktop menu instead.
     Desktop,
     Settings,
+    /// Widget i: its next look; hide it; (un)lock the widgets.
+    Look(u8),
+    Hide(u8),
+    LockWidgets,
 }
 
 pub struct CtxMenu {

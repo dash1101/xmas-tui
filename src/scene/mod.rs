@@ -168,6 +168,10 @@ pub struct Scene {
     pet_change: Option<crate::config::PetCfg>,
     /// The villager's name (empty: "neighbour").
     you_name: String,
+    /// The friends & family list as last set, and the friends in the
+    /// village who've already called out to the villager.
+    friends: Vec<crate::config::FriendCfg>,
+    friend_hi: Vec<u64>,
     /// The animal the villager's pet is after.
     pet_chasing: Option<u64>,
     /// Drawing for a zoomed view: people are left for `draw_people`.
@@ -535,6 +539,7 @@ impl Scene {
         avoid.extend(village.snowmen.iter().map(|s| (s.cx - 9, s.cx + 9)));
         avoid.extend(village.lamps.iter().map(|l| (l.x - 1, l.x + 2)));
         let mut critters = critters::Critters::new(&ctx, seed, cfg.critters, cfg.bushes, &avoid);
+        critters.set_friends(&cfg.friends);
         critters.k = sprite_k(h);
         critters.set_max(cfg.most_at_once as usize);
         // the player starts out a little left of the big tree, in the snow
@@ -616,6 +621,8 @@ impl Scene {
             pet_cfg: cfg.pet.clone(),
             pet_change: None,
             you_name: cfg.name.clone(),
+            friends: cfg.friends.clone(),
+            friend_hi: vec![],
             pet_chasing: None,
             zoomed: std::cell::Cell::new(false),
             held: None,
@@ -1301,12 +1308,30 @@ impl Scene {
         let visits = self.talks.get(&id).copied().unwrap_or(0);
         *self.talks.entry(id).or_insert(0) += 1;
         let mut c = story::Convo::open(id, &name, kid, visits, &ctx, &mut self.story_talk, cx, self.rng.next_u32(), aware);
-        c.line = story::by_name(&c.line, &self.you_name, visits == 0, kid, self.rng.next_u32());
+        let friend = self.critters.is_friend(id);
+        c.line = if friend && visits == 0 {
+            // friends and family know the villager already
+            story::friend_hello(&self.you_name, &name, kid, self.rng.next_u32())
+        } else {
+            story::by_name(&c.line, &self.you_name, visits == 0, kid, self.rng.next_u32())
+        };
         c.pos = self.convo_pos;
         self.director.say(cx.round() as i32, cy as i32 - 4, &c.line, t, 3.0, 40);
+        if friend && visits == 0 {
+            self.director.emote(cx, cy - 5.0, '♥', Rgb::hex(0xff7a9a), 2);
+        }
         if let Some(p) = &self.player {
             let intro = format!("hello! I'm {}", self.you_name);
-            let hi = if first && !self.you_name.is_empty() { intro.as_str() } else if first { "hello there!" } else { "hi again!" };
+            let friendly = format!("{name}!");
+            let hi = if friend && first {
+                friendly.as_str()
+            } else if first && !self.you_name.is_empty() {
+                intro.as_str()
+            } else if first {
+                "hello there!"
+            } else {
+                "hi again!"
+            };
             self.director.say(p.centre().round() as i32, p.y as i32 - 4, hi, t - 0.01, 1.2, 0);
         }
         self.critters.hold_talk(id, px, t);
@@ -1952,6 +1977,15 @@ impl Scene {
     }
 
     /// The villager's name (empty: "neighbour"), for what people call them.
+    /// The friends & family list (Settings → You): some newcomers take
+    /// these names.
+    pub fn set_friends(&mut self, list: &[crate::config::FriendCfg]) {
+        if self.friends != list {
+            self.friends = list.to_vec();
+            self.critters.set_friends(list);
+        }
+    }
+
     pub fn set_name(&mut self, name: &str) {
         if self.you_name != name {
             self.you_name = name.to_string();
@@ -3197,6 +3231,21 @@ impl Scene {
                     self.pet_chasing = None;
                 }
             }
+        }
+        // friends and family call out to the villager as they come by
+        if self.inside.is_none() && self.convo.is_none() && (t * 2.0).fract() < dt * 2.0 {
+            if let Some((px, py)) = self.player.as_ref().map(|p| (p.centre(), p.y)) {
+                let near = self.critters.friends_about().into_iter().find(|f| !self.friend_hi.contains(&f.0) && (f.2 - px).abs() < 14.0);
+                if let Some((id, name, fx, fy, kid)) = near {
+                    self.friend_hi.push(id);
+                    let line = story::friend_call(&self.you_name, kid, self.rng.next_u32());
+                    self.director.say(fx.round() as i32, fy as i32 - 4, &line, t, 2.8, 40);
+                    self.director.emote(fx, fy - 5.0, '♥', Rgb::hex(0xff7a9a), 2);
+                    self.director.sound(Sfx::Greet, fx, 0.6);
+                    self.director.say(px.round() as i32, py as i32 - 4, &format!("{name}!"), t + 1.6, 1.8, 0);
+                }
+            }
+            self.friend_hi.retain(|id| self.critters.position(*id).is_some());
         }
         // the pet keeps up (or pootles about at home)
         // the villager holds the pet while it's cuddled

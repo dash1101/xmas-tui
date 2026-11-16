@@ -353,6 +353,18 @@ pub struct SceneCfg {
     pub pet: PetCfg,
     /// The villager's name (empty: people call them "neighbour").
     pub name: String,
+    /// Friends and family: some of the folk who come to the village take
+    /// these names (and know the villager).
+    pub friends: Vec<FriendCfg>,
+}
+
+/// Someone in the friends & family list.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct FriendCfg {
+    pub name: String,
+    /// Comes to the village as a kid.
+    pub kid: bool,
 }
 
 /// The villager's pet: what it is, its colour and its name (empty: not
@@ -395,6 +407,50 @@ pub struct WidgetCfg {
     pub visualizer_khz: bool,
     /// Mount point shown in the disk row.
     pub disk: String,
+    /// Each widget's look: "classic", "frosted", "wood" or "gift".
+    pub looks: WidgetLooks,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct WidgetLooks {
+    pub system: String,
+    pub music: String,
+    pub weather: String,
+    pub map: String,
+    pub visualizer: String,
+}
+
+impl Default for WidgetLooks {
+    fn default() -> Self {
+        let c = || "classic".to_string();
+        WidgetLooks { system: c(), music: c(), weather: c(), map: c(), visualizer: c() }
+    }
+}
+
+impl WidgetLooks {
+    /// Widget `i`'s look (the clock and the shelves have their own).
+    pub fn get(&self, i: usize) -> Option<&str> {
+        Some(match i {
+            1 => &self.system,
+            2 => &self.music,
+            3 => &self.weather,
+            4 => &self.map,
+            5 => &self.visualizer,
+            _ => return None,
+        })
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut String> {
+        Some(match i {
+            1 => &mut self.system,
+            2 => &mut self.music,
+            3 => &mut self.weather,
+            4 => &mut self.map,
+            5 => &mut self.visualizer,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -431,7 +487,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
     }
 }
 
@@ -443,7 +499,7 @@ impl Default for ClockCfg {
 
 impl Default for WidgetCfg {
     fn default() -> Self {
-        WidgetCfg { system: true, music: true, weather: true, map: true, visualizer: false, visualizer_khz: false, disk: "/".into() }
+        WidgetCfg { system: true, music: true, weather: true, map: true, visualizer: false, visualizer_khz: false, disk: "/".into(), looks: WidgetLooks::default() }
     }
 }
 

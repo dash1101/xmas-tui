@@ -5,6 +5,7 @@
 
 pub mod art;
 pub mod data;
+pub mod looks;
 pub mod shelf;
 pub mod viz;
 #[cfg(windows)]
@@ -498,6 +499,10 @@ impl Widgets {
                     draw_viz(f, r, &self.bars, live, &status, quiet, self.cfg.widgets.visualizer_khz, t);
                 }
             }
+            // its look: frosted, wooden, a gift box (or the classic panel)
+            if let Some(look) = self.cfg.widgets.looks.get(i) {
+                looks::apply(f, r, look, if i == 4 { MAP_BG } else { PANEL }, i as u32 * 7919 + 3);
+            }
             let active = self.dragging == Some(i) || (self.dragging.is_none() && self.hover == Some(i));
             if active && !self.cfg.layout.locked {
                 draw_handles(f, r, self.dragging == Some(i), t);
@@ -585,8 +590,10 @@ impl Widgets {
 /// The village map: mountains along the top, houses and trees along the
 /// bottom, a highlight for what's on screen, the villager (●) and where they
 /// started (⚑). The ◢ corner resizes it.
+const MAP_BG: Bg = Bg::Mix(pal::UI_PANEL, 0.78);
+
 fn draw_map(f: &mut Frame, r: Rect, m: &crate::scene::MiniMap, t: f32) {
-    let bg = Bg::Mix(pal::UI_PANEL, 0.78);
+    let bg = MAP_BG;
     let border = pal::UI_BORDER * 0.8;
     let (iw, ih) = ((r.w - 2).max(2), (r.h - 2).max(1));
     let col = |x: f32| r.x + 1 + ((x / m.ww).clamp(0.0, 1.0) * (iw - 1) as f32).round() as i32;

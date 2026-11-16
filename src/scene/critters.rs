@@ -69,6 +69,8 @@ struct Critter {
     /// People have names; `met`: has said hello to the player; `chat`: a
     /// chat with the player in progress (topic, next step).
     name: &'static str,
+    /// One of the villager's friends or family (by name).
+    friend: bool,
     met: bool,
     chat: Option<(usize, usize)>,
     /// A pet out for a walk with them.
@@ -258,6 +260,8 @@ pub struct Critters {
     startle_cd: f32,
     /// What people talk about: what's going on, and what's been said.
     talk: Talk,
+    /// The villager's friends and family (name, comes as a kid).
+    friends: Vec<(&'static str, bool)>,
     tctx: TalkCtx,
     /// Conversations under way, for passers-by to chime in on:
     /// (participants, centre column, row, until, joined yet).
@@ -330,6 +334,7 @@ impl Critters {
             trim: false,
             startle_cd: 0.0,
             talk: Talk::new(seed),
+            friends: vec![],
             tctx: TalkCtx::default(),
             convs: vec![],
             react_cd: 0.0,
@@ -482,6 +487,20 @@ impl Critters {
         };
         let id = self.next_id;
         self.next_id += 1;
+        // people have names: now and then one of the villager's friends
+        // or family (one of each at a time), else a village name
+        let (name, friend) = match kind {
+            Kind::Walker | Kind::Kid => {
+                let kid = kind == Kind::Kid;
+                let free: Vec<&'static str> = self.friends.iter().filter(|f| f.1 == kid && !self.list.iter().any(|c| c.friend && c.name == f.0)).map(|f| f.0).collect();
+                if !free.is_empty() && self.rng.chance(0.4) {
+                    (*self.rng.pick(&free), true)
+                } else {
+                    (dialogue::name(&mut self.rng, kid), false)
+                }
+            }
+            _ => ("", false),
+        };
         self.list.push(Critter {
             id,
             kind,
@@ -499,7 +518,8 @@ impl Critters {
             group: 0,
             gap: 0.0,
             dodge: 0.0,
-            name: if matches!(kind, Kind::Walker | Kind::Kid) { dialogue::name(&mut self.rng, kind == Kind::Kid) } else { "" },
+            name,
+            friend,
             met: false,
             chat: None,
             pet: None,
@@ -1617,6 +1637,22 @@ impl Critters {
         }
     }
 
+    /// The villager's friends and family (name, kid): some newcomers take
+    /// these names.
+    pub fn set_friends(&mut self, list: &[crate::config::FriendCfg]) {
+        self.friends = list.iter().filter(|f| !f.name.trim().is_empty()).map(|f| (leak_name(f.name.trim()), f.kid)).collect();
+    }
+
+    /// One of the villager's friends or family?
+    pub fn is_friend(&self, id: u64) -> bool {
+        self.list.iter().any(|c| c.id == id && c.friend)
+    }
+
+    /// Friends in the village: (id, name, x, y, kid).
+    pub fn friends_about(&self) -> Vec<(u64, &'static str, f32, f32, bool)> {
+        self.list.iter().filter(|c| c.friend && c.free()).map(|c| (c.id, c.name, c.centre(), c.y, c.kind == Kind::Kid)).collect()
+    }
+
     pub fn is_kid(&self, id: u64) -> bool {
         self.list.iter().any(|c| c.id == id && c.kind == Kind::Kid)
     }
@@ -2452,9 +2488,42 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
     }
 }
 
+/// A name from the friends list, kept for the rest of the run (people's
+/// names are `&'static str`; the list is short and rarely changes).
+fn leak_name(s: &str) -> &'static str {
+    static KEPT: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = kept.iter().find(|k| **k == s) {
+        return k;
+    }
+    let k: &'static str = Box::leak(s.to_string().into_boxed_str());
+    kept.push(k);
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friends_and_family_come_by_one_of_each_at_a_time() {
+        let (w, h) = (300, 40);
+        let ctx = Ctx { w, h, ground_row: vec![24; w as usize], track_row: 20, occluded: vec![false; (w * h) as usize], church: None, sky_rows: 10, station: None, cam: 0.0, vw: w };
+        let mut c = Critters::new(&ctx, 5, 0.0, false, &[]);
+        c.set_max(100);
+        c.set_friends(&[crate::config::FriendCfg { name: "Sam".into(), kid: false }, crate::config::FriendCfg { name: "Bea".into(), kid: true }, crate::config::FriendCfg { name: " ".into(), kid: false }]);
+        for k in 0..40 {
+            c.spawn_demo(Kind::Walker, 10.0 + k as f32 * 6.0, 0.0);
+            c.spawn_demo(Kind::Kid, 12.0 + k as f32 * 6.0, 0.0);
+        }
+        let named = |n: &str| c.list.iter().filter(|x| x.name == n).count();
+        assert_eq!(named("Sam"), 1, "Sam, once");
+        assert_eq!(named("Bea"), 1, "Bea, once");
+        let sam = c.list.iter().find(|x| x.name == "Sam").unwrap();
+        assert!(sam.kind == Kind::Walker && c.is_friend(sam.id), "a grown-up, and a friend");
+        assert!(c.list.iter().find(|x| x.name == "Bea").unwrap().kind == Kind::Kid);
+        assert_eq!(c.friends_about().len(), 2);
+    }
 
     fn world() -> (Ctx, Director, Lines) {
         let (w, h) = (200, 40);

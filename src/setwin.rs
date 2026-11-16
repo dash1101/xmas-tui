@@ -134,28 +134,19 @@ impl Panel {
     }
 
     fn commit_city(&mut self) {
-        if let Some(i) = self.settings.editing_shelf.take() {
-            if let Some(text) = self.settings.editing.take() {
-                crate::widgets::shelf::rename(&mut self.cfg, i, &text);
-            }
-            return;
-        }
-        if let Some(text) = self.settings.editing.take() {
-            let city = text.trim().to_string();
-            if city != self.cfg.weather.city {
-                self.cfg.weather.city = city;
-                self.cfg.weather.latitude = None;
-                self.cfg.weather.longitude = None;
-            }
-        }
+        self.settings.commit(&mut self.cfg);
     }
 
     pub fn mouse(&mut self, ev: MouseIn, x: i32, y: i32) {
         self.settings.hover = (x, y);
         match ev {
             MouseIn::Down(Btn::Left) => match self.settings.click(x, y) {
-                Some(Act::EditCity) => self.acts.push(Act::EditCity),
-                Some(Act::ShelfName(i)) if self.settings.editing_shelf == Some(i as usize) => {}
+                Some(Act::Edit(w)) => self.acts.push(Act::Edit(w)),
+                Some(a @ Act::Set(f, _)) => {
+                    self.commit_city();
+                    self.settings.slider_drag = Some(f);
+                    self.acts.push(a);
+                }
                 Some(a) => {
                     self.commit_city();
                     self.acts.push(a);
@@ -167,6 +158,12 @@ impl Panel {
                     self.acts.push(a);
                 }
             }
+            MouseIn::Drag => {
+                if let Some(a) = self.settings.drag_slider(x, y) {
+                    self.acts.push(a);
+                }
+            }
+            MouseIn::Up(Btn::Left) => self.settings.slider_drag = None,
             _ => {}
         }
     }
@@ -179,7 +176,7 @@ impl Panel {
                     buf.pop();
                 }
                 KeyIn::Enter => self.commit_city(),
-                KeyIn::Esc => self.settings.editing = None,
+                KeyIn::Esc => self.settings.cancel_edit(),
                 _ => {}
             }
         } else if k == KeyIn::Esc {
@@ -190,7 +187,7 @@ impl Panel {
     pub fn pointer(&self) -> &'static str {
         let (hx, hy) = self.settings.hover;
         match self.settings.click(hx, hy) {
-            Some(Act::EditCity) => "text",
+            Some(Act::Edit(_)) => "text",
             Some(_) => "pointer",
             None => "default",
         }
@@ -238,7 +235,7 @@ impl Panel {
         }
         // the Sound and Effects tabs' live meters come from the running wallpaper: keep
         // telling it they're wanted, and read what it shares
-        if matches!(self.settings.tab, 2 | 3) {
+        if matches!(self.settings.tab, crate::settings::TAB_SOUND | crate::settings::TAB_EFFECTS) {
             if t - self.meters_asked > 1.0 {
                 self.meters_asked = t;
                 let _ = std::fs::write(crate::platform::meters_want_path(), b"1");
@@ -256,16 +253,7 @@ impl Panel {
                     self.commit_city();
                     self.close = true;
                 }
-                Act::EditCity => {
-                    // clicking back into the field while typing keeps the text
-                    if self.settings.editing.is_none() {
-                        self.settings.editing = Some(self.cfg.weather.city.clone());
-                    }
-                }
-                Act::ShelfName(i) => {
-                    self.settings.editing_shelf = Some(i as usize);
-                    self.settings.editing = self.cfg.shelves.get(i as usize).map(|c| c.name.clone());
-                }
+                Act::Edit(w) => self.settings.begin_edit(&mut self.cfg, w),
                 Act::ShelfFolder(i) => self.pick_folder(Some(i as usize)),
                 Act::ShelfNewFrom => self.pick_folder(None),
                 Act::ShelfOpen(i) => {
@@ -289,7 +277,7 @@ impl Panel {
                 Act::InstallUpdate => crate::update::request("install"),
                 Act::DismissUpdate => crate::update::request("dismiss"),
                 Act::SetWallpaper => {
-                    self.settings.tab = 6;
+                    self.settings.tab = crate::settings::TAB_DESKTOP;
                     #[cfg(target_os = "linux")]
                     crate::linwall::start_wallpaper();
                 }
@@ -782,8 +770,21 @@ mod tests {
         p.mouse(MouseIn::Down(Btn::Left), x, y);
         p.step(0.1, 0.03);
         assert_eq!(config::load(Some(&path.to_string_lossy())).scene.snow, 1.25);
-        // the city field lives on the Display tab
-        let (x, y) = find(&p, "Display");
+        // the villager's name, on the You tab (this window takes typing too)
+        let (x, y) = find(&p, "You ");
+        p.mouse(MouseIn::Down(Btn::Left), x, y);
+        p.step(0.12, 0.03);
+        let (x, y) = find(&p, "(click to set)");
+        p.mouse(MouseIn::Down(Btn::Left), x, y);
+        p.step(0.13, 0.03);
+        for c in "Parker".chars() {
+            p.key(KeyIn::Char(c));
+        }
+        p.key(KeyIn::Enter);
+        p.step(0.14, 0.03);
+        assert_eq!(config::load(Some(&path.to_string_lossy())).scene.name, "Parker");
+        // the city field lives on the Widgets tab
+        let (x, y) = find(&p, "Widgets");
         p.mouse(MouseIn::Down(Btn::Left), x, y);
         p.step(0.15, 0.03);
         // click the city field, type, Enter
