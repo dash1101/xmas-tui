@@ -1,6 +1,6 @@
 [package]
 name = "xmas-tui"
-version = "1.10.0"
+version = "1.11.0"
 edition = "2021"
 description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
 license = "MIT"
@@ -42,8 +42,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
     "Win32_System_StationsAndDesktops",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
