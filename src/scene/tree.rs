@@ -490,6 +490,11 @@ impl Present {
         self.base
     }
 
+    /// (x, top, w, base): the box and the bow over it.
+    pub fn bounds(&self) -> (i32, i32, i32, i32) {
+        (self.x, self.base - self.h, self.w, self.base)
+    }
+
     pub fn top_center(&self) -> (i32, i32) {
         (self.x + self.w / 2, self.base - self.h)
     }

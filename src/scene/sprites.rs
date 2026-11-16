@@ -164,6 +164,10 @@ pub enum Pose {
     Pet,
     /// Arms round something held in front (a cuddle).
     Hold,
+    /// Climbing: one hand reaching up, the other knee raised (two holds).
+    Climb(u8),
+    /// In the air: knees tucked, arms out.
+    Jump,
 }
 
 /// How a person looks.
@@ -224,13 +228,22 @@ fn draw_person(l: &Look, pose: Pose) -> Canvas {
         Pose::Walk(0) => (2, -2),
         Pose::Walk(_) => (-1, 1),
         Pose::Scoop => (2, -1),
+        Pose::Climb(_) => (2, 0),
+        Pose::Jump => (2, -2),
         _ => (1, -1),
     };
-    for (dx, col, b) in [(back_dx, pants * 0.75, boot * 0.75), (front_dx, pants, boot)] {
+    // a boot drawn up off the bottom row (a knee raised to climb, or tucked)
+    let (front_up, back_up) = match pose {
+        Pose::Climb(0) => (3, 0),
+        Pose::Climb(_) => (0, 3),
+        Pose::Jump => (2, 2),
+        _ => (0, 0),
+    };
+    for (dx, col, b, up) in [(back_dx, pants * 0.75, boot * 0.75, back_up), (front_dx, pants, boot, front_up)] {
         let x = (cx - 1.0) as i32 + dx.signum() * dx.abs().min(1);
-        c.line(cx - 1.0 + (dx as f32) * 0.25, hip_y as f32, x as f32 + (dx as f32) * 0.5, (boots_y - 1) as f32, 2, col);
+        c.line(cx - 1.0 + (dx as f32) * 0.25, hip_y as f32, x as f32 + (dx as f32) * 0.5, (boots_y - 1 - up) as f32, 2, col);
         let bx = x + dx / 2;
-        c.rect(bx, boots_y, 3, 2, b);
+        c.rect(bx, boots_y - up, 3, 2, b);
     }
     // the coat: a body, a little wider at the hem, buttons down the front
     let top = shoulder_y;
@@ -290,6 +303,9 @@ fn draw_person(l: &Look, pose: Pose) -> Canvas {
         Pose::Throw => ((cx - 2.6, rest), (cx - 2.4, head_cy - 2.0)),
         Pose::Pet => ((cx - 1.6, rest), (cx + 6.0, boots_y as f32 - 1.0)),
         Pose::Hold => ((cx + 3.4, sh + 2.6), (cx + 4.2, sh + 1.8)),
+        Pose::Climb(0) => ((cx + 2.2, head_cy - 3.2), (cx + 3.4, sh + 1.4)),
+        Pose::Climb(_) => ((cx + 2.0, sh + 1.4), (cx + 3.6, head_cy - 3.4)),
+        Pose::Jump => ((cx - 4.2, head_cy - 1.2), (cx + 4.4, head_cy - 2.2)),
     };
     let shoulder_back = (cx - 1.8 + lean, sh);
     let shoulder_front = (cx + 1.2 + lean, sh);
@@ -592,7 +608,7 @@ pub fn sheet(path: &std::path::Path) -> std::io::Result<()> {
     let adult = Look { kid: false, coat: Rgb::hex(0xd8a040), hat: Some(Rgb::hex(0x2fae5c)), hair: Rgb::hex(0x3a2a1a), scarf: Some(Rgb::hex(0xc8323c)), skin: Rgb::hex(0xe8c39e), mittens: Rgb::hex(0xc8323c), holding: None, lantern: false };
     let walker = Look { coat: Rgb::hex(0x2a4c8a), hat: Some(Rgb::hex(0xe8323c)), scarf: None, lantern: true, mittens: Rgb::hex(0x6a4a2a), ..adult };
     let kid = Look { kid: true, coat: Rgb::hex(0x6a3a8a), hat: Some(Rgb::hex(0xffc23a)), scarf: Some(Rgb::hex(0x2fae5c)), ..adult };
-    let poses = [Pose::Stand, Pose::Walk(0), Pose::Walk(1), Pose::Wave, Pose::ArmsUp, Pose::Scoop, Pose::Throw, Pose::Pet, Pose::Hold];
+    let poses = [Pose::Stand, Pose::Walk(0), Pose::Walk(1), Pose::Wave, Pose::ArmsUp, Pose::Scoop, Pose::Throw, Pose::Pet, Pose::Hold, Pose::Climb(0), Pose::Climb(1), Pose::Jump];
     let mut rows: Vec<Vec<Arc<Picture>>> = vec![];
     for l in [&adult, &walker, &kid] {
         rows.push(poses.iter().map(|&p| person(l, p, 1.0, 1.0)).collect());

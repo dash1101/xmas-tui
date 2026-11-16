@@ -135,6 +135,21 @@ impl House {
         self.mask.contains(&(x, y))
     }
 
+    /// The top edge of the silhouette in each column, in rows (a roof
+    /// whose top cell is only half painted tops out half a row lower).
+    pub fn tops(&self) -> std::collections::BTreeMap<i32, f32> {
+        let mut px = std::collections::BTreeMap::<i32, i32>::new();
+        self.paint(&mut |x, y, _| {
+            let t = px.entry(x).or_insert(y);
+            *t = (*t).min(y);
+        });
+        if let Some((cx, cy)) = self.steeple() {
+            let t = px.entry(cx).or_insert(cy * 2);
+            *t = (*t).min(cy * 2);
+        }
+        px.into_iter().map(|(x, y)| (x, y as f32 / 2.0)).collect()
+    }
+
     /// Every cell of the silhouette (see `contains`).
     pub fn cells(&self) -> impl Iterator<Item = &(i32, i32)> {
         self.mask.iter()

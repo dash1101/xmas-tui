@@ -767,7 +767,8 @@ impl App {
         self.hold(k);
         if self.settings.editing.is_none() && !self.settings.open && self.scene.has_player() {
             match k {
-                KeyIn::Char('e' | 'E' | ' ') | KeyIn::Enter => self.scene.interact(),
+                KeyIn::Char('e' | 'E') | KeyIn::Enter => self.scene.interact(),
+                KeyIn::Char(' ') => self.scene.jump(),
                 KeyIn::Char('f' | 'F') => self.scene.invite(),
                 KeyIn::Char('r' | 'R') => self.scene.snowball(),
                 KeyIn::Char('i' | 'I') => self.scene.toggle_pockets(),
@@ -868,6 +869,12 @@ impl App {
     pub fn set_windowed(&mut self, on: bool) {
         self.windowed = on;
         self.settings.windowed = on;
+        // Linux, in a window (not the wallpaper's own pop-out): offer to make
+        // it the desktop wallpaper, if it isn't already
+        #[cfg(target_os = "linux")]
+        if on && !self.popout && !crate::linwall::wallpaper_running() {
+            self.settings.wall_offer = true;
+        }
     }
 
     /// The wallpaper side: is a popped-out window open? (Checked about once
@@ -961,8 +968,8 @@ impl App {
         // (the clock is mostly see-through: right-clicks there are the desktop's)
         let ours = self.widgets.hit(x, y).is_some_and(|i| i != 0) || settings::gear_rect(self.w as i32).contains(x, y) || {
             let (wx, wy) = self.world_pt(x, y);
-            let (title, _) = self.scene.menu_at(wx, wy);
-            !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village")
+            let (title, items) = self.scene.menu_at(wx, wy);
+            !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village") || items.iter().any(|(_, d)| matches!(d, crate::scene::Do::DropOn(..)))
         };
         if ours {
             self.open_menu(x, y);
@@ -1295,6 +1302,23 @@ impl App {
                 Act::CheckUpdate => crate::update::check_now(),
                 Act::InstallUpdate => crate::update::install_now(),
                 Act::DismissUpdate => crate::update::dismiss(),
+                Act::SetWallpaper => {
+                    // show how it's going (in the Desktop tab)
+                    self.settings.wall_offer = false;
+                    self.settings.open = true;
+                    self.settings.tab = 6;
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_wallpaper();
+                }
+                Act::DismissWallOffer => self.settings.wall_offer = false,
+                Act::LockScreen => {
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_lock(!crate::linwall::info().lock_on);
+                }
+                Act::LockRedraw => {
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_lock(true);
+                }
                 Act::Autostart => {
                     let on = !self.settings.autostart.unwrap_or(false);
                     platform::autostart_set(on);
@@ -1455,6 +1479,8 @@ impl App {
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
+        // the widgets' tops are something to climb up onto (next frame)
+        self.scene.set_widget_ledges(self.widgets.rects.iter().flatten().map(|r| (r.x, r.y, r.w, r.h)).collect());
         self.settings.draw_gear(&mut self.frame, t);
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         // a popped-out window tells the wallpaper it's open

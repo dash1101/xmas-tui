@@ -8,7 +8,28 @@
 # whenever it exits (e.g. when the monitor sleeps and disconnects).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KITTEN="${KITTEN:-$(command -v kitten || echo "$HOME/.local/bin/kitten")}"
+# kitty draws it: the newest of the one on the PATH and an official build in
+# ~/.local/kitty.app (Settings → Desktop → "set as wallpaper" fetches one).
+# From 0.42 the panel is `kitten panel`; 0.34–0.41 (Debian 13 has 0.41) only
+# have `kitty +kitten panel`, without --listen-on.
+kver() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+at_least() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
+KITTY=""; KV=""
+for k in "$(command -v kitty || true)" "$HOME/.local/kitty.app/bin/kitty"; do
+  [[ -n "$k" && -x "$k" ]] || continue
+  v="$(kver "$k")"; [[ -n "$v" ]] || continue
+  if [[ -z "$KV" ]] || ! at_least "$KV" "$v"; then KITTY="$k"; KV="$v"; fi
+done
+if [[ -z "$KITTY" ]]; then
+  echo "xmas-tui: kitty isn't installed (Settings → Desktop → set as wallpaper fetches it)" >&2
+  sleep 30; exit 1
+fi
+if [[ "${XDG_SESSION_TYPE:-}" == x11 ]] && ! at_least "$KV" 0.42.0; then
+  echo "xmas-tui: kitty $KV can't draw the desktop on X11 (that needs 0.42 or newer)" >&2
+  sleep 30; exit 1
+fi
+KITTEN="${KITTEN:-$(dirname "$KITTY")/kitten}"
+[[ -x "$KITTEN" ]] || KITTEN="$(command -v kitten || echo kitten)"
 # an installed release keeps its binary in bin/ (and updates it there); a
 # source checkout runs its own build; the .deb puts it on the PATH
 BIN="$DIR/bin/xmas-tui"
@@ -44,8 +65,7 @@ export XMAS_KITTY_SOCKET="unix:$SOCK" XMAS_FONT_BASE="$BASE" XMAS_KITTEN="$KITTE
 # --listen-on (not -o listen_on, which gets "-<pid>" appended) so the app
 # finds the socket; kitty's own shortcuts are cleared so Ctrl(+Shift) +/-
 # reach the app (zoom / resolution) instead of resizing the font directly
-ARGS=(panel --edge=background --class xmas-tui --focus-policy=on-demand
-      --listen-on "unix:$SOCK"
+ARGS=(--edge=background --class xmas-tui
       -o "font_size=$FONT"
       -o allow_remote_control=socket-only
       -o clear_all_shortcuts=yes
@@ -55,4 +75,9 @@ ARGS=(panel --edge=background --class xmas-tui --focus-policy=on-demand
       -o default_pointer_shape=arrow -o pointer_shape_when_grabbed=arrow
       -o disable_ligatures=always)
 [[ -n "${XMAS_OUTPUT:-}" ]] && ARGS+=(--output-name "$XMAS_OUTPUT")
-exec "$KITTEN" "${ARGS[@]}" "$BIN" --wallpaper "$@"
+if at_least "$KV" 0.42.0; then
+  exec "$KITTEN" panel "${ARGS[@]}" --focus-policy=on-demand --listen-on "unix:$SOCK" "$BIN" --wallpaper "$@"
+fi
+# older: kitty appends "-<pid>" to a listen_on socket (the app looks for it)
+"$KITTY" +kitten panel --help 2>/dev/null | grep -q -- --focus-policy && ARGS+=(--focus-policy=on-demand)
+exec "$KITTY" +kitten panel "${ARGS[@]}" -o "listen_on=unix:$SOCK" "$BIN" --wallpaper "$@"

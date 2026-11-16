@@ -90,7 +90,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | **Windows** 10/11 | `xmas-tui-setup-x86_64.exe` | Per-user install (no admin needed), Start menu entries, optional run at startup, uninstaller. |
 | | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
-| **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo); then `systemctl --user enable --now xmas-tui`. Updated through the package manager. |
+| **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
 | **Android** 7+ | `xmas-tui-android.apk` | A live wallpaper: a cut-down village that lives its own life on the home screen. See [Android](#-android-live-wallpaper). |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
@@ -102,12 +102,20 @@ On **Windows**, in PowerShell (per-user, no admin; installs the latest release w
 ```powershell
 irm https://raw.githubusercontent.com/dash1101/xmas-tui/main/scripts/get.ps1 | iex
 ```
-Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.36 and a layer-shell compositor such as KDE Plasma 6, Sway
-or Hyprland (GNOME isn't supported). Settings live in `~/.config/xmas-tui/config.toml` (Linux) or
-`%APPDATA%\xmas-tui\config.toml` (Windows). Remove the Linux install with the same command plus `-s -- --remove`.
+Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) (0.34 or newer on Wayland, 0.42 or newer on X11; Debian 13's
+0.41 works) and a layer-shell compositor such as KDE Plasma 6, Sway or Hyprland (GNOME isn't supported). Without a
+suitable kitty, *set as the desktop wallpaper* (Settings → Desktop, or `xmas-tui --set-wallpaper` in a terminal)
+fetches the official build into `~/.local/kitty.app` (checked against the checksum GitHub lists for it), no sudo
+needed. Settings live in `~/.config/xmas-tui/config.toml` (Linux) or `%APPDATA%\xmas-tui\config.toml` (Windows).
+Remove the Linux install with the same command plus `-s -- --remove`.
+
+**Lock screen (KDE Plasma 6):** Settings → Desktop → *The village on the lock screen* renders a seamless looping
+video of the village (a still image when ffmpeg isn't installed) and makes it the lock screen's wallpaper through a
+small Plasma wallpaper plugin. Unticking it puts the previous lock screen wallpaper back; `xmas-tui --lock-screen
+on|off` does the same from a terminal.
 
 **Updates:** when a new version is out, a small banner asks whether to install it. **Install automatically** under
-Settings → Display → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
+Settings → Desktop → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
 anything is replaced, and `xmas-tui --update` does the same from a terminal. **Run at startup** sits in the same tab.
 
 ## 🎮 Controls
@@ -117,7 +125,9 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | Input | What it does |
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
-| **E** / **Space** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
+| **E** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
+| **Space** | jump: in the snow, on a roof, up a tree; steer in the air with **A** / **D** |
+| **W** against something | climb it: a house, a tree, a lamp post, the station, the cabin, a present, a widget |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
 | **Q** | what's in hand: berries or something from the pockets (E then gives it, or uses it) |
@@ -195,7 +205,14 @@ always be found in Explorer or Dolphin.
 **Walking around** (click the desktop first so it has keyboard focus)
 - **WASD or the arrow keys** walk the little villager (gold coat, green bobble hat) along the snowfield.
   The view follows along; the **mouse wheel** looks around independently. **Walk speed** is in the Scene tab.
-- **E, Space or Enter** interacts with whatever the `[E]` prompt points at:
+- **Parkour.** **W** at the back of the snowfield, up against a house, a tree, a lamp post, the station, the cocoa
+  cabin, a present or the snowman, climbs it hand over hand. On top, **A** / **D** walk along it, up and down the
+  slopes of a roof (a chimney or the steeple is a wall), and off the end drops back down into the snow. **Space**
+  jumps (from the snow, or off whatever the villager's up on), with **A** / **D** to steer in the air, so it's
+  possible to leap from roof to roof; **S** hops down. The tops of the widgets are ledges too: **W** under a widget
+  climbs up onto it, and it stays put while the village scrolls past below. The pet waits underneath. A fall from
+  high up ends in a dizzy tumble; a jump or hop down lands on its feet.
+- **E or Enter** interacts with whatever the `[E]` prompt points at:
   - **people:** a conversation opens in a dialogue box: they say something, and **1**–**5** (or a click, or E for
     the first answer) picks what to say back. Grown-ups talk about how they are, their job, tips for a newcomer
     and what's going on (the snow, the train, the light show…), and can be asked to walk along; kids talk about
@@ -255,6 +272,8 @@ always be found in Explorer or Dolphin.
   works on people, animals, houses, the station, the cabin, widget panels and shelves; on open ground, in the sky and on
   desktop icons it's still Windows' own desktop menu (xmas-tui's menus have a *Windows desktop menu…* item too):
   - **open ground:** *drop in here* (the villager shimmers down from the sky and lands with a puff) or *walk over*;
+  - **on or just above a roof, a tree, a lamp post, the station, a present or a widget:** *drop in up here*, to
+    land right on top of it;
   - **the villager:** the stats card and Christmas list, or the pockets;
   - **people:** say hello, invite along or say goodbye, give a gingerbread or candy cane, throw a snowball;
   - **animals:** pet, feed a berry, give a carrot;
@@ -579,7 +598,7 @@ xmas-tui --bench 300 --size 568x75                                 # timing + by
 ```
 
 ## 📋 Requirements
-- kitty ≥ 0.36, for background panels.
+- kitty ≥ 0.34 (≥ 0.42 on X11), for background panels; *set as the desktop wallpaper* can fetch it.
 - Rust toolchain (only to build from source).
 - `busctl`, for the music widget (part of systemd).
 - `pw-record` (PipeWire) or `parec` (PulseAudio), for the visualizer.

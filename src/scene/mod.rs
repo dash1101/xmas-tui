@@ -10,6 +10,7 @@ pub mod shop;
 pub mod high_sky;
 pub mod interior;
 pub mod land;
+pub mod ledges;
 pub mod lines;
 pub mod player;
 pub mod sky;
@@ -72,6 +73,15 @@ pub struct Scene {
     village: Village,
     trees: Vec<Tree>,
     presents: Vec<Present>,
+    /// What the villager can climb and stand on: the village's (built
+    /// once), then the widgets' tops this frame (on the screen: see
+    /// `set_widget_ledges`).
+    ledges: Vec<ledges::Ledge>,
+    static_ledges: usize,
+    widget_ledges: Vec<(i32, i32, i32, i32)>,
+    /// The view (column, sky lift) the widget ledges were last placed at:
+    /// someone up on a widget moves with it as the village scrolls by.
+    widget_view: (i32, i32),
     snow: snow::Snow,
     pub sleigh: sleigh::Sleigh,
     director: Director,
@@ -245,6 +255,9 @@ pub fn special_now() -> Special {
 pub enum Do {
     /// Arrive from the sky at (world column, row).
     DropIn(f32, f32),
+    /// Drop in on top of whatever's at this column and row (a roof, a
+    /// tree…).
+    DropOn(f32, f32),
     WalkTo(f32, f32),
     Stats,
     Pockets,
@@ -555,6 +568,10 @@ impl Scene {
             sky_up: 0.0,
             sky_up_target: 0.0,
             shop: None,
+            ledges: vec![],
+            static_ledges: 0,
+            widget_ledges: vec![],
+            widget_view: (0, 0),
             daylight: daylight::Daylight::default(),
             pockets: shop::Pockets::new(),
             show_pockets: false,
@@ -609,6 +626,7 @@ impl Scene {
         };
         s.map = s.static_map();
         s.shop = s.place_shop();
+        s.build_ledges();
         // the villager's own house: the one nearest where they start out
         if let Some(px) = s.player.as_ref().map(|p| p.centre()) {
             let home = s.village.houses.iter().enumerate().filter(|(_, h)| !h.church).min_by_key(|(_, h)| (h.door() as f32 - px).abs() as i32).map(|(i, _)| i);
@@ -674,6 +692,22 @@ impl Scene {
     /// The right-click menu for screen cell (x, y): a title and what can be
     /// done (the app adds "settings…").
     pub fn menu_at(&self, sx: i32, sy: i32) -> (String, Vec<(String, Do)>) {
+        let (title, mut items) = self.menu_at_inner(sx, sy);
+        // on a roof, a tree, the station, a lamp, a present, a widget…:
+        // drop in up there
+        let (x, y) = (sx + self.cam_i(), sy - self.oy_i());
+        let busy = self.player.as_ref().is_none_or(|p| p.contains(x, y)) || self.inside.is_some();
+        if !busy && self.ledge_at(x, y).is_some() {
+            let up = ("✦ drop in up here".to_string(), Do::DropOn(x as f32 + 0.5, y as f32));
+            match items.iter().position(|(_, d)| matches!(d, Do::DropIn(..))) {
+                Some(k) => items[k] = up,
+                None => items.insert(0, up),
+            }
+        }
+        (title, items)
+    }
+
+    fn menu_at_inner(&self, sx: i32, sy: i32) -> (String, Vec<(String, Do)>) {
         let t = self.now();
         let mut out: Vec<(String, Do)> = vec![];
         if self.inside.is_some() {
@@ -760,6 +794,14 @@ impl Scene {
     pub fn act(&mut self, what: Do) {
         let t = self.now();
         match what {
+            Do::DropOn(x, y) => {
+                self.goal = None;
+                // that one (not a widget or a roof above it on the way down)
+                let aim = self.ledge_at(x as i32, y as i32);
+                if let Some(p) = &mut self.player {
+                    p.drop_on(x, aim, t, &mut self.director);
+                }
+            }
             Do::DropIn(x, row) => {
                 self.goal = None;
                 if let Some(p) = &mut self.player {
@@ -2018,7 +2060,59 @@ impl Scene {
         self.ctx.station.map(|(sx, sw)| x >= sx && x <= sx + sw && y >= self.ctx.track_row - 4 && y <= self.ctx.track_row).unwrap_or(false)
     }
 
-    /// E / Space / Enter: say hello, pet or feed, pick berries, or poke
+    /// What there is to climb and stand on in the village.
+    fn build_ledges(&mut self) {
+        use ledges::{Kind, Ledge};
+        let mut v = vec![];
+        for hs in &self.village.houses {
+            v.extend(Ledge::from_tops(Kind::House, &hs.tops(), hs.base));
+        }
+        for tr in &self.trees {
+            let hw = tr.hw_base.ceil() as i32 + 1;
+            v.extend(Ledge::from_shape(Kind::Tree, tr.cx - hw, tr.cx + hw + 1, tr.top - 2, tr.base(), |x, y| tr.contains(x, y)));
+        }
+        for l in &self.village.lamps {
+            v.push(Ledge::flat(Kind::Lamp, l.x, 1, l.base - l.h + 1, l.base));
+        }
+        if let Some((sx, sw)) = self.ctx.station {
+            v.push(Ledge::flat(Kind::Station, sx, sw + 1, self.ctx.track_row - 4, self.ctx.track_row));
+        }
+        for sm in &self.village.snowmen {
+            v.push(Ledge::flat(Kind::Snowman, sm.cx - 1, 3, sm.base - (10.0 * sm.scale).round() as i32, sm.base));
+        }
+        if let Some(sh) = &self.shop {
+            v.extend(Ledge::from_shape(Kind::Shop, sh.x, sh.x + shop::SHOP_W, sh.base - 9, sh.base, |x, y| sh.contains(x, y)));
+        }
+        for p in &self.presents {
+            let (x, top, w, base) = p.bounds();
+            v.extend(Ledge::from_shape(Kind::Present, x, x + w, top, base, |x, y| p.contains(x, y)));
+        }
+        self.static_ledges = v.len();
+        self.ledges = v;
+    }
+
+    /// The widgets' panels on the screen (x, y, w, h), to climb and stand on.
+    pub fn set_widget_ledges(&mut self, rects: Vec<(i32, i32, i32, i32)>) {
+        self.widget_ledges = rects;
+    }
+
+    /// The ledge under (world column x, row y): on it, or just above it.
+    fn ledge_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.ledges.iter().position(|l| l.feet(x as f32).is_some_and(|f| y as f32 >= f - 3.0 && y <= l.base))
+    }
+
+    /// Space: jump (off the ground, or off whatever the villager's up on).
+    pub fn jump(&mut self) {
+        let t = self.now();
+        if self.inside.is_some() {
+            return self.interact();
+        }
+        if let Some(p) = &mut self.player {
+            p.jump(t, &mut self.director);
+        }
+    }
+
+    /// E / Enter: say hello, pet or feed, pick berries, or poke
     /// whatever's in front of the player.
     pub fn interact(&mut self) {
         let t = self.now();
@@ -2236,6 +2330,50 @@ impl Scene {
         self.pet_act(a);
     }
 
+    /// Previews: the villager up on the nearest house / tree / lamp /
+    /// station / cabin, or "climb"ing a house, or "jump"ing off its roof.
+    pub fn preview_perch(&mut self, what: &str) {
+        use ledges::Kind as K;
+        let kind = match what {
+            "tree" => K::Tree,
+            "lamp" => K::Lamp,
+            "station" => K::Station,
+            "shop" => K::Shop,
+            "present" => K::Present,
+            _ => K::House,
+        };
+        let Some(px) = self.player.as_ref().map(|p| p.centre()) else { return };
+        let Some((i, x, f)) = self.ledges[..self.static_ledges]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == kind)
+            .filter_map(|(i, l)| (l.x0..l.x0 + l.tops.len() as i32).filter_map(|x| l.feet(x as f32).map(|f| (i, x, f))).min_by(|a, b| a.2.total_cmp(&b.2)))
+            .min_by(|a, b| (a.1 as f32 - px).abs().total_cmp(&(b.1 as f32 - px).abs()))
+        else {
+            return;
+        };
+        let lo = self.lo_at(x as f32);
+        let t = self.now();
+        let p = self.player.as_mut().unwrap();
+        p.x = x as f32 - 0.5;
+        match what {
+            "climb" => {
+                p.y = (lo + f) / 2.0;
+                p.climb = Some((i, f));
+            }
+            _ => {
+                p.y = f;
+                p.perch = Some(i);
+                if what == "jump" {
+                    p.jump(t, &mut self.director);
+                }
+            }
+        }
+        self.cam_target = (x as f32 - self.w as f32 / 2.0).clamp(0.0, (self.ww - self.w) as f32);
+        self.cam = self.cam_target;
+        self.ctx.cam = self.cam;
+    }
+
     /// Previews: people out with their pets near the player.
     pub fn preview_pets(&mut self) {
         let t = self.now();
@@ -2366,7 +2504,7 @@ impl Scene {
     }
 
     /// Move the view instantly by `dx` cells (previews).
-    pub fn jump(&mut self, dx: f32) {
+    pub fn snap_pan(&mut self, dx: f32) {
         self.pan(dx);
         self.cam = self.cam_target;
         self.ctx.cam = self.cam;
@@ -2984,12 +3122,28 @@ impl Scene {
         };
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
             walked_out = inn.update(dt, t, mv, p);
-        } else if let Some(p) = &mut self.player {
+        } else if self.player.is_some() {
+            // the widgets' tops, where they are in the village this frame
+            self.ledges.truncate(self.static_ledges);
+            let (cam, oy) = (self.cam_i(), self.oy_i());
+            for &(x, y, w, h) in &self.widget_ledges {
+                self.ledges.push(ledges::Ledge::flat(ledges::Kind::Widget, x + cam, w, y - oy, y - oy + h - 1));
+            }
+            let Some(p) = self.player.as_mut() else { unreachable!() };
+            // the widget stays put on the screen; whoever's on it with it
+            let (vx, vy) = self.widget_view;
+            self.widget_view = (cam, oy);
+            if p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.kind == ledges::Kind::Widget) {
+                p.x += (cam - vx) as f32;
+                p.y -= (oy - vy) as f32;
+            }
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
-            p.update(dt, t, mv, lo, self.ww as f32, h, &mut self.director);
+            p.update(dt, t, mv, lo, self.ww as f32, h, &self.ledges, &mut self.director);
+            // up on a widget: it's fixed to the screen, so the view holds still
+            let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.kind == ledges::Kind::Widget);
             // the camera keeps the player comfortably in view while walking
-            if p.moving {
+            if p.moving && !on_widget {
                 // walking brings the view back down to earth
                 self.sky_up_target = 0.0;
                 let (w, c) = (self.w as f32, p.centre());
@@ -3055,7 +3209,9 @@ impl Scene {
                 None if !pet.staying => {
                     let g = &self.ctx.ground_row;
                     let lo = (g[(p.centre().max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
-                    pet.update(dt, t, p.centre(), p.y, p.dir, p.moving, lo, self.h as f32 - 1.0, sprite_k(self.h));
+                    // up on a roof (or a tree…): it waits below
+                    let py = if p.aloft() { lo } else { p.y };
+                    pet.update(dt, t, p.centre(), py, p.dir, p.moving, lo, self.h as f32 - 1.0, sprite_k(self.h));
                 }
                 Some(inn) if inn.is_climbing() => {
                     // it comes along, and turns up beside them
@@ -4209,7 +4365,7 @@ mod tests {
         assert!(s.sleigh.audio_x().is_none(), "no scheduled fly-bys when set to never");
         // (the sky drifts a little with the camera; look away from the big
         // tree, whose star can sit in front of the moon on a short screen)
-        s.jump(-120.0);
+        s.snap_pan(-120.0);
         let (mx, my, _) = s.sky.moon;
         s.click(mx as i32 - s.sky_off(), (my / 2.0) as i32, 0.0);
         s.update(DT, 0.0);
@@ -4250,6 +4406,94 @@ mod tests {
         for _ in 0..(secs / DT) as usize {
             s.update(DT, 0.0);
         }
+    }
+
+    #[test]
+    fn climbing_onto_a_roof_walking_it_and_jumping() {
+        let mut s = walker_scene();
+        // a house: stand against it at the back of the snowfield, under its ridge
+        let (i, x, f) = s.ledges[..s.static_ledges]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == ledges::Kind::House)
+            .filter_map(|(i, l)| (l.x0..l.x0 + l.tops.len() as i32).filter_map(|x| l.feet(x as f32).map(|f| (i, x, f))).min_by(|a, b| a.2.total_cmp(&b.2)))
+            .next()
+            .expect("a house");
+        let lo = s.lo_at(x as f32);
+        {
+            let p = s.player.as_mut().unwrap();
+            p.x = x as f32 - 0.5;
+            p.y = lo;
+        }
+        s.set_move(0.0, -1.0);
+        run(&mut s, 0.1);
+        assert!(s.player.as_ref().unwrap().climbing(), "W at the wall climbs");
+        run(&mut s, 4.0);
+        s.set_move(0.0, 0.0);
+        run(&mut s, 0.5);
+        let p = s.player.as_ref().unwrap();
+        assert_eq!(p.perch, Some(i), "up on the roof");
+        assert!((p.y - f).abs() < 0.01, "on its ridge: {} vs {f}", p.y);
+        // a jump on the roof comes back down onto it
+        s.jump();
+        run(&mut s, 0.2);
+        assert!(s.player.as_ref().unwrap().y < f - 1.5, "in the air");
+        run(&mut s, 1.5);
+        assert_eq!(s.player.as_ref().unwrap().perch, Some(i), "landed back on the roof");
+        // walk off the end of it: down into the snow
+        s.set_move(1.0, 0.0);
+        let mut fell = false;
+        for _ in 0..(6.0 / DT) as usize {
+            s.update(DT, 0.0);
+            let p = s.player.as_ref().unwrap();
+            fell |= p.perch.is_none() && !p.climbing();
+            if fell && !p.aloft() {
+                break;
+            }
+        }
+        s.set_move(0.0, 0.0);
+        run(&mut s, 2.5);
+        let p = s.player.as_ref().unwrap();
+        assert!(fell && !p.aloft(), "walked off the roof");
+        assert!(p.y >= s.lo_at(p.centre()) - 0.01, "back in the snow at {}", p.y);
+        // a hop in open snow lands back where it started
+        let x = (10..s.ww as i32 - 10).find(|&x| (-4..=4).all(|d| s.ledges.iter().all(|l| l.feet((x + d) as f32).is_none()))).expect("open snow");
+        let y0 = s.lo_at(x as f32) + 3.0;
+        {
+            let p = s.player.as_mut().unwrap();
+            (p.x, p.y) = (x as f32 - 0.5, y0);
+        }
+        s.jump();
+        run(&mut s, 0.2);
+        assert!(s.player.as_ref().unwrap().y < y0 - 2.0);
+        run(&mut s, 2.0);
+        let p = s.player.as_ref().unwrap();
+        assert!((p.y - y0).abs() < 0.01, "hopped from {y0} to {} onto {:?}", p.y, p.perch.map(|i| (s.ledges[i].kind, s.ledges[i].base, p.centre())));
+    }
+
+    #[test]
+    fn dropping_in_on_top_of_a_tree() {
+        let mut s = walker_scene();
+        let (i, x, f) = s.ledges[..s.static_ledges]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == ledges::Kind::Tree)
+            .filter_map(|(i, l)| (l.x0..l.x0 + l.tops.len() as i32).filter_map(|x| l.feet(x as f32).map(|f| (i, x, f))).min_by(|a, b| a.2.total_cmp(&b.2)))
+            .next()
+            .expect("a tree");
+        // the menu over the tree's top offers it (and a widget above it
+        // doesn't catch the villager on the way down)
+        let (sx, sy) = (x - s.cam_i(), f as i32 + 2 + s.oy_i());
+        s.set_widget_ledges(vec![(sx - 6, 1, 14, 3)]);
+        run(&mut s, 0.1);
+        let (_, items) = s.menu_at(sx, sy);
+        let drop = items.iter().find(|(l, _)| l.contains("drop in up here")).map(|(_, d)| d.clone());
+        let Some(d) = drop else { panic!("no drop-in item: {:?}", items.iter().map(|i| &i.0).collect::<Vec<_>>()) };
+        s.act(d);
+        run(&mut s, 3.0);
+        let p = s.player.as_ref().unwrap();
+        assert_eq!(p.perch, Some(i), "landed on the tree");
+        assert!((p.y - f).abs() < 0.01 && p.dizzy_until <= s.now(), "softly, on top");
     }
 
     #[test]
@@ -4454,9 +4698,10 @@ mod tests {
     fn right_click_drop_in_lands_the_villager_there() {
         let mut s = walker_scene();
         run(&mut s, 0.2);
-        // an open bit of snowfield, on screen
-        let sx = 20;
+        // an open bit of snowfield, on screen (not on a present: that's
+        // dropped in on top of)
         let row = s.h as i32 - 3;
+        let sx = (20..s.w as i32 - 20).find(|&sx| (-2..=2).all(|d| s.ledge_at(sx + d + s.cam_i(), row - s.oy_i()).is_none())).unwrap();
         let (_, items) = s.menu_at(sx, row);
         let drop = items.iter().find_map(|(_, d)| matches!(d, Do::DropIn(..)).then_some(*d)).expect("no drop-in on open ground");
         let target = sx as f32 + s.cam;

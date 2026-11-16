@@ -112,6 +112,16 @@ pub enum Act {
     /// Pick shelf i's folder; a new shelf from a picked folder.
     ShelfFolder(u8),
     ShelfNewFrom,
+    /// Linux: make the village the desktop wallpaper (kitty panel + service).
+    SetWallpaper,
+    /// The "make it the wallpaper?" banner: not now.
+    DismissWallOffer,
+    /// Linux (KDE): the village on the lock screen, or off it again; or
+    /// drawn afresh (the scene's changed).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    LockScreen,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    LockRedraw,
 }
 
 #[derive(Default)]
@@ -161,11 +171,14 @@ pub struct Settings {
     pub restart_ask: bool,
     /// A brief note at the top (zoom / resolution changes): text, until.
     pub toast: Option<(String, f32)>,
+    /// Linux, in a window of its own: offer to make it the desktop
+    /// wallpaper (a banner, until it's done or dismissed).
+    pub wall_offer: bool,
     /// The controls card is showing.
     pub help: bool,
 }
 
-pub const TABS: [&str; 6] = ["Scene", "Display", "Sound", "Effects", "Windows", "Shelves"];
+pub const TABS: [&str; 7] = ["Scene", "Display", "Sound", "Effects", "Windows", "Shelves", "Desktop"];
 const LIGHT_COUNTS: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const AMB_ROWS: [&str; 5] = ["Wind", "Snowfall hiss", "Fireplace", "Wind chimes", "Aurora shimmer"];
 const PANEL_W: i32 = 66;
@@ -376,7 +389,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom => false,
+        Act::Shuffle | Act::EditCity | Act::EditPetName | Act::EditName | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfName(_) | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw => false,
     }
 }
 
@@ -391,10 +404,12 @@ pub fn help_rect(w: i32) -> Rect {
 }
 
 /// The controls card: (keys, what they do).
-const CONTROLS: [(&str, &str); 16] = [
+const CONTROLS: [(&str, &str); 18] = [
     ("W A S D / arrows", "walk about"),
     ("Shift (held)", "run"),
-    ("E / Space / Enter", "talk, use, sit, climb, pick up"),
+    ("E / Enter", "talk, use, sit, pick up"),
+    ("Space", "jump (A / D steer in the air)"),
+    ("W at a wall", "climb a house, a tree, the station, a widget…"),
     ("F", "invite someone along / send them home"),
     ("R", "scoop a snowball, then throw it"),
     ("Q", "what's in hand: berries, a carrot, cocoa…"),
@@ -460,9 +475,12 @@ impl Settings {
         }
         let (msg, install, later, yes, no) = if self.restart_ask {
             (" ✦ the new resolution needs a restart ".to_string(), " restart now ", " later ", Act::RestartNow, Act::RestartLater)
-        } else {
-            let Some(v) = crate::update::offer() else { return };
+        } else if let Some(v) = crate::update::offer() {
             (format!(" ✦ xmas-tui {v} is out "), " install ", " later ", Act::InstallUpdate, Act::DismissUpdate)
+        } else if self.wall_offer && !self.open {
+            (" ✦ make the village the desktop wallpaper? ".to_string(), " set it up ", " not now ", Act::SetWallpaper, Act::DismissWallOffer)
+        } else {
+            return;
         };
         let n = (msg.chars().count() + install.len() + later.len() + 2) as i32;
         let (x, y) = ((f.w as i32 - n) / 2, 1);
@@ -582,6 +600,9 @@ impl Settings {
             self.tab = 0;
         }
         let mut tx = x + 3;
+        // a gap between the tabs, while they fit with one
+        let need: i32 = tabs.iter().map(|&i| TABS[i].chars().count() as i32 + 3).sum();
+        let gap = (need - 1 <= w - 5) as i32;
         for &i in &tabs {
             let label = format!(" {} ", TABS[i]);
             let r = Rect { x: tx, y: y + 1, w: label.chars().count() as i32, h: 1 };
@@ -596,7 +617,7 @@ impl Settings {
             };
             f.text(tx, y + 1, &label, fg, bg, 0.0);
             self.regions.push((r, Act::Tab(i as u8)));
-            tx += r.w + 1;
+            tx += r.w + gap;
         }
         for xx in x + 1..x + w - 1 {
             f.put_g(xx, y + 2, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
@@ -611,6 +632,7 @@ impl Settings {
             2 => self.tab_sound(f, cfg, lx, vx, yy, t),
             3 => self.tab_effects(f, cfg, lx, x + 28, yy, t),
             4 => self.tab_windows(f, cfg, lx, vx, yy, t),
+            6 => self.tab_desktop(f, cfg, lx, yy, x + w - 1, t),
             _ => self.tab_shelves(f, cfg, lx, yy, x + w - 1, t),
         }
 
@@ -785,7 +807,104 @@ impl Settings {
                 self.button(f, nx, yy, "▣ full screen (F11)", Act::FullScreen);
             }
         }
-        yy += 2;
+    }
+
+    /// The wallpaper itself: setting it up (Linux), the lock screen (KDE),
+    /// starting with the computer, updates.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    fn tab_desktop(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, right: i32, t: f32) {
+        let width = (right - lx - 1).max(10) as usize;
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        let clip = |s: &str| -> String { s.chars().take(width).collect() };
+        self.section(f, lx, yy, "WALLPAPER");
+        yy += 1;
+        #[cfg(target_os = "linux")]
+        {
+            use crate::linwall::Job;
+            let info = crate::linwall::info();
+            let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][(t * 10.0) as usize % 10];
+            match crate::linwall::wall_job() {
+                Job::Busy(m) => {
+                    f.text(lx, yy, &clip(&format!("{spin} {m}")), pal::UI_TITLE, BG, 0.0);
+                    yy += 1;
+                }
+                job => {
+                    if info.running {
+                        f.text(lx, yy, "the village is the desktop wallpaper ✓", pal::UI_TEXT, BG, 0.0);
+                        yy += 1;
+                    } else if info.known {
+                        self.button(f, lx, yy, "✦ set as the desktop wallpaper", Act::SetWallpaper);
+                        yy += 1;
+                        if let Some(n) = &info.needs {
+                            f.text(lx + 2, yy, &clip(n), pal::UI_DIM, BG, 0.0);
+                            yy += 1;
+                        }
+                    } else {
+                        f.text(lx, yy, &format!("{spin} looking…"), pal::UI_DIM, BG, 0.0);
+                        yy += 1;
+                    }
+                    match job {
+                        Job::Failed(e) => {
+                            f.text(lx, yy, &clip(&format!("✗ {e}")), pal::CANDY_RED * 1.3, BG, 0.0);
+                            yy += 1;
+                        }
+                        Job::Done(m) if !info.running => {
+                            f.text(lx, yy, &clip(&m), pal::UI_DIM, BG, 0.0);
+                            yy += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut cx = lx;
+        if let Some(on) = self.autostart {
+            cx = self.check(f, lx, yy, "Run at startup", Act::Autostart, on) + 4;
+        }
+        if self.extras {
+            self.button(f, cx, yy, "✕ quit wallpaper", Act::Quit);
+        }
+        if self.autostart.is_some() || self.extras {
+            yy += 1;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use crate::linwall::Job;
+            let info = crate::linwall::info();
+            if info.lock_ok {
+                yy += 1;
+                self.section(f, lx, yy, "LOCK SCREEN");
+                yy += 1;
+                match crate::linwall::lock_job() {
+                    Job::Busy(m) => {
+                        let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][(t * 10.0) as usize % 10];
+                        f.text(lx, yy, &clip(&format!("{spin} {m}")), pal::UI_TITLE, BG, 0.0);
+                    }
+                    job => {
+                        let cx = self.check(f, lx, yy, "The village on the lock screen", Act::LockScreen, info.lock_on) + 3;
+                        if info.lock_on {
+                            self.button(f, cx, yy, "⟲ redraw it", Act::LockRedraw);
+                        }
+                        match job {
+                            Job::Failed(e) => {
+                                yy += 1;
+                                f.text(lx, yy, &clip(&format!("✗ {e}")), pal::CANDY_RED * 1.3, BG, 0.0);
+                            }
+                            Job::Done(m) => {
+                                yy += 1;
+                                f.text(lx, yy, &clip(&m), pal::UI_DIM, BG, 0.0);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                yy += 1;
+                let note = if info.ffmpeg { "a looping video of the village (KDE Plasma's lock screen)" } else { "a still of the village (with ffmpeg installed, it moves)" };
+                f.text(lx, yy, &clip(note), pal::UI_DIM, BG, 0.0);
+                yy += 1;
+            }
+        }
+        yy += 1;
         self.section(f, lx, yy, "UPDATES");
         yy += 1;
         let cx = self.check(f, lx, yy, "Check for updates", Act::Toggle(F::UpdCheck), cfg.updates.check) + 3;
@@ -813,14 +932,6 @@ impl Settings {
         let cx = f.text(lx, yy, &msg, pal::UI_DIM, BG, 0.0);
         if let Some((label, a)) = act {
             self.button(f, cx + 2, yy, label, a);
-        }
-        yy += 2;
-        let mut cx = lx;
-        if let Some(on) = self.autostart {
-            cx = self.check(f, lx, yy, "Run at startup", Act::Autostart, on) + 4;
-        }
-        if self.extras {
-            self.button(f, cx, yy, "✕ quit wallpaper", Act::Quit);
         }
     }
 

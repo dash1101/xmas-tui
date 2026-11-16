@@ -288,6 +288,20 @@ impl Panel {
                 Act::CheckUpdate => crate::update::request("check"),
                 Act::InstallUpdate => crate::update::request("install"),
                 Act::DismissUpdate => crate::update::request("dismiss"),
+                Act::SetWallpaper => {
+                    self.settings.tab = 6;
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_wallpaper();
+                }
+                Act::DismissWallOffer => {}
+                Act::LockScreen => {
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_lock(!crate::linwall::info().lock_on);
+                }
+                Act::LockRedraw => {
+                    #[cfg(target_os = "linux")]
+                    crate::linwall::start_lock(true);
+                }
                 Act::Autostart => {
                     let on = !self.settings.autostart.unwrap_or(false);
                     platform::autostart_set(on);

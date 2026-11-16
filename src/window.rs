@@ -79,7 +79,7 @@ struct Runner {
     polled: (bool, bool),
     /// Walking keys last seen down (Windows desktop mode, see winsys::desktop_keys).
     #[cfg_attr(not(windows), allow(dead_code))]
-    keys: [bool; 15],
+    keys: [bool; 17],
     /// The render scale the layout was last made for.
     scale: f32,
     /// Ctrl is held (Ctrl+wheel looks up into the sky).
@@ -116,6 +116,21 @@ struct Runner {
     /// with XMAS_WINFX=1 for testing). Dropped = stopped.
     #[cfg(windows)]
     winfx: Option<crate::winsnow::win::Overlay>,
+    /// Something changed that should show at once (a menu opened).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    draw_now: bool,
+    /// Desktop mode: attach afresh at this time (after something that can
+    /// leave the wallpaper hidden or stuck: see winsys::take_desktop_event),
+    /// and why.
+    #[cfg(windows)]
+    refresh: Option<(Instant, &'static str)>,
+    /// The wall clock at the last loop: a jump means the PC slept.
+    #[cfg(windows)]
+    wall_seen: std::time::SystemTime,
+    /// Watchdog re-attaches lately (see winsys::attach_ok), and the first
+    /// one's time: capped, in case the check is wrong for some layout.
+    #[cfg(windows)]
+    fixes: (u32, Instant),
 }
 
 fn cell_size(height: u32, rows: u32) -> (usize, usize) {
@@ -335,7 +350,10 @@ impl Runner {
         if let Some((sx, sy)) = crate::winsys::take_rclick() {
             let rx = ((sx - g.origin.0 - g.offset.0 as i32) as f64 / g.raster.cw as f64).floor() as i32;
             let ry = ((sy - g.origin.1 - g.offset.1 as i32) as f64 / g.raster.ch as f64).floor() as i32;
-            if !app.right_click(rx, ry) {
+            if app.right_click(rx, ry) {
+                // the menu shows now, not at the next frame
+                self.draw_now = true;
+            } else {
                 crate::winsys::pass_rclick();
             }
         }
@@ -353,7 +371,7 @@ impl Runner {
         let _ = was_r;
         // walking around: keys go to Explorer's desktop window, so read
         // them while it's focused and feed presses / releases through
-        let keys = crate::winsys::desktop_keys().unwrap_or([false; 15]);
+        let keys = crate::winsys::desktop_keys().unwrap_or([false; 17]);
         app.set_shift(keys[13]);
         let names = [
             KeyIn::Left,
@@ -371,6 +389,8 @@ impl Runner {
             KeyIn::Char('5'),
             KeyIn::Char('\0'),
             KeyIn::Char('q'),
+            KeyIn::Char(' '),
+            KeyIn::Esc,
         ];
         // polling sees every release
         app.set_exact_keys();
@@ -399,6 +419,21 @@ impl Runner {
         if self.attached && crate::winsys::keep_layered(hwnd) {
             eprintln!("xmas-tui: the window had lost its layered style; restored");
         }
+        // hidden behind a layer Explorer put in front of it (or hidden
+        // outright): attach afresh, at most a few times an hour
+        if self.attached && self.refresh.is_none() {
+            if let Err(why) = crate::winsys::attach_ok(hwnd) {
+                let now = Instant::now();
+                if now.duration_since(self.fixes.1) > Duration::from_secs(3600) {
+                    self.fixes = (0, now);
+                }
+                if self.fixes.0 < 6 {
+                    self.fixes.0 += 1;
+                    eprintln!("xmas-tui: the wallpaper isn't showing ({why}); attaching afresh");
+                    self.refresh = Some((now, "watchdog"));
+                }
+            }
+        }
         if self.logged_at.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
             self.logged_at = None;
             eprintln!("xmas-tui: 5 s after attaching (paused={}):\n{}", self.paused, crate::winsys::describe(hwnd));
@@ -419,6 +454,25 @@ impl Runner {
             if rect_changed {
                 self.restart_winfx(Some((x, y, w, h)));
             }
+        }
+    }
+
+    /// Attach a fresh window behind the icons. The old one goes once the
+    /// new one is in place (so the wallpaper doesn't blink); if attaching
+    /// fails, the usual re-attach takes over.
+    #[cfg(windows)]
+    fn refresh_desktop(&mut self, el: &ActiveEventLoop, why: &str) {
+        eprintln!("xmas-tui: attaching afresh ({why})");
+        if std::mem::take(&mut self.left_down) {
+            if let Some(app) = self.app.as_mut() {
+                app.mouse(MouseIn::Up(Btn::Left), 0, 0);
+            }
+        }
+        let old = self.gfx.take();
+        let ok = self.create(el) && self.attached;
+        drop(old);
+        if !ok {
+            self.lost_desktop();
         }
     }
 
@@ -513,9 +567,11 @@ impl Runner {
                     }
                     eprintln!("xmas-tui: monitor {:?}, window {}x{}\n{}", mon_rect, s.width, s.height, crate::winsys::describe(hwnd));
                     self.logged_at = Some(Instant::now());
-                    // right-clicks on the village (not on icons) get our menu
+                    // right-clicks on the village (not on icons) get its menus;
+                    // sleep, unlock and display changes are looked out for
                     if self.attached {
                         crate::winsys::rclick_hook(hwnd, (origin.0, origin.1, s.width as i32, s.height as i32));
+                        crate::winsys::watch_desktop_events();
                     }
                     self.geom = (mon_rect, crate::winsys::parent_origin(hwnd));
                 }
@@ -746,6 +802,28 @@ impl ApplicationHandler for Runner {
         }
         #[cfg(windows)]
         if self.opts.desktop {
+            // something that can leave the wallpaper hidden or stuck (waking
+            // from sleep, unlocking, a display change…): attach afresh once
+            // things have settled
+            if let Some(what) = crate::winsys::take_desktop_event() {
+                self.refresh = Some((now + Duration::from_millis(1500), what));
+            }
+            // the wall clock jumped ahead: the PC was asleep (a laptop's lid
+            // closed), even if the wake-up message never came
+            let wall = std::time::SystemTime::now();
+            if wall.duration_since(self.wall_seen).is_ok_and(|d| d > Duration::from_secs(15)) && self.refresh.is_none() {
+                self.refresh = Some((now + Duration::from_millis(1500), "the PC was asleep"));
+            }
+            self.wall_seen = wall;
+            if self.reattach.is_some() {
+                self.refresh = None;
+            } else if let Some((at, why)) = self.refresh {
+                // (still locked or in a game: when it's back on show)
+                if now >= at && self.gfx.is_some() && !self.wall_full && !self.paused {
+                    self.refresh = None;
+                    self.refresh_desktop(el, why);
+                }
+            }
             if self.reattach.is_some() {
                 self.try_reattach(el, now);
             }
@@ -799,8 +877,13 @@ impl ApplicationHandler for Runner {
                     self.next = self.next.min(now);
                 }
             }
+            // right-clicks are only taken from the desktop while we draw
+            crate::winsys::rclick_active(self.gfx.is_some() && self.attached && !self.paused && !self.wall_full);
             if !self.paused && !self.wall_full {
                 self.poll_desktop_input();
+                if std::mem::take(&mut self.draw_now) {
+                    self.next = self.next.min(now);
+                }
             }
         }
         let dt = if self.paused {
@@ -838,7 +921,7 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         pointer: "",
         #[cfg(windows)]
         polled: (false, false),
-        keys: [false; 15],
+        keys: [false; 17],
         scale: 1.0,
         ctrl: false,
         shift: false,
@@ -862,6 +945,13 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         logged_at: None,
         #[cfg(windows)]
         winfx: None,
+        draw_now: false,
+        #[cfg(windows)]
+        refresh: None,
+        #[cfg(windows)]
+        wall_seen: std::time::SystemTime::now(),
+        #[cfg(windows)]
+        fixes: (0, Instant::now()),
     };
     el.run_app(&mut r)?;
     Ok(())

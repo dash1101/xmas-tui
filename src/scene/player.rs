@@ -1,9 +1,12 @@
 //! The player: a little bundled-up villager walked around with WASD / the arrow
 //! keys. They crunch through the snow, leave footprints, and can say hello
 //! to people, pet and feed the animals, pick berries, knock on doors and
-//! poke at things (E / Space / Enter), or ask someone to walk along (F).
+//! poke at things (E / Enter), or ask someone to walk along (F). They climb
+//! (W against a house, a tree, a widget…), walk along the tops of things and
+//! jump (Space).
 
 use super::events::Director;
+use super::ledges::Ledge;
 use crate::audio::Sfx;
 use crate::color::Rgb;
 use crate::frame::{Bg, Frame, Glyph};
@@ -17,6 +20,10 @@ const BOOTS: Rgb = Rgb::hex(0x2a2a34);
 /// Walking speed (cells/s) across and up/down the snowfield.
 const SPEED_X: f32 = 11.0;
 const SPEED_Y: f32 = 5.0;
+/// A jump's upward speed (rows a second; about five rows high), and how
+/// fast the villager climbs.
+const JUMP: f32 = 26.0;
+const CLIMB: f32 = 9.0;
 
 pub struct Player {
     pub x: f32,
@@ -55,6 +62,23 @@ pub struct Player {
     /// Petting the pet until then; holding it in their arms (a cuddle).
     pub petting_until: f32,
     pub cuddling: bool,
+    /// Up on something (a roof, a tree, a widget…): which ledge.
+    pub perch: Option<usize>,
+    /// Climbing up onto a ledge: which, and the row to get to.
+    pub climb: Option<(usize, f32)>,
+    /// The fall under way lands on ledges (a jump, stepping off an edge,
+    /// being let go of), not just the snowfield.
+    ledge_fall: bool,
+    /// A ledge not to land on straight away (the one just hopped down from).
+    left: Option<usize>,
+    /// Arriving by magic (a soft landing); let go of by the mouse (a high
+    /// drop makes them dizzy).
+    magic: bool,
+    dropped: bool,
+    /// A jump from the snowfield: the row it left from.
+    depth: Option<f32>,
+    /// Dropping in on top of this one (passing anything above it).
+    aim: Option<usize>,
     /// Dropping in from the sky (right-click → drop in here): the row to
     /// land on; drawn shimmering on the way down.
     pub drop_to: Option<f32>,
@@ -62,7 +86,7 @@ pub struct Player {
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, drop_to: None }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None }
     }
 
     /// How fast to go: the walk speed, doubled while running.
@@ -96,6 +120,9 @@ impl Player {
     pub fn grab(&mut self, x: i32, y: i32, t: f32) {
         self.held = Some((x as f32 - self.x, y as f32 - self.y));
         self.fall = None;
+        self.perch = None;
+        self.climb = None;
+        self.aim = None;
         self.snowball = false;
         self.scoop_until = 0.0;
         self.active_at = t;
@@ -108,16 +135,57 @@ impl Player {
         }
     }
 
-    /// Let go: down into the snow.
+    /// Let go: down into the snow (or onto whatever's underneath).
     pub fn release(&mut self) {
         if self.held.take().is_some() {
             self.fall = Some((0.0, self.y));
+            self.ledge_fall = true;
+            self.left = None;
+            self.depth = None;
+            self.aim = None;
+            self.dropped = true;
         }
+    }
+
+    /// Up off the ground (on a ledge, climbing, or in the air)?
+    pub fn aloft(&self) -> bool {
+        self.perch.is_some() || self.climb.is_some() || (self.fall.is_some() && self.ledge_fall)
+    }
+
+    /// A jump (from the snow, or off a ledge).
+    pub fn jump(&mut self, t: f32, d: &mut Director) {
+        if self.held.is_some() || self.fall.is_some() || self.climb.is_some() || t < self.dizzy_until {
+            return;
+        }
+        // from the snow it lands back on the row it left (or on something
+        // standing about as far forward); from up on something, back on it
+        // (or on whatever it's steered over to)
+        self.depth = self.perch.take().is_none().then_some(self.y);
+        self.left = None;
+        self.fall = Some((-JUMP * self.k.sqrt(), self.y));
+        self.ledge_fall = true;
+        self.dropped = false;
+        self.active_at = t;
+        d.sound(Sfx::Pickup, self.centre(), 0.35);
+    }
+
+    /// Climbing (for drawing): hand over hand.
+    pub fn climbing(&self) -> bool {
+        self.climb.is_some()
+    }
+
+    /// In the air from a jump or a step off an edge (for drawing).
+    pub fn leaping(&self) -> bool {
+        self.fall.is_some() && self.ledge_fall && self.held.is_none() && self.drop_to.is_none() && !self.magic
     }
 
     /// Arrive from the sky at column `x`, landing on row `row`.
     pub fn drop_in(&mut self, x: f32, row: f32, t: f32, d: &mut Director) {
         self.held = None;
+        self.perch = None;
+        self.climb = None;
+        self.aim = None;
+        self.ledge_fall = false;
         self.x = x - 1.0;
         self.y = (row - 30.0).max(1.0);
         self.fall = Some((4.0, self.y));
@@ -144,30 +212,94 @@ impl Player {
         self.x + 1.0
     }
 
+    /// Arrive from the sky onto ledge `aim` (its top at column `x`).
+    pub fn drop_on(&mut self, x: f32, aim: Option<usize>, t: f32, d: &mut Director) {
+        self.drop_in(x, 0.0, t, d);
+        self.drop_to = None;
+        self.ledge_fall = true;
+        self.left = None;
+        self.depth = None;
+        self.aim = aim;
+        self.magic = true;
+    }
+
     /// Move by the held direction keys. `lo(x)`: the first walkable row at
-    /// column x; `w`/`h`: world size.
+    /// column x; `w`/`h`: world size; `ledges`: what can be stood on.
     #[allow(clippy::too_many_arguments)]
-    pub fn update(&mut self, dt: f32, t: f32, mv: (f32, f32), lo: impl Fn(f32) -> f32, w: f32, h: f32, d: &mut Director) {
+    pub fn update(&mut self, dt: f32, t: f32, mv: (f32, f32), lo: impl Fn(f32) -> f32, w: f32, h: f32, ledges: &[Ledge], d: &mut Director) {
         let ground = lo(self.centre()).max(0.0);
         if self.held.is_some() {
             self.moving = false;
             return;
         }
+        // climbing up onto something, hand over hand
+        if let Some((li, to)) = self.climb {
+            self.y -= CLIMB * self.k * dt;
+            self.phase += dt * 8.0;
+            self.moving = true;
+            if self.y <= to {
+                self.y = to;
+                self.climb = None;
+                self.perch = Some(li);
+                d.snow_puff(self.centre(), self.y);
+            }
+            return;
+        }
         if let Some((vy, from)) = self.fall {
+            // in a jump (or off an edge) the arrows still steer a little
+            if self.ledge_fall && self.drop_to.is_none() && mv.0 != 0.0 {
+                self.dir = mv.0.signum();
+                self.x = (self.x + mv.0 * SPEED_X * self.pace() * self.k * dt).clamp(1.0, w - 4.0);
+            }
+            let prev = self.y;
             let vy = vy + 70.0 * dt;
             self.y += vy * dt;
-            let to = self.drop_to.unwrap_or(self.y).min(h - 1.0).max(ground);
+            // landing on something on the way down
+            if self.ledge_fall && vy > 0.0 {
+                let found = match self.aim {
+                    Some(a) => ledges.get(a).and_then(|l| l.feet(self.centre())).filter(|&f| prev <= f + 0.01 && self.y >= f).map(|f| (a, f)),
+                    None => super::ledges::landing(ledges, self.centre(), prev, self.y, self.left, self.depth),
+                };
+                if let Some((li, f)) = found {
+                    self.depth = None;
+                    self.aim = None;
+                    self.y = f;
+                    self.fall = None;
+                    self.perch = Some(li);
+                    self.left = None;
+                    d.snow_puff(self.centre(), self.y);
+                    d.sound(Sfx::Drop, self.centre(), 0.5);
+                    if std::mem::take(&mut self.magic) {
+                        d.burst(self.centre(), self.y - 1.0, 24, &[Rgb::hex(0xbfe4ff), Rgb::WHITE, Rgb::hex(0xffd36b)], 7.0, 4.0);
+                    }
+                    self.moving = false;
+                    return;
+                }
+            }
+            if self.ledge_fall && self.y > prev && self.left.is_some_and(|l| ledges.get(l).and_then(|l| l.feet(self.centre())).is_none_or(|f| self.y > f + 1.0)) {
+                // clear of the ledge just left: it can be landed on again
+                self.left = None;
+            }
+            // down to the snow (a jump from it: back to the row it left)
+            let to = self.drop_to.unwrap_or(from).min(h - 1.0).max(ground);
             if self.drop_to.is_some() && (t * 12.0).fract() < dt * 12.0 {
                 // a trail of sparkles on the way down
                 d.emote(self.centre(), self.y - 2.0, '✦', Rgb::hex(0xbfe4ff), 1);
             }
-            if self.y >= to && self.y >= ground {
+            if self.y >= to && self.y >= ground && vy > 0.0 {
                 self.y = to.round();
                 self.fall = None;
+                self.depth = None;
+                self.aim = None;
                 d.snow_puff(self.centre(), self.y);
-                let high = self.y - from > 3.0;
+                // a jump or a hop down lands on its feet; dropped from a
+                // height, it's a bit of a tumble
+                let high = self.y - from > if self.ledge_fall && !self.dropped { 14.0 } else { 3.0 };
+                self.dropped = false;
+                self.ledge_fall = false;
+                self.left = None;
                 d.sound(Sfx::Drop, self.centre(), if high { 1.0 } else { 0.6 });
-                if self.drop_to.take().is_some() {
+                if self.drop_to.take().is_some() || std::mem::take(&mut self.magic) {
                     // a soft, magical landing (no dizziness)
                     d.burst(self.centre(), self.y - 1.0, 24, &[Rgb::hex(0xbfe4ff), Rgb::WHITE, Rgb::hex(0xffd36b)], 7.0, 4.0);
                 } else if high {
@@ -180,7 +312,68 @@ impl Player {
             return;
         }
         let (mx, my) = if self.free(t) { mv } else { (0.0, 0.0) };
+        // up on something: along its top (up and down its slopes), off the
+        // end to drop down; S hops down
+        if let Some(li) = self.perch {
+            let Some(l) = ledges.get(li) else {
+                self.perch = None;
+                self.fall = Some((0.0, self.y));
+                self.ledge_fall = true;
+                return;
+            };
+            self.moving = mx != 0.0;
+            if my > 0.0 {
+                self.perch = None;
+                self.left = Some(li);
+                self.fall = Some((0.0, self.y));
+                self.ledge_fall = true;
+                return;
+            }
+            if mx != 0.0 {
+                self.active_at = t;
+                self.dir = mx.signum();
+                let nx = (self.x + mx * SPEED_X * self.pace() * self.k * dt).clamp(1.0, w - 4.0);
+                match l.feet(nx + 1.0) {
+                    // a step up or down the slope
+                    Some(f) if (f - self.y).abs() <= super::ledges::STEP => {
+                        self.x = nx;
+                        self.y = f;
+                    }
+                    // a wall (a chimney, the steeple): no further
+                    Some(f) if f < self.y => {}
+                    // off the end (or a sheer drop): down we go
+                    _ => {
+                        self.x = nx;
+                        self.perch = None;
+                        self.left = Some(li);
+                        self.fall = Some((0.0, self.y));
+                        self.ledge_fall = true;
+                        return;
+                    }
+                }
+                self.phase += dt * self.pace().sqrt() * 9.0;
+                self.step_cd -= dt;
+                if self.step_cd <= 0.0 {
+                    self.step_cd = 0.32;
+                    d.sound(Sfx::Crunch, self.centre(), 0.14);
+                }
+            } else if let Some(f) = l.feet(self.centre()) {
+                self.y = f;
+            }
+            return;
+        }
         self.moving = mx != 0.0 || my != 0.0;
+        // up against something at the back of the snowfield (or under a
+        // widget): W climbs it
+        if my < 0.0 {
+            let back = self.y <= lo(self.centre()) + 0.5;
+            if let Some((li, f)) = super::ledges::climbable(ledges, self.centre(), self.y, back) {
+                self.climb = Some((li, f));
+                self.active_at = t;
+                d.sound(Sfx::Rustle, self.centre(), 0.4);
+                return;
+            }
+        }
         if self.moving {
             self.active_at = t;
             if mx != 0.0 {
@@ -233,7 +426,11 @@ impl Player {
         // the detailed sprite, where the front-end can show pictures
         if crate::frame::pictures_ok() {
             use super::sprites::{self, Look, Pose};
-            let pose = if up {
+            let pose = if self.climbing() {
+                Pose::Climb(step as u8)
+            } else if self.leaping() {
+                Pose::Jump
+            } else if up {
                 Pose::ArmsUp
             } else if scooping {
                 Pose::Scoop
@@ -290,7 +487,7 @@ impl Player {
                 scarf: Some(SCARF),
                 sit: None,
                 kid: false,
-                arms_up: throwing || wave,
+                arms_up: throwing || wave || self.climbing(),
                 outdoor: true,
             };
             b.draw(f, t);

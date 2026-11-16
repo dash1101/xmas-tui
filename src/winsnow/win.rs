@@ -108,6 +108,19 @@ fn enumerate(own: HWND, skip: HWND, mon: Rect, scale: f32) -> (Vec<Win>, Vec<Str
                 if matches!(cls.as_str(), "Progman" | "WorkerW" | CLASS) {
                     continue;
                 }
+                // menus and flyouts (the desktop's right-click menu, the
+                // Windows 11 XAML menus and popups) aren't windows either
+                if matches!(cls.as_str(), "#32768" | "Xaml_WindowedPopupClass" | "Microsoft.UI.Content.PopupWindowSiteBridge" | "DropDown" | "SysDragImage") {
+                    continue;
+                }
+                let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+                if style & WS_POPUP != 0 && style & WS_CAPTION != WS_CAPTION && style & WS_THICKFRAME == 0 && ex & WS_EX_TOPMOST != 0 {
+                    // a topmost borderless popup: a menu, tooltip or toast
+                    let covers = r.left <= mx && r.top <= my && r.right >= mx + mw && r.bottom >= my + mh;
+                    if !covers {
+                        continue;
+                    }
+                }
             }
             // the visible frame, without the invisible resize borders
             // (on failure `r` keeps the outer rect)

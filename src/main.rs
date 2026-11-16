@@ -10,6 +10,8 @@ mod ctxmenu;
 mod export;
 mod frame;
 mod icon;
+#[cfg(target_os = "linux")]
+mod linwall;
 mod platform;
 mod raster;
 mod rng;
@@ -95,6 +97,9 @@ struct Args {
     viz: bool,
     /// --export: the pet fed / cuddled / napping / brushed.
     pet_act: Option<String>,
+    /// --export: the villager up on something (house, tree, lamp,
+    /// station, shop, present), or climbing / jumping.
+    perch: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -138,6 +143,7 @@ fn parse_args() -> Args {
         menu: None,
         viz: false,
         pet_act: None,
+        perch: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -170,6 +176,7 @@ fn parse_args() -> Args {
             "--stats" => a.stats = true,
             "--viz" => a.viz = true,
             "--pet-act" => a.pet_act = it.next(),
+            "--perch" => a.perch = it.next(),
             "--controls" => a.controls = true,
             "--menu" => {
                 a.menu = it.next().and_then(|v| {
@@ -211,6 +218,8 @@ fn parse_args() -> Args {
                      USAGE: xmas-tui [--config PATH] [--fps N]           (Linux: run inside a terminal; Windows: desktop wallpaper)\n\
                      \x20      xmas-tui --wallpaper                       (terminal mode, keys don't quit — used by the kitty launcher)\n\
                      \x20      xmas-tui --windowed [--rows N]             (a normal window, any OS)\n\
+                     \x20      xmas-tui --set-wallpaper                   (Linux: make it the desktop wallpaper)\n\
+                     \x20      xmas-tui --lock-screen [on|off]            (KDE: the village on the lock screen)\n\
                      \x20      xmas-tui --fullscreen [--rows N]           (full screen, F11 toggles)\n\
                      \x20      xmas-tui --settings-window [--export DIR]  (just the settings panel; what the tray icon opens)\n\
                      \x20      xmas-tui --export DIR [--size 568x75] [--frames N] [--at SECONDS] [--sleigh] [--settings] [--demo] [--pan CELLS] [--clean] [--raw]\n\
@@ -245,6 +254,14 @@ fn main() {
         }
         return;
     }
+    // Linux: make the village the desktop wallpaper / put it on the lock
+    // screen, from a terminal
+    #[cfg(target_os = "linux")]
+    match std::env::args().nth(1).as_deref() {
+        Some("--set-wallpaper") => std::process::exit(linwall::cli_set_wallpaper()),
+        Some("--lock-screen") => std::process::exit(linwall::cli_lock(std::env::args().nth(2).as_deref() != Some("off"))),
+        _ => {}
+    }
     let args = parse_args();
     if std::env::args().any(|a| a == "--update") {
         std::process::exit(update::cli());
@@ -265,6 +282,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     if (args.wallpaper || args.windowed || args.settings_window) && args.export.is_none() {
         std::thread::spawn(icon::install_desktop_files);
+        // an installed launcher follows the app's own updates
+        if args.wallpaper {
+            linwall::refresh_launcher();
+        }
     }
     if args.settings_window {
         let res = match &args.export {
@@ -630,7 +651,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     if args.sleigh {
         scene.sleigh.trigger((args.at - 9.0).max(0.0));
     }
-    scene.jump(args.pan);
+    scene.snap_pan(args.pan);
     scene.look_up(args.sky);
     if let Some(m) = &args.time {
         scene.set_daylight(scene::daylight::compute(m, 720.0, 450.0, 1020.0));
@@ -709,6 +730,15 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     if let Some(a) = &args.pet_act {
         scene.preview_pet(a);
         for _ in 0..(2.0 / dt) as usize {
+            scene.update(dt, t);
+            t += dt;
+        }
+    }
+    if let Some(a) = &args.perch {
+        scene.preview_perch(a);
+        // a moment for a jump to rise
+        let n = if a == "jump" { 0.15 } else { 0.0 };
+        for _ in 0..(n / dt) as usize {
             scene.update(dt, t);
             t += dt;
         }

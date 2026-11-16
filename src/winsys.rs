@@ -11,7 +11,7 @@
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, RedrawWindow, ScreenToClient, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW};
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, DESKTOP_SWITCHDESKTOP};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, SetFocus, KEYEVENTF_KEYUP, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, SetFocus, KEYEVENTF_KEYUP, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP};
 use windows_sys::Win32::UI::Shell::{SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -321,6 +321,138 @@ pub fn parent_origin(hwnd: HWND) -> (i32, i32) {
     }
 }
 
+/// Is the attached wallpaper window where it shows: visible, inside a visible parent,
+/// and with no other wallpaper layer in front of it? Explorer rebuilds its
+/// desktop layers now and then (a new wallpaper, a display change, waking
+/// from sleep), and a layer it puts in front hides the wallpaper without its window
+/// going anywhere. Err(why) when something's wrong.
+pub fn attach_ok(hwnd: HWND) -> Result<(), String> {
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return Err("the wallpaper window is hidden".into());
+        }
+        let parent = GetAncestor(hwnd, GA_PARENT);
+        if parent.is_null() || IsWindowVisible(parent) == 0 {
+            return Err(format!("its parent ({}) is hidden", class_of(parent)));
+        }
+        let visible_worker = |h: HWND| IsWindowVisible(h) != 0 && class_of(h) == "WorkerW" && FindWindowExW(h, std::ptr::null_mut(), wide("SHELLDLL_DefView").as_ptr(), std::ptr::null()).is_null();
+        if on_raised_desktop(hwnd) {
+            // [icons, the wallpaper, Windows' WorkerW]: no WorkerW in front of it
+            let mut h = GetWindow(hwnd, GW_HWNDPREV);
+            while !h.is_null() {
+                if visible_worker(h) {
+                    return Err(format!("a WorkerW ({:#x}) is in front of it", h as usize));
+                }
+                h = GetWindow(h, GW_HWNDPREV);
+            }
+        } else if class_of(parent) == "WorkerW" {
+            // classic: between the icons' window and the wallpaper's WorkerW, no other
+            // wallpaper WorkerW
+            let mut h = GetWindow(parent, GW_HWNDPREV);
+            while !h.is_null() {
+                if !FindWindowExW(h, std::ptr::null_mut(), wide("SHELLDLL_DefView").as_ptr(), std::ptr::null()).is_null() {
+                    break;
+                }
+                if visible_worker(h) {
+                    return Err(format!("another WorkerW ({:#x}) is in front of ours", h as usize));
+                }
+                h = GetWindow(h, GW_HWNDPREV);
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Things that can leave the wallpaper stuck or hidden: waking from sleep
+// (closing a laptop's lid), unlocking, the display changing or switching
+// back on, DWM restarting, a new Windows wallpaper. The wallpaper window is a child
+// of Explorer's and never hears of them, so a hidden top-level window of
+// xmas-tui's own listens, and window.rs attaches afresh shortly after.
+
+static DESK_EVENT: Mutex<Option<&'static str>> = Mutex::new(None);
+static DESK_WATCH: AtomicBool = AtomicBool::new(false);
+static DISPLAY_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+
+/// What happened (once), if anything.
+pub fn take_desktop_event() -> Option<&'static str> {
+    DESK_EVENT.lock().ok()?.take()
+}
+
+fn desktop_event(what: &'static str) {
+    if let Ok(mut e) = DESK_EVENT.lock() {
+        *e = Some(what);
+    }
+}
+
+/// Start listening (once).
+pub fn watch_desktop_events() {
+    if DESK_WATCH.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("desktop events".into()).spawn(|| unsafe {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::System::Power::RegisterPowerSettingNotification;
+        use windows_sys::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION};
+        use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+        let inst = GetModuleHandleW(std::ptr::null());
+        let class = wide("xmas-tui-desktop-events");
+        let wc = WNDCLASSW { lpfnWndProc: Some(desk_events_proc), hInstance: inst, lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
+        RegisterClassW(&wc);
+        // top-level (message-only windows don't get the broadcasts), never shown
+        let h = CreateWindowExW(WS_EX_TOOLWINDOW, class.as_ptr(), class.as_ptr(), WS_POPUP, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), inst, std::ptr::null());
+        if h.is_null() {
+            DESK_WATCH.store(false, Ordering::SeqCst);
+            return;
+        }
+        WTSRegisterSessionNotification(h, NOTIFY_FOR_THIS_SESSION);
+        RegisterPowerSettingNotification(h as _, &GUID_CONSOLE_DISPLAY_STATE, 0);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+unsafe extern "system" fn desk_events_proc(h: HWND, msg: u32, wp: usize, lp: isize) -> isize {
+    use windows_sys::Win32::System::Power::POWERBROADCAST_SETTING;
+    use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+    const WM_DWMCOMPOSITIONCHANGED: u32 = 0x031E;
+    const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+    const WTS_CONSOLE_CONNECT: usize = 1;
+    const WTS_SESSION_UNLOCK: usize = 8;
+    const PBT_APMRESUMESUSPEND: usize = 7;
+    const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
+    const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+    const SPI_SETDESKWALLPAPER: usize = 0x14;
+    match msg {
+        WM_DISPLAYCHANGE => desktop_event("the display changed"),
+        WM_DWMCOMPOSITIONCHANGED => desktop_event("DWM restarted"),
+        WM_SETTINGCHANGE if wp == SPI_SETDESKWALLPAPER => desktop_event("the Windows wallpaper changed"),
+        WM_WTSSESSION_CHANGE if wp == WTS_SESSION_UNLOCK || wp == WTS_CONSOLE_CONNECT => desktop_event("the session was unlocked"),
+        WM_POWERBROADCAST => match wp {
+            PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => desktop_event("woke from sleep"),
+            PBT_POWERSETTINGCHANGE if lp != 0 => {
+                let s = &*(lp as *const POWERBROADCAST_SETTING);
+                let g = &s.PowerSetting;
+                let d = &GUID_CONSOLE_DISPLAY_STATE;
+                // the screen back on after being off (0 = off, 1 = on, 2 =
+                // dimmed; the state as it is comes once on registering)
+                if g.data1 == d.data1 && g.data2 == d.data2 && g.data3 == d.data3 && g.data4 == d.data4 && s.DataLength >= 1 {
+                    let was = DISPLAY_STATE.swap(s.Data[0], Ordering::SeqCst);
+                    if was == 0 && s.Data[0] == 1 {
+                        desktop_event("the screen came back on");
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    DefWindowProcW(h, msg, wp, lp)
+}
+
 /// Is our attached window still alive inside the *current* Explorer's
 /// desktop? False once Explorer crashed / restarted or tore down the
 /// window we were parented to (then window.rs creates a fresh window and
@@ -402,9 +534,9 @@ pub fn poll() -> Polled {
 
 /// Walking keys, read only while the desktop itself has keyboard focus
 /// (the user clicked the bare desktop): [left, right, up, down, interact,
-/// invite, snowball, pockets, items 1-5]. None while any other window is focused, so typing elsewhere
-/// never moves anyone.
-pub fn desktop_keys() -> Option<[bool; 15]> {
+/// invite, snowball, pockets, items 1-5, shift, cycle, jump, esc]. None
+/// while any other window is focused, so typing elsewhere never moves anyone.
+pub fn desktop_keys() -> Option<[bool; 17]> {
     unsafe {
         let fg = GetForegroundWindow();
         let cls = class_of(fg);
@@ -417,7 +549,7 @@ pub fn desktop_keys() -> Option<[bool; 15]> {
             down(VK_RIGHT) || down(b'D' as u16),
             down(VK_UP) || down(b'W' as u16),
             down(VK_DOWN) || down(b'S' as u16),
-            down(b'E' as u16) || down(VK_SPACE) || down(VK_RETURN),
+            down(b'E' as u16) || down(VK_RETURN),
             down(b'F' as u16),
             down(b'R' as u16),
             down(b'I' as u16),
@@ -428,6 +560,8 @@ pub fn desktop_keys() -> Option<[bool; 15]> {
             down(b'5' as u16),
             down(VK_SHIFT),
             down(b'Q' as u16),
+            down(VK_SPACE),
+            down(VK_ESCAPE),
         ])
     }
 }
@@ -546,6 +680,14 @@ static RC_OWN: AtomicUsize = AtomicUsize::new(0);
 static RC_AREA: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
 static RC_PENDING: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static RC_EATEN: AtomicBool = AtomicBool::new(false);
+/// The wallpaper is drawing (not resting, not full screen, attached): only
+/// then are right-clicks taken from the desktop (a resting wallpaper
+/// wouldn't answer them until it woke).
+static RC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn rclick_active(on: bool) {
+    RC_ACTIVE.store(on, Ordering::Relaxed);
+}
 static RC_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// Start taking right-clicks on the bare desktop (once). `own` is the
@@ -601,6 +743,9 @@ pub fn pass_rclick() {
 /// Is (x, y) bare desktop over the wallpaper: the desktop's own windows (or
 /// ours) under it, and no icon there?
 fn rclick_ours(x: i32, y: i32) -> bool {
+    if !RC_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
     let (ax, ay, aw, ah) = RC_AREA.lock().map(|a| *a).unwrap_or_default();
     if aw <= 0 || x < ax || y < ay || x >= ax + aw || y >= ay + ah {
         return false;
