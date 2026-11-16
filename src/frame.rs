@@ -94,6 +94,14 @@ pub struct Frame {
     /// While set, glyphs put are marked as text over the scene (see
     /// `Glyph::ui`).
     pub ui: bool,
+    /// While set (the widgets drawing), text over the scene isn't painted
+    /// over: speech bubbles and prompts stay readable on top.
+    pub keep_ui: bool,
+    /// Which cells hold a speck (a snowflake or a star), and whether glyphs
+    /// put now are specks: the clock clears specks from between its digits
+    /// and leaves trees, houses and their lights alone.
+    speck: Vec<bool>,
+    pub specks: bool,
     /// Light already bloomed (and magnified) by `zoom`, added at compose.
     pre: Vec<Rgb>,
     pre_on: bool,
@@ -123,6 +131,9 @@ impl Frame {
             xtaps: vec![],
             out: vec![],
             ui: false,
+            keep_ui: false,
+            speck: vec![],
+            specks: false,
             pre: vec![],
             pre_on: false,
             glow_near: 1.0,
@@ -147,6 +158,7 @@ impl Frame {
         self.half = vec![Rgb::BLACK; nh];
         self.half_tmp = vec![Rgb::BLACK; nh];
         self.glyph = vec![None; w * h];
+        self.speck = vec![false; w * h];
         self.out = vec![Cell::default(); w * h];
     }
 
@@ -156,7 +168,9 @@ impl Frame {
         self.soft.fill(0);
         self.pre_on = false;
         self.ui = false;
+        self.specks = false;
         self.glyph.fill(None);
+        self.speck.fill(false);
     }
 
     // ---------------- pixel layer ----------------
@@ -270,13 +284,29 @@ impl Frame {
         x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h
     }
 
+    /// Clear the speck (snowflake or star) at a cell, if there is one.
+    pub fn clear_speck(&mut self, x: i32, y: i32) {
+        if self.cell_in(x, y) {
+            let i = y as usize * self.w + x as usize;
+            if self.speck[i] {
+                self.glyph[i] = None;
+                self.speck[i] = false;
+            }
+        }
+    }
+
     #[inline]
     pub fn put_g(&mut self, x: i32, y: i32, g: Glyph) {
         let x = x - self.ox;
         let y = y + self.oy;
         if self.cell_in(x, y) {
+            let i = y as usize * self.w + x as usize;
+            if self.keep_ui && self.glyph[i].is_some_and(|o| o.ui) {
+                return;
+            }
             let g = if self.ui { Glyph { ui: true, ..g } } else { g };
-            self.glyph[y as usize * self.w + x as usize] = Some(g);
+            self.glyph[i] = Some(g);
+            self.speck[i] = self.specks;
         }
     }
 

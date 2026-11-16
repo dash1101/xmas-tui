@@ -3536,7 +3536,9 @@ impl Scene {
         self.sky.draw_px(f, t, self.director.flare.value(t), self.sky_off());
         let dl = self.daylight;
         if oy > 0 {
+            f.specks = true;
             self.high.draw(f, t, glow, self.sky.top_color(), dl.sun, self.sky_off());
+            f.specks = false;
         }
         daylight::sky_pass(f, &dl, -2 * oy, self.land.horizon as i32, glow);
         // clouds drift with the sky (the same slow parallax)
@@ -3556,7 +3558,9 @@ impl Scene {
         f.ox = 0;
         if dl.sun < 0.45 {
             // stars and the moon's glyphs (not in daylight)
+            f.specks = true;
             self.sky.draw_glyphs(f, t, self.sky_off());
+            f.specks = false;
         }
         f.ox = self.sky_off();
         self.skylife.draw_flyers(f, t, glow, dl.sun);
@@ -3571,14 +3575,18 @@ impl Scene {
         self.land.draw_glints(f, t);
         f.ox = 0;
         if self.cfg.snow > 0.0 {
+            f.specks = true;
             self.snow.draw_far(f);
+            f.specks = false;
         }
         f.ox = cam;
         self.director.draw_back(f, &self.ctx, t);
         self.critters.draw_back(f, t);
         f.ox = 0;
         if self.cfg.snow > 0.0 {
+            f.specks = true;
             self.snow.draw_mid(f);
+            f.specks = false;
         }
         f.ox = cam;
         let show = self.director.show.value(t);
@@ -3617,7 +3625,9 @@ impl Scene {
         }
         f.ox = 0;
         if self.cfg.snow > 0.0 {
+            f.specks = true;
             self.snow.draw_near(f, t);
+            f.specks = false;
         }
         f.ox = cam;
         self.director.draw_front(f, t, glow);

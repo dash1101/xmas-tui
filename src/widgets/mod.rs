@@ -250,6 +250,13 @@ impl Widgets {
     }
 
     pub fn draw(&mut self, f: &mut Frame, t: f32) {
+        // speech bubbles and prompts stay readable on top of the widgets
+        f.keep_ui = true;
+        self.draw_all(f, t);
+        f.keep_ui = false;
+    }
+
+    fn draw_all(&mut self, f: &mut Frame, t: f32) {
         self.rects = [None; COUNT];
         if f.w < 150 || f.h < 30 {
             return;
@@ -311,12 +318,11 @@ impl Widgets {
         };
         let s = format!("{}:{:02}", h, now.minute());
         let warm = Rgb::hex(0xfff1d6);
-        // keep the clock's backdrop clean: no stars/snow between the digits
+        // keep the clock's backdrop clean: no stars or snow between the
+        // digits (trees, houses, their lights and speech bubbles stay)
         for yy in y..(y + 11) {
             for xx in x..(x + 66) {
-                if f.cell_in(xx, yy) {
-                    f.glyph[yy as usize * f.w + xx as usize] = None;
-                }
+                f.clear_speck(xx, yy);
             }
         }
         let mut cx = x;
@@ -1020,4 +1026,53 @@ fn draw_weather(f: &mut Frame, x: i32, y: i32, w: i32, wx: &Weather, t: f32) -> 
         fx += 14;
     }
     y + h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the clock: no data threads (no network, no audio capture).
+    fn clock_only() -> Widgets {
+        let mut cfg = Config::default();
+        (cfg.widgets.system, cfg.widgets.music, cfg.widgets.weather, cfg.widgets.map, cfg.widgets.visualizer) = (false, false, false, false, false);
+        cfg.sound.enabled = false;
+        Widgets::new(&cfg)
+    }
+
+    #[test]
+    fn the_clock_clears_snow_but_not_trees_or_speech_bubbles() {
+        let mut w = clock_only();
+        let mut f = Frame::new(200, 60);
+        // inside the clock's area (3..69 × 2..13), right of the digits
+        f.ui = true;
+        f.text(50, 6, "see that one?", Rgb::hex(0x2a1a14), Bg::Mix(Rgb::hex(0xf4efe6), 0.9), 0.0);
+        f.ui = false;
+        f.put_g(48, 10, Glyph::new('^', Rgb::hex(0x2f9a52)).bg(Bg::Solid(Rgb::hex(0x143f23))));
+        f.specks = true;
+        f.put_g(47, 9, Glyph::new('❄', Rgb::WHITE));
+        f.specks = false;
+        w.draw(&mut f, 1.0);
+        let at = |x: usize, y: usize| f.glyph[y * f.w + x].map(|g| g.ch);
+        assert_eq!(at(50, 6), Some('s'), "the speech bubble was wiped");
+        assert_eq!(at(48, 10), Some('^'), "the tree was wiped");
+        assert_eq!(at(47, 9), None, "the snowflake stayed between the digits");
+        assert!(!f.keep_ui);
+    }
+
+    #[test]
+    fn panels_dont_paint_over_speech_bubbles() {
+        let mut cfg = Config::default();
+        (cfg.widgets.music, cfg.widgets.weather, cfg.widgets.map, cfg.widgets.visualizer, cfg.clock.enabled) = (false, false, false, false, false);
+        cfg.sound.enabled = false;
+        // the system panel, without its stats thread: parked off, then drawn
+        let mut w = Widgets::new(&cfg);
+        let mut f = Frame::new(200, 60);
+        f.ui = true;
+        f.text(10, 16, "hello!", Rgb::hex(0x2a1a14), Bg::Mix(Rgb::hex(0xf4efe6), 0.9), 0.0);
+        f.ui = false;
+        w.draw(&mut f, 1.0);
+        assert!(w.rects[1].is_some_and(|r| r.contains(10, 16)), "the system panel isn't under the bubble");
+        assert_eq!(f.glyph[16 * f.w + 10].map(|g| g.ch), Some('h'));
+    }
 }
