@@ -1,33 +1,32 @@
-# The relay behind a Cloudflare Tunnel. Neither port is published on the
-# host: the tunnel (cloudflared, on the same Docker network) reaches them.
-#   xmas-relay.<domain>  → http://xmas-relay:8080   (public: the game's WebSocket at /mqtt)
-#   xmas-admin.<domain>  → http://xmas-relay:8081   (behind a Cloudflare Access app: the admin only)
+# xmas-relay, for /opt/xmas-relay/compose.yaml on the server. Both ports are
+# published on 127.0.0.1 only: the Cloudflare tunnel (on the same machine)
+# reaches them there, and nothing else on the network can.
+#   xmas-relay.novalabs.app → http://localhost:8080   (public: the game's WebSocket at /mqtt)
+#   xmas-admin.novalabs.app → http://localhost:8081   (behind Cloudflare Access)
 services:
   xmas-relay:
-    build: .
-    image: xmas-relay:latest
+    image: ghcr.io/dash1101/xmas-relay:1.0.0
     container_name: xmas-relay
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
     environment:
-      # the admin's Cloudflare Access address: the console answers only them
+      # the admin's Cloudflare Access login (in .env beside this file): the
+      # console answers only requests Access signed in as that address
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       TRUST_CF: "1"
     volumes:
-      - xmas-relay-data:/data
-    networks:
-      - tunnel
+      # limits and bans (owned by uid 10001, the container's user)
+      - ./data:/data
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     cpus: 2
-
-volumes:
-  xmas-relay-data:
-
-networks:
-  # the network cloudflared is on (make it external if the tunnel runs in
-  # another compose project: `external: true` and its name)
-  tunnel:
-    name: tunnel
-    external: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
