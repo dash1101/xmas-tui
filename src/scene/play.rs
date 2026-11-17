@@ -52,6 +52,12 @@ pub enum Pending {
     /// A trip out (true: skiing), or back from one.
     Trip(bool),
     TripEnd,
+    /// Along to where someone online is on their trip (their id).
+    Join(u32),
+    /// A race down the mountain with friends: the course, when it starts.
+    Race(u32, f32),
+    /// Round the table in the games room (the table's number).
+    GameRoom(u32),
 }
 
 /// How long the view takes to close (and again to open).
@@ -85,6 +91,9 @@ impl Scene {
                     Pending::Cabin => self.enter_cabin(t),
                     Pending::Trip(ski) => self.start_trip(ski),
                     Pending::TripEnd => self.finish_trip(),
+                    Pending::Join(id) => self.join_trip(id),
+                    Pending::Race(seed, at) => self.start_race(seed, at),
+                    Pending::GameRoom(game) => self.enter_games_room(game),
                 }
                 // (opening round where the villager is now)
                 let (x, y) = self.zoom_focus();
@@ -216,6 +225,7 @@ impl Scene {
         self.you_say(line, t);
         let join = *self.rng.pick(&["ooh, I know this one!", "a carol! wait for me!", "♪ la la laaa ♪", "everyone, sing along!"]);
         self.critters.gather(px, t + secs, t, &mut self.director, join);
+        self.share_show(2, 0);
         self.director.sound(Sfx::Chime, px, 0.6);
         let _ = py;
     }
@@ -278,6 +288,7 @@ impl Scene {
         let t = self.now();
         if self.director.plan_light_show(t, super::events::SHOW_LEAD * 0.6, secs) {
             self.pockets.light_shows += 1;
+            self.share_show(0, secs as u16);
             self.you_say("light show by the big tree — everyone come and see!", t);
             self.director.sound(Sfx::Chime, self.player.as_ref().map(|p| p.centre()).unwrap_or(0.0), 0.6);
         } else {
@@ -290,6 +301,7 @@ impl Scene {
         let t = self.now();
         let Some(px) = self.player.as_ref().map(|p| p.centre()) else { return };
         self.director.fireworks(t + 0.6, n, px);
+        self.share_show(1, n as u16);
         self.pockets.fireworks += n as u32;
         let line = *self.rng.pick(&["stand back!", "light the fuse…", "three, two, one…", "ooh, here they go!"]);
         self.you_say(line, t);
@@ -298,11 +310,8 @@ impl Scene {
 
     /// The further choices behind a "▸" (title, choices).
     pub fn more_menu(&self, k: u8) -> (String, Vec<(String, Do)>) {
-        if k == super::online::MORE_ONLINE {
-            return self.online_menu();
-        }
-        if k >= super::online::MORE_FRIEND {
-            return self.friend_menu((k - super::online::MORE_FRIEND) as usize);
+        if let Some(m) = self.online_more(k) {
+            return m;
         }
         match k {
             0 => (
@@ -351,15 +360,31 @@ impl Scene {
     /// Games to play with whoever's at home (none in an empty house or an
     /// igloo on your own).
     pub(super) fn game_choices(&self) -> Vec<(String, Do)> {
-        let Some(name) = self.inside.as_ref().and_then(|i| i.residents.first()).map(|r| r.name) else { return vec![] };
-        super::games::Kind::ALL.iter().map(|&k| (format!("{} {} with {name}", k.icon(), k.name()), Do::Game(k))).collect()
+        let Some(inn) = self.inside.as_ref().filter(|i| !i.is_games()) else { return vec![] };
+        let names: Vec<&str> = inn.residents.iter().filter(|r| !inn.is_cabin() || r.name != inn.residents[0].name).map(|r| r.name).collect();
+        let Some(first) = names.first().copied() else { return vec![] };
+        // (the cards: up to three of them round the table)
+        let all = match names.len() {
+            1 => first.to_string(),
+            2 => format!("{} & {}", names[0], names[1]),
+            _ => format!("{}, {} & {}", names[0], names[1], names[2]),
+        };
+        super::games::Kind::ALL.iter().map(|&k| (format!("{} {} with {}", k.icon(), k.name(), if k.seats() > 2 { &all } else { first }), Do::Game(k))).collect()
     }
 
     /// Sit down at the table for a game with whoever's at home.
     pub(super) fn start_game(&mut self, kind: super::games::Kind) {
-        let Some(name) = self.inside.as_ref().and_then(|i| i.residents.first()).map(|r| r.name) else { return };
+        if let Some(old) = self.table.take() {
+            self.left_table(&old);
+        }
+        // round a table: the villager sits down, and whoever's playing too
+        let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) else { return };
+        let names = inn.sit_for_game(p, kind.seats() - 1);
+        if names.is_empty() {
+            return;
+        }
         let seed = self.rng.next_u32();
-        self.table = Some(super::games::Table::new(kind, name, seed));
+        self.table = Some(super::games::Table::with(kind, &names, seed));
         self.convo = None;
     }
 
@@ -408,7 +433,15 @@ impl Scene {
         let t = self.now();
         match (k, self.table.as_mut()) {
             (Some(k), Some(tb)) => tb.key(k, t),
-            (None, _) => self.table = None,
+            (None, _) => {
+                if let Some(old) = self.table.take() {
+                    self.left_table(&old);
+                }
+                // up from the table, everyone
+                if let Some(inn) = self.inside.as_mut() {
+                    inn.game_over();
+                }
+            }
             _ => {}
         }
     }
@@ -422,7 +455,10 @@ impl Scene {
 
     /// The game: their moves; a game over goes on the scorecard (once).
     pub(super) fn update_table(&mut self, t: f32) {
-        if self.inside.is_none() {
+        // (a game with a friend online goes on anywhere; with a neighbour,
+        // only in their home)
+        let online = self.table.as_ref().is_some_and(|tb| tb.net.is_some());
+        if self.inside.is_none() && !online {
             self.table = None;
             return;
         }
@@ -455,14 +491,39 @@ impl Scene {
     /// Off on a trip (the station, or the car by home, reached).
     pub(super) fn start_trip(&mut self, ski: bool) {
         let t = self.now();
-        let seed = self.rng.next_u32();
+        // (in a shared village, the same train and mountain for everyone)
+        let seed = if self.online.village().is_some() { self.seed ^ 0x51ed } else { self.rng.next_u32() };
         self.goal = None;
         self.trip = Some(if ski { super::trips::Trip::ski(t, seed) } else { super::trips::Trip::drive(t, seed) });
+        if ski {
+            self.share_trip();
+        }
         self.director.sound(if ski { Sfx::TrainWhistle } else { Sfx::Honk }, self.player.as_ref().map(|p| p.centre()).unwrap_or(0.0), 0.8);
+    }
+
+    /// Along to where someone online is on their trip.
+    pub(super) fn join_trip(&mut self, id: u32) {
+        let t = self.now();
+        let Some(at) = self.online.other(id).and_then(|o| o.av.trip).filter(|a| (1..=5).contains(&a.at)) else {
+            self.post("they're not on a trip just now");
+            return;
+        };
+        self.goal = None;
+        self.trip = Some(super::trips::Trip::join(t, at));
+        self.director.sound(Sfx::TrainWhistle, self.player.as_ref().map(|p| p.centre()).unwrap_or(0.0), 0.6);
+    }
+
+    /// A race with friends: up the chairlift, and down from the top at
+    /// `at` (scene time).
+    pub(super) fn start_race(&mut self, seed: u32, at: f32) {
+        let t = self.now();
+        self.goal = None;
+        self.trip = Some(super::trips::Trip::racing(t, seed, at - t));
     }
 
     /// The trip, each frame: and back to the village once it's over.
     pub(super) fn update_trip(&mut self, dt: f32, t: f32) {
+        self.update_trip_online();
         let mv = self.mv;
         let Some(tr) = &mut self.trip else { return };
         tr.update(dt, t, mv);
@@ -480,8 +541,9 @@ impl Scene {
         let t = self.now();
         let Some(tr) = &self.trip else { return };
         let Some(back) = tr.done else { return };
-        let (runs, best, km) = (tr.runs, tr.best, tr.km);
+        let (runs, best, km, score) = (tr.runs, tr.best, tr.km, tr.best_score);
         self.trip = None;
+        self.pockets.ski_score = self.pockets.ski_score.max(score);
         self.pockets.ski_runs += runs;
         if let Some(b) = best {
             self.pockets.ski_best = Some(self.pockets.ski_best.map_or(b, |o: f32| o.min(b)));
@@ -545,6 +607,11 @@ impl Scene {
         let mut v: Vec<(String, Do)> = vec![];
         let Some(p) = self.player.as_ref() else { return ("things to do".into(), v) };
         let (px, py) = (p.centre(), p.y);
+        // with friends online (first: it's what's new)
+        if !self.online.others().is_empty() {
+            v.push((format!("☺ with the {} here online: play, wave, race ▸", self.online.others().len() + 1), Do::More(super::online::MORE_PEOPLE)));
+        }
+        v.push(("✉ friends & online: play together ▸".into(), Do::More(super::online::MORE_ONLINE)));
         if self.inside.is_some() {
             v.extend(self.game_choices());
             return ("things to do".into(), v);
@@ -631,7 +698,6 @@ impl Scene {
         if self.daylight.sun < 0.25 {
             v.push(("✦ wish on a star".into(), Do::Wish));
         }
-        v.push(("✉ friends & online ▸".into(), Do::More(super::online::MORE_ONLINE)));
         ("things to do".into(), v)
     }
 }

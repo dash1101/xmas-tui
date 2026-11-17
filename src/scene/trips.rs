@@ -131,8 +131,24 @@ fn slope_things(seed: u32) -> Vec<(f32, usize, u8)> {
     v
 }
 
+/// Someone else on the trip (a friend online): who, how they look, where.
+#[derive(Clone, Debug)]
+pub struct Fellow {
+    pub name: String,
+    pub look: crate::scene::sprites::Look,
+    pub at: crate::net::TripAt,
+}
+
 pub struct Trip {
     pub at: Where,
+    /// Friends online on the same trip (set by the village each frame).
+    pub fellows: Vec<Fellow>,
+    /// A race with friends: no one else on the slope, and the run's
+    /// result to tell them (score, seconds) once it's down.
+    pub race: bool,
+    pub finished: Option<(u32, f32)>,
+    /// The others' results in the race (name, score, seconds).
+    pub results: Vec<(String, u32, f32)>,
     /// Skis rented at the shop.
     pub skis: bool,
     /// The villager at the lodge or in the carriage: column (0..1), facing.
@@ -220,6 +236,10 @@ impl Trip {
             .collect();
         Trip {
             at: Where::Lodge,
+            fellows: vec![],
+            race: false,
+            finished: None,
+            results: vec![],
             skis: false,
             x: 0.05,
             dir: 1.0,
@@ -245,6 +265,71 @@ impl Trip {
             best: None,
             km: 0.0,
             best_score: 0,
+        }
+    }
+
+    /// A race down the mountain with friends: the course from `seed`, the
+    /// chairlift up first (it starts at the top in `wait` seconds).
+    pub fn racing(t: f32, seed: u32, wait: f32) -> Self {
+        let mut tr = Trip::new(seed);
+        tr.skis = true;
+        tr.race = true;
+        tr.at = Where::Lift { since: t + wait.clamp(0.0, 30.0) - 7.0 };
+        tr.say("a race! up the chairlift, and it starts at the top…", t, 4.0);
+        tr.sounds.push((Sfx::Chime, 0.7));
+        tr
+    }
+
+    /// Where the villager is on the trip, for friends to see.
+    pub fn here(&self, t: f32) -> crate::net::TripAt {
+        use crate::net::TripAt;
+        let base = TripAt { x: self.x, dir: self.dir, seed: self.seed, ..Default::default() };
+        match self.at {
+            Where::Shuttle { home, since } => TripAt { at: 1, home, el: t - since, ..base },
+            Where::Carriage { home, since } => TripAt { at: 2, home, air: self.ride, sat: self.sat, el: t - since, ..base },
+            Where::Lodge => TripAt { at: 3, sat: self.skis, ..base },
+            Where::Lift { since } => TripAt { at: 4, el: t - since, ..base },
+            Where::Ski => match &self.run {
+                Some(r) => TripAt { at: 5, x: r.x, lane: r.lane, air: r.air, score: r.score, sat: r.tumble > t, el: t - r.started, dir: if (((r.spin / 90.0).round() as i32).rem_euclid(4)) == 2 { -1.0 } else { 1.0 }, ..base },
+                None => TripAt { at: 3, ..base },
+            },
+            Where::Drive => TripAt { at: 6, ..base },
+        }
+    }
+
+    /// Along to where a friend is on their trip (the same shuttle, the same
+    /// train, the lodge at the top).
+    pub fn join(t: f32, at: crate::net::TripAt) -> Self {
+        let mut tr = Trip::new(at.seed);
+        match at.at {
+            1 => {
+                tr.at = Where::Shuttle { home: at.home, since: t - at.el.clamp(0.0, SHUTTLE - 0.5) };
+                tr.say("aboard the shuttle — just in time!", t, 3.0);
+            }
+            2 => {
+                tr.board(at.home, t);
+                tr.ride = at.air.clamp(0.0, 0.98);
+                tr.x = (at.x - 0.05).clamp(0.05, 0.9);
+                tr.say("on the same train — they're along the carriage", t, 3.5);
+            }
+            _ => {
+                tr.at = Where::Lodge;
+                tr.skis = true;
+                tr.x = LIFT - 0.06;
+                tr.say("up at Pine Peak with them · E at the lift: down the mountain", t, 4.0);
+            }
+        }
+        tr.sounds.push((Sfx::Chime, 0.6));
+        tr
+    }
+
+    /// A friend's result in the race.
+    pub fn result(&mut self, name: &str, score: u32, secs: f32, t: f32) {
+        self.results.retain(|r| r.0 != name);
+        self.results.push((name.to_string(), score, secs));
+        if self.run.is_none() && self.race {
+            let msg = format!("{name} is down: {score} points in {secs:.1}s");
+            self.say(&msg, t, 4.0);
         }
     }
 
@@ -421,7 +506,8 @@ impl Trip {
 
     fn start_run(&mut self, t: f32) {
         self.at = Where::Ski;
-        let rivals = (0..4)
+        let n = if self.race { 0 } else { 4 };
+        let rivals = (0..n)
             .map(|k| Rival { name: NAMES[(self.seed as usize + k * 3 + 1) % NAMES.len()], coat: Rgb::hex(COATS[(k + 2) % COATS.len()]), x: -6.0 - k as f32 * 9.0, v: 9.0 + k as f32, lane: (k % LANES) as f32, want: (k % LANES) as f32, air: 0.0, vy: 0.0, done: None, score: 0 })
             .collect();
         self.run = Some(Run { x: 0.0, v: 10.0, lane: 1.0, want: 1.0, air: 0.0, vy: 0.0, held: false, boost: 0.0, spin: 0.0, grab: false, tumble: 0.0, started: t, score: 0, flags: 0, gates: 0, tricks: 0, flakes: 0, passed: vec![], pop: None, rivals });
@@ -654,7 +740,11 @@ impl Trip {
             let bonus = ((150.0 - secs).max(0.0) * 8.0) as u32;
             r.score += bonus;
             let score = r.score;
-            let place = 1 + r.rivals.iter().filter(|rv| rv.done.is_some_and(|d| d < t)).count();
+            let mut place = 1 + r.rivals.iter().filter(|rv| rv.done.is_some_and(|d| d < t)).count();
+            if self.race {
+                place = 1 + self.results.iter().filter(|o| o.1 > score).count();
+                self.finished = Some((score, secs));
+            }
             let (flags, gates, tricks) = (r.flags, r.gates, r.tricks);
             self.last = Some((secs, flags, gates, tricks));
             self.runs += 1;
@@ -802,8 +892,13 @@ impl Trip {
         for x in cx + 14..hx - 6 {
             f.px_set(x, ground - 9, Rgb::hex(0xc8a040));
         }
-        // the villager at the window
+        // the villager at the window (friends along beside them)
         person(f, look, crate::scene::sprites::Pose::Sit, 1.0, cx as f32 - 4.0, (ground - 6) as f32 / 2.0, 1.0);
+        for (i, fw) in self.fellows.iter().filter(|fw| fw.at.at == 1 && fw.at.home == home).take(2).enumerate() {
+            let x = cx as f32 + 3.0 + i as f32 * 7.0;
+            person(f, &fw.look, crate::scene::sprites::Pose::Sit, 1.0, x, (ground - 6) as f32 / 2.0, 1.0);
+            name_tag(f, &fw.name, x / 1.0, (ground - 18 + bob) / 2 - 2);
+        }
         // snow
         for i in 0..80 {
             let x = (h01(hash2(i, 1)) * pw as f32 - el * 40.0).rem_euclid(pw as f32);
@@ -892,6 +987,13 @@ impl Trip {
         let walking = t > self.conductor.2;
         let pose = if walking { Pose::Walk(((t * 5.0) as i32 % 2) as u8) } else { Pose::Wave };
         person(f, &cl, pose, self.conductor.1, self.conductor.0 * pw as f32, feet + 1.0, 2.0);
+        // friends on the same train
+        for fw in self.fellows.iter().filter(|fw| fw.at.at == 2 && fw.at.home == home) {
+            let pose = if fw.at.sat { Pose::Sit } else if (fw.at.el * 3.0) as i32 % 3 == 0 { Pose::Stand } else { Pose::Walk(((t * 5.0) as i32 % 2) as u8) };
+            let x = fw.at.x * pw as f32;
+            person(f, &fw.look, pose, fw.at.dir, x, feet + if fw.at.sat { -1.0 } else { 2.0 }, 2.0);
+            name_tag(f, &fw.name, x, (feet as i32) - 12);
+        }
         // the villager
         let pose = if self.sat { Pose::Sit } else if (self.walk * 10.0) as i32 % 3 == 0 { Pose::Stand } else { Pose::Walk(((self.walk as i32) % 2) as u8) };
         person(f, look, pose, self.dir, self.x * pw as f32, feet + if self.sat { -1.0 } else { 2.0 }, 2.0);
@@ -993,8 +1095,16 @@ impl Trip {
             f.text(x, row - 9, s, Rgb::hex(0xffd36b), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
         };
         label(f, PLATFORM, " ⇄ train home ");
-        label(f, SHOP, " ⛷ ski shop ");
+        label(f, SHOP, " ❄ ski shop ");
         label(f, LIFT, " ⇗ chairlift ");
+        // friends up here too (at the lodge, or on the lift)
+        for fw in self.fellows.iter().filter(|fw| fw.at.at == 3 || fw.at.at == 4) {
+            let (fx, lift) = if fw.at.at == 4 { (LIFT * f.w as f32 + 2.0, true) } else { (fw.at.x * f.w as f32, false) };
+            let pose = if lift { crate::scene::sprites::Pose::Wave } else { crate::scene::sprites::Pose::Stand };
+            person(f, &fw.look, pose, fw.at.dir, fx, (ground / 2) as f32 + 0.5, 2.0);
+            let tag = if lift { format!("{} (on the lift)", fw.name) } else { fw.name.clone() };
+            name_tag(f, &tag, fx, ground / 2 - 12);
+        }
         // the villager
         let x = self.x * f.w as f32;
         let step = (self.walk as i32) % 2;
@@ -1138,6 +1248,20 @@ impl Trip {
             }
             f.text(px / 1 - 2, ((feet / 2.0) as i32 - 9).max(2), rv.name, Rgb::hex(0xf4ecd8), Bg::Mix(Rgb::hex(0x1a1014), 0.6), 0.0);
         }
+        // friends on the slope
+        for fw in self.fellows.iter().filter(|fw| fw.at.at == 5) {
+            let px = sx + (fw.at.x - r.x) as i32;
+            if px < -20 || px > pw + 20 {
+                continue;
+            }
+            let feet = surface(px, fw.at.lane) - fw.at.air * 2.0;
+            let pose = if fw.at.sat { Pose::Lie } else if fw.at.air > 0.0 { Pose::Jump } else { Pose::Scoop };
+            person(f, &fw.look, pose, fw.at.dir, px as f32, feet / 2.0, 2.0);
+            for dx in -7..9 {
+                f.px_set(px + dx, feet as i32 + dx / 3, fw.look.hat.unwrap_or(fw.look.coat));
+            }
+            name_tag(f, &fw.name, px as f32, ((feet / 2.0) as i32 - 10).max(2));
+        }
         // the skier: tucked, in the air (spinning, grabbing), or tumbling
         let feet_px = surface(sx, r.lane) - r.air * 2.0;
         let spun = ((r.spin / 90.0).round() as i32).rem_euclid(4);
@@ -1172,6 +1296,8 @@ impl Trip {
         }
         // the standings
         let mut all: Vec<(String, f32)> = r.rivals.iter().map(|rv| (rv.name.to_string(), rv.x)).collect();
+        all.extend(self.fellows.iter().filter(|fw| fw.at.at == 5).map(|fw| (fw.name.clone(), fw.at.x)));
+        all.extend(self.results.iter().map(|(n, ..)| (n.clone(), RUN_LEN + 1.0)));
         all.push(("you".into(), r.x));
         all.sort_by(|a, b| b.1.total_cmp(&a.1));
         for (i, (n, _)) in all.iter().enumerate() {
@@ -1345,6 +1471,13 @@ impl Trip {
         }
     }
 
+}
+
+/// A friend's name, over them (column, row).
+fn name_tag(f: &mut Frame, name: &str, cx: f32, row: i32) {
+    let s = format!(" {name} ");
+    let n = s.chars().count() as i32;
+    f.text(cx.round() as i32 - n / 2, row.max(1), &s, Rgb::hex(0xffe9a8), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
 }
 
 /// The villager (or anyone) drawn as in the village, `k` times the

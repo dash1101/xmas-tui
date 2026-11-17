@@ -339,6 +339,26 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     startActivity(new Intent(GameActivity.this, SettingsActivity.class));
                 } else if (ask != null && ask.startsWith("text:")) {
                     typeLine(ask.substring(5));
+                } else if (ask != null && ask.startsWith("you:")) {
+                    // the villager changed in the village (or on a linked device)
+                    Prefs.applyYou(GameActivity.this, ask.substring(4));
+                } else if ("reload".equals(ask)) {
+                    // another villager: theirs into the settings, and start again
+                    try {
+                        java.io.File f = new java.io.File(getFilesDir(), "save.toml");
+                        byte[] b = new byte[(int) f.length()];
+                        try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                            int n = 0;
+                            while (n < b.length) {
+                                int r = in.read(b, n, b.length - n);
+                                if (r < 0) break;
+                                n += r;
+                            }
+                        }
+                        Prefs.applyYou(GameActivity.this, Native.youJson(new String(b, "UTF-8")));
+                    } catch (Exception ignored) {
+                    }
+                    recreate();
                 } else if (ask != null && ask.startsWith("copy:")) {
                     String text = ask.substring(5);
                     ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -535,11 +555,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 3: return new float[] {w - 150 * d, h - 150 * d, 26 * d};
                 case 4: return new float[] {w - 30 * d, 30 * d, 20 * d};
                 case 5: return new float[] {w - 80 * d, 30 * d, 20 * d};
+                case 7: return new float[] {w - 130 * d, 30 * d, 20 * d};
                 default: return new float[] {w - 230 * d, h - 120 * d, 26 * d};
             }
         }
 
-        private static final int N_BTN = 7;
+        private static final int N_BTN = 8;
 
         /** 7×7 pixel icons for the buttons ('#' lit, '+' bright). */
         private final String[][] icons = {
@@ -550,6 +571,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
             {"..#.#..", ".#####.", "##...##", ".#...#.", "##...##", ".#####.", "..#.#.."},
             {"..###..", ".#...#.", "#..#..#", "#.###.#", "#..#..#", ".#...#.", "..###.."},
             {"...#...", "...#...", ".#####.", "#######", ".#####.", "...#...", "...#..."},
+            {".......", "#######", "##...##", "#.#.#.#", "#..#..#", "#######", "......."},
         };
 
         /** A filled disc of art pixels, edged, round (cx, cy) radius r (screen px). */
@@ -685,6 +707,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 4: startActivity(new Intent(GameActivity.this, SettingsActivity.class)); break;
                 case 5: Native.button(game, Native.CENTRE); break;
                 case 6: todo(); break;
+                case 7: Native.online(game); break;
                 default:
                     if (b > 100) {
                         Native.button(game, Native.NUM + (b - 100));

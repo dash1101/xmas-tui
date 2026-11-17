@@ -24,6 +24,7 @@ traffic = "auto"      # side of the road: "auto" (from the weather city), "right
 talk_time = 1.0       # how long speech bubbles stay up (0.5..3; longer lines always stay longer)
 chattiness = 1.0      # how often people stop to talk and remark on things (0 = quiet .. 2)
 name = ""             # the villager's name (people use it); empty: "neighbour"
+motto = ""            # a line on the villager's profile card (friends online see it)
 
 # friends & family: some of the folk who come by take these names (one of each
 # at a time) and know the villager. Up to ten; kid = true comes as a kid.
@@ -32,6 +33,13 @@ name = ""             # the villager's name (people use it); empty: "neighbour"
 # [[scene.friends]]
 # name = "Bea"
 # kid = true
+
+[scene.wear]          # the villager's own look (left empty: the classic green hat and gold coat)
+coat = ""             # red green blue purple gold pink grey white
+hat = ""              # red green blue gold pink white, or "none"
+hair = ""             # brown dark blonde red grey
+skin = ""             # light fair tan deep
+scarf = true
 
 [scene.pet]           # the villager's own pet (named in the village, or here)
 kind = "dog"          # "dog", "cat", "bunny" or "none"

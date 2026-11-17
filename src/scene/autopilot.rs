@@ -1,7 +1,8 @@
 //! Autopilot (Settings → You): left alone a while, the villager gets on with
 //! a day of their own — a hand with the kids' snowmen and igloos (or one of
 //! their own), snowballs at the neighbours, berries for the animals, a chat,
-//! a game with the pet, tag with the kids, a look round from a rooftop.
+//! a game with the pet, tag with the kids, a look round from a rooftop, a
+//! knock at a neighbour's door for a game of chess, checkers or cards.
 //! Anything done by hand takes over again at once.
 
 use super::ledges::Kind as LKind;
@@ -23,7 +24,7 @@ pub(super) struct Auto {
     pub goal_mine: bool,
     /// How many times each kind of thing was taken up (tests).
     #[cfg(test)]
-    pub tried: [u32; 13],
+    pub tried: [u32; 14],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +50,10 @@ pub(super) enum Plan {
     Roof { stage: u8, at: f32 },
     /// Standing about (curled up in an igloo, maybe).
     Linger { until: f32 },
+    /// A game with a neighbour: walking to their door (stage 0), sat at
+    /// the table (1, the next move once it's had a think), the game over
+    /// (2, up and out at `next`).
+    Game { stage: u8, next: f32, until: f32 },
 }
 
 impl Auto {
@@ -64,6 +69,7 @@ impl Auto {
             Some(Plan::Tag { swaps, tire_at, dodge, commit }) => Some(Plan::Tag { swaps, tire_at: tire_at - s, dodge, commit: commit - s }),
             Some(Plan::Roof { stage, at }) => Some(Plan::Roof { stage, at: at - s }),
             Some(Plan::Linger { until }) => Some(Plan::Linger { until: until - s }),
+            Some(Plan::Game { stage, next, until }) => Some(Plan::Game { stage, next: next - s, until: until - s }),
             None => None,
         };
     }
@@ -122,7 +128,7 @@ impl Scene {
         }
     }
 
-    fn auto_goal(&mut self, d: Do) {
+    pub(super) fn auto_goal(&mut self, d: Do) {
         self.act(d);
         self.auto.goal_mine = true;
     }
@@ -137,6 +143,11 @@ impl Scene {
     /// it holds, if any (walking to a goal steers itself).
     pub(super) fn autopilot(&mut self, t: f32) -> Option<(f32, f32)> {
         if !self.auto.on || self.player.is_none() || t - self.auto.touched < IDLE {
+            return None;
+        }
+        // at a neighbour's for a game
+        if let (Some(Plan::Game { stage, next, until }), true) = (self.auto.plan, self.inside.is_some()) {
+            self.auto_game(t, stage, next, until);
             return None;
         }
         // inside an igloo for a rest: back out when it's time
@@ -257,6 +268,12 @@ impl Scene {
                     _ => {}
                 }
             }
+            Plan::Game { until, .. } => {
+                // (not in yet: knocked, the view closing; or no one home)
+                if !walking && self.pending.is_none() || t > until {
+                    self.auto_done(t, 2.0, 5.0);
+                }
+            }
             Plan::Linger { until } => {
                 if t >= until {
                     if self.in_igloo {
@@ -271,6 +288,69 @@ impl Scene {
             }
         }
         None
+    }
+
+    /// At a neighbour's for a game: sit down to one (whatever they fancy),
+    /// play it out (a think between moves), shake hands, and out again.
+    fn auto_game(&mut self, t: f32, stage: u8, next: f32, until: f32) {
+        let leave = |s: &mut Self| {
+            if s.table.is_some() {
+                s.table_key(None);
+            }
+            s.soon(super::play::Pending::Leave);
+            s.auto_done(t, 3.0, 8.0);
+        };
+        match stage {
+            0 => {
+                let someone = self.inside.as_ref().is_some_and(|i| !i.residents.is_empty() && !i.is_igloo());
+                if !someone {
+                    let line = self.rng_line(&["nobody home…", "oh — they're out", "another time, then"]);
+                    self.auto_say(line, t);
+                    return leave(self);
+                }
+                if t < next || next == 0.0 {
+                    if next == 0.0 {
+                        // (a moment to come in and say hello)
+                        self.auto.plan = Some(Plan::Game { stage: 0, next: t + 1.5, until });
+                    }
+                    return;
+                }
+                let kinds = super::games::Kind::ALL;
+                let kind = kinds[(self.rng.next_u32() as usize) % kinds.len()];
+                self.start_game(kind);
+                // (a long game of chess doesn't go on all day)
+                let long = if kind == super::games::Kind::Chess { 240.0 } else { 150.0 };
+                self.auto.plan = Some(Plan::Game { stage: 1, next: t + 2.0, until: t + long });
+            }
+            1 => {
+                let Some(tb) = &mut self.table else { return leave(self) };
+                if let Some(r) = tb.result {
+                    let line = match r {
+                        super::games::Result::Won => self.rng_line(&["good game! (I won!)", "ha! got you", "well played — but I win!"]),
+                        super::games::Result::Lost => self.rng_line(&["you got me! good game", "rematch next time…", "well played!"]),
+                        super::games::Result::Drawn => self.rng_line(&["a draw — fair's fair", "evenly matched!"]),
+                    };
+                    self.auto_say(line, t);
+                    self.auto.plan = Some(Plan::Game { stage: 2, next: t + 4.0, until });
+                    return;
+                }
+                if t > until {
+                    let line = self.rng_line(&["let's call it a draw", "I'd better be off — good game!"]);
+                    self.auto_say(line, t);
+                    return leave(self);
+                }
+                if t >= next && !tb.theirs() {
+                    tb.auto_move(t);
+                    let pause = self.rng.range(1.2, 2.8);
+                    self.auto.plan = Some(Plan::Game { stage: 1, next: t + pause, until });
+                }
+            }
+            _ => {
+                if t >= next {
+                    leave(self);
+                }
+            }
+        }
     }
 
     fn rng_line(&mut self, lines: &[&'static str]) -> &'static str {
@@ -383,6 +463,11 @@ impl Scene {
         }
         if igloo.is_some() {
             opts.push((1.0, 12));
+        }
+        // a neighbour's door, for a game
+        let homes: Vec<usize> = self.village.houses.iter().enumerate().filter(|(i, h)| !h.church && Some(*i) != self.home && near(h.door() as f32)).map(|(i, _)| i).collect();
+        if !homes.is_empty() {
+            opts.push((1.0, 13));
         }
         let sum: f32 = opts.iter().map(|o| o.0).sum();
         let mut r = self.rng.range(0.0, sum);
@@ -501,6 +586,14 @@ impl Scene {
                     self.auto_goal(Do::Crawl(bx));
                     self.auto.plan = Some(Plan::Linger { until: t + self.rng.range(14.0, 24.0) });
                 }
+            }
+            // a knock at a neighbour's: a game with whoever's in
+            13 => {
+                let i = *self.rng.pick(&homes);
+                let line = self.rng_line(&["fancy a game of something?", "I feel lucky today…", "time for a rematch!", "who's up for chess?"]);
+                self.auto_say(line, t);
+                self.auto_goal(Do::Visit(i));
+                self.auto.plan = Some(Plan::Game { stage: 0, next: 0.0, until: t + 40.0 });
             }
             // a wander
             _ => {

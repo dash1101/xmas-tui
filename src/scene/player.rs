@@ -12,11 +12,51 @@ use crate::audio::Sfx;
 use crate::color::Rgb;
 use crate::frame::{Bg, Frame, Glyph};
 
-const COAT: Rgb = Rgb::hex(0xe0a030);
-const HAT: Rgb = Rgb::hex(0x2fae5c);
-const SCARF: Rgb = Rgb::hex(0xd8283a);
-const SKIN: Rgb = Rgb::hex(0xe8c39e);
 const BOOTS: Rgb = Rgb::hex(0x2a2a34);
+
+/// The villager's look (Settings → You): coat, hat (0: none), hair, skin,
+/// scarf (0: none).
+static WEAR: std::sync::RwLock<[u32; 5]> = std::sync::RwLock::new([0xe0a030, 0x2fae5c, 0x3a2a1a, 0xe8c39e, 0xd8283a]);
+
+/// Dress the villager (from the config's `wear`).
+pub fn set_wear(w: &crate::config::FriendCfg) {
+    let (coat, hat, hair, skin, scarf) = w.wear_colours();
+    if let Ok(mut l) = WEAR.write() {
+        *l = [coat, hat.unwrap_or(0), hair, skin, scarf.unwrap_or(0)];
+    }
+}
+
+fn wear() -> [u32; 5] {
+    WEAR.read().map(|l| *l).unwrap_or([0xe0a030, 0x2fae5c, 0x3a2a1a, 0xe8c39e, 0xd8283a])
+}
+
+#[allow(non_snake_case)]
+fn COAT() -> Rgb {
+    Rgb::hex(wear()[0])
+}
+#[allow(non_snake_case)]
+fn HAT() -> Option<Rgb> {
+    let h = wear()[1];
+    (h != 0).then(|| Rgb::hex(h))
+}
+#[allow(non_snake_case)]
+fn HAIR() -> Rgb {
+    Rgb::hex(wear()[2])
+}
+#[allow(non_snake_case)]
+fn SKIN() -> Rgb {
+    Rgb::hex(wear()[3])
+}
+#[allow(non_snake_case)]
+fn SCARF() -> Option<Rgb> {
+    let s = wear()[4];
+    (s != 0).then(|| Rgb::hex(s))
+}
+/// Mittens: the scarf's colour, or the hat's, or the coat's (darker).
+#[allow(non_snake_case)]
+fn MITTENS() -> Rgb {
+    SCARF().or(HAT()).unwrap_or(COAT() * 0.7)
+}
 
 /// Walking speed (cells/s) across and up/down the snowfield.
 const SPEED_X: f32 = 11.0;
@@ -92,6 +132,8 @@ pub struct Player {
     /// Dropping in from the sky (right-click → drop in here): the row to
     /// land on; drawn shimmering on the way down.
     pub drop_to: Option<f32>,
+    /// Waving (at someone online) until then.
+    pub wave_until: f32,
     /// Space still held: a jump keeps rising for as long as this lasts (s).
     pub jump_held: bool,
     boost: f32,
@@ -118,7 +160,8 @@ pub struct Player {
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
-        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0, hop: false, auto_pace: false }
+        Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false,
+            wave_until: 0.0, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0, hop: false, auto_pace: false }
     }
 
     /// How fast to go: the walk speed, doubled while running.
@@ -140,7 +183,7 @@ impl Player {
 
     /// How the villager looks (for drawing them elsewhere: on a trip).
     pub fn look() -> super::sprites::Look {
-        super::sprites::Look { kid: false, coat: COAT, hat: Some(HAT), hair: Rgb::hex(0x3a2a1a), scarf: Some(SCARF), skin: SKIN, mittens: SCARF, holding: None, lantern: false }
+        super::sprites::Look { kid: false, coat: COAT(), hat: HAT(), hair: HAIR(), scarf: SCARF(), skin: SKIN(), mittens: MITTENS(), holding: None, lantern: false }
     }
 
     /// Up in the air (a jump, a fall).
@@ -626,7 +669,7 @@ impl Player {
         } else {
             [" ▲", " ●", "~█", if self.moving && step { " ╨" } else { " ║" }]
         };
-        let wave = !self.moving && !up && !scooping && !throwing && (t * 0.5).sin() > 0.97;
+        let wave = !self.moving && !up && !scooping && !throwing && ((t * 0.5).sin() > 0.97 || t < self.wave_until);
         // the detailed sprite, where the front-end can show pictures
         if crate::frame::pictures_ok() {
             use super::sprites::{self, Look, Pose};
@@ -657,7 +700,7 @@ impl Player {
                 Pose::Stand
             };
             let holding = if self.snowball && !throwing { Some(Rgb::hex(0xf2f6ff)) } else { self.hold.map(|(_, c)| c) };
-            let look = Look { kid: false, coat: COAT, hat: Some(HAT), hair: Rgb::hex(0x3a2a1a), scarf: Some(SCARF), skin: Rgb::hex(0xe8c39e), mittens: SCARF, holding: if self.lantern { None } else { holding }, lantern: self.lantern };
+            let look = Look { holding: if self.lantern { None } else { holding }, lantern: self.lantern, ..Self::look() };
             let light = 0.9 + 0.25 * f.day.max(0.0);
             let pic = sprites::person(&look, pose, self.dir, light);
             let rows = sprites::rows_of(&pic, sk);
@@ -687,15 +730,15 @@ impl Player {
         if lying {
             let feet = sy.round() as i32;
             let x0 = (sc - 2.0).round() as i32;
-            let cells: [(i32, char, Rgb); 5] = [(0, '•', Rgb::hex(0xf4f0ea)), (1, '●', SKIN), (2, '▬', COAT), (3, '▬', COAT), (4, '▀', BOOTS)];
+            let cells: [(i32, char, Rgb); 5] = [(0, '•', Rgb::hex(0xf4f0ea)), (1, '●', SKIN()), (2, '▬', COAT()), (3, '▬', COAT()), (4, '▀', BOOTS)];
             for (dx, ch, c) in cells {
                 let x = if self.dir > 0.0 { x0 + dx } else { x0 + 4 - dx };
                 f.put_g(x, feet, Glyph::new(ch, c).bg(Bg::Scene).lit(0.6));
             }
             if flap == Some(true) {
                 let (a, b) = if self.dir > 0.0 { (x0 + 2, x0 + 3) } else { (x0 + 2, x0 + 1) };
-                f.put_g(a, feet - 1, Glyph::new('╲', COAT).lit(0.6));
-                f.put_g(b, feet - 1, Glyph::new('╱', COAT).lit(0.6));
+                f.put_g(a, feet - 1, Glyph::new('╲', COAT()).lit(0.6));
+                f.put_g(b, feet - 1, Glyph::new('╱', COAT()).lit(0.6));
             }
             f.light_cell(x0 + 2, feet, Rgb::hex(0xffc878) * (1.6 * glow));
             return;
@@ -707,14 +750,15 @@ impl Player {
                 feet: sy.round() as i32,
                 dir: self.dir,
                 step: self.moving && step,
-                hat: Some(HAT),
-                hair: Rgb::hex(0x3a2a1a),
-                coat: COAT,
-                scarf: Some(SCARF),
+                hat: HAT(),
+                hair: HAIR(),
+                coat: COAT(),
+                scarf: SCARF(),
                 sit: None,
                 kid: false,
                 arms_up: throwing || wave || self.climbing(),
                 outdoor: true,
+                behind: None,
             };
             b.draw(f, t);
             let (hx, hy) = (sc.round() as i32 + if self.dir > 0.0 { 3 } else { -4 }, sy.round() as i32 * 2 - 5);
@@ -784,12 +828,12 @@ impl Player {
                 }
                 let (cx, ch) = if self.dir > 0.0 { (x0 + i as i32, ch) } else { (x0 + 1 - i as i32, super::events::mirror(ch)) };
                 let col = match (ry, ch) {
-                    (_, '▲') => HAT,
-                    (_, '●') => SKIN,
-                    (_, '~') => SCARF,
+                    (_, '▲') => HAT().unwrap_or(HAIR()),
+                    (_, '●') => SKIN(),
+                    (_, '~') => SCARF().unwrap_or(COAT()),
                     (3, '╨' | '║' | '▀') => BOOTS,
                     (3, '╱' | '╲') if up => BOOTS,
-                    _ => COAT,
+                    _ => COAT(),
                 };
                 // the scarf's loose end flutters
                 let ch = if ch == '~' && (t * 6.0) as i32 % 2 == 0 { '≈' } else { ch };
@@ -823,7 +867,7 @@ impl Player {
         }
         if wave {
             let ax = if self.dir > 0.0 { x0 + 2 } else { x0 - 1 };
-            put(f, ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT).lit(0.6));
+            put(f, ax, top + 1, Glyph::new(if self.dir > 0.0 { '╱' } else { '╲' }, COAT()).lit(0.6));
         }
         if self.drop_to.is_some() {
             light(f, x0 + 1, top + 1, Rgb::hex(0x9fd8ff) * (5.0 * glow));

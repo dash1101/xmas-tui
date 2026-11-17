@@ -147,6 +147,12 @@ public class SettingsActivity extends Activity {
     private void village() {
         card("THE VILLAGER");
         text("Name", "name", "neighbour", 16);
+        text("Card's line", "motto", "(friends online see it)", 60);
+        choice("Your coat", "wear_coat", new String[] {"classic", "red", "green", "blue", "purple", "gold", "pink", "grey", "white"}, "classic");
+        choice("Your hat", "wear_hat", new String[] {"classic", "red", "green", "blue", "gold", "pink", "white", "none"}, "classic");
+        choice("Your hair", "wear_hair", new String[] {"classic", "brown", "dark", "blonde", "red", "grey"}, "classic");
+        choice("Your skin", "wear_skin", new String[] {"classic", "light", "fair", "tan", "deep"}, "classic");
+        toggle("A scarf", "wear_scarf", true);
         choice("Pet", "pet", new String[] {"cat", "dog", "bunny", "none"}, "cat");
         String kind = prefs.getString("pet", "cat");
         String[] coats = "dog".equals(kind) ? new String[] {"golden", "chocolate", "black", "snowy", "spotty", "grey", "red"}

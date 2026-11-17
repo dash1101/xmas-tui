@@ -52,6 +52,9 @@ final class Native {
     /** The ☰ menu, drawn in the village. */
     static native void more(long game);
 
+    /** Friends & online (the ✉ button). */
+    static native void online(long game);
+
     /** The controls card, drawn in the village. */
     static native void help(long game);
 
@@ -61,7 +64,8 @@ final class Native {
     /** What's showing: 1 the pockets, 2 a menu or card. */
     static native int state(long game);
 
-    /** Something for the app to do ("wallpaper", "settings", "text:<question>", "copy:<text>"), or null. */
+    /** Something for the app to do ("wallpaper", "settings", "text:<question>", "copy:<text>",
+     *  "you:<json>" the villager changed, "reload" another villager), or null. */
     static native String ask(long game);
 
     /** The line typed for a "text:" ask ("" for never mind). */

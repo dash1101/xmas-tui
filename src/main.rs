@@ -20,6 +20,7 @@ mod save;
 mod scene;
 mod setwin;
 mod settings;
+mod sync;
 mod term;
 mod tray;
 mod update;
@@ -799,7 +800,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         if !args.clean {
             widgets.map = Some(scene.minimap());
             widgets.draw(&mut frame, t);
+            scene.draw_top(&mut frame);
             settings.draw_gear(&mut frame, t);
+            settings.draw_online(&mut frame, if scene.online.wanted() { 2 } else { 0 }, 1, scene.asked_now(), t);
             settings.draw(&mut frame, cfg, t);
             settings.draw_help(&mut frame, &cfg.keys, &cfg.ui.look);
         }

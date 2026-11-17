@@ -453,6 +453,10 @@ pub struct SceneCfg {
     /// Friends and family: some of the folk who come to the village take
     /// these names (and know the villager).
     pub friends: Vec<FriendCfg>,
+    /// The villager's own look (a part left empty: the classic one).
+    pub wear: FriendCfg,
+    /// A line about the villager, on their profile card (friends see it).
+    pub motto: String,
 }
 
 /// Someone in the friends & family list: a villager of their own.
@@ -516,6 +520,43 @@ impl FriendCfg {
         let list = Self::lists(part);
         let k = (self.pick(part) as i32 + dir).rem_euclid(list.len() as i32) as usize;
         let v = list[k].0.to_string();
+        match part {
+            0 => self.coat = v,
+            1 => self.hat = v,
+            2 => self.hair = v,
+            _ => self.skin = v,
+        }
+    }
+
+    /// The villager's own look as colours: coat, hat, hair, skin, scarf (a
+    /// part left empty is the classic look's).
+    pub fn wear_colours(&self) -> (u32, Option<u32>, u32, u32, Option<u32>) {
+        let find = |list: &[(&str, u32)], v: &str, or: u32| list.iter().find(|(n, _)| *n == v).map(|c| c.1).unwrap_or(or);
+        let hat = match self.hat.as_str() {
+            "none" => None,
+            v => Some(find(&FRIEND_HATS, v, 0x2fae5c)),
+        };
+        (find(&FRIEND_COATS, &self.coat, 0xe0a030), hat, find(&FRIEND_HAIRS, &self.hair, 0x3a2a1a), find(&FRIEND_SKINS, &self.skin, 0xe8c39e), self.scarf.then_some(0xd8283a))
+    }
+
+    /// A part of the villager's own look, by name ("classic" when unset).
+    pub fn wear_name(&self, part: u8) -> &str {
+        let v = self.value(part);
+        if v.is_empty() {
+            "classic"
+        } else {
+            v
+        }
+    }
+
+    /// The next (or previous) colour for a part of the villager's own look:
+    /// through the list, and round by the classic one.
+    pub fn wear_step(&mut self, part: u8, dir: i32) {
+        let list = Self::lists(part);
+        let n = list.len() as i32 + 1;
+        let at = list.iter().position(|(nm, _)| *nm == self.value(part)).map(|i| i as i32 + 1).unwrap_or(0);
+        let k = (at + dir).rem_euclid(n);
+        let v = if k == 0 { String::new() } else { list[(k - 1) as usize].0.to_string() };
         match part {
             0 => self.coat = v,
             1 => self.hat = v,
@@ -653,7 +694,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![] }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
     }
 }
 

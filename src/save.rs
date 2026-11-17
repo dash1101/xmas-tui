@@ -26,6 +26,9 @@ pub struct Save {
     pub you: Option<You>,
     /// Online: the friend code, friends (see `crate::net`).
     pub online: Option<crate::net::Book>,
+    /// Devices linked to share this villager (this device's side; see
+    /// `crate::sync`).
+    pub sync: Option<crate::sync::Linked>,
 }
 
 /// The villager themself: their name, their pet, friends & family, which
@@ -41,6 +44,10 @@ pub struct You {
     /// The panels' and menus' look (Settings → Widgets).
     pub look: String,
     pub keys: Option<crate::config::KeysCfg>,
+    /// The villager's own look (coat, hat, hair, skin, scarf).
+    pub wear: Option<crate::config::FriendCfg>,
+    /// The line on their profile card.
+    pub motto: String,
 }
 
 impl You {
@@ -52,6 +59,8 @@ impl You {
             only_friends: cfg.scene.only_friends,
             look: cfg.ui.look.clone(),
             keys: Some(cfg.keys.clone()),
+            wear: Some(cfg.scene.wear.clone()),
+            motto: cfg.scene.motto.clone(),
         }
     }
 
@@ -67,6 +76,10 @@ impl You {
         if let Some(k) = &self.keys {
             cfg.keys = k.clone();
         }
+        if let Some(w) = &self.wear {
+            cfg.scene.wear = w.clone();
+        }
+        cfg.scene.motto = self.motto.clone();
     }
 
     /// Whatever a config leaves unset, from here (the villager's name, the
@@ -80,6 +93,13 @@ impl You {
         }
         if cfg.scene.friends.is_empty() {
             cfg.scene.friends = self.friends.clone();
+        }
+        let classic = crate::config::SceneCfg::default().wear;
+        if let (true, Some(w)) = (cfg.scene.wear == classic, &self.wear) {
+            cfg.scene.wear = w.clone();
+        }
+        if cfg.scene.motto.is_empty() {
+            cfg.scene.motto = self.motto.clone();
         }
     }
 }
@@ -128,6 +148,50 @@ pub fn write(p: &Path, s: &Save) -> std::io::Result<()> {
     let tmp = p.with_extension("toml.tmp");
     std::fs::write(&tmp, format!("# xmas-tui save: the village and the villager's things\n{text}"))?;
     std::fs::rename(&tmp, p)
+}
+
+/// Other villagers kept on this device: beside the save, in `villagers/`
+/// (their names, and where each is kept).
+pub fn villagers(save: &Path) -> Vec<(String, PathBuf)> {
+    let Some(dir) = save.parent().map(|d| d.join("villagers")) else { return vec![] };
+    let mut v: Vec<(String, PathBuf)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .filter_map(|p| {
+            let s = read(&p)?;
+            let name = if s.name.trim().is_empty() { "a villager (no name)".to_string() } else { s.name.trim().to_string() };
+            Some((name, p))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Put the villager in `save` away (in `villagers/`), and take `to` out in
+/// its place (None: no save, a new villager starts).
+pub fn switch(save: &Path, to: Option<&Path>) -> std::io::Result<()> {
+    let dir = save.parent().map(|d| d.join("villagers")).ok_or_else(|| std::io::Error::other("no folder"))?;
+    std::fs::create_dir_all(&dir)?;
+    if let Some(cur) = read(save) {
+        let slug: String = cur.name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).take(16).collect();
+        let slug = if slug.is_empty() { "villager".to_string() } else { slug };
+        let kept = dir.join(format!("{slug}-{:08x}.toml", cur.seed));
+        write(&kept, &cur)?;
+    }
+    match to {
+        Some(t) => {
+            let s = read(t).ok_or_else(|| std::io::Error::other("that villager's save can't be read"))?;
+            write(save, &s)?;
+            std::fs::remove_file(t)?;
+        }
+        None => {
+            let _ = std::fs::remove_file(save);
+        }
+    }
+    Ok(())
 }
 
 /// A copy to keep or share: in Documents (or the home folder), named for
@@ -211,6 +275,19 @@ mod tests {
         mine.scene.name = "Alex".into();
         back.you.as_ref().unwrap().fill(&mut mine);
         assert_eq!((mine.scene.name.as_str(), mine.scene.pet.name.as_str()), ("Alex", "Biscuit"));
+        // other villagers: put away and taken out again
+        write(&p, &s).unwrap();
+        switch(&p, None).unwrap();
+        assert!(read(&p).is_none());
+        let kept = villagers(&p);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "Robin");
+        let mut sam = Save { seed: 99, name: "Sam".into(), ..Default::default() };
+        sam.pockets.cheer = 5;
+        write(&p, &sam).unwrap();
+        switch(&p, Some(&kept[0].1)).unwrap();
+        assert_eq!(read(&p).map(|s| s.name), Some("Robin".into()));
+        assert_eq!(villagers(&p).iter().map(|v| v.0.as_str()).collect::<Vec<_>>(), vec!["Sam"]);
         // something that isn't a save
         std::fs::write(&p, "fps = 30").unwrap();
         assert!(read(&p).is_none());

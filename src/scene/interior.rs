@@ -141,6 +141,9 @@ pub enum RoomKind {
     Igloo,
     /// The cocoa cabin: log walls, a counter, gifts, tables by the fire.
     Cabin,
+    /// The games room in the villager's home: a long table under a lamp,
+    /// four chairs round it, games on the shelves, a fire.
+    Games,
 }
 
 impl RoomKind {
@@ -153,6 +156,7 @@ impl RoomKind {
             RoomKind::Igloo => "the igloo",
             RoomKind::Church => "the church",
             RoomKind::Cabin => "the cocoa cabin",
+            RoomKind::Games => "the games room",
         }
     }
 }
@@ -198,6 +202,8 @@ pub struct Resident {
     pub name: &'static str,
     pub kid: bool,
     pub temper: Temper,
+    /// Came in with the villager (a visitor here, not at home).
+    pub guest: bool,
     coat: Rgb,
     hair: Rgb,
     x: f32,
@@ -217,6 +223,8 @@ struct Seat {
     top: i32,
     /// Who's in it: Some(None) the villager, Some(Some(i)) a resident.
     by: Option<Option<usize>>,
+    /// Behind a table (the sitter shows over its top): the top's pixel row.
+    behind: Option<i32>,
 }
 
 /// Walking between floors of the home.
@@ -383,6 +391,14 @@ pub struct Interior {
     bulbs: Vec<(i32, i32, Rgb, f32)>,
     /// Lamps that glow: (x, y).
     lamps: Vec<(i32, i32)>,
+    /// Friends online in the games room, sat in their chairs (see
+    /// `Visitor`).
+    pub visitors: Vec<Visitor>,
+    /// The games room's table: its top (x0, x1, pixel row).
+    board: Option<(i32, i32, i32)>,
+    /// A chair pulled out to sit on (which, when); the time now.
+    pulled: Option<(usize, f32)>,
+    t: f32,
     pub director: Director,
     ctx: Ctx,
     rng: Rng,
@@ -456,6 +472,7 @@ impl Interior {
                     name: super::dialogue::name(&mut rng, kid),
                     kid,
                     temper: temper_of(id, kid),
+                    guest: false,
                     coat: Rgb::hex(*rng.pick(&coats)),
                     hair: Rgb::hex(*rng.pick(&hair)),
                     x: w as f32 * (0.3 + 0.2 * k as f32),
@@ -527,6 +544,10 @@ impl Interior {
             toy_train: None,
             bulbs: vec![],
             lamps: vec![],
+            visitors: vec![],
+            board: None,
+            pulled: None,
+            t,
             director,
             ctx,
             rng,
@@ -562,6 +583,7 @@ impl Interior {
             name: keeper,
             kid: false,
             temper: temper_of(0xcab1, false),
+            guest: false,
             coat: Rgb::hex(0x2a6a3a),
             hair: Rgb::hex(0xd8d0c0),
             x: kx,
@@ -581,6 +603,7 @@ impl Interior {
                 name: super::dialogue::name(&mut rng, kid),
                 kid,
                 temper: temper_of(hash(seed ^ (k as u32 + 9) * 7919) as u64, kid),
+                guest: false,
                 coat: Rgb::hex(*rng.pick(&coats)),
                 hair: Rgb::hex(*rng.pick(&[0x3a2a1a, 0x8a5a2a, 0x1a1a1a, 0xa8462a])),
                 x: w as f32 * (0.36 + 0.1 * k as f32),
@@ -601,6 +624,114 @@ impl Interior {
         }
         inn.build();
         inn
+    }
+
+    /// The games room in the villager's home (or a friend's): the table,
+    /// four chairs, nobody in it yet.
+    pub fn games_room(w: usize, h: usize, seed: u32, outside: (f32, f32), t: f32) -> Self {
+        let mut inn = Interior::new(usize::MAX - 2, false, false, Rgb::hex(0x6a4a3a), w, h, seed, outside, t);
+        inn.rooms = vec![RoomKind::Games];
+        inn.residents.clear();
+        inn.pet = None;
+        inn.build();
+        inn
+    }
+
+    pub fn is_games(&self) -> bool {
+        self.rooms.first() == Some(&RoomKind::Games)
+    }
+
+    /// The villager's in seat `i` (true), or walks there first (false).
+    pub fn take_seat(&mut self, i: usize, p: &mut Player) -> bool {
+        if self.you_sit == Some(i) {
+            return true;
+        }
+        let Some(s) = self.seats.get(i) else { return true };
+        if (p.centre() - s.x as f32).abs() < 1.6 {
+            if let Some(old) = self.you_sit.take() {
+                if let Some(o) = self.seats.get_mut(old) {
+                    o.by = None;
+                }
+            }
+            self.seats[i].by = None;
+            self.sit_in(i, p);
+            // (the chair pulled out to sit on)
+            self.pulled = Some((i, self.t));
+            return true;
+        }
+        false
+    }
+
+    /// Which way someone in seat `s` faces (the games room's table: in
+    /// towards it).
+    fn facing(&self, s: &Seat) -> Option<f32> {
+        let (x0, x1, _) = self.board?;
+        if s.behind.is_some() {
+            return Some(if s.x < (x0 + x1) / 2 { 1.0 } else { -1.0 });
+        }
+        (s.x < x0 || s.x > x1).then(|| if s.x < x0 { 1.0 } else { -1.0 })
+    }
+
+    /// Where seat `i` is (column).
+    pub fn seat_x(&self, i: usize) -> Option<f32> {
+        self.seats.get(i).map(|s| s.x as f32)
+    }
+
+    /// Sat down (which seat).
+    pub fn sitting(&self) -> Option<usize> {
+        self.you_sit
+    }
+
+    /// A game here: the villager sits in the nearest free seat, and the
+    /// first `n` of the household (not the shopkeeper) in the seats nearest
+    /// theirs; their names.
+    pub fn sit_for_game(&mut self, p: &mut Player, n: usize) -> Vec<&'static str> {
+        if self.you_sit.is_none() {
+            self.sit_down(p);
+        }
+        let Some(mine) = self.you_sit.and_then(|i| self.seats.get(i)).map(|s| s.x) else { return vec![] };
+        let mut names = vec![];
+        // (one each by name: two Agneses round a table is one too many)
+        let mut seen: Vec<&str> = vec![];
+        let who: Vec<usize> = (0..self.residents.len())
+            .filter(|&i| self.keeper != Some(i))
+            .filter(|&i| {
+                let n = self.residents[i].name;
+                let new = !seen.contains(&n);
+                seen.push(n);
+                new
+            })
+            .take(n)
+            .collect();
+        for i in who {
+            let free = self.seats.iter().enumerate().filter(|(_, s)| s.by.is_none()).min_by_key(|(_, s)| (s.x - mine).abs()).map(|(k, _)| k);
+            if let Some(k) = free {
+                let sx = self.seats[k].x;
+                self.seats[k].by = Some(Some(i));
+                let r = &mut self.residents[i];
+                (r.x, r.target, r.doing, r.then, r.until) = (sx as f32 - 1.0, sx as f32 - 1.0, Doing::Sit(k), Doing::Sit(k), self.t + 1e6);
+            }
+            names.push(self.residents[i].name);
+        }
+        names
+    }
+
+    /// The game's over: up again, the household (back to their evening).
+    pub fn game_over(&mut self) {
+        let t = self.t;
+        for (i, r) in self.residents.iter_mut().enumerate() {
+            if let Doing::Sit(k) = r.doing {
+                if r.until > t + 1e5 {
+                    r.until = t + 2.0 + i as f32;
+                    if let Some(s) = self.seats.get_mut(k) {
+                        if s.by == Some(Some(i)) {
+                            s.by = None;
+                        }
+                    }
+                    r.doing = Doing::Stand;
+                }
+            }
+        }
     }
 
     /// The cocoa cabin (not a house).
@@ -635,6 +766,7 @@ impl Interior {
                     name,
                     kid: *kid,
                     temper: temper_of(id, *kid),
+                    guest: false,
                     coat: *coat,
                     hair: Rgb::hex([0x3a2a1a, 0x8a5a2a, 0xa8462a, 0xe0c080][k % 4]),
                     x: w as f32 * (0.42 + 0.14 * k as f32),
@@ -662,6 +794,7 @@ impl Interior {
                 name,
                 kid,
                 temper: temper_of(id, kid),
+                guest: true,
                 coat,
                 hair: Rgb::hex([0x3a2a1a, 0x8a5a2a, 0xa8462a, 0xe0c080][k % 4]),
                 x,
@@ -745,8 +878,9 @@ impl Interior {
             RoomKind::Attic => self.build_attic(),
             RoomKind::Igloo => self.build_igloo(),
             RoomKind::Cabin => self.build_cabin(),
+            RoomKind::Games => self.build_games(),
         }
-        if !matches!(kind, RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin) {
+        if !matches!(kind, RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin | RoomKind::Games) {
             self.decorate(kind);
         }
         for (i, r) in self.residents.iter().enumerate() {
@@ -1110,7 +1244,7 @@ impl Interior {
         for x in 0..w {
             l.set(x, floor - 1, wood * 0.5);
         }
-        if matches!(kind, RoomKind::Parlour | RoomKind::Church) {
+        if matches!(kind, RoomKind::Parlour | RoomKind::Church | RoomKind::Games) {
             self.front_door();
         }
     }
@@ -1213,7 +1347,7 @@ impl Interior {
             }
         }
         let n = self.seats.len();
-        self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 7, by: None });
+        self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 7, by: None, behind: None });
         self.things.push((Thing::Seat(n), sx, (floor - 16) / 2 - 1));
         self.spots.push((sx as f32, Doing::Sit(n)));
         // the sleeping ledge and its furs
@@ -1333,6 +1467,103 @@ impl Interior {
     /// The cabin: the fire and a sleepy cat by the door, tables and chairs
     /// under the window, the long counter with the shopkeeper behind it,
     /// shelves of gifts, the stove with the cocoa pot, lanterns, lights.
+    /// The games room: the fire, a rug, a window, shelves of games and
+    /// puzzles, and the long table under its lamp, a chair at each end and
+    /// two behind it.
+    fn build_games(&mut self) {
+        let (w, floor) = (self.w, self.floor);
+        let fx = |f: f32| (w as f32 * f) as i32;
+        let wtop = (floor as f32 * 0.22) as i32;
+        let wh = (floor as f32 * 0.36) as i32;
+        self.fireplace(fx(0.17));
+        self.window_at(fx(0.34), wtop, 18, wh, false, Self::street_look(0.2));
+        self.candles.push((fx(0.34) + 6, wtop + wh));
+        self.rug(fx(0.56), 30.0);
+        self.shelf(fx(0.88), true);
+        self.shelf(fx(0.88) - 14, false);
+        // game boxes stacked on the shelves
+        {
+            let l = &mut self.room;
+            let boxes = [0xc8202a, 0x2a6a3a, 0x2a4c8a, 0xc8a040, 0x6a3a8a];
+            for (k, sy) in [floor - 8, floor - 16, floor - 24].into_iter().enumerate() {
+                let x0 = fx(0.88) - 13;
+                for b in 0..2 {
+                    let c = Rgb::hex(boxes[(k * 2 + b) % boxes.len()]);
+                    for y in sy - 3..sy {
+                        for x in x0 + b as i32 * 5..x0 + b as i32 * 5 + 4 {
+                            l.set(x, y, if y == sy - 3 { c * 1.2 } else { c });
+                        }
+                    }
+                }
+            }
+        }
+        // the table: a long top under a red cloth trimmed in gold, turned legs
+        let cx = fx(0.56);
+        let (tx0, tx1, top) = (cx - 16, cx + 16, floor - 11);
+        {
+            let l = &mut self.room;
+            for x in tx0..tx1 {
+                l.set(x, top, Rgb::hex(0x7a4a28));
+                l.set(x, top + 1, Rgb::hex(0x5a3420));
+                for y in top + 2..top + 5 {
+                    let gold = y == top + 4;
+                    l.set(x, y, if gold { Rgb::hex(0xc8a040) } else { Rgb::hex(0xa82a2a) * (0.9 + 0.1 * h01(hash2(x, y))) });
+                }
+            }
+            for lx in [tx0 + 2, tx1 - 3] {
+                for y in top + 5..floor + 1 {
+                    l.set(lx, y, Rgb::hex(0x4a2a16));
+                    l.set(lx + 1, y, Rgb::hex(0x3a2214));
+                }
+            }
+            // a chessboard and a fan of cards on the top
+            for i in 0..6 {
+                l.set(cx - 9 + i, top - 1, if i % 2 == 0 { Rgb::hex(0xe8d4b0) } else { Rgb::hex(0x5a3a24) });
+            }
+            for (i, c) in [0xf4efe6u32, 0xf4efe6, 0xc8202a].iter().enumerate() {
+                l.set(cx + 4 + i as i32 * 2, top - 1, Rgb::hex(*c));
+                l.set(cx + 5 + i as i32 * 2, top - 1, Rgb::hex(0xf4efe6));
+            }
+            // the lamp hanging over it
+            for y in 2..floor - 40 {
+                l.set(cx, y, Rgb::hex(0x2a1a10));
+            }
+            for k in 0..5 {
+                for x in cx - k - 2..=cx + k + 2 {
+                    l.set(x, floor - 40 + k, Rgb::hex(0x2a6a3a) * (0.8 + 0.05 * k as f32));
+                }
+            }
+            for x in cx - 2..=cx + 2 {
+                l.set(x, floor - 35, Rgb::hex(0xffe0a0));
+            }
+        }
+        self.lamps.push((cx, floor - 34));
+        self.board = Some((tx0, tx1, top));
+        // the chairs: one at each end, facing in; two behind, their backs
+        // showing over the cloth
+        let chair = |l: &mut Layer, sx: i32, back_left: bool, behind: bool| {
+            for y in floor - 16..floor + 1 {
+                for x in sx - 2..sx + 3 {
+                    let backrest = y < floor - 6 && (if behind { x != sx - 2 && x != sx + 2 && y < top } else if back_left { x == sx - 2 } else { x == sx + 2 });
+                    let seat = !behind && (y == floor - 6 || y == floor - 5);
+                    let leg = !behind && y > floor - 5 && (x == sx - 2 || x == sx + 2);
+                    if backrest || seat || leg {
+                        l.set(x, y, Rgb::hex(0x6a3e22) * if behind { 0.85 } else { 1.0 });
+                    }
+                }
+            }
+        };
+        let spots = [(tx0 - 5, true, false), (tx1 + 4, false, false), (cx - 7, false, true), (cx + 7, false, true)];
+        for &(sx, left, behind) in &spots {
+            chair(&mut self.room, sx, left, behind);
+        }
+        for (n, &(sx, _, behind)) in spots.iter().enumerate() {
+            self.seats.push(Seat { x: sx, feet: floor / 2, top: if behind { floor - 8 } else { floor - 6 }, by: None, behind: behind.then_some(top) });
+            self.things.push((Thing::Seat(n), sx, (floor - 16) / 2 - 1));
+        }
+        self.spots.push((fx(0.25) as f32, Doing::Warm));
+    }
+
     fn build_cabin(&mut self) {
         let (w, floor) = (self.w, self.floor);
         let fx = |f: f32| (w as f32 * f) as i32;
@@ -1370,7 +1601,7 @@ impl Interior {
                     }
                 }
                 let n = self.seats.len();
-                self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
+                self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None, behind: None });
                 self.things.push((Thing::Seat(n), sx, (floor - 14) / 2 - 1));
                 self.spots.push((sx as f32, Doing::Sit(n)));
             }
@@ -1531,7 +1762,7 @@ impl Interior {
     fn draw_keeper(&self, f: &mut Frame, t: f32) {
         let (Some(k), Some((x0, x1, top))) = (self.keeper, self.counter) else { return };
         let Some(r) = self.residents.get(k) else { return };
-        let b = Big { x: r.x + 1.0, feet: r.feet, dir: r.dir, step: false, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit: None, kid: false, arms_up: false, outdoor: false };
+        let b = Big { x: r.x + 1.0, feet: r.feet, dir: r.dir, step: false, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit: None, kid: false, arms_up: false, outdoor: false, behind: None };
         if crate::frame::pictures_ok() {
             // just the top of them shows over the counter
             use super::sprites::{self, Look, Pose};
@@ -1767,7 +1998,7 @@ impl Interior {
             }
         }
         let n = self.seats.len();
-        self.seats.push(Seat { x: ax + 7, feet: floor / 2, top: floor - 6, by: None });
+        self.seats.push(Seat { x: ax + 7, feet: floor / 2, top: floor - 6, by: None, behind: None });
         self.things.push((Thing::Seat(n), ax + 7, (floor - 16) / 2 - 1));
         self.spots.push(((ax + 7) as f32, Doing::Sit(n)));
     }
@@ -1805,7 +2036,7 @@ impl Interior {
         }
         for sx in [x0 + 9, x0 + 23] {
             let n = self.seats.len();
-            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
+            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None, behind: None });
             self.things.push((Thing::Seat(n), sx, (floor - 14) / 2 - 1));
             self.spots.push((sx as f32, Doing::Sit(n)));
         }
@@ -2294,7 +2525,7 @@ impl Interior {
                 }
             }
             let n = self.seats.len();
-            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None });
+            self.seats.push(Seat { x: sx, feet: floor / 2, top: floor - 6, by: None, behind: None });
             self.things.push((Thing::Seat(n), sx, (floor - 16) / 2 - 1));
         }
     }
@@ -2480,9 +2711,11 @@ impl Interior {
     /// Walk around inside. Returns true when the player walks out the front
     /// door (rooms of the home are changed in here).
     pub fn update(&mut self, dt: f32, t: f32, mv: (f32, f32), p: &mut Player) -> bool {
+        self.t = t;
         if !self.greeted {
             self.greeted = true;
-            if let Some(r) = self.residents.first() {
+            // whoever lives here says hello (not friends who came in too)
+            if let Some(r) = self.residents.iter().find(|r| !r.guest) {
                 let pet = self.pet.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "cat".into());
                 let line = if self.church { (*self.rng.pick(CHURCH_HI)).to_string() } else { self.rng.pick(HOST_HI).replace("{pet}", &pet) };
                 let (hx, hy) = (r.x.round() as i32 + 1, r.feet - 9);
@@ -2490,6 +2723,12 @@ impl Interior {
                 self.director.sound(Sfx::Greet, r.x, 0.8);
             } else if self.home {
                 self.director.say(17, self.floor / 2 - 6, "home sweet home ✦", t + 0.4, 2.6, 40);
+                // a friend along: a word about the place
+                if let Some(r) = self.residents.iter().find(|r| r.guest) {
+                    let line = *self.rng.pick(&["ooh, cosy!", "so this is your place!", "thanks for having me over!", "what a lovely tree!"]);
+                    let (hx, hy) = (r.x.round() as i32 + 1, r.feet - 9);
+                    self.director.say(hx, hy, line, t + 2.0, 3.0, 40);
+                }
             }
         }
         // on the stairs: the climb walks the villager (no keys)
@@ -2587,7 +2826,7 @@ impl Interior {
         self.director.track(&who);
         self.director.update(dt, t, &self.ctx);
         // walking back out through the front door
-        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin) && mx < 0.0 && p.x <= 1.5
+        matches!(self.kind(), RoomKind::Parlour | RoomKind::Church | RoomKind::Igloo | RoomKind::Cabin | RoomKind::Games) && mx < 0.0 && p.x <= 1.5
     }
 
     /// Into another room of the home (`from_left`: walked in from its left).
@@ -3317,18 +3556,32 @@ impl Interior {
             .enumerate()
             .filter(|(i, _)| self.keeper != Some(*i))
             .map(|(_, r)| {
-                let sit = match r.doing {
-                    Doing::Sit(n) => self.seats.get(n).map(|s| s.top),
+                let seat = match r.doing {
+                    Doing::Sit(n) => self.seats.get(n),
                     _ => None,
                 };
                 let step = r.doing == Doing::Walk && (t * 6.0) as i32 % 2 == 0;
                 let warm = r.doing == Doing::Warm;
-                (r.feet, Big { x: r.x + 1.0, feet: r.feet, dir: r.dir, step, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit, kid: r.kid, arms_up: warm && (t * 2.0) as i32 % 2 == 0, outdoor: false })
+                let dir = seat.and_then(|s| self.facing(s)).unwrap_or(r.dir);
+                (r.feet - seat.is_some_and(|s| s.behind.is_some()) as i32 * 2, Big { x: r.x + 1.0, feet: r.feet, dir, step, hat: None, hair: r.hair, coat: r.coat, scarf: None, sit: seat.map(|s| s.top), kid: r.kid, arms_up: warm && (t * 2.0) as i32 % 2 == 0, outdoor: false, behind: seat.and_then(|s| s.behind) })
             })
             .collect();
         if let (Some((p, _)), None) = (you, self.you_lie) {
-            let sit = self.you_sit.and_then(|i| self.seats.get(i)).map(|s| s.top);
-            people.push((p.y.round() as i32, Big { x: p.centre(), feet: p.y.round() as i32, dir: p.dir, step: walking, hat: Some(Rgb::hex(0x2fae5c)), hair: Rgb::hex(0x3a2a1a), coat: Rgb::hex(0xe0a030), scarf: Some(Rgb::hex(0xd8283a)), sit, kid: false, arms_up: false, outdoor: false }));
+            let seat = self.you_sit.and_then(|i| self.seats.get(i));
+            let l = super::player::Player::look();
+            let dir = seat.and_then(|s| self.facing(s)).unwrap_or(p.dir);
+            people.push((p.y.round() as i32 - seat.is_some_and(|s| s.behind.is_some()) as i32 * 2, Big { x: p.centre(), feet: p.y.round() as i32, dir, step: walking, hat: l.hat, hair: l.hair, coat: l.coat, scarf: l.scarf, sit: seat.map(|s| s.top), kid: false, arms_up: false, outdoor: false, behind: seat.and_then(|s| s.behind) }));
+        }
+        // friends online, sat in their chairs (their names over them)
+        for v in &self.visitors {
+            let Some(s) = self.seats.get(v.seat) else { continue };
+            let dir = self.facing(s).unwrap_or(1.0);
+            people.push((s.feet - s.behind.is_some() as i32 * 2, Big { x: s.x as f32, feet: s.feet, dir, step: false, hat: v.look.hat, hair: v.look.hair, coat: v.look.coat, scarf: v.look.scarf, sit: Some(s.top), kid: false, arms_up: false, outdoor: false, behind: s.behind }));
+            let name = format!(" {} ", v.name);
+            let n = name.chars().count() as i32;
+            f.ui = true;
+            f.text(s.x - n / 2, (s.top - 22) / 2, &name, Rgb::hex(0xffe9a8), crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.7), 0.0);
+            f.ui = false;
         }
         people.sort_by_key(|(feet, _)| *feet);
         self.draw_keeper(f, t);
@@ -3344,8 +3597,9 @@ impl Interior {
         // tucked up in bed: head on the pillow, a bump under the quilt
         if let (Some(since), Some((bx, floor)), Some(_)) = (self.you_lie, self.bed, you) {
             let fl = floor;
+            let l = super::player::Player::look();
             for (x, y) in [(bx + 5, fl - 11), (bx + 6, fl - 11), (bx + 5, fl - 10), (bx + 6, fl - 10), (bx + 7, fl - 10), (bx + 6, fl - 12)] {
-                f.px_set(x, y, Rgb::hex(0x2fae5c));
+                f.px_set(x, y, l.hat.unwrap_or(l.hair));
             }
             f.px_set(bx + 4, fl - 12, Rgb::hex(0xf4f0ea));
             for y in fl - 11..fl - 7 {
@@ -3507,6 +3761,8 @@ impl Interior {
             church: self.church,
             has_piano: self.things.iter().any(|t| t.0 == Thing::Piano),
             has_oven: self.oven.is_some(),
+            guest: r.guest,
+            your_home: self.home,
         })
     }
 
@@ -3524,6 +3780,18 @@ pub struct HostInfo {
     pub church: bool,
     pub has_piano: bool,
     pub has_oven: bool,
+    /// A visitor (came in with the villager), not someone who lives here;
+    /// in the villager's own home.
+    pub guest: bool,
+    pub your_home: bool,
+}
+
+/// A friend online in the games room: their name and look, which chair.
+#[derive(Clone, Debug)]
+pub struct Visitor {
+    pub name: String,
+    pub look: super::sprites::Look,
+    pub seat: usize,
 }
 
 /// A person drawn as pixel art at double the village scale: 8 px wide,
@@ -3546,6 +3814,8 @@ pub(crate) struct Big {
     /// Out in the village: daylight shades it, and lights touch it the way
     /// they touch glyphs.
     pub(crate) outdoor: bool,
+    /// Sat behind a table: only what's above its top (this pixel row) shows.
+    pub(crate) behind: Option<i32>,
 }
 
 impl Big {
@@ -3570,6 +3840,14 @@ impl Big {
             Some(top) => (top as f32 + 6.0) / 2.0,
             None => self.feet as f32 + 1.0,
         };
+        if let Some(cut) = self.behind {
+            // behind the table: head and shoulders over its top
+            let cut = cut as f32 / 2.0;
+            let frac = ((cut - (feet - rows)) / rows).clamp(0.1, 1.0);
+            let keep = ((pic.h as f32 * frac).round() as usize).clamp(1, pic.h);
+            f.sprite(self.x, cut, rows * keep as f32 / pic.h as f32, top_of(&pic, keep));
+            return;
+        }
         f.sprite(self.x, feet, rows, pic);
     }
 

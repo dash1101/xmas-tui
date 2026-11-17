@@ -165,9 +165,70 @@ pub struct Placed {
     /// It's drawn at the biggest whole-number scale that fits, crisp, with
     /// its feet on that row. None: fitted into its cells (an icon).
     pub sprite: Option<(f32, f32, f32)>,
+    /// Cells a panel's been drawn over (that much of it isn't shown).
+    pub hidden: Vec<(i32, i32)>,
+}
+
+thread_local! {
+    /// Pictures with parts cut away (under a panel), kept while they're
+    /// wanted: the same cut, the same picture (a terminal sends each once).
+    static CUTS: std::cell::RefCell<std::collections::HashMap<(u64, u64), std::sync::Arc<Picture>>> = Default::default();
 }
 
 impl Placed {
+    /// The picture with the cells under panels cut away (None: nothing of
+    /// it left showing). `aspect`: a cell's height over its width.
+    fn cut(&self, aspect: f32) -> Option<std::sync::Arc<Picture>> {
+        use std::hash::{Hash, Hasher};
+        let mut hidden = self.hidden.clone();
+        hidden.sort_unstable();
+        hidden.dedup();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hidden.hash(&mut h);
+        if let Some(cx) = self.sprite.map(|s| ((s.0 * 8.0) as i32, (s.1 * 8.0) as i32)) {
+            cx.hash(&mut h);
+        }
+        let key = (self.pic.id, h.finish());
+        if let Some(p) = CUTS.with(|c| c.borrow().get(&key).cloned()) {
+            return (!p.rgba.is_empty()).then_some(p);
+        }
+        let (w, hgt) = (self.pic.w, self.pic.h);
+        // where each of the picture's pixels lands (in cells)
+        let (x0, y0, sx, sy) = match self.sprite {
+            Some((cx, feet, rows)) => {
+                let wc = w as f32 / hgt.max(1) as f32 * rows * aspect;
+                (cx - wc / 2.0, feet - rows, wc / w.max(1) as f32, rows / hgt.max(1) as f32)
+            }
+            None => (self.x as f32, self.y as f32, self.cols as f32 / w.max(1) as f32, self.rows as f32 / hgt.max(1) as f32),
+        };
+        let mut rgba = self.pic.rgba.clone();
+        let mut left = 0;
+        for py in 0..hgt {
+            let cy = (y0 + (py as f32 + 0.5) * sy).floor() as i32;
+            for px in 0..w {
+                let i = (py * w + px) * 4 + 3;
+                if rgba[i] == 0 {
+                    continue;
+                }
+                let cx = (x0 + (px as f32 + 0.5) * sx).floor() as i32;
+                if hidden.binary_search(&(cx, cy)).is_ok() {
+                    rgba[i] = 0;
+                } else {
+                    left += 1;
+                }
+            }
+        }
+        let pic = std::sync::Arc::new(if left == 0 { Picture::new(0, 0, vec![]) } else { Picture::new(w, hgt, rgba) });
+        CUTS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() > 96 {
+                c.clear();
+            }
+            c.insert(key, pic.clone());
+        });
+        (left > 0).then_some(pic)
+    }
+
     /// A sprite's top-left (pixels, from the grid's corner) and scale, for
     /// cells `cw`×`ch` pixels.
     pub fn sprite_px(&self, cw: usize, ch: usize) -> Option<(i32, i32, usize)> {
@@ -354,7 +415,7 @@ impl Frame {
         if x + cols < 0 || y + rws < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return;
         }
-        self.pictures.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((cx, feet, rows)) });
+        self.pictures.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((cx, feet, rows)), hidden: vec![] });
     }
 
     /// A picture over `cols`×`rows` cells at (x, y) (the cells under it are
@@ -366,7 +427,7 @@ impl Frame {
             let w = self.w;
             let ui = (y..y + rows).any(|yy| (x..x + cols).any(|xx| self.glyph[yy as usize * w + xx as usize].is_some_and(|g| g.ui)));
             if !ui {
-                self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None });
+                self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None, hidden: vec![] });
             }
         }
     }
@@ -503,7 +564,10 @@ impl Frame {
                 return;
             }
             if (self.cover_pictures || (self.cover_panels && !matches!(g.bg, Bg::Scene))) && !self.pictures.is_empty() {
-                self.pictures.retain(|p| x < p.x || x >= p.x + p.cols || y < p.y || y >= p.y + p.rows);
+                // (only the part of a picture under the panel is hidden)
+                for p in self.pictures.iter_mut().filter(|p| x >= p.x && x < p.x + p.cols && y >= p.y && y < p.y + p.rows) {
+                    p.hidden.push((x, y));
+                }
             }
             let g = if self.ui { Glyph { ui: true, ..g } } else { g };
             self.glyph[i] = Some(g);
@@ -881,6 +945,23 @@ impl Frame {
     }
 
     pub fn compose(&mut self) {
+        // pictures partly under panels: those parts cut away
+        if self.pictures.iter().any(|p| !p.hidden.is_empty()) {
+            let aspect = self.cell_aspect;
+            let all = std::mem::take(&mut self.pictures);
+            self.pictures = all
+                .into_iter()
+                .filter_map(|mut p| {
+                    if p.hidden.is_empty() {
+                        return Some(p);
+                    }
+                    let cut = p.cut(aspect)?;
+                    p.pic = cut;
+                    p.hidden.clear();
+                    Some(p)
+                })
+                .collect();
+        }
         self.bloom();
         let (pw, ph) = (self.pw, self.ph);
         if self.pre_on && self.pre.len() == pw * ph {

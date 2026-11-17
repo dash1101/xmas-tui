@@ -24,13 +24,17 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   above the sky.
 - **Things to do** (**T**): snowmen and igloos (and inside the igloos, a room of their own), snow angels, a rest in the
   snow under the stars, carols the neighbours join in with, tag, team snowball fights with whoever's tagging along,
-  a light show of any length, fireworks, and a game of chess, checkers, Snowflakes or Twenty-One at the table in
-  someone's home. A scorecard keeps count.
+  a light show of any length, fireworks, and a game of chess, checkers, Snowflakes or Twenty-One round the table in
+  someone's home (up to four at the cards, dealt off a real deck that slides across the table). A scorecard keeps
+  count.
 - **Trips out**: the train from the station up to a ski lodge (skis from the shop, the chairlift, then a run down
   the mountain through the flags), and a night drive in the car parked by home.
-- **Friends and shared villages, online**: add friends by friend code, write to them, open a village to them or
-  walk into theirs, and see each other walk about, talk aloud and throw snowballs, in real time, on the desktop,
-  on the web and on a phone alike. Opt-in, through a free public relay, sealed end to end.
+- **Friends and shared villages, online** (the **✉ friends** button): add friends by friend code, write to them,
+  open a village to them or walk into theirs, and play together in real time: chess, checkers and cards round the
+  table in the games room, tag, snowball fights, races down the mountain, the train up to the slopes, light shows
+  and fireworks everyone sees. A profile card with the villager's own look, one villager across a phone, a laptop
+  and a desktop (linked devices), and more than one villager on a device. On the desktop, the web and a phone alike;
+  opt-in, through a free public relay, sealed end to end.
 - **Play in a browser**: the same village on the web at **[dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/)**,
   with sound, the same menus and settings, and touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
@@ -152,7 +156,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **Space** | jump; held, higher (up to twice as high); in the air, again: the Christmas spirit lifts the villager once more; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
 | **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
 | **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
-| **O** | friends & online: go online, the friend code, add a friend, write, open this village or go into a friend's |
+| **O** | friends & online (also the **✉ friends** button, top right): go online, the friend code, add a friend, write, open this village or go into a friend's, play with friends there, the profile card, linked devices |
+| **Y** / **N** | yes (or no thanks) to what a friend online asks (a game, tag, a race, the train); clicking the question works too |
 | **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
 | **R** | scoop a snowball, press again to throw it |
@@ -249,8 +254,17 @@ always be found in Explorer or Dolphin.
   own: lending the kids a hand with a snowman or igloo (or starting one, and sometimes crawling into the finished
   igloo for a rest), snowballs at the neighbours, berries off a bush for the animals, a chat (answering for
   themselves), a game with the pet, a game of tag with one of the kids (tag, run off, get tagged back), a look round
-  from a rooftop, or just a wander. A direction key, any of the villager's keys, picking someone up or choosing
+  from a rooftop, a knock at a neighbour's door for a game of chess, checkers or cards (sat down at their table,
+  played out to the end on the panel, then a handshake and out again), or just a wander. A direction key, any of the villager's keys, picking someone up or choosing
   something from the right-click menu takes over again at once; it waits another 20 seconds before carrying on.
+- **Games at the table.** Indoors, **T** (or a right-click) → a game with whoever's at home: chess, checkers,
+  Snowflakes or Twenty-One (at the cards, up to three of the household round the table). The villager sits down, and
+  so do they. The arrow keys (or a click on the board, a card or the deck) choose, **Enter** plays, **Esc** gets up.
+  The cards come off a real deck, sliding across the table to each hand, and at Twenty-One the dealer's hidden card
+  turns over at the end. Only the buttons under the game (*hit*, *stand*, *draw a card*, *again*, *pass the deal*),
+  the board, the cards and the deck play anything when clicked, so a click to bring the window forward never plays
+  a card. At Twenty-One **P** (or *pass the deal*) passes the deal round the table: a neighbour dealing keeps to the
+  house rule (another card under 17); dealing yourself, you play last, and choose.
 - **Building with the kids.** Right by a snowman or igloo going up, **E** lends a hand: each press pushes the
   snowball bigger or sets another block, the kids cheer the villager on, and it goes up far faster. Right-click open
   snow for **build a snowman here** or **build an igloo here** to start one; kids nearby come over to help. What the
@@ -396,7 +410,9 @@ speaks StatusNotifierItem; the notification area on Windows).
 - The settings window also runs on its own: `xmas-tui --settings-window [--config PATH]`.
 ## 🌐 Friends and shared villages (online)
 
-Off until asked for: **O** (or **✦ things to do → friends & online**, or ☰ on a phone) → *go online*.
+Off until asked for: the **✉ friends** button (top right; ✉ on a phone, in the web page's bar), **O**, or
+**✦ things to do → friends & online** → *go online*. The post (bottom left on the desktop, top left on a phone or the
+web) shows what's happening online; a click on it opens friends & online.
 
 - **A friend code** (`XXXX-XXXX-XXXX`) is made for the villager and kept in the save. *My friend code* copies it to
   give to a friend; *add a friend* takes theirs. They see the request (in the post, top left, and in their friends &
@@ -417,6 +433,52 @@ Off until asked for: **O** (or **✦ things to do → friends & online**, or ☰
   their snowballs go between them. The neighbours, the animals and the weather are each player's own.
 - The desktop and the Android app connect over TCP (port 1883), the web page over a secure WebSocket. On Android the
   game is online; the wallpaper stays off it.
+
+### Playing together
+
+In a shared village, **☺ with the … here** (in ✉ friends, or ✦ things to do), or a right-click on a friend, opens
+what there is to do with them. Whatever's asked comes up for them at the top of the screen (**Y** yes, **N** no
+thanks, or a click), and is asked again now and then until it's answered.
+
+- **Games round the table.** Chess, checkers, Snowflakes or Twenty-One with a friend, or *Snowflakes / Twenty-One
+  round the table (everyone asked)* for up to four. Everyone goes to **the games room** in the host's home: in by
+  the door, over to a chair (one at each end of the long table under the lamp, two behind it), a chair pulled out,
+  sat down, and the game comes up over the room, everyone in their own chair for everyone else. The one who asked
+  deals (and deals again; at Twenty-One the deal passes round). Each move goes to everyone at the table, sealed like
+  everything else, and is sent again until it's taken in. Getting up (Esc), or walking out of the games room,
+  leaves the table; at the cards the others play on.
+- **Tag** with a friend (whoever asked is "it" first, a ⚑ over whoever's it), and **a snowball fight**: hits are
+  counted on both sides for a minute and a half.
+- **Wave**, **a heart**, **a cheer**: to one friend or everyone.
+- **Light shows, fireworks and carols** started in a shared village happen for everyone in it.
+- **The train and the slopes together.** Off up the mountain in a shared village, everyone's asked along; a yes puts
+  them on the same shuttle, or the same train (walking the carriage, sitting in the seats, with their names over
+  them), or up at the lodge. A friend on a trip can be joined where they are (*go and join …*). On the slope friends
+  ski down alongside, in the standings. **A race**: everyone asked, up the chairlift together, down the same course,
+  the results at the bottom.
+
+### The profile card, and the villager's own look
+
+Settings → You → **your look** dresses the villager (coat, hat, hair, skin, a scarf; left as *classic*, the green hat
+and gold coat), and **card's line** is a line about them. Friends see the villager that way, and see their **profile
+card** (*★ my profile card*; a friend's from their name, or a right-click on them in a shared village): the look, the
+line, the pet, games and fights won, runs down the mountain and the best score, cheer, friends.
+
+### One villager on all your devices
+
+*✉ friends → my devices → link another device: show the link code* (copied) on one device, then on the other *link
+this device to my villager elsewhere* and type it. The second becomes the same villager: the same village, name,
+look, pet, friends & family, friend code and friends; what's been done on it is added in. From then on the two (or
+more) keep in step through the relay whenever they're online: what each has done adds up (cheer earned on one and
+spent on the other comes out right, even both played at once), and a change to the villager or the village on one
+shows on the others. Each device sends only its own side, kept by the relay, so one that's been off catches up when
+it's back; the link code is the key to it, so it's for one's own devices only. *Unlink this device* stops it.
+
+### More than one villager on a device
+
+*✉ friends → villagers on this device → a new villager* starts another: their own name, look, village, friend code
+and friends. The one before is put away (beside the save, in `villagers/`; in the browser on the web) and *switch to
+…* brings them back.
 
 ## 🎶 Sound
 Every sound is synthesized live in code. There are no audio files and nothing copyrighted.
@@ -498,7 +560,8 @@ conversation, the joystick up and down picks the answer and E says it), **jump**
 a tree or a lamp post, a leap right up onto it), **❄** (scoop a snowball, then throw it), **✦** (things to do here:
 building, snow angels, carols, tag, light shows, fireworks, the ski trip, a drive, games indoors…), **☰** (pockets,
 the scorecard and the Christmas list, inviting someone along, what's in hand, lying down in the snow, friends &
-online, settings, set as the wallpaper, the controls) and **◎** (the view back on the villager). The menus are drawn
+online, settings, set as the wallpaper, the controls), **✉** (friends & online) and **◎** (the view back on the
+villager). The menus are drawn
 in the village as on the desktop, with roomy rows for fingers: the joystick goes up and down them and E picks (or a
 tap), and they move by their title bars. *Hide the controls when not in use* in the
 settings fades them away when they're left alone. A game controller works too: the stick or d-pad walks, **A**
@@ -649,7 +712,8 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
 - **You:** the villager (on or off, **their name**, walk speed), **speech bubbles** (how long they stay up; longer
   lines always stay longer) and **chattiness** (how often people stop to talk and remark on things), the
   villager's **pet** (dog, cat, bunny or none, its colour and its name), **autopilot**, and **friends & family**
-  (each one's name, grown-up or kid, and how they look).
+  (each one's name, grown-up or kid, and how they look); **your look** (the villager's own coat, hat, hair, skin and
+  scarf) and **card's line** (on their profile card, for friends online).
 - **Widgets:** the clock, each widget on or off and its **look**, the visualizer's kHz labels, the weather city and
   units, and the widget layout.
 - **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
@@ -732,7 +796,7 @@ xmas-tui --export DIR --size 568x75 --frames 1 --at 20 --sleigh   # render frame
 xmas-tui --export X --frames 720 --fps 24 --clean --raw | ffmpeg -f rawvideo -pix_fmt rgb24 -s 5112x1425 -r 24 -i - out.mp4  # a video
 xmas-tui --bench 300 --size 568x75                                 # timing + bytes per frame
 xmas-tui --settings-window --export DIR                            # settings window + tray icons to PNG
-xmas-tui --export DIR --perch todo|rest|angel|igloo|chess|cabin|trip-ski|trip-drive …  # preview a new pass's scenes
+xmas-tui --export DIR --perch todo|rest|angel|igloo|chess|twentyone|cabin|trip-ski|trip-drive|trip-carriage-friends|online|card|netchess|gamesroom|sleigh …  # preview a new pass's scenes
 xmas-tui --export DIR --shop                                       # inside the cocoa cabin, at the counter
 xmas-tui --sprite-sheet OUT.png                                    # every pose of the people, pets and animals
 cargo test --release net::tests::through_the_real_relay -- --ignored   # two players through the real relay

@@ -72,6 +72,15 @@ impl Sleigh {
     }
 
     /// Force a fly-by at time `t` (or right after the current one).
+    /// Previews: crossing now, its lead reindeer at column `x`.
+    pub fn show_at(&mut self, x: f32) {
+        self.active = true;
+        self.x = x;
+        self.speed = 0.0;
+        self.y0 = self.moon_row + 1.0;
+        self.requested = None;
+    }
+
     pub fn trigger(&mut self, t: f32) {
         self.requested = Some(self.requested.map_or(t, |r| r.min(t)));
     }
@@ -187,6 +196,31 @@ impl Sleigh {
 /// `santa` false the seat's empty (he's off down a chimney).
 pub fn draw_team(f: &mut Frame, x0: f32, y_of: impl Fn(f32) -> f32, t: f32, glow: f32, santa: bool) {
         let gallop = ((t * 8.0) as i32) % 2 == 0;
+        if crate::frame::pictures_ok() {
+            // as pixel art, like everyone in the village
+            use super::sprites;
+            // (the sleigh where it always is; the team strung out ahead of
+            // it, each deer as big as the sleigh has it)
+            let sx = x0 + (DEER * 5) as f32;
+            let rows = 3.2;
+            let deer_rows = rows * 28.0 / 30.0;
+            let gap = 32.0 / 28.0 * deer_rows * f.cell_aspect + 0.4;
+            for d in 0..DEER {
+                let cx = sx - (DEER - d) as f32 * gap + gap / 2.0;
+                let y = y_of(cx);
+                // (each deer a step out of time with the one in front)
+                let frame = ((t * 8.0) as usize + d) % 2;
+                let pic = sprites::reindeer(frame as u8, d == 0, 1.0);
+                f.sprite(cx, y + 1.8, deer_rows, pic);
+                if d == 0 {
+                    f.light_cell((cx - gap / 2.0).round() as i32, (y - 0.8).round() as i32, Rgb::hex(0xff3030) * (4.0 * glow));
+                }
+            }
+            let y = y_of(sx);
+            f.sprite(sx + 4.0, y + 2.2, rows, sprites::sleigh(santa, 1.0));
+            f.light_cell(sx.round() as i32 + 2, y.round() as i32, GOLD * (1.5 * glow));
+            return;
+        }
         // reindeer team, Rudolph in front
         for d in 0..DEER {
             let x = x0 + (d * 5) as f32;

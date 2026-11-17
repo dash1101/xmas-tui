@@ -155,6 +155,9 @@ pub struct Scene {
     trip: Option<trips::Trip>,
     /// Online: friends, messages, shared villages (see `online`).
     pub online: crate::net::Online,
+    /// The villager's look and card, what's asked of them, games with
+    /// friends online, linked devices (see `online::Social`).
+    social: online::Social,
     /// The big tree's column and foot, and the village's scale: what
     /// positions are measured from to be the same on any screen.
     anchor: (f32, f32, f32),
@@ -690,6 +693,7 @@ impl Scene {
             trip: None,
             seed,
             online: crate::net::Online::new(crate::net::Book::default(), ""),
+            social: online::Social::default(),
             anchor: (main_cx as f32, main_base as f32, u),
             post: vec![],
             text_ask: None,
@@ -887,7 +891,19 @@ impl Scene {
             return ("the village".into(), vec![("look up into the sky".into(), Do::LookUp)]);
         };
         if p.contains(x, y) {
-            return ("you".into(), vec![("my stats & Christmas list".into(), Do::Stats), ("my pockets".into(), Do::Pockets)]);
+            return (
+                "you".into(),
+                vec![
+                    ("my stats & Christmas list".into(), Do::Stats),
+                    ("my pockets".into(), Do::Pockets),
+                    ("★ my profile card".into(), Do::Net(online::NetDo::MyCard)),
+                    ("✉ friends & online: play together ▸".into(), Do::More(online::MORE_ONLINE)),
+                ],
+            );
+        }
+        // someone online, here in the shared village
+        if let Some(m) = self.other_at(x, y).and_then(|id| self.other_menu_of(id)) {
+            return m;
         }
         if let Some(id) = self.critters.id_at(x, y, t) {
             let who = self.critters.label(id);
@@ -1512,9 +1528,26 @@ impl Scene {
             tasks.push(interior::Task::Tune);
         }
         let task = if info.church || inn.is_cabin() || inn.task.is_some() { None } else { Some(tasks[(seed as usize) % tasks.len()]) };
-        let h = story::HostCtx { theme: info.theme, family: info.family.clone(), pet: info.pet.clone(), years: info.years, church: info.church, piano: info.has_piano, oven: info.has_oven, task };
-        let mut c = story::Convo::host(id, info.name, info.kid, info.temper, visits, &ctx, &mut self.story_talk, h, seed);
-        c.line = story::by_name(&c.line, &self.you_name, visits == 0, info.kid, seed);
+        let mut c = if info.guest {
+            // a friend who came in with the villager: a visitor here too
+            let mut c = story::Convo::open(id, info.name, info.kid, visits.max(1), &ctx, &mut self.story_talk, 0.0, seed, vec![]);
+            let lines: &[&str] = if info.your_home {
+                if info.kid {
+                    &["whoa, is this YOUR house? it's so cool!", "can I see your room? please please please", "your tree's even bigger than ours!"]
+                } else {
+                    &["so this is your place! it's lovely", "thanks for having me over — it's so cosy in here", "I love what you've done with the tree", "mm, it's warm in here. that fire's just right"]
+                }
+            } else {
+                &["isn't this nice? I've always wanted to see inside", "shh — we're guests. best behaviour!", "what a lovely home they've got"]
+            };
+            c.line = lines[(seed as usize) % lines.len()].to_string();
+            c
+        } else {
+            let h = story::HostCtx { theme: info.theme, family: info.family.clone(), pet: info.pet.clone(), years: info.years, church: info.church, piano: info.has_piano, oven: info.has_oven, task };
+            let mut c = story::Convo::host(id, info.name, info.kid, info.temper, visits, &ctx, &mut self.story_talk, h, seed);
+            c.line = story::by_name(&c.line, &self.you_name, visits == 0, info.kid, seed);
+            c
+        };
         c.pos = self.convo_pos;
         inn.hold_talk(i, t);
         if let Some((hx, hy)) = inn.head_of(i) {
@@ -1842,6 +1875,9 @@ impl Scene {
 
     /// Esc: close the shop / pockets first. True if something closed.
     pub fn close_panels(&mut self) -> bool {
+        if self.close_card() {
+            return true;
+        }
         // away on a trip: Esc heads home
         if let Some(tr) = &mut self.trip {
             tr.done = Some(if matches!(tr.at, trips::Where::Drive) { trips::Back::Home } else { trips::Back::Station });
@@ -2855,11 +2891,39 @@ impl Scene {
             }
             return;
         }
-        // or: away on a trip (the ski lodge, a run down the mountain, a drive)
+        // or: Santa's sleigh crossing the sky
+        if what == "sleigh" {
+            return self.sleigh.show_at(self.w as f32 * 0.25);
+        }
+        // or: friends online (in a shared village: someone asking to play,
+        // a profile card, a game of chess with one of them out in the snow)
+        if matches!(what, "online" | "card" | "netchess" | "netcards" | "gamesroom") {
+            return self.preview_online(what);
+        }
+        // or: away on a trip (the ski lodge, a run down the mountain, a drive;
+        // "-friends": with friends online along)
         if let Some(rest) = what.strip_prefix("trip-") {
             let t = self.now();
+            let (rest, friends) = match rest.strip_suffix("-friends") {
+                Some(r) => (r, true),
+                None => (rest, false),
+            };
             let mut tr = if rest == "drive" { trips::Trip::drive(t, 7) } else { trips::Trip::ski(t, 7) };
             tr.preview(rest, t);
+            if friends {
+                let at = |a: u8, x: f32, lane: f32, air: f32, sat: bool| crate::net::TripAt { at: a, x, lane, air, sat, dir: 1.0, el: 2.0, ..Default::default() };
+                let (a, x, lane, sat) = match rest {
+                    "carriage" => (2, 0.32, 0.0, false),
+                    "lodge" => (3, 0.6, 0.0, false),
+                    _ => (5, tr.here(t).x + 14.0, 2.0, false),
+                };
+                // (online, away on the same trip: the trip finds them there)
+                let av = |coat: u32, hat: u32, at: crate::net::TripAt| crate::net::Avatar { coat, hat, hair: 0x6a4a2a, skin: 0xf0d0b0, scarf: hat, away: 2, trip: Some(at), ..Default::default() };
+                self.online.pretend(vec![
+                    (11, "Sam", av(0x2a4c8a, 0xd8283a, at(a, x, lane, if a == 2 { 0.6 } else { 0.0 }, sat)), None),
+                    (12, "Alex", av(0x6a3a8a, 0xffc23a, at(a, if a == 5 { x - 30.0 } else { x + 0.3 }, 0.0, if a == 2 { 0.6 } else { 0.0 }, a == 2)), None),
+                ]);
+            }
             self.trip = Some(tr);
             return;
         }
@@ -3589,6 +3653,10 @@ impl Scene {
     /// Left click on the scene: everything reacts a little differently.
     pub fn click(&mut self, x: i32, y: i32, _app_t: f32) {
         let t = self.now();
+        // a question asked (yes, no), a profile card (put away)
+        if self.close_card() {
+            return;
+        }
         if self.convo_click(x, y) {
             return;
         }
@@ -3839,6 +3907,13 @@ impl Scene {
             (0.0, 0.0)
         } else {
             mv
+        };
+        // (in the games room: over to the chair, unless steered by hand)
+        let mv = if mv != (0.0, 0.0) && self.mv != (0.0, 0.0) {
+            self.social.to_seat = false;
+            mv
+        } else {
+            self.seat_steer().unwrap_or(mv)
         };
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
             walked_out = inn.update(dt, t, mv, p);
@@ -4658,18 +4733,12 @@ impl Scene {
         let t = self.now();
         f.ox = 0;
         f.oy = 0;
-        if self.trip.is_none() {
-            self.draw_post(f);
-        }
         if self.inside.is_some() && self.look.is_none() {
             if let (Some(s), Some((cx, row))) = (self.shop.as_ref().filter(|s| s.open), self.inside.as_ref().and_then(|inn| inn.counter_at())) {
                 s.draw_menu_at(f, &self.pockets, cx, row - 11, self.ui_look);
             }
             if let Some(c) = &self.convo {
                 c.draw(f, self.convo_hover, self.ui_look);
-            }
-            if let Some(tb) = &self.table {
-                tb.draw(f, self.ui_look);
             }
             return;
         }
@@ -4685,6 +4754,7 @@ impl Scene {
         } else if self.show_pockets {
             shop::draw_pockets(f, &self.pockets);
         }
+
         // in hand (Q to change)
         if let (Some(h), Some(p)) = (self.held, &self.player) {
             if t - p.active_at < 20.0 {
@@ -5630,6 +5700,93 @@ mod tests {
         // a proper chase, not gone in an instant
         assert!(secs > 4.0, "gone too soon: {secs}s");
         assert!(!s.sleigh.santa_out, "the seat's still empty");
+    }
+
+    /// Two villages online (through a pretend relay): one asks the other to
+    /// a game of chess; the question comes up, Y says yes, both sit down to
+    /// it, and a move made on one board turns up on the other.
+    #[test]
+    fn friends_online_ask_and_play_chess() {
+        use crate::net::{ask, Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 4.0);
+        let (ia, ib) = (a.online.my_id(), b.online.my_id());
+        assert!(a.online.other(ib).is_some() && b.online.other(ia).is_some(), "not in the village together");
+        a.act(Do::Net(online::NetDo::With(ib, ask::CHESS)));
+        both(&mut a, &mut b, 1.0);
+        assert!(b.asked_now(), "the question never came up");
+        assert!(b.prompt_key(true));
+        both(&mut a, &mut b, 1.0);
+        assert!(a.table.is_some() && b.table.is_some(), "no table (a {}, b {})", a.table.is_some(), b.table.is_some());
+        // into the games room, over to their chairs, and sat down: each
+        // sees the other in theirs
+        both(&mut a, &mut b, 16.0);
+        for (who, s) in [("a", &a), ("b", &b)] {
+            let inn = s.inside.as_ref().unwrap_or_else(|| panic!("{who} isn't indoors"));
+            assert!(inn.is_games(), "{who} isn't in the games room");
+            assert!(inn.sitting().is_some(), "{who} hasn't sat down");
+            assert_eq!(inn.visitors.len(), 1, "{who} doesn't see the other at the table");
+        }
+        assert_eq!(a.inside.as_ref().unwrap().sitting(), Some(0));
+        assert_eq!(b.inside.as_ref().unwrap().sitting(), Some(1));
+        a.table.as_mut().unwrap().test_move(4, 1, 4, 3);
+        both(&mut a, &mut b, 1.0);
+        let sb = b.table.as_ref().unwrap().state_json();
+        assert!(b.table.as_ref().unwrap().net.as_ref().unwrap().seq == 1, "the move never came: {sb}");
+        assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
+    }
+
+    /// On autopilot, a knock at a neighbour's: in, a game with whoever's
+    /// home, played out (or called off), and out again.
+    #[test]
+    fn autopilot_plays_a_neighbour_at_their_table() {
+        let mut s = walker_scene();
+        s.set_autopilot(true);
+        run(&mut s, autopilot::IDLE + 0.5);
+        let px = s.player.as_ref().unwrap().centre();
+        let i = (0..s.village.houses.len()).filter(|&i| !s.village.houses[i].church && Some(i) != s.home).min_by(|&a, &b| (s.village.houses[a].door() as f32 - px).abs().total_cmp(&(s.village.houses[b].door() as f32 - px).abs())).expect("a neighbour");
+        let t = s.now();
+        s.auto.plan = None;
+        s.auto.next_at = t + 1e6;
+        s.goal = None;
+        s.auto_goal(Do::Visit(i));
+        s.auto.plan = Some(autopilot::Plan::Game { stage: 0, next: 0.0, until: t + 60.0 });
+        let (mut sat, mut ended, mut out_again) = (false, false, false);
+        for _ in 0..(400.0 / DT) as usize {
+            s.update(DT, 0.0);
+            if s.table.is_some() {
+                sat = true;
+            }
+            if s.table.as_ref().is_some_and(|tb| tb.result.is_some()) {
+                ended = true;
+            }
+            if sat && s.inside.is_none() {
+                out_again = true;
+                break;
+            }
+        }
+        assert!(sat, "never sat down to a game (inside: {})", s.inside.is_some());
+        assert!(out_again, "never came out again (game over: {ended})");
     }
 
     /// Tag with a kid: the villager chases, tags them, runs off, and gets

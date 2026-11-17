@@ -106,6 +106,8 @@ pub struct Pockets {
     pub ski_runs: u32,
     pub ski_best: Option<f32>,
     pub km: f32,
+    /// The best score down the mountain.
+    pub ski_score: u32,
 }
 
 /// The Christmas list: (goal, how much cheer it's worth).

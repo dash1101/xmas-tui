@@ -156,6 +156,11 @@ pub struct App {
     importing_save: Option<crate::save::Save>,
     /// The link to the relay (online: friends, shared villages).
     link: Option<crate::net::tcp::Tcp>,
+    /// Devices linked to share this villager (see `crate::sync`).
+    linked: Option<crate::sync::Linked>,
+    /// The village to be made anew (another villager, the village changed
+    /// on a linked device): next frame.
+    reseed_soon: bool,
     /// A line being typed (a friend's code, a message): what for, the
     /// question, the text.
     typing: Option<(crate::scene::online::TextFor, String, String)>,
@@ -338,6 +343,8 @@ impl App {
             ffmpeg_job: None,
             importing_save: None,
             link: None,
+            linked: None,
+            reseed_soon: false,
             typing: None,
             trackpad: false,
             pad_acc: 0.0,
@@ -422,6 +429,7 @@ impl App {
             pockets: self.scene.pockets().clone(),
             you: Some(crate::save::You::of(&self.cfg)),
             online: Some(self.scene.online.book.clone()),
+            sync: self.linked.clone(),
         }
     }
 
@@ -429,7 +437,183 @@ impl App {
     fn write_save(&mut self) {
         self.saved_at = self.t();
         if self.saves {
+            self.send_sync();
             let _ = crate::save::write(&crate::save::path(), &self.current_save());
+        }
+    }
+
+    /// Linked devices: this one's side, for the others.
+    fn send_sync(&mut self) {
+        let Some(l) = &mut self.linked else { return };
+        let now = crate::clock::now().timestamp();
+        let you = crate::save::You::of(&self.cfg);
+        let st = l.state(&you, self.seed, self.scene.pockets(), &self.scene.online.book, now);
+        self.scene.online.sync_send(now, st);
+        let devs = l.devices(now);
+        self.scene.set_devices(Some((l.label.clone(), devs)));
+    }
+
+    /// The village made anew (another seed, or a setting that needs it):
+    /// the villager's things, the online side and their card carried over.
+    fn new_scene(&mut self) {
+        let pockets = self.scene.take_pockets();
+        let mut online = self.scene.take_online();
+        let social = self.scene.take_social();
+        if online.guest_seed().is_some() {
+            online.leave_village();
+        }
+        self.scene = Scene::new(self.w, self.h, self.seed, &self.cfg.scene);
+        self.scene.set_pockets(pockets);
+        self.scene.put_online(online);
+        self.scene.put_social(social);
+        self.scene.set_own_seed(self.seed);
+    }
+
+    /// The villagers kept on this device (for the menu).
+    fn list_villagers(&mut self) {
+        let names = crate::save::villagers(&crate::save::path()).into_iter().map(|(n, _)| n).collect();
+        self.scene.set_villagers(names);
+    }
+
+    /// Another villager on this device (`to`, one kept), or a new one
+    /// (`name`): this one's put away, theirs is taken out.
+    fn switch_villager(&mut self, to: Option<std::path::PathBuf>, name: Option<String>) {
+        if !self.saves {
+            return;
+        }
+        let t = self.t();
+        self.write_save();
+        let p = crate::save::path();
+        if let Err(e) = crate::save::switch(&p, to.as_deref()) {
+            self.scene.note(&format!("couldn't switch: {e}"));
+            return;
+        }
+        // off the relay as this villager
+        self.scene.online.goodbye();
+        if let Some(l) = self.link.take() {
+            l.close(self.scene.online.take_out());
+        }
+        let s = crate::save::load();
+        let mut pockets = Default::default();
+        let mut place = None;
+        let mut book = crate::net::Book::default();
+        self.linked = None;
+        match &s {
+            Some(s) => {
+                self.seed = s.seed;
+                if let Some(you) = &s.you {
+                    you.apply(&mut self.cfg);
+                }
+                pockets = s.pockets.clone();
+                place = s.player;
+                book = s.online.clone().unwrap_or_default();
+                self.linked = s.sync.clone();
+            }
+            None => {
+                self.seed = random_seed();
+                let fresh = crate::config::SceneCfg::default();
+                self.cfg.scene.name = name.unwrap_or_default();
+                self.cfg.scene.pet = fresh.pet;
+                self.cfg.scene.friends = vec![];
+                self.cfg.scene.wear = fresh.wear;
+                self.cfg.scene.motto = String::new();
+            }
+        }
+        if self.cfg.seed != 0 {
+            self.cfg.seed = self.seed as u64;
+        }
+        self.scene = Scene::new(self.w, self.h, self.seed, &self.cfg.scene);
+        self.scene.set_pockets(pockets);
+        self.scene.place_player(place);
+        self.scene.set_own_seed(self.seed);
+        self.scene.put_online(crate::net::Online::new(book, &self.cfg.scene.name));
+        if let Some(l) = &self.linked {
+            self.scene.online.sync_on(Some((&l.code, &l.dev)));
+        }
+        self.scene.set_devices(None);
+        self.applied = self.cfg.clone();
+        self.write_save();
+        self.list_villagers();
+        let who = if self.cfg.scene.name.is_empty() { "a new villager".to_string() } else { self.cfg.scene.name.clone() };
+        self.scene.note(&format!("☺ {who} now (their own village)"));
+        self.settings.toast = Some((format!("☺ {who}"), t + 3.0));
+    }
+
+    /// What the village asks of the app (the card's line, linking devices,
+    /// switching villagers).
+    fn do_front(&mut self) {
+        use crate::scene::online::Front;
+        for f in self.scene.take_front() {
+            match f {
+                Front::Motto(m) => self.cfg.scene.motto = m,
+                Front::LinkShow => {
+                    let l = self.linked.get_or_insert_with(|| crate::sync::Linked::new(&crate::net::seal::new_code(), false));
+                    let code = l.pretty_code();
+                    self.scene.online.sync_on(Some((&l.code.clone(), &l.dev.clone())));
+                    crate::net::copy_text(&code);
+                    self.scene.note(&format!("⇄ link code {code} (copied) · on the other device: ✉ → my devices → link this device, and type it"));
+                    self.write_save();
+                }
+                Front::Link(code) => {
+                    let l = crate::sync::Linked::new(&code, true);
+                    self.scene.online.sync_on(Some((&l.code, &l.dev)));
+                    self.linked = Some(l);
+                    self.scene.note("⇄ linking… (the other device needs to be online; it can take a minute)");
+                    self.write_save();
+                }
+                Front::Unlink => {
+                    self.linked = None;
+                    self.scene.online.sync_on(None);
+                    self.scene.set_devices(None);
+                    self.scene.note("⇄ this device isn't linked any more");
+                    self.write_save();
+                }
+                Front::Villager(i) => {
+                    let to = crate::save::villagers(&crate::save::path()).into_iter().nth(i).map(|(_, p)| p);
+                    if to.is_some() {
+                        self.switch_villager(to, None);
+                    }
+                }
+                Front::NewVillager(name) => self.switch_villager(None, Some(name)),
+                Front::Unfriended(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.unfriended(&code);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Linked devices' sides, taken in.
+    fn take_synced(&mut self) {
+        let now = crate::clock::now().timestamp();
+        for (dev, at, st) in self.scene.take_synced() {
+            let Some(l) = &mut self.linked else { continue };
+            let you = crate::save::You::of(&self.cfg);
+            let a = l.take(&dev, at, &st, now, &you, self.seed, self.scene.pockets(), &self.scene.online.book);
+            if let Some(p) = a.pockets {
+                self.scene.set_pockets(p);
+            }
+            if let Some(y) = &a.you {
+                y.apply(&mut self.cfg);
+                self.scene.note(&format!("⇄ {} from {}", if y.name.is_empty() { "the villager" } else { &y.name }, a.from));
+            }
+            if let Some(b) = a.book {
+                if crate::net::seal::norm(&b.code) != crate::net::seal::norm(&self.scene.online.book.code) {
+                    self.scene.online.rekey(b);
+                } else {
+                    self.scene.online.merge_book(b);
+                }
+            }
+            if let Some(seed) = a.seed {
+                self.seed = seed;
+                if self.cfg.seed != 0 {
+                    self.cfg.seed = seed as u64;
+                }
+                self.reseed_soon = true;
+                self.scene.note(&format!("⇄ the village from {}", a.from));
+            }
+            self.saved_at = self.saved_at.min(self.t() - 55.0);
         }
     }
 
@@ -449,9 +633,18 @@ impl App {
         }
         // online: the friend code and friends (in any save: they're the
         // villager's, whichever village)
-        let book = crate::save::load().and_then(|s| s.online).unwrap_or_default();
+        let saved = crate::save::load();
+        let book = saved.as_ref().and_then(|s| s.online.clone()).unwrap_or_default();
         self.scene.put_online(crate::net::Online::new(book, &self.cfg.scene.name));
         self.scene.online.dirty = true;
+        // linked devices: this one's link
+        self.linked = saved.and_then(|s| s.sync);
+        if let Some(l) = &self.linked {
+            self.scene.online.sync_on(Some((&l.code, &l.dev)));
+            let now = crate::clock::now().timestamp();
+            self.scene.set_devices(Some((l.label.clone(), l.devices(now))));
+        }
+        self.list_villagers();
     }
 
     /// Once a frame: bytes to and from the relay, a line to type, a code to
@@ -476,12 +669,16 @@ impl App {
             let seed = to.unwrap_or(self.seed);
             let pockets = self.scene.take_pockets();
             let online = self.scene.take_online();
+            let social = self.scene.take_social();
             self.scene = Scene::new(self.w, self.h, seed, &self.cfg.scene);
             self.scene.set_pockets(pockets);
             self.scene.put_online(online);
+            self.scene.put_social(social);
             self.scene.set_own_seed(self.seed);
             self.scene.arrive_by_host();
         }
+        self.do_front();
+        self.take_synced();
     }
 
     /// The line being typed, over the bottom of the village.
@@ -687,6 +884,12 @@ impl App {
                     self.scene.recenter();
                 } else if settings::help_rect(self.w as i32).contains(x, y) {
                     self.settings.help = true;
+                } else if settings::online_rect(self.w as i32).contains(x, y) {
+                    self.open_online();
+                } else if self.scene.prompt_click(x, y) || self.scene.close_card() {
+                    // (a question answered, a profile card put away)
+                } else if self.scene.post_click(x, y) {
+                    self.open_online();
                 } else if self.scene.at_table() {
                     // (its title bar picks it up to move it)
                     if !self.scene.table_grab(x, y) {
@@ -1037,6 +1240,13 @@ impl App {
             }
             return;
         }
+        // a question asked by someone online: Y yes, N no thanks
+        if self.settings.editing.is_none() && !self.settings.open && self.scene.asked_now() {
+            if let KeyIn::Char(c @ ('y' | 'Y' | 'n' | 'N')) = k {
+                self.scene.prompt_key(c.eq_ignore_ascii_case(&'y'));
+                return;
+            }
+        }
         // a key being set for something (Settings → You → Keys)
         if let Some(i) = self.settings.binding {
             match k {
@@ -1098,6 +1308,7 @@ impl App {
                 KeyIn::Char('s' | 'S') if board => Some(Some(G::Down)),
                 KeyIn::Char('a' | 'A') if board => Some(Some(G::Left)),
                 KeyIn::Char('d' | 'D') if board => Some(Some(G::Right)),
+                KeyIn::Char('p' | 'P') => Some(Some(G::Dealer)),
                 KeyIn::Char('d' | 'D' | 's' | 'S') => Some(Some(G::Other)),
                 KeyIn::Enter | KeyIn::Char(' ' | 'e' | 'E') => Some(Some(G::Pick)),
                 KeyIn::Esc => Some(None),
@@ -1152,7 +1363,7 @@ impl App {
         }
         if let Some(buf) = self.settings.editing.as_mut() {
             match k {
-                KeyIn::Char(c) if buf.chars().count() < 28 => buf.push(c),
+                KeyIn::Char(c) if buf.chars().count() < if self.settings.edit == Some(settings::Field::Motto) { 60 } else { 28 } => buf.push(c),
                 KeyIn::Backspace => {
                     buf.pop();
                 }
@@ -1205,7 +1416,7 @@ impl App {
                 Some(_) => "pointer",
                 None => "default",
             }
-        } else if settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) || settings::zoom_rects(self.w as i32).0.contains(hx, hy) || settings::zoom_rects(self.w as i32).1.contains(hx, hy) {
+        } else if settings::online_rect(self.w as i32).contains(hx, hy) || self.scene.post_click(hx, hy) || settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) || settings::zoom_rects(self.w as i32).0.contains(hx, hy) || settings::zoom_rects(self.w as i32).1.contains(hx, hy) {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
             "grab"
@@ -1823,6 +2034,9 @@ impl App {
             self.seed = self.cfg.seed as u32;
             reseed = true;
         }
+        if std::mem::take(&mut self.reseed_soon) {
+            reseed = true;
+        }
         // a save to import, picked: its village and its things
         if let Some(rx) = &self.import_pick {
             match rx.try_recv() {
@@ -1888,12 +2102,12 @@ impl App {
                 c.autopilot = false;
                 c.only_friends = false;
                 c.friends.clear();
+                c.wear = Default::default();
+                c.motto.clear();
                 c
             };
             if reseed || live(&self.cfg.scene) != live(&old.scene) {
-                let pockets = self.scene.take_pockets();
-                self.scene = Scene::new(self.w, self.h, self.seed, &self.cfg.scene);
-                self.scene.set_pockets(pockets);
+                self.new_scene();
                 // a save imported: its things, in its village
                 if let Some(s) = self.importing_save.take() {
                     self.scene.set_pockets(s.pockets);
@@ -1949,6 +2163,7 @@ impl App {
         self.scene.set_pet(&self.cfg.scene.pet);
         self.scene.set_name(&self.cfg.scene.name);
         self.scene.set_friends(&self.cfg.scene.friends);
+        self.scene.set_wear(&self.cfg.scene.wear, &self.cfg.scene.motto);
         self.scene.set_autopilot(self.cfg.scene.autopilot);
         self.scene.set_only_friends(self.cfg.scene.only_friends);
         if let Some((sc, at)) = self.scale_pending {
@@ -2018,6 +2233,8 @@ impl App {
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.draw(&mut self.frame, t);
+        // (the post, questions asked, cards and games with friends: over the widgets)
+        self.scene.draw_top(&mut self.frame);
         // the widgets' tops are something to climb up onto (next frame)
         self.scene.set_widget_ledges(self.widgets.rects.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r.x, r.y, r.w, r.h))).collect());
         // and the open windows' tops (the window-snow overlay sees them)
@@ -2037,6 +2254,17 @@ impl App {
             self.scene.set_window_ledges(cells);
         }
         self.settings.draw_gear(&mut self.frame, t);
+        {
+            let o = &self.scene.online;
+            let about = o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count();
+            let state = match (o.wanted(), o.link()) {
+                (false, _) => 0,
+                (true, crate::net::Link::On) => 2,
+                _ => 1,
+            };
+            let asked = self.scene.asked_now() || !o.book.asking.is_empty();
+            self.settings.draw_online(&mut self.frame, state, about, asked, t);
+        }
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         // a popped-out window tells the wallpaper it's open
         if self.popout && t - self.popout_touched > 1.0 {

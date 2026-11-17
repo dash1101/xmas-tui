@@ -783,6 +783,97 @@ fn draw_deer(body: Rgb, pose: WildPose) -> Canvas {
     c
 }
 
+/// One of Santa's reindeer in full flight (heading left): legs out fore
+/// and aft (`frame` 0) or gathered under (1), a red collar with a gold
+/// bell; Rudolph's nose glowing.
+pub fn reindeer(frame: u8, rudolph: bool, light: f32) -> Arc<Picture> {
+    let k = key(("reindeer", frame, rudolph, (light * 20.0) as i32));
+    cached(k, || {
+        let body = Rgb::hex(0x8a5a32);
+        let mut c = draw_deer(body, if frame == 0 { WildPose::Kick(0) } else { WildPose::Walk(1) });
+        // the collar and its bell, round the neck's foot
+        c.line(18.5, 11.5, 21.0, 13.5, 2, Rgb::hex(0xc8202a));
+        c.set(20, 14, Rgb::hex(0xffcc55));
+        c.set(21, 15, Rgb::hex(0xffcc55));
+        // the harness along the back
+        c.line(8.0, 11.0, 18.0, 11.0, 1, Rgb::hex(0xc8202a) * 0.9);
+        c.set(13, 11, Rgb::hex(0xffcc55));
+        if rudolph {
+            // (the head's at about (23, 6.4): the nose at its tip)
+            c.ellipse(27.3, 6.6, 1.3, 1.1, Rgb::hex(0xff2a2a));
+            c.set(27, 6, Rgb::hex(0xffa0a0));
+        }
+        c.mirror();
+        c.picture(light)
+    })
+}
+
+/// Santa's sleigh (heading left): red, trimmed and scrolled in gold, on
+/// gold runners, the sack of presents behind; Santa on the seat with the
+/// reins (`santa` false: the seat's empty).
+pub fn sleigh(santa: bool, light: f32) -> Arc<Picture> {
+    let k = key(("sleigh", santa, (light * 20.0) as i32));
+    cached(k, || {
+        let mut c = Canvas::new(44, 28);
+        let (red, gold, white) = (Rgb::hex(0xc8202a), Rgb::hex(0xffcc55), Rgb::hex(0xf2efe8));
+        let dark = red * 0.6;
+        // the runners, curling up at the front, and their struts
+        c.line(6.0, 26.0, 40.0, 26.0, 1, gold);
+        c.line(6.0, 26.0, 3.0, 23.0, 1, gold);
+        c.line(3.0, 23.0, 4.0, 20.0, 1, gold);
+        c.set(5, 20, gold);
+        for x in [12, 22, 34] {
+            c.line(x as f32, 22.0, x as f32, 25.0, 1, gold * 0.85);
+        }
+        // the sack of presents, behind the seat
+        c.ellipse(34.0, 9.0, 5.0, 6.0, Rgb::hex(0x8a5a2a));
+        c.line(31.0, 4.0, 37.0, 4.0, 1, Rgb::hex(0x5a3a1a));
+        for (x, y, w, h, col) in [(29, 3, 4, 4, 0x2fae5c), (35, 1, 4, 4, 0x4a8dff), (32, 0, 3, 3, 0xffc23a)] {
+            c.rect(x, y, w, h, Rgb::hex(col));
+            c.set(x + w / 2, y, gold);
+        }
+        // the body: a deep red tub, high at the back, a gold scroll at the
+        // front, gold along its top, a darker side panel
+        c.rect(9, 15, 29, 7, red);
+        c.ellipse(9.5, 18.0, 4.0, 4.0, red);
+        c.rect(34, 9, 6, 13, red);
+        c.ellipse(37.0, 9.0, 3.0, 2.0, red);
+        c.rect(12, 17, 20, 3, dark);
+        c.line(8.0, 15.0, 34.0, 15.0, 1, gold);
+        c.line(34.0, 8.0, 40.0, 8.0, 1, gold);
+        c.ellipse(7.0, 13.5, 2.4, 2.4, gold);
+        c.ellipse(7.0, 13.5, 1.0, 1.0, red);
+        for x in [15, 21, 27] {
+            c.set(x, 18, gold);
+        }
+        if santa {
+            let skin = Rgb::hex(0xf0c8a8);
+            // his coat, its white trim and the black belt
+            c.ellipse(24.0, 11.0, 5.0, 5.0, red);
+            c.rect(19, 12, 10, 1, Rgb::hex(0x1a1414));
+            c.set(23, 12, gold);
+            c.line(20.0, 15.0, 28.0, 15.0, 1, white);
+            // the arms out to the reins, black mittens
+            c.line(21.0, 9.0, 15.0, 12.0, 2, red);
+            c.rect(13, 12, 2, 2, Rgb::hex(0x1a1414));
+            // the head: face, rosy cheek, the big white beard, the hat
+            // flopping back, its white brim and pompom
+            c.ellipse(21.0, 5.5, 2.4, 2.2, skin);
+            c.set(19, 6, Rgb::hex(0xe88a8a));
+            c.set(20, 5, Rgb::hex(0x1a1414));
+            c.ellipse(21.5, 8.2, 3.0, 2.6, white);
+            c.rect(18, 3, 7, 1, white);
+            c.line(20.0, 2.0, 26.0, 0.0, 2, red);
+            c.ellipse(27.0, 1.0, 1.2, 1.2, white);
+            // the reins, off to the team
+            c.line(13.0, 13.0, 0.0, 14.0, 1, gold * 0.8);
+        } else {
+            c.line(10.0, 15.0, 0.0, 14.0, 1, gold * 0.8);
+        }
+        c.picture(light)
+    })
+}
+
 fn draw_fox(body: Rgb, pose: WildPose) -> Canvas {
     let mut c = Canvas::new(28, 16);
     let g = 15;

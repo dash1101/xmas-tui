@@ -271,6 +271,12 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_giveText(mut env: 
 }
 
 /// A save (its text): its seed, or 0 when it isn't one.
+/// Friends & online (the ✉ button).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_online(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "online", (), |g| g.online_menu());
+}
+
 #[no_mangle]
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_saveSeed(mut env: JNIEnv, _: JClass, text: JString) -> jlong {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();

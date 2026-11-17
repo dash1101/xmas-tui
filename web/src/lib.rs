@@ -25,6 +25,8 @@ pub mod scene;
 pub mod save;
 #[path = "../../src/net/mod.rs"]
 pub mod net;
+#[path = "../../src/sync.rs"]
+pub mod sync;
 #[path = "../../android/native/src/widgets.rs"]
 pub mod widgets;
 #[path = "../../android/native/src/game.rs"]
@@ -243,10 +245,37 @@ pub extern "C" fn net_bye(w: *mut Web) -> usize {
     w.text.len()
 }
 
-/// Whether the village wants to be online (the page opens a WebSocket).
+/// Whether the village wants to be online (the page opens a WebSocket): 0
+/// no, 1 yes, 2 yes, with a new link (another friend code).
 #[no_mangle]
 pub extern "C" fn net_want(w: *mut Web) -> u32 {
-    unsafe { &*w }.game.scene.online.wanted() as u32
+    let o = &mut unsafe { &mut *w }.game.scene.online;
+    if !o.wanted() {
+        return 0;
+    }
+    if o.take_relink() {
+        2
+    } else {
+        1
+    }
+}
+
+/// Y or N: what someone online asked, answered (1 if there was a question).
+#[no_mangle]
+pub extern "C" fn answer(w: *mut Web, yes: u32) -> u32 {
+    unsafe { &mut *w }.game.answer(yes != 0) as u32
+}
+
+/// The other villagers kept in the browser: their names (JSON, `len` bytes
+/// in the scratch buffer).
+#[no_mangle]
+pub extern "C" fn set_villagers(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    let names: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
+    unsafe { &mut *w }.game.set_villagers(names);
 }
 
 /// The page's WebSocket to the relay: 1 open, 0 closed.

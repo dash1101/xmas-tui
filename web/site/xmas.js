@@ -7,7 +7,7 @@
 "use strict";
 
 const BTN = { E: 0, JUMP: 1, SNOWBALL: 2, POCKETS: 3, INVITE: 4, HELD: 5, BACK: 6, CENTRE: 7, JUMP_UP: 8, REST: 9, NUM: 10 };
-const KEY = "xmas-tui-save", OPTS = "xmas-tui-opts", PLACE = "xmas-tui-opts-at";
+const KEY = "xmas-tui-save", OPTS = "xmas-tui-opts", PLACE = "xmas-tui-opts-at", FOLK = "xmas-tui-villagers";
 const canvas = document.getElementById("village");
 const ctx = canvas.getContext("2d", { alpha: false });
 const pad = document.getElementById("pad");
@@ -20,7 +20,8 @@ let wasm, game = 0, W = 0, H = 0, K = 1, last = 0, img = null, imgPtr = 0;
 // ------------------------------------------------------------ settings
 
 const DEFAULTS = {
-  name: "", pet: "cat", petcoat: "", petname: "", auto: false, walk: 100,
+  name: "", pet: "cat", petcoat: "", petname: "", auto: false, walk: 100, motto: "",
+  wcoat: "", what: "", whair: "", wskin: "", wscarf: true,
   friends: [], only_friends: false,
   time: "auto", snow: 100, wind: 100, aurora: true, glow: 100, size: 100, zoom: 100,
   critters: 100, most: 24, bushes: true, events: 100, sleigh: 4, chattiness: 100, talk_time: 100,
@@ -40,7 +41,8 @@ function config(o) {
   let s = `zoom = ${o.zoom / 100}\n[scene]\nname = ${q(o.name)}\nautopilot = ${!!o.auto}\nwalk_speed = ${o.walk / 100}\n`;
   s += `time = ${q(o.time)}\nsnow = ${o.snow / 100}\nwind = ${o.wind / 100}\naurora = ${!!o.aurora}\nglow = ${o.glow / 100}\n`;
   s += `critters = ${o.critters / 100}\nmost_at_once = ${o.most | 0}\nbushes = ${!!o.bushes}\nevents = ${o.events / 100}\nsleigh_minutes = ${o.sleigh}\n`;
-  s += `chattiness = ${o.chattiness / 100}\ntalk_time = ${o.talk_time / 100}\nonly_friends = ${!!o.only_friends}\n`;
+  s += `chattiness = ${o.chattiness / 100}\ntalk_time = ${o.talk_time / 100}\nonly_friends = ${!!o.only_friends}\nmotto = ${q(o.motto)}\n`;
+  s += `[scene.wear]\ncoat = ${q(o.wcoat)}\nhat = ${q(o.what)}\nhair = ${q(o.whair)}\nskin = ${q(o.wskin)}\nscarf = ${o.wscarf !== false}\n`;
   s += `[scene.pet]\nkind = ${q(o.pet)}\ncoat = ${q(o.petcoat)}\nname = ${q(o.petname)}\n`;
   for (const f of o.friends) {
     if (!String(f.name || "").trim()) continue;
@@ -86,6 +88,54 @@ function build() {
   game = wasm.create(W, H, o.size / 100, (Math.random() * 4294967295) >>> 0, localMs(), n);
   img = null;
   sound();
+  // the other villagers kept in this browser (for the menu)
+  wasm.set_villagers(game, putText(JSON.stringify(folk().map((v) => v.name || "a villager (no name)"))));
+}
+
+// other villagers kept in this browser: their saves and settings
+function folk() {
+  try { const a = JSON.parse(localStorage.getItem(FOLK) || "[]"); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+function park() {
+  save();
+  const o = opts();
+  const all = folk();
+  all.push({ name: o.name, save: localStorage.getItem(KEY) || "", opts: o });
+  try { localStorage.setItem(FOLK, JSON.stringify(all)); } catch (e) { toast("no room to keep another villager"); return false; }
+  return true;
+}
+function switchTo(i) {
+  const all = folk();
+  const v = all[i];
+  if (!v || !park()) return;
+  const now = folk();
+  now.splice(i, 1);
+  localStorage.setItem(FOLK, JSON.stringify(now));
+  if (game) { netBye(); wasm.destroy(game); game = 0; }
+  if (v.save) localStorage.setItem(KEY, v.save); else localStorage.removeItem(KEY);
+  if (v.opts) setOpts(Object.assign(opts(), v.opts));
+  build();
+  toast("☺ " + (v.name || "another villager"));
+}
+function newVillager(name) {
+  if (!park()) return;
+  if (game) { netBye(); wasm.destroy(game); game = 0; }
+  localStorage.removeItem(KEY);
+  const o = opts();
+  Object.assign(o, { name, pet: "cat", petcoat: "", petname: "", friends: [], only_friends: false, motto: "", wcoat: "", what: "", whair: "", wskin: "", wscarf: true });
+  setOpts(o);
+  build();
+  toast("☺ " + name + ", in a village of their own");
+}
+// a save's villager (an import, or changed on a linked device) into the settings
+function takeYou(you, o) {
+  o.name = you.name || "";
+  if (you.pet) { o.pet = you.pet.kind || "cat"; o.petcoat = you.pet.coat || ""; o.petname = you.pet.name || ""; }
+  o.friends = (you.friends || []).map((fr) => ({ name: fr.name, kid: !!fr.kid, coat: fr.coat || "", hat: fr.hat || "", hair: fr.hair || "", skin: fr.skin || "", scarf: fr.scarf !== false }));
+  o.only_friends = !!you.only_friends;
+  if (you.look) o.look = you.look;
+  o.motto = you.motto || "";
+  if (you.wear) { o.wcoat = you.wear.coat || ""; o.what = you.wear.hat || ""; o.whair = you.wear.hair || ""; o.wskin = you.wear.skin || ""; o.wscarf = you.wear.scarf !== false; }
 }
 
 function save() {
@@ -112,6 +162,15 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+// a tab out of sight gets no animation frames: a slow tick instead, so the
+// link to the relay stays up and friends' messages are taken in
+setInterval(() => {
+  if (!game || !document.hidden) return;
+  wasm.frame(game, 0.1, localMs());
+  asked(getText(wasm.ask(game)));
+  netPump(performance.now());
+}, 1000);
+
 // what the village asks of the page: the settings, a line typed (a
 // friend's code, a message), a code onto the clipboard
 function asked(a) {
@@ -120,6 +179,13 @@ function asked(a) {
   else if (a.startsWith("text:")) {
     held.clear(); steer();
     setTimeout(() => { const v = prompt(a.slice(5)); if (game) wasm.give_text(game, putText(v || "")); }, 0);
+  } else if (a.startsWith("you:")) {
+    try { const o = opts(); takeYou(JSON.parse(a.slice(4)), o); setOpts(o); if (box.classList.contains("open")) show(tab); } catch (e) {}
+  } else if (a.startsWith("villager:")) {
+    setTimeout(() => switchTo(+a.slice(9)), 0);
+  } else if (a.startsWith("newvillager:")) {
+    const n = a.slice(12);
+    setTimeout(() => newVillager(n), 0);
   } else if (a.startsWith("copy:")) {
     const t = a.slice(5);
     try { navigator.clipboard.writeText(t).then(() => toast("copied: " + t), () => toast(t)); } catch (e) { toast(t); }
@@ -134,7 +200,10 @@ const RELAYS = ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/
 let ws = null, wsTry = 0, wsWait = 0, relays = null;
 fetch("relays.json").then((r) => r.json()).then((j) => { if (Array.isArray(j.ws) && j.ws.length) relays = j.ws; }).catch(() => {});
 function netPump(now) {
-  if (!wasm.net_want(game)) {
+  const want = wasm.net_want(game);
+  // (another friend code, from a linked device: the link made again)
+  if (want === 2 && ws) { flushNet(); ws.onclose = null; ws.close(); ws = null; wasm.net_link(game, 0); }
+  if (!want) {
     if (ws) { flushNet(); ws.onclose = null; ws.close(); ws = null; }
     return;
   }
@@ -229,13 +298,14 @@ addEventListener("keydown", (e) => {
     case "KeyZ": wasm.button(game, BTN.REST); break;
     case "KeyT": if (menu) wasm.back(game); else wasm.todo(game); break;
     case "KeyO": if (menu) wasm.back(game); else wasm.online(game); break;
+    case "KeyY": case "KeyN": wasm.answer(game, e.code === "KeyY" ? 1 : 0); break;
     case "Escape": if (box.classList.contains("open")) openOpts(false); else wasm.back(game); break;
     default:
       if (/^Digit[1-9]$/.test(e.code)) wasm.button(game, BTN.NUM + +e.code.slice(5));
       else if (e.key === "?") wasm.help(game, 1);
   }
   steer();
-  if (/^(Key[WASDEFRZTQICO]|Arrow|Space|Enter|Digit|Escape)/.test(e.code)) e.preventDefault();
+  if (/^(Key[WASDEFRZTQICOYN]|Arrow|Space|Enter|Digit|Escape)/.test(e.code)) e.preventDefault();
 });
 addEventListener("keyup", (e) => {
   if (!game) return;
@@ -462,6 +532,15 @@ function show(i) {
   if (i === 0) {
     h3("THE VILLAGER");
     text("Name", "name", "neighbour");
+    const line = el("input", { type: "text", value: o.motto || "", placeholder: "(friends online see it)", maxLength: 60 });
+    line.oninput = () => change("motto", line.value.trim());
+    row("Card's line", line);
+    pick("Your coat", "wcoat", ["", "red", "green", "blue", "purple", "gold", "pink", "grey", "white"]);
+    pick("Your hat", "what", ["", "red", "green", "blue", "gold", "pink", "white", "none"]);
+    pick("Your hair", "whair", ["", "brown", "dark", "blonde", "red", "grey"]);
+    pick("Your skin", "wskin", ["", "light", "fair", "tan", "deep"]);
+    check("A scarf", "wscarf");
+    note("(\"any\" here is the classic look; friends online see you this way, and on your profile card)");
     pick("Pet", "pet", ["cat", "dog", "bunny", "none"], () => show(0));
     if (o.pet !== "none") {
       pick("Pet's coat", "petcoat", COATS[o.pet] || [""]);
@@ -563,11 +642,7 @@ document.getElementById("o-file").onchange = async (e) => {
   try { you = JSON.parse(getText(wasm.you_json(game, putText(text))) || "null"); } catch (err) {}
   const o = opts();
   if (you) {
-    o.name = you.name || "";
-    if (you.pet) { o.pet = you.pet.kind || "cat"; o.petcoat = you.pet.coat || ""; o.petname = you.pet.name || ""; }
-    o.friends = (you.friends || []).map((fr) => ({ name: fr.name, kid: !!fr.kid, coat: fr.coat || "", hat: fr.hat || "", hair: fr.hair || "", skin: fr.skin || "", scarf: fr.scarf !== false }));
-    o.only_friends = !!you.only_friends;
-    if (you.look) o.look = you.look;
+    takeYou(you, o);
     setOpts(o);
   }
   if (game) { wasm.destroy(game); game = 0; }
@@ -589,6 +664,7 @@ function fresh() {
 document.getElementById("b-todo").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.todo(game); };
 document.getElementById("b-more").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.more(game); };
 document.getElementById("b-centre").onclick = () => game && wasm.button(game, BTN.CENTRE);
+document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.online(game); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
 document.getElementById("b-opts").onclick = () => openOpts();
 document.getElementById("b-sound").onclick = () => {

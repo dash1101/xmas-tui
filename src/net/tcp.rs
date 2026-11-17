@@ -153,6 +153,12 @@ pub fn pump(online: &mut Online, link: &mut Option<Tcp>) {
         }
         return;
     }
+    if online.take_relink() {
+        // (another friend code: a new link, with its own goodbye-will)
+        if let Some(l) = link.take() {
+            l.close(online.take_out());
+        }
+    }
     if link.is_none() {
         *link = Tcp::start();
     }

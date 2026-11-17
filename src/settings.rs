@@ -156,10 +156,14 @@ pub enum Field {
     Friend(u8),
     /// A new name for the friends & family list.
     NewFriend,
+    /// The line on the villager's profile card.
+    Motto,
 }
 
 /// How many friends & family fit on the list.
 pub const MAX_FRIENDS: usize = 10;
+/// The look editor's "friend" number for the villager's own look.
+pub const YOU_LOOK: u8 = 255;
 
 #[derive(Default)]
 pub struct Settings {
@@ -434,6 +438,15 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             fr.kid ^= true;
             true
         }
+        // (255: the villager's own look)
+        Act::FriendLook(YOU_LOOK, part, d) => {
+            cfg.scene.wear.wear_step(part, d as i32);
+            true
+        }
+        Act::FriendScarf(YOU_LOOK) => {
+            cfg.scene.wear.scarf ^= true;
+            true
+        }
         Act::FriendLook(i, part, d) => {
             let Some(fr) = cfg.scene.friends.get_mut(i as usize) else { return false };
             fr.step(part, d as i32);
@@ -540,6 +553,8 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Edit(Field::PetName) => return Some("The pet's name. People mention it, and it answers to it."),
         Act::Edit(Field::Shelf(_)) => return Some("The shelf's name (its folder is renamed with it)."),
         Act::Edit(Field::Friend(_)) => return Some("Their name in the village. Clear it to take them off the list."),
+        Act::Edit(Field::Motto) => return Some("A line about you, on your profile card (friends online see it)."),
+        Act::FriendSel(YOU_LOOK) => return Some("How you look in the village (and to friends online): coat, hat, hair, skin, scarf."),
         Act::Edit(Field::NewFriend) => return Some("A friend or family member: some visitors take these names and know the villager."),
         Act::FriendKid(_) => return Some("Whether they come to the village as a grown-up or as a kid."),
         Act::FriendRemove(_) => return Some("Take them off the list."),
@@ -653,6 +668,11 @@ pub fn centre_rect(w: i32) -> Rect {
     Rect { x: w - 36, y: 0, w: 9, h: 1 }
 }
 
+/// The friends & online button, left of the zoom ones.
+pub fn online_rect(w: i32) -> Rect {
+    Rect { x: w - 57, y: 0, w: 13, h: 1 }
+}
+
 /// The zoom buttons (out, in), left of the re-centre one.
 pub fn zoom_rects(w: i32) -> (Rect, Rect) {
     (Rect { x: w - 43, y: 0, w: 3, h: 1 }, Rect { x: w - 40, y: 0, w: 3, h: 1 })
@@ -712,6 +732,7 @@ impl Settings {
             Field::Shelf(i) => cfg.shelves.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
             Field::Friend(i) => cfg.scene.friends.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
             Field::NewFriend => String::new(),
+            Field::Motto => cfg.scene.motto.clone(),
         };
         self.edit = Some(which);
         self.editing = Some(text);
@@ -753,6 +774,7 @@ impl Settings {
                     cfg.scene.friends.push(crate::config::FriendCfg { name: short(), ..Default::default() });
                 }
             }
+            Field::Motto => cfg.scene.motto = text.chars().take(60).collect(),
         }
     }
 
@@ -946,6 +968,28 @@ impl Settings {
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
         f.put_g(r.x + 1, r.y, Glyph::new('⚙', gc).bg(bg).lit(0.0));
         f.text(r.x + 2, r.y, " settings ", tc, bg, 0.0);
+    }
+
+    /// The friends & online button (`state`: 0 offline, 1 connecting, 2
+    /// online; how many friends are about; something waiting).
+    pub fn draw_online(&self, f: &mut Frame, state: u8, about: usize, waiting: bool, t: f32) {
+        let r = online_rect(f.w as i32);
+        let hot = r.contains(self.hover.0, self.hover.1);
+        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
+        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
+        let pulse = if waiting { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
+        f.put_g(r.x + 1, r.y, Glyph::new('✉', Rgb::hex(0xffd36b) * if hot { 1.2 } else { 0.85 * pulse }).bg(bg).lit(0.0));
+        let x = f.text(r.x + 2, r.y, " friends", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
+        let (dot, c) = match state {
+            2 if about > 0 => (format!(" ●{about}"), Rgb::hex(0x9be08a)),
+            2 => (" ●".to_string(), Rgb::hex(0x9be08a)),
+            1 => (" ◌".to_string(), pal::UI_DIM),
+            _ => (" ○".to_string(), pal::UI_DIM),
+        };
+        let x = f.text(x, r.y, &dot, c, bg, 0.0);
+        for xx in x..r.x + r.w {
+            f.put_g(xx, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        }
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
@@ -1145,7 +1189,24 @@ impl Settings {
         let editing = self.edit == Some(Field::Name) && self.editing.is_some();
         let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.scene.name.is_empty() { "(click to set)".into() } else { cfg.scene.name.clone() };
         self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::Edit(Field::Name), t);
-        self.check(f, vx + 21, yy, "Walk about (WASD)", Act::Toggle(F::Player), cfg.scene.player);
+        // their look: click the colours to dress them
+        {
+            let (coat, hat, hair, _, _) = cfg.scene.wear.wear_colours();
+            let (x, y) = (vx + 21, yy);
+            let sel = self.friend_sel == Some(YOU_LOOK);
+            let r = Rect { x, y, w: 14, h: 1 };
+            let hot = r.contains(self.hover.0, self.hover.1);
+            f.put_g(x, y, Glyph::new('▀', Rgb::hex(hat.unwrap_or(hair))).bg(Bg::Solid(Rgb::hex(coat))).lit(0.0));
+            f.text(x + 2, y, if sel { "your look ◂" } else { "your look ✎" }, if hot || sel { pal::UI_TITLE } else { pal::UI_TEXT }, BG, 0.0);
+            self.regions.push((r, Act::FriendSel(YOU_LOOK)));
+        }
+        self.check(f, vx + 37, yy, "Walk about", Act::Toggle(F::Player), cfg.scene.player);
+        yy += 1;
+        f.text(lx, yy, "Card's line", pal::UI_TEXT, BG, 0.0);
+        self.hints.push((Rect { x: lx, y: yy, w: 11, h: 1 }, Act::Edit(Field::Motto)));
+        let editing = self.edit == Some(Field::Motto) && self.editing.is_some();
+        let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.scene.motto.is_empty() { "(a line friends see on your profile card)".into() } else { cfg.scene.motto.clone() };
+        self.field(f, Rect { x: vx, y: yy, w: (right - vx - 2).clamp(18, 48), h: 1 }, &txt, editing, Act::Edit(Field::Motto), t);
         yy += 1;
         f.text(lx, yy, "Autopilot", pal::UI_TEXT, BG, 0.0);
         self.hints.push((Rect { x: lx, y: yy, w: 9, h: 1 }, Act::Toggle(F::Autopilot)));
@@ -1176,7 +1237,7 @@ impl Settings {
         yy += 2;
         self.section(f, lx, yy, "FRIENDS & FAMILY");
         yy += 1;
-        f.text(lx, yy, "Each comes by as a villager of their own, and knows the villager.", pal::UI_DIM, BG, 0.0);
+        f.text(lx, yy, "Each comes by as a villager of their own.", pal::UI_DIM, BG, 0.0);
         self.check(f, right - 22, yy, "only them", Act::Toggle(F::OnlyFriends), cfg.scene.only_friends);
         yy += 1;
         // two columns of five
@@ -1214,6 +1275,24 @@ impl Settings {
         }
         // the chosen friend's look, and how they'll appear
         let yy = yy + 7;
+        if self.friend_sel == Some(YOU_LOOK) {
+            let w = &cfg.scene.wear;
+            f.text(lx, yy, "Your look", Rgb::hex(0xffd36b), BG, 0.0);
+            for (part, label, px, py) in [(0u8, "coat", vx, yy), (1, "hat", vx + 18, yy), (2, "hair", vx, yy + 1), (3, "skin", vx + 18, yy + 1)] {
+                let c = f.text(px, py, label, pal::UI_TEXT, BG, 0.0);
+                self.arrow(f, c + 1, py, '◂', Act::FriendLook(YOU_LOOK, part, -1));
+                let e = f.text(c + 3, py, w.wear_name(part), pal::UI_TITLE, BG, 0.0);
+                self.arrow(f, e + 1, py, '▸', Act::FriendLook(YOU_LOOK, part, 1));
+            }
+            self.check(f, vx + 34, yy, "scarf", Act::FriendScarf(YOU_LOOK), w.scarf);
+            f.text(lx, yy + 2, "(friends online see you this way, and on your profile card)", pal::UI_DIM, BG, 0.0);
+            let (coat, hat, hair, skin, scarf) = w.wear_colours();
+            let look = crate::scene::sprites::Look { kid: false, coat: Rgb::hex(coat), hat: hat.map(Rgb::hex), hair: Rgb::hex(hair), scarf: scarf.map(Rgb::hex), skin: Rgb::hex(skin), mittens: Rgb::hex(scarf.or(hat).unwrap_or(coat)), holding: None, lantern: false };
+            let pic = crate::scene::sprites::person(&look, crate::scene::sprites::Pose::Wave, 1.0, 1.0);
+            let rows = crate::scene::sprites::rows_of(&pic, 2.5);
+            f.sprite((right - 6) as f32, (yy + 2) as f32, rows, pic);
+            return;
+        }
         let Some(i) = self.friend_sel.filter(|&i| (i as usize) < n) else {
             if n > 0 {
                 f.text(lx, yy, "Click the colours by a name to choose how they look.", pal::UI_DIM, BG, 0.0);

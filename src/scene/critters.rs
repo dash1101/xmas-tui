@@ -2959,6 +2959,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
             kid,
             arms_up: wave && (t * 3.0) as i32 % 2 == 0,
             outdoor: true,
+            behind: None,
         };
         b.draw(f, t);
         if c.kind == Kind::Walker {

@@ -56,6 +56,13 @@ final class Prefs {
         s.append("walk_speed = ").append(p.getInt("walk_speed", 100) / 100f).append('\n');
         s.append("only_friends = ").append(p.getBoolean("only_friends", false)).append('\n');
         s.append("autopilot = ").append(wallpaper || p.getBoolean("autopilot", false)).append('\n');
+        s.append("motto = ").append(q(p.getString("motto", ""))).append('\n');
+        s.append("[scene.wear]\n");
+        for (String part : new String[] {"coat", "hat", "hair", "skin"}) {
+            String v = p.getString("wear_" + part, "classic");
+            s.append(part).append(" = ").append(q("classic".equals(v) ? "" : v)).append('\n');
+        }
+        s.append("scarf = ").append(p.getBoolean("wear_scarf", true)).append('\n');
         s.append("[scene.pet]\n");
         s.append("kind = ").append(q(p.getString("pet", "cat"))).append('\n');
         s.append("coat = ").append(q(p.getString("pet_coat", ""))).append('\n');
@@ -153,6 +160,15 @@ final class Prefs {
             e.putBoolean("only_friends", o.optBoolean("only_friends", false));
             String look = o.optString("look", "");
             if (!look.isEmpty()) e.putString("look", look);
+            e.putString("motto", o.optString("motto", ""));
+            JSONObject wear = o.optJSONObject("wear");
+            if (wear != null) {
+                for (String part : new String[] {"coat", "hat", "hair", "skin"}) {
+                    String v = wear.optString(part, "");
+                    e.putString("wear_" + part, v.isEmpty() ? "classic" : v);
+                }
+                e.putBoolean("wear_scarf", wear.optBoolean("scarf", true));
+            }
             e.apply();
         } catch (Exception ignored) {
         }
