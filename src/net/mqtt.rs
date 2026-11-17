@@ -92,15 +92,28 @@ pub fn disconnect() -> Vec<u8> {
 #[derive(Default)]
 pub struct Reader {
     buf: Vec<u8>,
+    /// Bytes still to throw away: the rest of a packet too big to be ours
+    /// (nobody gets to make this hold megabytes).
+    skip: usize,
 }
 
+/// The biggest packet taken in: the village's own messages are a few KB at
+/// most; anything bigger is someone else's (or trouble), and is skipped.
+pub const MAX_PACKET: usize = 256 * 1024;
+
 impl Reader {
-    pub fn feed(&mut self, b: &[u8]) {
+    pub fn feed(&mut self, mut b: &[u8]) {
+        if self.skip > 0 {
+            let n = self.skip.min(b.len());
+            self.skip -= n;
+            b = &b[n..];
+        }
         self.buf.extend_from_slice(b);
     }
 
     pub fn clear(&mut self) {
         self.buf.clear();
+        self.skip = 0;
     }
 
     /// The next whole packet, if one's in.
@@ -122,6 +135,13 @@ impl Reader {
                 self.buf.clear();
                 return None;
             }
+        }
+        if len > MAX_PACKET {
+            // too big: drop what's here of it, and the rest as it comes
+            let have = self.buf.len() - i;
+            self.skip = len.saturating_sub(have);
+            self.buf.drain(..(i + len).min(self.buf.len()));
+            return self.next();
         }
         if self.buf.len() < i + len {
             return None;
@@ -178,5 +198,22 @@ mod tests {
         let c = connect("xt1", 60, Some(("w", b"bye")));
         assert_eq!(c[0], 0x10);
         assert_eq!(c[1] as usize, c.len() - 2);
+    }
+
+    #[test]
+    fn a_packet_too_big_is_skipped_not_kept() {
+        let huge = vec![1u8; 3 * MAX_PACKET];
+        let mut bytes = publish("t", &huge, false);
+        bytes.extend(publish("t", b"after", false));
+        let mut r = Reader::default();
+        let mut got = vec![];
+        for chunk in bytes.chunks(4096) {
+            r.feed(chunk);
+            while let Some(p) = r.next() {
+                got.push(p);
+            }
+            assert!(r.buf.len() <= MAX_PACKET + 8192, "kept {} bytes", r.buf.len());
+        }
+        assert_eq!(got, vec![Packet::Publish { topic: "t".into(), payload: b"after".to_vec() }]);
     }
 }

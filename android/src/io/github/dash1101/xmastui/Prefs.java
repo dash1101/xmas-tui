@@ -79,6 +79,7 @@ final class Prefs {
         }
         s.append("[ui]\n");
         s.append("look = ").append(q(p.getString("look", "classic"))).append('\n');
+        s.append("scale = ").append(Math.max(100, Math.min(250, p.getInt("ui_scale", 140))) / 100f).append('\n');
         s.append("[sound]\n");
         s.append("enabled = ").append(!wallpaper && p.getBoolean("game_sound", true)).append('\n');
         s.append("master = ").append(p.getInt("vol_master", 50) / 100f).append('\n');

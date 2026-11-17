@@ -56,6 +56,8 @@ pub enum Sfx {
     Starburst,
     Magic,
     Chime,
+    /// A friend's ping: two bright notes, up.
+    Ping,
     // animals, people and handling them
     Deer,
     Fox,
@@ -78,7 +80,7 @@ pub enum Sfx {
     Meow,
 }
 
-pub const ALL_SFX: [Sfx; 37] = [
+pub const ALL_SFX: [Sfx; 38] = [
     Sfx::Present,
     Sfx::Snowman,
     Sfx::ShootingStar,
@@ -99,6 +101,7 @@ pub const ALL_SFX: [Sfx; 37] = [
     Sfx::Starburst,
     Sfx::Magic,
     Sfx::Chime,
+    Sfx::Ping,
     Sfx::Deer,
     Sfx::Fox,
     Sfx::Rabbit,
@@ -137,7 +140,7 @@ impl Sfx {
             Sfx::Fanfare => "fanfare",
             Sfx::TrainWhistle | Sfx::Honk | Sfx::Plane => "train",
             Sfx::Cursor => "cursor",
-            Sfx::Chime => "",
+            Sfx::Chime | Sfx::Ping => "",
             Sfx::Deer | Sfx::Fox | Sfx::Rabbit | Sfx::Munch => "animals",
             Sfx::Pet | Sfx::Greet | Sfx::Laugh => "people",
             Sfx::Pickup | Sfx::Drop | Sfx::Snowball => "handling",

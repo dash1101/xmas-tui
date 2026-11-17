@@ -89,6 +89,93 @@ struct Critter {
     chat: Option<(usize, usize)>,
     /// A pet out for a walk with them.
     pet: Option<VPet>,
+    /// Something carried about: cocoa, coffee, a candy cane, a shovel, a
+    /// present (off to put it under the big tree).
+    carry: Option<super::sprites::Hold>,
+}
+
+/// Someone (or an animal) out in the village as its host has them, for a
+/// guest to show the same (see `Critters::crowd`, `set_crowd`): kept
+/// short, it goes several times a second. Positions in hundredths of the
+/// village's own units (see `Scene::shared`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Pup {
+    pub id: u64,
+    /// Deer, fox, rabbit, grown-up, kid (0..4).
+    pub k: u8,
+    pub x: i32,
+    pub y: i32,
+    /// Facing right.
+    pub r: bool,
+    /// Doing: 0 walking, 1 standing, 2 lying in the snow, 3 a snow angel,
+    /// 4 throwing, 5 petting, 6 waving, 7 carried / falling, 8 grazing,
+    /// 9 talking.
+    pub p: u8,
+    pub c: u32,
+    pub h: u32,
+    pub n: String,
+    /// A friend's look: coat, hat, hair, skin, scarf (0: none).
+    pub l: Option<[u32; 5]>,
+    /// Their pet: kind (dog, cat, bunny), body, markings.
+    pub pet: Option<(u8, u32, u32)>,
+    /// What they're carrying (see `hold_code`).
+    pub hd: u8,
+}
+
+/// What someone's carrying, as a number (0: nothing), and back.
+fn hold_code(h: Option<super::sprites::Hold>) -> u8 {
+    use super::sprites::Hold;
+    match h {
+        None => 0,
+        Some(Hold::Snowball) => 1,
+        Some(Hold::Cocoa) => 2,
+        Some(Hold::Coffee) => 3,
+        Some(Hold::CandyCane) => 4,
+        Some(Hold::Gingerbread) => 5,
+        Some(Hold::Carrot) => 6,
+        Some(Hold::Berries) => 7,
+        Some(Hold::Shovel) => 8,
+        Some(Hold::Present(i)) => 16 + (i % 8),
+    }
+}
+
+fn hold_of(c: u8) -> Option<super::sprites::Hold> {
+    use super::sprites::Hold;
+    Some(match c {
+        1 => Hold::Snowball,
+        2 => Hold::Cocoa,
+        3 => Hold::Coffee,
+        4 => Hold::CandyCane,
+        5 => Hold::Gingerbread,
+        6 => Hold::Carrot,
+        7 => Hold::Berries,
+        8 => Hold::Shovel,
+        16..=23 => Hold::Present(c - 16),
+        _ => return None,
+    })
+}
+
+fn hexof(c: Rgb) -> u32 {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    b(c.r) << 16 | b(c.g) << 8 | b(c.b)
+}
+
+/// A name heard from the host, kept for good (a few hundred at most).
+fn intern(s: &str) -> &'static str {
+    use std::sync::Mutex;
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let s = crate::net::clean(s, 24);
+    let Ok(mut v) = NAMES.lock() else { return "" };
+    if let Some(n) = v.iter().find(|n| **n == s) {
+        return n;
+    }
+    if v.len() >= 400 {
+        return "";
+    }
+    let n: &'static str = Box::leak(s.into_boxed_str());
+    v.push(n);
+    n
 }
 
 /// A villager's pet: trots along behind them (a dog on its lead), sits when
@@ -293,6 +380,15 @@ pub struct Critters {
     friends: Vec<Friend>,
     /// Only friends & family come by as people.
     pub only_friends: bool,
+    /// A guest in someone's village: everyone here is the host's, as they
+    /// have them (see `set_crowd`); nobody comes or goes, says or does
+    /// anything here but what's heard. Where each is headed.
+    pub puppets: bool,
+    pup_to: std::collections::HashMap<u64, (f32, f32)>,
+    /// The big tree (its column, how far its presents spread), and the
+    /// presents put under it since the scene last asked (by whom, where).
+    pub tree: Option<(f32, f32)>,
+    placed: Vec<(u64, f32, u8)>,
     /// The houses' front doors (column, row): people come out of them, and
     /// go in at them when they're done (rather than off out of the village).
     doors: Vec<(f32, f32)>,
@@ -384,6 +480,11 @@ impl Critters {
             talk: Talk::new(seed),
             friends: vec![],
             only_friends: false,
+            puppets: false,
+            tree: None,
+            placed: vec![],
+            
+            pup_to: Default::default(),
             doors: vec![],
             forced: None,
             tctx: TalkCtx::default(),
@@ -590,7 +691,21 @@ impl Critters {
             chat: None,
             pet: None,
             gone_in: false,
+            carry: None,
         });
+        // some folk have something with them (from their id: the village's
+        // own run of chance isn't disturbed)
+        let hh = crate::rng::hash(id as u32 ^ 0xca77_1e55);
+        if matches!(kind, Kind::Walker | Kind::Kid) && look.is_none() && h01(hh) < 0.4 {
+            use super::sprites::Hold;
+            let paper = (hh >> 8) as u8 % 4;
+            let kids = [Hold::CandyCane, Hold::Gingerbread, Hold::Present(paper), Hold::Cocoa, Hold::CandyCane];
+            let grown = [Hold::Cocoa, Hold::Coffee, Hold::Shovel, Hold::Present(paper), Hold::CandyCane, Hold::Coffee, Hold::Shovel];
+            let carry = if kind == Kind::Kid { kids[(hh >> 12) as usize % kids.len()] } else { grown[(hh >> 12) as usize % grown.len()] };
+            if let Some(c) = self.list.last_mut() {
+                c.carry = Some(carry);
+            }
+        }
         // some folk bring their pet along
         let p = match kind {
             Kind::Walker => 0.22,
@@ -611,6 +726,194 @@ impl Critters {
             }
         }
         id
+    }
+
+    /// Everyone out in the village, for guests (see `Pup`); `to`: world
+    /// position → the village's own units.
+    pub fn crowd(&self, t: f32, to: impl Fn(f32, f32) -> (f32, f32)) -> Vec<Pup> {
+        self.list
+            .iter()
+            .filter(|c| !c.gone_in && (c.person() || c.animal()))
+            .take(48)
+            .map(|c| {
+                let (x, y) = to(c.x, c.y);
+                let k = match c.kind {
+                    Kind::Deer => 0,
+                    Kind::Fox => 1,
+                    Kind::Rabbit => 2,
+                    Kind::Walker => 3,
+                    _ => 4,
+                };
+                let moving = matches!(c.st, St::Walk | St::Flee { .. } | St::Chase { .. } | St::Tag { .. } | St::Home { .. } | St::Play { .. } | St::Curious { .. } | St::Follow { moving: true, .. } | St::Gather { moving: true, .. });
+                let p = match c.st {
+                    _ if c.held() || matches!(c.st, St::Fall { .. }) => 7,
+                    St::Lie { flap, .. } if t < flap => 3,
+                    St::Lie { .. } => 2,
+                    St::Throw { .. } => 4,
+                    St::Petting { .. } => 5,
+                    St::Greet { .. } => 6,
+                    St::Graze { .. } | St::Munch { .. } => 8,
+                    St::Talk { .. } => 9,
+                    _ if moving => 0,
+                    _ => 1,
+                };
+                let l = c.look.map(|fl| [hexof(fl.coat), fl.hat.map(hexof).unwrap_or(0), hexof(fl.hair), hexof(fl.skin), fl.scarf.map(hexof).unwrap_or(0)]);
+                let pet = c.pet.as_ref().map(|p| (p.kind as u8, hexof(p.body), hexof(p.marks)));
+                Pup { id: c.id, k, x: (x * 100.0).round() as i32, y: (y * 100.0).round() as i32, r: c.dir > 0.0, p, c: hexof(c.color), h: hexof(c.hat), n: c.name.to_string(), l, pet, hd: hold_code(c.carry) }
+            })
+            .collect()
+    }
+
+    /// A guest: everyone out in the village as the host has them (`from`:
+    /// the village's units → world position). Those not heard of any more
+    /// have gone; new ones step in where they are.
+    pub fn set_crowd(&mut self, pups: &[Pup], from: impl Fn(f32, f32) -> (f32, f32), t: f32) {
+        self.puppets = true;
+        let ids: std::collections::HashSet<u64> = pups.iter().map(|p| p.id).collect();
+        let held = self.held;
+        self.list.retain(|c| ids.contains(&c.id) || Some(c.id) == held);
+        self.pup_to.retain(|id, _| ids.contains(id));
+        for p in pups.iter().take(48) {
+            let (x, y) = from(p.x as f32 / 100.0, p.y as f32 / 100.0);
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            let kind = match p.k {
+                0 => Kind::Deer,
+                1 => Kind::Fox,
+                2 => Kind::Rabbit,
+                3 => Kind::Walker,
+                _ => Kind::Kid,
+            };
+            let st = match p.p {
+                0 => St::Walk,
+                2 => St::Lie { until: f32::INFINITY, flap: 0.0 },
+                3 => St::Lie { until: f32::INFINITY, flap: f32::INFINITY },
+                4 => St::Throw { until: f32::INFINITY },
+                5 => St::Petting { until: f32::INFINITY },
+                6 => St::Greet { until: f32::INFINITY },
+                7 => St::Fall { vy: 0.0, to: y, from: y },
+                8 => St::Graze { until: f32::INFINITY },
+                9 => St::Talk { until: f32::INFINITY, resume: false },
+                _ => St::Idle { until: f32::INFINITY },
+            };
+            let look = p.l.map(|l| FriendLook { coat: Rgb::hex(l[0]), hat: (l[1] != 0).then(|| Rgb::hex(l[1])), hair: Rgb::hex(l[2]), skin: Rgb::hex(l[3]), scarf: (l[4] != 0).then(|| Rgb::hex(l[4])) });
+            let dir = if p.r { 1.0 } else { -1.0 };
+            let pet = p.pet.map(|(k, b, m)| {
+                let kind = match k {
+                    0 => PetKind::Dog,
+                    1 => PetKind::Cat,
+                    _ => PetKind::Bunny,
+                };
+                VPet { kind, body: Rgb::hex(b), marks: Rgb::hex(m), name: "", x: x - dir * 3.0, y, dir, walking: false, happy_until: 0.0 }
+            });
+            self.pup_to.insert(p.id, (x, y));
+            if let Some(c) = self.list.iter_mut().find(|c| c.id == p.id) {
+                if Some(c.id) == held {
+                    continue;
+                }
+                c.st = st;
+                c.dir = dir;
+                c.color = Rgb::hex(p.c);
+                c.hat = Rgb::hex(p.h);
+                c.look = look;
+                c.friend = look.is_some();
+                c.carry = hold_of(p.hd);
+                if c.pet.is_some() != pet.is_some() {
+                    c.pet = pet;
+                }
+                // too far to walk there (or just in): there at once
+                if (c.x - x).abs() > 12.0 || (c.y - y).abs() > 6.0 {
+                    c.x = x;
+                    c.y = y;
+                }
+            } else {
+                self.list.push(Critter {
+                    id: p.id,
+                    kind,
+                    x,
+                    y,
+                    dir,
+                    speed: 4.0,
+                    age: 0.0,
+                    st,
+                    color: Rgb::hex(p.c),
+                    hat: Rgb::hex(p.h),
+                    social_at: f32::INFINITY,
+                    leave_at: f32::INFINITY,
+                    chatter_at: f32::INFINITY,
+                    group: 0,
+                    gap: 0.0,
+                    dodge: 0.0,
+                    name: if matches!(kind, Kind::Walker | Kind::Kid) { intern(&p.n) } else { "" },
+                    friend: look.is_some(),
+                    look,
+                    met: true,
+                    chat: None,
+                    pet,
+                    gone_in: false,
+                    carry: hold_of(p.hd),
+                });
+            }
+        }
+        // (ids from the host, from now on: none of ours to clash with them)
+        self.next_id = self.next_id.max(pups.iter().map(|p| p.id + 1).max().unwrap_or(0));
+        let _ = t;
+    }
+
+    /// Previews: each one out with something different in hand.
+    pub fn demo_carry(&mut self) {
+        use super::sprites::Hold;
+        let things = [Hold::Cocoa, Hold::Present(1), Hold::CandyCane, Hold::Shovel, Hold::Coffee, Hold::Gingerbread, Hold::Present(2)];
+        for (c, h) in self.list.iter_mut().filter(|c| c.person()).zip(things.iter().cycle()) {
+            c.carry = Some(*h);
+        }
+    }
+
+    /// Presents put under the big tree since last asked: (whose, where,
+    /// the paper).
+    pub fn take_placed(&mut self) -> Vec<(u64, f32, u8)> {
+        std::mem::take(&mut self.placed)
+    }
+
+    /// Where villager `id` is (their centre column, baseline row).
+    pub fn where_is(&self, id: u64) -> Option<(f32, f32)> {
+        self.list.iter().find(|c| c.id == id).map(|c| (c.centre(), c.y))
+    }
+
+    /// A guest: the host's gone quiet about who's out (or never said):
+    /// the village's own folk again.
+    pub fn end_crowd(&mut self) {
+        if self.puppets {
+            self.puppets = false;
+            self.pup_to.clear();
+            self.list.clear();
+        }
+    }
+
+    /// Puppets (see `puppets`): each walks on to where the host has them.
+    fn update_puppets(&mut self, dt: f32) {
+        let k = 1.0 - (-dt * 6.0).exp();
+        let held = self.held;
+        for c in &mut self.list {
+            if Some(c.id) == held {
+                continue;
+            }
+            let Some(&(tx, ty)) = self.pup_to.get(&c.id) else { continue };
+            let (dx, dy) = (tx - c.x, ty - c.y);
+            c.x += dx * k;
+            c.y += dy * k;
+            if matches!(c.st, St::Walk) || dx.abs() > 0.2 {
+                c.age += dt;
+            }
+            if let Some(p) = &mut c.pet {
+                let want = c.x - c.dir * 3.0;
+                p.walking = (want - p.x).abs() > 0.3;
+                p.x += (want - p.x) * k;
+                p.y = c.y;
+                p.dir = c.dir;
+            }
+        }
     }
 
     /// Someone arriving at column `x` (off the train), if there's room under
@@ -815,6 +1118,10 @@ impl Critters {
     pub fn update(&mut self, dt: f32, t: f32, ctx: &Ctx, d: &mut Director, lines: &mut Lines, cursor: Option<(f32, f32, f32, f32)>, snowman: Option<(i32, i32)>) {
         let (w, h) = (self.w as f32, (self.h - 1) as f32);
         self.view = (ctx.cam, ctx.vw as f32);
+        if self.puppets {
+            self.update_puppets(dt);
+            return;
+        }
         let (v0, vw) = self.view;
         if self.trim {
             self.trim(t);
@@ -840,6 +1147,34 @@ impl Critters {
                     if let Some(&(x, _)) = near {
                         c.st = St::Home { x };
                     }
+                }
+            }
+        }
+        // folk with a present head for the big tree, and put it under it;
+        // folk with a shovel stop now and then to clear a bit of snow
+        if let Some((tx, spread)) = self.tree {
+            let (rng, placed) = (&mut self.rng, &mut self.placed);
+            for c in self.list.iter_mut().filter(|c| c.person() && !c.held() && !c.friend && c.group == 0 && t <= c.leave_at) {
+                match (c.carry, c.st) {
+                    (Some(super::sprites::Hold::Present(paper)), St::Walk) => {
+                        let gap = tx - c.centre();
+                        if gap.abs() < spread * 0.6 {
+                            c.carry = None;
+                            c.st = St::Idle { until: t + 2.5 };
+                            placed.push((c.id, c.centre(), paper));
+                            let line = *rng.pick(&["there — under the tree it goes", "for someone special ♥", "no peeking till Christmas!", "one more for the pile"]);
+                            d.say(c.centre().round() as i32, c.y as i32 - 4, line, t, 2.4, 6);
+                        } else {
+                            c.dir = gap.signum();
+                        }
+                    }
+                    (Some(super::sprites::Hold::Shovel), St::Idle { .. }) if rng.chance(dt * 1.5) => {
+                        d.snow_puff(c.centre() + c.dir * 3.0, c.y);
+                    }
+                    (Some(super::sprites::Hold::Shovel), St::Walk) if rng.chance(dt * 0.05) => {
+                        c.st = St::Idle { until: t + rng.range(3.0, 6.0) };
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2885,11 +3220,13 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
             Pose::Stand
         };
         let kid = c.kind == Kind::Kid;
-        // grown-ups carry a lantern after dark
-        let lantern = !kid && f.day < 0.45;
+        // grown-ups carry a lantern after dark (unless their hands are full)
+        let lantern = !kid && f.day < 0.45 && c.carry.is_none();
+        // digging: the shovel down and up again
+        let pose = if c.carry == Some(super::sprites::Hold::Shovel) && matches!(c.st, St::Idle { .. }) { if (t * 2.0 + c.id as f32) as i32 % 2 == 0 { Pose::Scoop } else { Pose::Stand } } else { pose };
         let look = match c.look {
             // a friend, dressed as chosen
-            Some(fl) => Look { kid, coat: fl.coat, hat: fl.hat, hair: fl.hair, scarf: fl.scarf, skin: fl.skin, mittens: fl.hat.unwrap_or(fl.coat * 0.8), holding: None, lantern },
+            Some(fl) => Look { kid, coat: fl.coat, hat: fl.hat, hair: fl.hair, scarf: fl.scarf, skin: fl.skin, mittens: fl.hat.unwrap_or(fl.coat * 0.8), holding: c.carry, lantern },
             None => Look {
                 kid,
                 coat: c.color,
@@ -2898,7 +3235,7 @@ fn draw_critter(f: &mut Frame, c: &Critter, t: f32, glow: f32, k: f32, view: Opt
                 scarf: (c.id % 2 == 0).then_some(c.hat * 0.85),
                 skin: [Rgb::hex(0xe8c39e), Rgb::hex(0xc89a72), Rgb::hex(0x8a5a3a), Rgb::hex(0xf0d0b0)][(c.id % 4) as usize],
                 mittens: c.hat,
-                holding: None,
+                holding: c.carry,
                 lantern,
             },
         };

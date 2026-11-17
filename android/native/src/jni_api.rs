@@ -271,6 +271,28 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_giveText(mut env: 
 }
 
 /// A save (its text): its seed, or 0 when it isn't one.
+/// New settings (from the settings screen): taken in where things stand.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_configure(mut env: JNIEnv, _: JClass, h: jlong, cfg: JString, size: jfloat) {
+    let text: String = env.get_string(&cfg).map(|s| s.into()).unwrap_or_default();
+    with_game(h, "configure", (), |g| match toml::from_str::<Config>(&text) {
+        Ok(c) => g.configure(c, size),
+        Err(e) => log(&format!("configure: {e}")),
+    });
+}
+
+/// The screen's new size (the phone turned): the grid made again for it.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_resize(_: JNIEnv, _: JClass, h: jlong, w: jint, hh: jint, size: jfloat) {
+    with_game(h, "resize", (), |g| g.resize(w.max(64) as usize, hh.max(64) as usize, size));
+}
+
+/// The talk line.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_chat(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "chat", (), |g| g.chat());
+}
+
 /// Friends & online (the ✉ button).
 #[no_mangle]
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_online(_: JNIEnv, _: JClass, h: jlong) {

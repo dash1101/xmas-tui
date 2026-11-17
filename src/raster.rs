@@ -87,6 +87,58 @@ impl Raster {
     }
 
     /// Draw one cell into a 0x00RRGGBB buffer.
+    /// A cell drawn over what's there: its background at `bg_a` (0: none,
+    /// see through), its letter at `fg_a`. (The UI's own layer, over the
+    /// village.)
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_cell_over(&mut self, buf: &mut [u32], stride: usize, x0: usize, y0: usize, ch: char, fg: [u8; 3], bg: [u8; 3], bg_a: f32, fg_a: f32) {
+        let (cw, chh) = (self.cw, self.ch);
+        if (y0 + chh) * stride > buf.len() || x0 + cw > stride {
+            return;
+        }
+        if bg_a > 0.0 {
+            for y in 0..chh {
+                let row = (y0 + y) * stride + x0;
+                for p in &mut buf[row..row + cw] {
+                    *p = mix(*p, bg, bg_a.min(1.0));
+                }
+            }
+        }
+        if ch == ' ' || fg_a <= 0.0 {
+            return;
+        }
+        if let Some(cov) = shape_coverage(ch, cw as f32, chh as f32) {
+            for y in 0..chh {
+                for x in 0..cw {
+                    let a = cov(x as f32 + 0.5, y as f32 + 0.5);
+                    if a > 0.0 {
+                        let i = (y0 + y) * stride + x0 + x;
+                        buf[i] = mix(buf[i], fg, (a * fg_a).min(1.0));
+                    }
+                }
+            }
+            return;
+        }
+        let g = self.glyph(ch);
+        for gy in 0..g.h {
+            let py = g.y + gy as i32;
+            if py < 0 || py as usize >= chh {
+                continue;
+            }
+            for gx in 0..g.w {
+                let px = g.x + gx as i32;
+                if px < 0 || px as usize >= cw {
+                    continue;
+                }
+                let a = g.a[gy * g.w + gx];
+                if a > 0 {
+                    let i = (y0 + py as usize) * stride + x0 + px as usize;
+                    buf[i] = mix(buf[i], fg, a as f32 / 255.0 * fg_a);
+                }
+            }
+        }
+    }
+
     pub fn draw_cell(&mut self, buf: &mut [u32], stride: usize, x0: usize, y0: usize, cell: &Cell) {
         let (cw, ch) = (self.cw, self.ch);
         let bgp = pack(cell.bg);

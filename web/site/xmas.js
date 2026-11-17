@@ -26,7 +26,7 @@ const DEFAULTS = {
   time: "auto", snow: 100, wind: 100, aurora: true, glow: 100, size: 100, zoom: 100,
   critters: 100, most: 24, bushes: true, events: 100, sleigh: 4, chattiness: 100, talk_time: 100,
   sound: true, master: 50, music: 60, sfx: 70, ambience: 50, track: "shuffle",
-  look: "classic",
+  look: "classic", uiscale: touchy ? 140 : 100,
 };
 function opts() {
   let o = {};
@@ -48,7 +48,7 @@ function config(o) {
     if (!String(f.name || "").trim()) continue;
     s += `[[scene.friends]]\nname = ${q(f.name.trim())}\nkid = ${!!f.kid}\ncoat = ${q(f.coat)}\nhat = ${q(f.hat)}\nhair = ${q(f.hair)}\nskin = ${q(f.skin)}\nscarf = ${f.scarf !== false}\n`;
   }
-  s += `[ui]\nlook = ${q(o.look)}\n[sound]\nenabled = ${!!o.sound}\nmaster = ${o.master / 100}\nmusic = ${o.music / 100}\nsfx = ${o.sfx / 100}\nambience = ${o.ambience / 100}\ntrack = ${q(o.track)}\n`;
+  s += `[ui]\nlook = ${q(o.look)}\nscale = ${(o.uiscale || 100) / 100}\n[sound]\nenabled = ${!!o.sound}\nmaster = ${o.master / 100}\nmusic = ${o.music / 100}\nsfx = ${o.sfx / 100}\nambience = ${o.ambience / 100}\ntrack = ${q(o.track)}\n`;
   return s;
 }
 function localMs() { const d = new Date(); return d.getTime() - d.getTimezoneOffset() * 60000; }
@@ -170,6 +170,13 @@ setInterval(() => {
   asked(getText(wasm.ask(game)));
   netPump(performance.now());
 }, 1000);
+// the page's title: the village, and where in it
+setInterval(() => {
+  if (!game) return;
+  const p = getText(wasm.place(game));
+  const t = p ? "Village · " + p : "Village";
+  if (document.title !== t) document.title = t;
+}, 1500);
 
 // what the village asks of the page: the settings, a line typed (a
 // friend's code, a message), a code onto the clipboard
@@ -178,7 +185,16 @@ function asked(a) {
   if (a === "settings") openOpts(true);
   else if (a.startsWith("text:")) {
     held.clear(); steer();
-    setTimeout(() => { const v = prompt(a.slice(5)); if (game) wasm.give_text(game, putText(v || "")); }, 0);
+    askFor(a.slice(5));
+  } else if (a.startsWith("rules:")) {
+    // the village's settings, changed by a guest (said yes to): kept
+    try {
+      const r = JSON.parse(a.slice(6)), o = opts();
+      const pc = (v) => Math.round(v * 100);
+      Object.assign(o, { snow: pc(r.snow), wind: pc(r.wind), glow: pc(r.glow), events: pc(r.events), critters: pc(r.critters), chattiness: pc(r.chattiness), most: r.most_at_once | 0, sleigh: r.sleigh_minutes, aurora: !!r.aurora, bushes: !!r.bushes, time: r.time || "auto" });
+      setOpts(o);
+      if (box.classList.contains("open")) show(tab);
+    } catch (e) {}
   } else if (a.startsWith("you:")) {
     try { const o = opts(); takeYou(JSON.parse(a.slice(4)), o); setOpts(o); if (box.classList.contains("open")) show(tab); } catch (e) {}
   } else if (a.startsWith("villager:")) {
@@ -191,6 +207,24 @@ function asked(a) {
     try { navigator.clipboard.writeText(t).then(() => toast("copied: " + t), () => toast(t)); } catch (e) { toast(t); }
   }
 }
+
+// a line to type (a friend's code, a message): a box in the page, not the
+// browser's own prompt
+const askBox = document.getElementById("ask"), askIn = document.getElementById("ask-in");
+function askFor(q) {
+  document.getElementById("ask-q").textContent = q;
+  askIn.value = "";
+  askBox.classList.add("open");
+  setTimeout(() => askIn.focus(), 0);
+}
+function askDone(v) {
+  askBox.classList.remove("open");
+  askIn.blur();
+  if (game) wasm.give_text(game, putText(v || ""));
+}
+askBox.onsubmit = (e) => { e.preventDefault(); askDone(askIn.value); };
+document.getElementById("ask-no").onclick = () => askDone("");
+askIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); askDone(""); } e.stopPropagation(); });
 
 // ------------------------------------------------------------ online
 // The relay (a free public MQTT broker) through a WebSocket; the village
@@ -298,14 +332,16 @@ addEventListener("keydown", (e) => {
     case "KeyZ": wasm.button(game, BTN.REST); break;
     case "KeyT": if (menu) wasm.back(game); else wasm.todo(game); break;
     case "KeyO": if (menu) wasm.back(game); else wasm.online(game); break;
+    case "Slash": wasm.chat(game); break;
     case "KeyY": case "KeyN": wasm.answer(game, e.code === "KeyY" ? 1 : 0); break;
     case "Escape": if (box.classList.contains("open")) openOpts(false); else wasm.back(game); break;
     default:
       if (/^Digit[1-9]$/.test(e.code)) wasm.button(game, BTN.NUM + +e.code.slice(5));
       else if (e.key === "?") wasm.help(game, 1);
+      else if (e.key === "/") { wasm.chat(game); e.preventDefault(); }
   }
   steer();
-  if (/^(Key[WASDEFRZTQICOYN]|Arrow|Space|Enter|Digit|Escape)/.test(e.code)) e.preventDefault();
+  if (/^(Key[WASDEFRZTQICOYN]|Arrow|Space|Enter|Digit|Escape|Slash)/.test(e.code)) e.preventDefault();
 });
 addEventListener("keyup", (e) => {
   if (!game) return;
@@ -464,15 +500,23 @@ function toast(s) {
   clearTimeout(t._t);
   t._t = setTimeout(() => (t.style.display = "none"), 2600);
 }
-// a change: kept, and the village made anew with it (a moment later, so a
-// slider being dragged doesn't rebuild it every step); the sound's live
+// a change: kept, and taken in by the village where it stands (still in a
+// friend's village, still online); a slider being dragged, a moment after
+// it stops
 function change(k, v, live) {
   const o = opts();
   o[k] = v;
   setOpts(o);
   if (live) { if (k === "sound" && v) wake(); sound(); return; }
+  reconfigure();
+}
+function reconfigure() {
   clearTimeout(rebuildT);
-  rebuildT = setTimeout(build, 700);
+  rebuildT = setTimeout(() => {
+    if (!game) return;
+    const o = opts();
+    wasm.configure(game, putText(config(o)), o.size / 100);
+  }, 120);
 }
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
@@ -505,12 +549,12 @@ const COATS = { dog: ["golden", "chocolate", "black", "snowy", "spotty", "grey",
 
 function friendBox(f, k) {
   const fr = el("div", { className: "friend" });
-  const put = (key, v) => { const p = opts(); p.friends[k][key] = v; setOpts(p); clearTimeout(rebuildT); rebuildT = setTimeout(build, 700); };
+  const put = (key, v) => { const p = opts(); p.friends[k][key] = v; setOpts(p); reconfigure(); };
   const name = el("input", { type: "text", value: f.name || "", maxLength: 16 });
   name.oninput = () => put("name", name.value);
   const kid = el("input", { type: "checkbox", checked: !!f.kid });
   kid.onchange = () => put("kid", kid.checked);
-  const del = button("✕", () => { const p = opts(); p.friends.splice(k, 1); setOpts(p); show(1); build(); }, true);
+  const del = button("✕", () => { const p = opts(); p.friends.splice(k, 1); setOpts(p); show(1); reconfigure(); }, true);
   const sel = (key, items) => {
     const s = el("select", {}, ...items.map((v) => el("option", { value: v, textContent: v || "any" })));
     s.value = items.includes(f[key] || "") ? f[key] || "" : "";
@@ -553,7 +597,7 @@ function show(i) {
     note("Some of the folk who come by take these names, know the villager, and wear what's chosen for them (\"any\": picked from the name).");
     check("Only them (no strangers; the animals still come)", "only_friends");
     o.friends.forEach((f, k) => pane.append(friendBox(f, k)));
-    pane.append(button("+ add someone", () => { const p = opts(); p.friends.push({ name: "Friend " + (p.friends.length + 1), kid: false, scarf: true }); setOpts(p); show(1); build(); }));
+    pane.append(button("+ add someone", () => { const p = opts(); p.friends.push({ name: "Friend " + (p.friends.length + 1), kid: false, scarf: true }); setOpts(p); show(1); reconfigure(); }));
   } else if (i === 2) {
     h3("THE VILLAGE");
     pick("Time of day", "time", ["auto", "night", "dawn", "morning", "noon", "afternoon", "dusk"]);
@@ -562,6 +606,7 @@ function show(i) {
     check("Northern lights", "aurora");
     slide("Size", "size", 50, 200, "%");
     slide("Zoom", "zoom", 100, 300, "%");
+    slide("UI size (menus, panels, text)", "uiscale", 100, 250, "%");
     h3("FOLK & HAPPENINGS");
     slide("Animals & people coming by", "critters", 0, 300, "%");
     slide("The most out at once", "most", 2, 40, "");
@@ -679,7 +724,19 @@ document.getElementById("b-sound").onclick = () => {
 
 // ------------------------------------------------------------ start
 
-addEventListener("resize", () => { clearTimeout(window._rs); window._rs = setTimeout(build, 300); });
+// resized (or a phone turned): the village keeps going at the new size
+function resized() {
+  if (!game) return build();
+  let dpr;
+  [W, H, K, dpr] = size();
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = (W * K / dpr) + "px";
+  canvas.style.height = (H * K / dpr) + "px";
+  pad.width = innerWidth; pad.height = innerHeight;
+  wasm.resize(game, W, H, opts().size / 100);
+  img = null;
+}
+addEventListener("resize", () => { clearTimeout(window._rs); window._rs = setTimeout(resized, 250); });
 document.addEventListener("visibilitychange", () => { if (document.hidden) save(); });
 addEventListener("pagehide", () => { save(); if (game) netBye(); });
 setInterval(save, 30000);

@@ -171,6 +171,8 @@ public class SettingsActivity extends Activity {
         slider("Size", "size", 50, 200, sizeNow(), "%");
         note("Bigger or smaller village. It stays the same size whichever way the screen is turned: sideways shows more of it.");
         slider("Zoom", "zoom", 100, 300, 100, "%");
+        slider("UI size (menus, panels, text)", "ui_scale", 100, 250, 140, "%");
+        note("Bigger menus, panels and writing over the village; the village stays its own size.");
 
         card("FOLK & HAPPENINGS");
         slider("Animals and people coming by", "critters", 0, 300, 100, "%");

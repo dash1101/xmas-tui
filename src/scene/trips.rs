@@ -45,13 +45,42 @@ const RIDE: f32 = 36.0;
 /// How long the shuttle takes (s).
 const SHUTTLE: f32 = 5.5;
 
-/// Someone in the carriage: (name, coat, column 0..1, a kid, sat).
+/// Someone in the carriage: their name and look, where along (0..1),
+/// and, once the train's in, when they get up and go for the door.
+#[derive(Clone)]
 struct Passenger {
     name: &'static str,
     coat: Rgb,
-    hat: Rgb,
+    hat: Option<Rgb>,
+    hair: Rgb,
+    skin: Rgb,
+    scarf: Option<Rgb>,
     x: f32,
     kid: bool,
+    /// Up and off at this time (the train in), and walking.
+    off: Option<f32>,
+    dir: f32,
+    walk: f32,
+}
+
+impl Passenger {
+    fn look(&self) -> crate::scene::sprites::Look {
+        crate::scene::sprites::Look { kid: self.kid, coat: self.coat, hat: self.hat, hair: self.hair, scarf: self.scarf, skin: self.skin, mittens: self.hat.unwrap_or(self.coat * 0.8), holding: None, lantern: false }
+    }
+}
+
+/// Someone about at the lodge: off the train to the shop for skis, then
+/// up the lift (or along to the platform for the train home).
+#[derive(Clone)]
+struct Folk {
+    p: Passenger,
+    /// Where they're making for (0..1 across), and what for: 0 the shop,
+    /// 1 the lift, 2 gone (up the lift, or off on the train).
+    to: f32,
+    stage: u8,
+    skis: bool,
+    /// Stopped (at the shop's window, a chat) until then.
+    wait: f32,
 }
 
 /// Someone else on the slope.
@@ -158,6 +187,18 @@ pub struct Trip {
     /// Sat in a seat on the train.
     sat: bool,
     passengers: Vec<Passenger>,
+    /// The train in: when it stopped; how fast it's going (0..1) and how
+    /// far the view out of the window has gone by.
+    stopped: Option<f32>,
+    pace: f32,
+    scroll: f32,
+    /// Folk about at the lodge.
+    folk: Vec<Folk>,
+    /// Down at the bottom of a run: since when (everyone's waited for,
+    /// then it's back up the lift); the lift's taking the villager back up
+    /// to the lodge (not to the top of a run).
+    down: Option<f32>,
+    lift_home: bool,
     /// The conductor: where along (0..1), which way, stopped until.
     conductor: (f32, f32, f32),
     /// Something said in the carriage: (who, what, where along, until).
@@ -229,11 +270,7 @@ impl Trip {
 
     fn new(seed: u32) -> Self {
         let mut rng = Rng::new(seed as u64 ^ 0x7121);
-        let passengers = (0..6)
-            .filter(|_| rng.chance(0.7))
-            .enumerate()
-            .map(|(k, _)| Passenger { name: NAMES[(seed as usize + k * 5) % NAMES.len()], coat: Rgb::hex(COATS[k % COATS.len()]), hat: Rgb::hex([0xd8283a, 0x2fae5c, 0x4a8dff, 0xffc23a][k % 4]), x: 0.14 + k as f32 * 0.13, kid: k % 3 == 2 })
-            .collect();
+        let passengers = Self::folk_for(&mut rng);
         Trip {
             at: Where::Lodge,
             fellows: vec![],
@@ -246,6 +283,12 @@ impl Trip {
             walk: 0.0,
             sat: false,
             passengers,
+            stopped: None,
+            pace: 1.0,
+            scroll: 0.0,
+            folk: vec![],
+            down: None,
+            lift_home: false,
             conductor: (0.6, -1.0, 0.0),
             talk: None,
             ride: 0.0,
@@ -266,6 +309,40 @@ impl Trip {
             km: 0.0,
             best_score: 0,
         }
+    }
+
+    /// Whoever's on the train this time: a different lot each trip (names,
+    /// coats, hats or none, hair, skin, kids), in seats here and there.
+    fn folk_for(rng: &mut Rng) -> Vec<Passenger> {
+        let mut seats: Vec<usize> = (0..6).collect();
+        let n = rng.int(3, 7) as usize;
+        let mut out = vec![];
+        for _ in 0..n {
+            if seats.is_empty() {
+                break;
+            }
+            let s = seats.remove(rng.int(0, seats.len() as i32) as usize);
+            let kid = rng.chance(0.3);
+            const MORE_COATS: [u32; 10] = [0xb3202a, 0x1f6e3a, 0x2a4c8a, 0x6a3a8a, 0xc8862a, 0x3a6a6a, 0xd8588a, 0x5a5e68, 0x8a4a2a, 0xd8d8e0];
+            const HATS: [u32; 7] = [0xd8283a, 0x2fae5c, 0x4a8dff, 0xffc23a, 0xff7ae0, 0xf0f0f4, 0x7a3aa8];
+            const HAIRS: [u32; 5] = [0x6a4a2a, 0x2a1c14, 0xc89a5a, 0xa8461e, 0xb0b0b8];
+            const SKINS: [u32; 4] = [0xf0d0b0, 0xe8c39e, 0xc89a72, 0x8a5a3a];
+            let hat = rng.chance(0.75).then(|| Rgb::hex(*rng.pick(&HATS)));
+            out.push(Passenger {
+                name: crate::scene::dialogue::name(rng, kid),
+                coat: Rgb::hex(*rng.pick(&MORE_COATS)),
+                hat,
+                hair: Rgb::hex(*rng.pick(&HAIRS)),
+                skin: Rgb::hex(*rng.pick(&SKINS)),
+                scarf: rng.chance(0.5).then(|| hat.unwrap_or(Rgb::hex(0xd8283a)) * 0.85),
+                x: 0.14 + s as f32 * 0.13,
+                kid,
+                off: None,
+                dir: -1.0,
+                walk: 0.0,
+            });
+        }
+        out
     }
 
     /// A race down the mountain with friends: the course from `seed`, the
@@ -344,7 +421,41 @@ impl Trip {
                     self.talk = Some((p.name.to_string(), CHAT[0].to_string(), p.x, t + 3.0));
                 }
             }
-            "lodge" => self.at = Where::Lodge,
+            "lodge" => {
+                self.at = Where::Lodge;
+                self.x = SHOP - 0.02;
+                let mut rng = Rng::new(9);
+                for (k, mut p) in Self::folk_for(&mut rng).into_iter().take(3).enumerate() {
+                    p.x = PLATFORM + 0.08 + k as f32 * 0.17;
+                    p.dir = 1.0;
+                    p.walk = k as f32;
+                    self.folk.push(Folk { p, to: LIFT, stage: 1, skis: k > 0, wait: 0.0 });
+                }
+            }
+            "arrived" => {
+                self.board(false, t);
+                self.x = 0.7;
+                for k in 0..400 {
+                    self.update(1.0 / 30.0, t + k as f32 / 30.0, (0.0, 0.0));
+                }
+                self.ride = 0.9999;
+                for k in 0..120 {
+                    self.update(1.0 / 30.0, t + 40.0 + k as f32 / 30.0, (0.0, 0.0));
+                }
+            }
+            "bottom" => {
+                self.skis = true;
+                self.start_run(t);
+                if let Some(r) = &mut self.run {
+                    r.x = RUN_LEN - 4.0;
+                    for (k, rv) in r.rivals.iter_mut().enumerate() {
+                        rv.x = RUN_LEN - 30.0 + k as f32 * 20.0;
+                    }
+                }
+                for k in 0..60 {
+                    self.ski_step(1.0 / 30.0, t + k as f32 / 30.0, (0.0, 0.0));
+                }
+            }
             "lift" => {
                 self.skis = true;
                 self.at = Where::Lift { since: t - 3.0 };
@@ -408,12 +519,15 @@ impl Trip {
             // (a ride can be hurried along)
             Where::Shuttle { home, .. } => self.off_shuttle(home, t),
             Where::Carriage { home, .. } => self.carriage_e(home, t),
+            Where::Lift { .. } if self.lift_home => self.lift_arrive(t),
             Where::Lift { .. } => self.start_run(t),
             Where::Lodge => {
                 let near = |a: f32, x: f32| (a - x).abs() < 0.06;
                 if near(SHOP, self.x) {
                     if self.skis {
-                        self.say("\"they suit you!\" — the skis are yours for the day", t, 3.0);
+                        self.skis = false;
+                        self.say("\"back in one piece! thanks — come again\" (the skis are returned)", t, 3.5);
+                        self.sounds.push((Sfx::Drop, 0.6));
                     } else {
                         self.skis = true;
                         self.say("\"here you go — skis, poles, and a hot drink for later\"", t, 3.5);
@@ -433,8 +547,68 @@ impl Trip {
                     self.say("the shop (skis), the lift (up), the platform (home)", t, 2.5);
                 }
             }
+            // at the bottom, waiting: back up now
+            Where::Ski if self.down.is_some() => self.lift_back(t),
             Where::Ski => {}
             Where::Drive => self.done = Some(Back::Home),
+        }
+    }
+
+    /// Everyone down (or E): the chairlift back up to the lodge.
+    fn lift_back(&mut self, t: f32) {
+        self.down = None;
+        self.run = None;
+        self.lift_home = true;
+        self.at = Where::Lift { since: t };
+        self.say("everyone's down — back up the chairlift…", t, 3.0);
+        self.sounds.push((Sfx::Click, 0.6));
+    }
+
+    /// Off the lift at the top, by the lodge.
+    fn lift_arrive(&mut self, t: f32) {
+        self.lift_home = false;
+        self.at = Where::Lodge;
+        self.x = LIFT - 0.02;
+        self.dir = -1.0;
+        self.say("back up at Pine Peak · the lift: another run · the shop: return the skis · the platform: home", t, 5.0);
+    }
+
+    /// What E would do just now, for the [E] over the villager's head.
+    pub fn prompt(&self) -> Option<&'static str> {
+        match self.at {
+            Where::Shuttle { home: false, .. } => Some("hurry along"),
+            Where::Shuttle { home: true, .. } => Some("off at the station"),
+            Where::Carriage { home, .. } => {
+                let x = self.x;
+                if self.sat {
+                    Some("up again")
+                } else if self.ride >= 1.0 && x > 0.86 {
+                    Some(if home { "off the train" } else { "off at Pine Peak" })
+                } else if (self.conductor.0 - x).abs() < 0.05 {
+                    Some("a word with the conductor")
+                } else if self.passengers.iter().any(|p| p.off.is_none() && (p.x - x).abs() < 0.04) {
+                    Some("say hello")
+                } else {
+                    let seat = (x - 0.14) / 0.13;
+                    ((seat - seat.round()).abs() < 0.25 && (0.0..6.0).contains(&seat.round()) && !self.passengers.iter().any(|p| p.off.is_none() && (p.x - (0.14 + seat.round() * 0.13)).abs() < 0.02)).then_some("sit down")
+                }
+            }
+            Where::Lodge => {
+                let near = |a: f32| (a - self.x).abs() < 0.06;
+                if near(SHOP) {
+                    Some(if self.skis { "return the skis" } else { "rent skis" })
+                } else if near(LIFT) {
+                    Some(if self.skis { "up the chairlift" } else { "(skis first: the shop)" })
+                } else if near(PLATFORM) {
+                    Some("the train home")
+                } else {
+                    None
+                }
+            }
+            Where::Lift { .. } => Some("skip ahead"),
+            Where::Ski if self.down.is_some() => Some("back up the lift now"),
+            Where::Ski => None,
+            Where::Drive => Some("home"),
         }
     }
 
@@ -452,6 +626,10 @@ impl Trip {
         self.ride = 0.0;
         self.x = 0.06;
         self.sat = false;
+        self.stopped = None;
+        self.pace = 0.0;
+        // a different lot aboard each time
+        self.passengers = Self::folk_for(&mut self.rng);
         self.sounds.push((Sfx::TrainWhistle, 0.9));
         let msg = if home { "the train home — find a seat, or walk the carriage" } else { "all aboard for Pine Peak! ← → walk · E: talk, sit, the door" };
         self.say(msg, t, 4.0);
@@ -475,6 +653,13 @@ impl Trip {
                 self.at = Where::Lodge;
                 self.x = PLATFORM + 0.03;
                 self.say("Pine Peak! skis at the shop, then up the lift", t, 4.0);
+                // the folk off the train, ahead along the platform
+                let off: Vec<Passenger> = self.passengers.iter().filter(|p| p.off.is_some()).cloned().collect();
+                for (k, mut p) in off.into_iter().enumerate() {
+                    p.x = (PLATFORM + 0.05 + k as f32 * 0.04).min(0.3);
+                    p.dir = 1.0;
+                    self.folk.push(Folk { p, to: SHOP + self.rng.range(-0.04, 0.04), stage: 0, skis: false, wait: 0.0 });
+                }
             }
             self.sounds.push((Sfx::TrainWhistle, 0.6));
             return;
@@ -485,7 +670,7 @@ impl Trip {
             self.conductor.2 = t + 3.0;
             return;
         }
-        if let Some(p) = self.passengers.iter().find(|p| (p.x - x).abs() < 0.04) {
+        if let Some(p) = self.passengers.iter().find(|p| p.off.is_none() && (p.x - x).abs() < 0.04) {
             let line = (*self.rng.pick(CHAT)).to_string();
             self.talk = Some((p.name.to_string(), line, p.x, t + 3.5));
             self.sounds.push((Sfx::Greet, 0.4));
@@ -549,14 +734,35 @@ impl Trip {
                     self.off_shuttle(home, t);
                 }
             }
-            Where::Carriage { .. } => {
+            Where::Carriage { home, .. } => {
                 let pace = if self.sat { 3.5 } else { 1.0 };
                 let was = self.ride;
                 self.ride = (self.ride + dt * pace / RIDE).min(1.0);
+                // pulling away, slowing in, stopped
+                let want = if self.ride >= 1.0 { 0.0 } else if self.ride > 0.94 { 0.3 } else { 1.0 };
+                self.pace += (want - self.pace) * (1.0 - (-dt * 1.5).exp());
+                self.scroll += self.pace * pace.min(2.0) * 60.0 * dt;
                 if was < 1.0 && self.ride >= 1.0 {
-                    self.say("we're here! the door's at the far end (→, then E)", t, 5.0);
+                    let stop = if home { "the village! everybody off — mind the step" } else { "Pine Peak! everybody off — mind the step" };
+                    self.say(&format!("{stop} (the door's at the far end: →, then E)"), t, 5.0);
+                    self.talk = Some(("conductor".into(), stop.to_string(), self.conductor.0, t + 3.5));
+                    self.conductor.2 = t + 3.5;
                     self.sounds.push((Sfx::TrainWhistle, 0.8));
                     self.sat = false;
+                    self.stopped = Some(t);
+                    // everyone up and off, one after another
+                    let n = self.passengers.len();
+                    for (k, p) in self.passengers.iter_mut().enumerate() {
+                        p.off = Some(t + 1.0 + k as f32 * 0.9 + (n as f32 - k as f32) * 0.1);
+                    }
+                }
+                // folk making for the door, and stepping off
+                for p in self.passengers.iter_mut() {
+                    if p.off.is_some_and(|o| t > o) && p.x < 0.98 {
+                        p.dir = 1.0;
+                        p.x += 0.11 * dt;
+                        p.walk += dt * 9.0;
+                    }
                 }
                 if mv.0 != 0.0 && !self.sat {
                     self.dir = mv.0.signum();
@@ -581,7 +787,11 @@ impl Trip {
             }
             Where::Lift { since } => {
                 if t - since > 7.0 {
-                    self.start_run(t);
+                    if self.lift_home {
+                        self.lift_arrive(t);
+                    } else {
+                        self.start_run(t);
+                    }
                 }
             }
             Where::Lodge => {
@@ -590,6 +800,7 @@ impl Trip {
                     self.x = (self.x + mv.0 * 0.09 * dt).clamp(0.04, 0.95);
                     self.walk += dt * 9.0;
                 }
+                self.update_folk(dt, t);
             }
             Where::Ski => self.ski_step(dt, t, mv),
             Where::Drive => {
@@ -605,7 +816,67 @@ impl Trip {
         }
     }
 
+    /// The folk at the lodge: to the shop for skis, a moment at its
+    /// window, then over to the lift and up it; now and then someone new
+    /// along from the platform.
+    fn update_folk(&mut self, dt: f32, t: f32) {
+        if self.folk.len() < 4 && self.rng.chance(dt * 0.06) {
+            let mut p = Self::folk_for(&mut self.rng).remove(0);
+            p.x = PLATFORM;
+            p.dir = 1.0;
+            self.folk.push(Folk { p, to: SHOP, stage: 0, skis: false, wait: 0.0 });
+        }
+        for f in self.folk.iter_mut() {
+            if t < f.wait {
+                continue;
+            }
+            let d = f.to - f.p.x;
+            if d.abs() > 0.01 {
+                f.p.dir = d.signum();
+                f.p.x += d.signum() * 0.07 * dt;
+                f.p.walk += dt * 9.0;
+                continue;
+            }
+            match f.stage {
+                0 => {
+                    f.skis = true;
+                    f.stage = 1;
+                    f.wait = t + 2.5;
+                    f.to = LIFT + 0.02;
+                }
+                _ => f.stage = 2,
+            }
+        }
+        self.folk.retain(|f| f.stage < 2);
+    }
+
     fn ski_step(&mut self, dt: f32, t: f32, mv: (f32, f32)) {
+        // down at the bottom: waiting for the others, then back up
+        if let Some(since) = self.down {
+            let race = self.race;
+            let (fellows_down, results) = (self.fellows.iter().all(|fw| fw.at.at != 5), self.results.len());
+            if let Some(r) = &mut self.run {
+                // gliding to a stop past the line
+                r.v = (r.v - dt * 30.0).max(0.0);
+                r.x = (r.x + r.v * dt).min(RUN_LEN + 40.0);
+                for (k, rv) in r.rivals.iter_mut().enumerate() {
+                    let stop = RUN_LEN + 22.0 + k as f32 * 7.0;
+                    if rv.x < stop {
+                        rv.v = (rv.v + dt * 5.0).min(30.0);
+                        rv.x = (rv.x + rv.v * dt).min(stop);
+                        if rv.x >= RUN_LEN && rv.done.is_none() {
+                            rv.done = Some(t);
+                        }
+                    }
+                }
+                let all = r.rivals.iter().all(|rv| rv.done.is_some()) && (!race || fellows_down || results > 0);
+                if (all && t - since > 3.0) || t - since > 30.0 {
+                    self.lift_back(t);
+                }
+            }
+            let _ = mv;
+            return;
+        }
         let things = self.things.clone();
         let Some(r) = &mut self.run else { return };
         // lanes: a push up or down moves over one
@@ -750,16 +1021,15 @@ impl Trip {
             self.runs += 1;
             self.best = Some(self.best.map_or(secs, |b| b.min(secs)));
             self.best_score = self.best_score.max(score);
-            self.run = None;
-            self.at = Where::Lodge;
-            self.x = LIFT - 0.02;
+            // (the run's kept: everyone glides in at the bottom, and waits)
+            self.down = Some(t);
             let place = match place {
                 1 => "1st".to_string(),
                 2 => "2nd".into(),
                 3 => "3rd".into(),
                 n => format!("{n}th"),
             };
-            let msg = format!("{place}! {score} points · {secs:.1}s · {flags}/{gates} flags · {tricks} tricks · E at the lift: again");
+            let msg = format!("{place}! {score} points · {secs:.1}s · {flags}/{gates} flags · {tricks} tricks · waiting for everyone to finish…");
             self.say(&msg, t, 7.0);
             self.sounds.push((Sfx::Fanfare, 0.6));
         }
@@ -779,22 +1049,97 @@ impl Trip {
             Where::Ski => self.draw_ski(f, t, look),
             Where::Drive => self.draw_drive(f, t),
         }
-        // the caption, along the bottom
-        if let Some((s, _)) = &self.caption {
-            let bg = Bg::Mix(pal::UI_PANEL, 0.85);
-            let n = s.chars().count() as i32 + 4;
-            let x = (w - n) / 2;
-            f.text(x, h - 3, &format!("  {s}  "), Rgb::hex(0xf4ecd8), bg, 0.0);
+        let _ = (w, h);
+    }
+
+    /// Where the villager's head is (cells), for the [E] over it.
+    fn head_at(&self, f: &Frame) -> (i32, i32) {
+        let (w, h) = (f.w as f32, f.h as f32);
+        // (the feet: as each part draws the villager; a head about 11 rows
+        // above them, at the size they're drawn)
+        match self.at {
+            Where::Shuttle { .. } => ((w / 3.0) as i32 - 4, (h * 0.75 - 9.0) as i32),
+            Where::Carriage { .. } => ((self.x * w) as i32, (h * 0.8 - 12.0) as i32),
+            Where::Lodge => ((self.x * w) as i32, (h * 0.8 - 12.0) as i32),
+            Where::Lift { .. } => ((w / 2.0) as i32, (h / 3.0) as i32),
+            Where::Ski => ((w / 3.0) as i32, (h * 0.5 - 12.0) as i32),
+            Where::Drive => ((w / 2.0) as i32, (h * 0.6) as i32),
         }
+    }
+
+    /// Over the trip, kept clear of the widgets (`avoid`: their rects, x,
+    /// y, w, h) and above the taskbar: the keys along the top, the caption
+    /// along the bottom, the [E] over the villager, the score and the
+    /// standings on the slope.
+    pub fn draw_ui(&self, f: &mut Frame, t: f32, avoid: &[(i32, i32, i32, i32)]) {
+        let (w, h) = (f.w as i32, f.h as i32);
+        // what's been put where so far (the widgets, then each of these)
+        let mut taken: Vec<(i32, i32, i32, i32)> = avoid.to_vec();
+        // somewhere free (the top first; a side; down the screen), taken
+        let mut spot = |n: i32, rows: i32, prefer_right: bool| -> (i32, i32) {
+            let xs = if prefer_right { [w - n - 2, (w - n) / 2, 1] } else { [1, (w - n) / 2, w - n - 2] };
+            let free = |x: i32, y: i32, taken: &[(i32, i32, i32, i32)]| x >= 0 && taken.iter().all(|&(ax, ay, aw, ah)| x >= ax + aw || x + n <= ax || y >= ay + ah || y + rows <= ay);
+            let mut at = (xs[1].max(0), (h - 6 - rows).max(1));
+            'find: for y in (1..(h - 6 - rows).max(2)).step_by(2) {
+                for &x in &xs {
+                    if free(x, y, &taken) {
+                        at = (x, y);
+                        break 'find;
+                    }
+                }
+            }
+            taken.push((at.0, at.1, n, rows));
+            at
+        };
         let hint = match self.at {
             Where::Shuttle { .. } => " E: hurry along · Esc: home ",
             Where::Carriage { .. } => " ← → walk the carriage · E: talk, sit, the door · Esc: home ",
             Where::Lift { .. } => " E: skip ahead · Esc: home ",
             Where::Lodge => " ← → walk · E: the shop, the lift, the train · Esc: home ",
+            Where::Ski if self.down.is_some() => " waiting for everyone at the bottom · E: back up the lift now ",
             Where::Ski => " → tuck · ← slow · ↑ ↓ lanes · Space jump · air: ← → spin, ↓ grab ",
             Where::Drive => " → faster · ← slower · ↑ ↓ lanes · Space honk · E home ",
         };
-        f.text(1, 1, hint, pal::UI_DIM, Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
+        let n = hint.chars().count() as i32;
+        let (hx, hy) = spot(n, 1, false);
+        f.text(hx, hy, hint, pal::UI_DIM, Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
+        let _ = (hx, hy);
+        // on the slope: the score line, and the standings
+        if let (Where::Ski, Some(r)) = (self.at, &self.run) {
+            let secs = if self.down.is_some() { self.last.map(|l| l.0).unwrap_or(0.0) } else { t - r.started };
+            let line = format!(" {} pts · {:.0} km/h · {secs:.1}s · flags {}/{} · {:.0}% down ", r.score, r.v * 1.6, r.flags, r.gates, (r.x / RUN_LEN * 100.0).min(100.0));
+            let n = line.chars().count() as i32;
+            let (lx, ly) = spot(n, 1, true);
+            f.text(lx, ly, &line, Rgb::hex(0xffd36b), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
+            let mut all: Vec<(String, f32)> = r.rivals.iter().map(|rv| (rv.name.to_string(), if rv.done.is_some() { RUN_LEN + 100.0 - rv.done.unwrap_or(0.0) * 0.001 } else { rv.x })).collect();
+            all.extend(self.fellows.iter().filter(|fw| fw.at.at == 5).map(|fw| (fw.name.clone(), fw.at.x)));
+            all.extend(self.results.iter().map(|(n, ..)| (n.clone(), RUN_LEN + 1.0)));
+            all.push(("you".into(), if self.down.is_some() { RUN_LEN + 50.0 } else { r.x }));
+            all.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let wide = all.iter().map(|(n, _)| n.chars().count() as i32 + 4).max().unwrap_or(8);
+            let rows = all.len() as i32;
+            let (sx, sy) = spot(wide, rows, false);
+            for (i, (name, _)) in all.iter().enumerate() {
+                let me = name == "you";
+                f.text(sx, sy + i as i32, &format!("{}. {name}", i + 1), if me { Rgb::hex(0xffd36b) } else { pal::UI_TEXT }, Bg::Mix(pal::UI_PANEL, 0.6), 0.0);
+            }
+        }
+        // the [E] over the villager, and what it does
+        if let Some(what) = self.prompt() {
+            let (x, y) = self.head_at(f);
+            let y = y.clamp(2, h - 4);
+            crate::scene::player::Player::draw_prompt(f, x, y, 'E', t);
+            let label = format!(" {what} ");
+            let n = label.chars().count() as i32;
+            f.text((x - n / 2).clamp(0, (w - n).max(0)), y - 1, &label, Rgb::hex(0xffe9a8), Bg::Mix(Rgb::hex(0x1a1a24), 0.7), 0.0);
+        }
+        // the caption, along the bottom
+        if let Some((s, _)) = &self.caption {
+            let bg = Bg::Mix(pal::UI_PANEL, 0.85);
+            let n = s.chars().count() as i32 + 4;
+            let x = (w - n) / 2;
+            f.text(x.max(0), h - 3, &format!("  {s}  "), Rgb::hex(0xf4ecd8), bg, 0.0);
+        }
     }
 
     /// A word in a bubble over someone (column, the row their head's at).
@@ -918,10 +1263,11 @@ impl Trip {
         use crate::scene::sprites::{Look, Pose};
         let (pw, ph) = (f.pw as i32, f.ph as i32);
         let floor = ph * 4 / 5;
-        let sway = ((t * 2.3).sin() * 1.0).round() as i32;
+        // (rocking along; still, once in)
+        let sway = ((t * 2.3).sin() * self.pace).round() as i32;
         // the walls and the windows' strip of the outside
         let (wy0, wy1) = (ph / 5, ph / 2);
-        let scroll = t * 60.0 * if home { -1.0 } else { 1.0 };
+        let scroll = self.scroll * if home { -1.0 } else { 1.0 };
         for y in 0..ph {
             for x in 0..pw {
                 let c = if y < 6 {
@@ -977,10 +1323,19 @@ impl Trip {
             }
         }
         let feet = (floor - 1) as f32 / 2.0;
-        // the folk in their seats
+        // the folk in their seats (or, the train in, off along the aisle
+        // to the door)
         for p in &self.passengers {
-            let l = Look { kid: p.kid, coat: p.coat, hat: Some(p.hat), hair: Rgb::hex(0x3a2a1a), scarf: None, skin: Rgb::hex(0xe8c39e), mittens: p.coat * 0.8, holding: None, lantern: false };
-            person(f, &l, Pose::Sit, -1.0, (p.x + 0.03) * pw as f32, feet - 1.0, 2.0);
+            let l: Look = p.look();
+            match p.off {
+                Some(o) if self.stopped.is_some() && t > o => {
+                    if p.x < 0.96 {
+                        let pose = Pose::Walk(((p.walk as i32) % 2) as u8);
+                        person(f, &l, pose, p.dir, p.x * pw as f32, feet + 2.0, 2.0);
+                    }
+                }
+                _ => person(f, &l, Pose::Sit, -1.0, (p.x + 0.03) * pw as f32, feet - 1.0, 2.0),
+            }
         }
         // the conductor (navy coat, peaked cap)
         let cl = Look { kid: false, coat: Rgb::hex(0x1a2a5a), hat: Some(Rgb::hex(0x1a1a2a)), hair: Rgb::hex(0x8a8a8a), scarf: Some(Rgb::hex(0xc8a040)), skin: Rgb::hex(0xe8c39e), mittens: Rgb::hex(0x1a1a2a), holding: None, lantern: false };
@@ -1009,7 +1364,12 @@ impl Trip {
             f.light_px((dx + 4) as f32, (floor - 18) as f32, Rgb::hex(0xffb050) * 5.0);
         }
         // the next stop, and how far along
-        let to = if home { "next stop: the village" } else { "next stop: Pine Peak" };
+        let to = match (home, self.stopped.is_some()) {
+            (true, true) => "the village · everybody off",
+            (false, true) => "Pine Peak · everybody off",
+            (true, false) => "next stop: the village",
+            (false, false) => "next stop: Pine Peak",
+        };
         f.text(f.w as i32 / 2 - 10, 2, to, Rgb::hex(0xffd36b), Bg::Mix(Rgb::hex(0x1a1014), 0.9), 0.0);
         let bar = (self.ride * (pw - 20) as f32) as i32;
         for x in 10..10 + bar {
@@ -1039,32 +1399,185 @@ impl Trip {
                 f.px_set(x, y, Rgb::hex(0xe8eef8) * (0.8 + 0.15 * h01(hash2(x, y))));
             }
         }
-        // the platform and its sign
-        let px0 = (pw as f32 * (PLATFORM - 0.08)) as i32;
-        for x in px0..px0 + pw / 6 {
-            for y in ground - 3..ground {
-                f.px_set(x, y, Rgb::hex(0x5a5a68));
+        // Pine Peak station: the platform, the station house (a clock in
+        // the gable, the name board, lit windows, a bench, a lamp)
+        let px0 = (pw as f32 * (PLATFORM - 0.1)).max(0.0) as i32;
+        let px1 = px0 + pw / 5;
+        for x in px0..px1 {
+            for y in ground - 4..ground {
+                let c = if y == ground - 4 { Rgb::hex(0xffd36b) * 0.8 } else { Rgb::hex(0x6a6a78) * (0.85 + 0.1 * h01(hash2(x / 6, y))) };
+                f.px_set(x, y, c);
+            }
+            // the track along in front
+            f.px_set(x, ground + 2, Rgb::hex(0x3a3a44));
+            if x % 6 == 0 {
+                f.px_set(x, ground + 3, Rgb::hex(0x5a3a24));
             }
         }
-        // the ski shop: a timber chalet with a warm window
+        let hx = (pw as f32 * (PLATFORM - 0.02)) as i32;
+        let (hw, hh) = ((pw / 9).max(16), (ph / 6).max(14));
+        let (hx0, hy0) = (hx - hw / 2, ground - 4 - hh);
+        for y in hy0..ground - 4 {
+            for x in hx0..hx0 + hw {
+                let plank = (x - hx0) % 4 == 0;
+                f.px_set(x, y, if plank { Rgb::hex(0x4a2a1a) } else { Rgb::hex(0x7a4a2a) * (0.9 + 0.08 * h01(hash2(x, y / 3))) });
+            }
+        }
+        // the roof, snow on it, icicles under the eaves
+        let rh = hw / 2;
+        for k in 0..rh + 3 {
+            for x in hx - k - 2..hx + k + 2 {
+                let snow = k < 3 || x <= hx - k || x >= hx + k + 1;
+                f.px_set(x, hy0 - rh + k, if snow { Rgb::hex(0xf4f8ff) } else { Rgb::hex(0x5a2a22) });
+            }
+        }
+        for x in (hx0 - 2..hx0 + hw + 2).step_by(3) {
+            let n = 1 + (hash2(x, 7) % 3) as i32;
+            for y in 0..n {
+                f.px_set(x, hy0 + 1 + y, Rgb::hex(0xdff0ff));
+            }
+        }
+        // the clock in the gable
+        let (ccx, ccy) = (hx, hy0 - rh / 2 + 1);
+        for dy in -3i32..=3 {
+            for dx in -3i32..=3 {
+                if dx * dx + dy * dy <= 10 {
+                    f.px_set(ccx + dx, ccy + dy, if dx * dx + dy * dy >= 8 { Rgb::hex(0xc8a040) } else { Rgb::hex(0xf4ecd8) });
+                }
+            }
+        }
+        let mins = (t / 60.0) as i32;
+        f.px_set(ccx, ccy - 1, Rgb::hex(0x2a1a14));
+        f.px_set(ccx + if mins % 2 == 0 { 1 } else { -1 }, ccy, Rgb::hex(0x2a1a14));
+        f.light_px(ccx as f32, ccy as f32, Rgb::hex(0xffd27a) * 1.5);
+        // windows and the door
+        for wxk in [hx0 + hw / 5, hx0 + hw - hw / 5 - 4] {
+            for y in hy0 + hh / 4..hy0 + hh / 4 + hh / 3 {
+                for x in wxk..wxk + 4 {
+                    let bar = x == wxk + 2 || y == hy0 + hh / 4 + hh / 6;
+                    f.px_set(x, y, if bar { Rgb::hex(0x4a2a1a) } else { Rgb::hex(0xffd27a) });
+                }
+            }
+            f.light_px((wxk + 2) as f32, (hy0 + hh / 3) as f32, Rgb::hex(0xffb050) * 3.0);
+        }
+        for y in ground - 4 - hh / 2..ground - 4 {
+            for x in hx - 2..hx + 3 {
+                f.px_set(x, y, Rgb::hex(0x3a1a10));
+            }
+        }
+        // a bench (snow on it) and a lamp
+        let bx = hx0 + hw + 3;
+        for x in bx..bx + 8 {
+            f.px_set(x, ground - 7, Rgb::hex(0xf4f8ff));
+            f.px_set(x, ground - 6, Rgb::hex(0x5a3a24));
+        }
+        for y in ground - 6..ground - 4 {
+            f.px_set(bx, y, Rgb::hex(0x3a2414));
+            f.px_set(bx + 7, y, Rgb::hex(0x3a2414));
+        }
+        let lmp = hx0 - 4;
+        for y in ground - 4 - hh..ground - 4 {
+            f.px_set(lmp, y, Rgb::hex(0x22242c));
+        }
+        f.px_set(lmp, ground - 5 - hh, Rgb::hex(0xffd27a));
+        f.px_set(lmp - 1, ground - 5 - hh, Rgb::hex(0xffd27a));
+        f.light_px(lmp as f32, (ground - 5 - hh) as f32, Rgb::hex(0xffb050) * 5.0);
+        // the name board under the eaves
+        f.text(hx / 1 - 5, (hy0 / 2).max(1), " PINE PEAK ", Rgb::hex(0xffd36b), Bg::Solid(Rgb::hex(0x2a1a14)), 0.0);
+        // the ski shop: a chalet with a striped awning, skis in the window
+        // and racked outside, a wreath on the door, lights along the eaves,
+        // smoke from the chimney
         let sx = (pw as f32 * SHOP) as i32;
-        let (bw, bh) = (pw / 7, ph / 4);
-        for y in ground - bh..ground {
-            for x in sx - bw / 2..sx + bw / 2 {
-                f.px_set(x, y, if (y - ground) % 4 == 0 { Rgb::hex(0x4a2a16) } else { Rgb::hex(0x6a4428) });
+        let (bw, bh) = (pw / 6, ph / 4);
+        let (sx0, sy0) = (sx - bw / 2, ground - bh);
+        for y in sy0..ground {
+            for x in sx0..sx0 + bw {
+                let log = (y - sy0) % 5;
+                let c = match log {
+                    0 => Rgb::hex(0x3a2214),
+                    1 => Rgb::hex(0x9a6a3a),
+                    _ => Rgb::hex(0x7a4a28) * (0.9 + 0.1 * h01(hash2(x / 5, y / 5))),
+                };
+                f.px_set(x, y, c);
             }
         }
-        for k in 0..bw / 2 + 4 {
-            for x in sx - k..sx + k {
-                f.px_set(x, ground - bh - bw / 2 - 4 + k, if k < 3 { Rgb::hex(0xf4f8ff) } else { Rgb::hex(0x7a2a22) });
+        let roof = bw / 2 + 6;
+        for k in 0..roof {
+            for x in sx - k - 4..sx + k + 4 {
+                let snow = k < 4 || x <= sx - k - 2 || x >= sx + k + 2;
+                f.px_set(x, sy0 - roof + k, if snow { Rgb::hex(0xf4f8ff) } else { Rgb::hex(0x8a2a22) * (0.9 + 0.1 * ((x + k) % 3) as f32) });
             }
         }
-        for y in ground - bh * 2 / 3..ground - bh / 3 {
-            for x in sx - bw / 4..sx + bw / 4 {
-                f.px_set(x, y, Rgb::hex(0xffd27a));
+        // the chimney, smoke curling up
+        let cx0 = sx + bw / 4;
+        for y in sy0 - roof - 2..sy0 - roof / 2 {
+            for x in cx0..cx0 + 4 {
+                f.px_set(x, y, Rgb::hex(0x6a3a2a));
             }
         }
-        f.light_px(sx as f32, (ground - bh / 2) as f32, Rgb::hex(0xffb050) * 6.0);
+        for i in 0..6 {
+            let a = (t * 0.6 + i as f32 * 0.4).fract();
+            let (x, y) = (cx0 as f32 + 2.0 + (a * 6.0 + i as f32).sin() * 2.0 + a * 4.0, (sy0 - roof - 3) as f32 - a * 14.0);
+            f.px_blend(x as i32, y as i32, Rgb::hex(0xc8ccd8), 0.5 * (1.0 - a));
+        }
+        // lights along the eaves
+        for (i, x) in (sx - roof - 2..sx + roof + 2).step_by(4).enumerate() {
+            let dy = (roof - (x - sx).abs()).max(0);
+            let y = sy0 - dy + 1;
+            let c = [0xff4a4a, 0x4aff7a, 0x4a9aff, 0xffd34a][i % 4];
+            let tw = 0.7 + 0.3 * ((t * 3.0 + i as f32).sin() * 0.5 + 0.5);
+            f.px_set(x, y, Rgb::hex(c) * tw);
+            f.light_px(x as f32, y as f32, Rgb::hex(c) * (1.2 * tw));
+        }
+        // the awning (red and white) over the big window
+        let (wx0, wx1) = (sx0 + 3, sx + 2);
+        for x in wx0 - 1..wx1 + 2 {
+            for y in sy0 + 3..sy0 + 6 {
+                f.px_set(x, y, if (x / 3) % 2 == 0 { Rgb::hex(0xd8283a) } else { Rgb::hex(0xf4f0ea) });
+            }
+        }
+        for y in sy0 + 7..sy0 + 7 + bh / 2 {
+            for x in wx0..wx1 {
+                f.px_set(x, y, Rgb::hex(0xffd27a) * 0.95);
+            }
+        }
+        // skis on show in the window
+        for (k, c) in [0xd8283a, 0x2a4c8a, 0x2fae5c, 0xffc23a].into_iter().enumerate() {
+            let x = wx0 + 2 + k as i32 * 3;
+            if x + 1 < wx1 {
+                for y in sy0 + 9..sy0 + 6 + bh / 2 {
+                    f.px_set(x, y, Rgb::hex(c));
+                }
+            }
+        }
+        f.light_px(((wx0 + wx1) / 2) as f32, (sy0 + 7 + bh / 4) as f32, Rgb::hex(0xffb050) * 6.0);
+        // the door, a wreath on it
+        let dx0 = sx + bw / 4 - 2;
+        for y in ground - bh / 2..ground {
+            for x in dx0..dx0 + 6 {
+                f.px_set(x, y, Rgb::hex(0x4a2414));
+            }
+        }
+        for (ddx, ddy) in [(2, 0), (3, 0), (1, 1), (4, 1), (1, 2), (4, 2), (2, 3), (3, 3)] {
+            f.px_set(dx0 + ddx, ground - bh / 2 + 3 + ddy, Rgb::hex(0x1f6e3a));
+        }
+        f.px_set(dx0 + 3, ground - bh / 2 + 6, Rgb::hex(0xd8283a));
+        // skis racked outside, a snowboard
+        let rx = sx0 + bw + 2;
+        for (k, c) in [0xd8283a, 0x2fae5c, 0x4a8dff, 0xff7ae0].into_iter().enumerate() {
+            let x = rx + k as i32 * 2;
+            for y in ground - bh / 2..ground {
+                f.px_set(x, y, Rgb::hex(c));
+            }
+            f.px_set(x, ground - bh / 2 - 1, Rgb::hex(c) * 1.2);
+        }
+        for y in ground - bh / 2 - 2..ground {
+            f.px_set(rx + 10, y, Rgb::hex(0x222a44));
+            f.px_set(rx + 11, y, Rgb::hex(0x3a4a7a));
+        }
+        // a lantern by the door
+        f.px_set(dx0 - 2, ground - bh / 2, Rgb::hex(0xffd27a));
+        f.light_px((dx0 - 2) as f32, (ground - bh / 2) as f32, Rgb::hex(0xffb050) * 4.0);
         // the lift: a hut, a pylon, the cable climbing away, chairs on it
         let lx = (pw as f32 * LIFT) as i32;
         for y in ground - ph / 6..ground {
@@ -1094,9 +1607,22 @@ impl Trip {
             let x = (f.w as f32 * at) as i32 - s.chars().count() as i32 / 2;
             f.text(x, row - 9, s, Rgb::hex(0xffd36b), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
         };
-        label(f, PLATFORM, " ⇄ train home ");
-        label(f, SHOP, " ❄ ski shop ");
+        label(f, PLATFORM, " ⇄ trains: the village ");
+        label(f, SHOP, " ❄ SKI & SNOWBOARD · rentals ");
         label(f, LIFT, " ⇗ chairlift ");
+        // folk about the lodge (skis over the shoulder, once they've some)
+        for fo in &self.folk {
+            let x = fo.p.x * f.w as f32;
+            let pose = if t < fo.wait { crate::scene::sprites::Pose::Stand } else { crate::scene::sprites::Pose::Walk(((fo.p.walk as i32) % 2) as u8) };
+            person(f, &fo.p.look(), pose, fo.p.dir, x, (ground / 2) as f32 + 0.5, 2.0);
+            if fo.skis {
+                let (px, py) = ((x * f.pw as f32 / f.w as f32) as i32, ground - 14);
+                for k in 0..12 {
+                    f.px_set(px - 3 + k / 2, py + k - 6, Rgb::hex(0xd8283a));
+                    f.px_set(px - 2 + k / 2, py + k - 6, Rgb::hex(0x2a4c8a));
+                }
+            }
+        }
         // friends up here too (at the lodge, or on the lift)
         for fw in self.fellows.iter().filter(|fw| fw.at.at == 3 || fw.at.at == 4) {
             let (fx, lift) = if fw.at.at == 4 { (LIFT * f.w as f32 + 2.0, true) } else { (fw.at.x * f.w as f32, false) };
@@ -1234,14 +1760,37 @@ impl Trip {
                 }
             }
         }
-        // the others racing down
+        // the finish: a banner across the slope, flags either side
+        let fx = sx + (RUN_LEN - r.x) as i32;
+        if fx > -30 && fx < pw + 30 {
+            let (b0, b1) = (surface(fx, 0.0) as i32, surface(fx, (LANES - 1) as f32 + 0.6) as i32);
+            for y in b1 - 26..b0 {
+                f.px_set(fx - 1, y, Rgb::hex(0x22242c));
+                f.px_set(fx + 1, y, Rgb::hex(0x22242c));
+            }
+            for y in b1 - 26..b1 - 20 {
+                for x in fx - 14..fx + 15 {
+                    let check = ((x - fx + 14) / 3 + (y - b1 + 26) / 3) % 2 == 0;
+                    f.px_set(x, y, if check { Rgb::hex(0x14141c) } else { Rgb::hex(0xf4f4f8) });
+                }
+            }
+            f.text(fx - 3, (b1 - 34) / 2, " FINISH ", Rgb::hex(0xffd36b), Bg::Mix(Rgb::hex(0x1a1014), 0.8), 0.0);
+        }
+        // the others racing down (and those down, standing about at the
+        // bottom, skis off)
         for rv in &r.rivals {
             let px = sx + (rv.x - r.x) as i32;
-            if px < -20 || px > pw + 20 || rv.done.is_some() {
+            if px < -20 || px > pw + 20 {
                 continue;
             }
             let l = Look { kid: false, coat: rv.coat, hat: Some(rv.coat * 0.7), hair: Rgb::hex(0x3a2a1a), scarf: Some(Rgb::hex(0xf4f0ea)), skin: Rgb::hex(0xe8c39e), mittens: rv.coat * 0.7, holding: None, lantern: false };
             let feet = surface(px, rv.lane) - rv.air * 2.0;
+            if rv.done.is_some() && rv.x >= RUN_LEN + 20.0 {
+                let pose = if ((t + rv.x) * 0.7) as i32 % 3 == 0 { Pose::Wave } else { Pose::Stand };
+                person(f, &l, pose, -1.0, px as f32, feet / 2.0, 2.0);
+                f.text(px - 2, ((feet / 2.0) as i32 - 9).max(2), rv.name, Rgb::hex(0xf4ecd8), Bg::Mix(Rgb::hex(0x1a1014), 0.6), 0.0);
+                continue;
+            }
             person(f, &l, if rv.air > 0.0 { Pose::Jump } else { Pose::Scoop }, 1.0, px as f32, feet / 2.0, 2.0);
             for dx in -7..9 {
                 f.px_set(px + dx, feet as i32 + dx / 3, Rgb::hex(0x2a4c8a));
@@ -1266,7 +1815,9 @@ impl Trip {
         let feet_px = surface(sx, r.lane) - r.air * 2.0;
         let spun = ((r.spin / 90.0).round() as i32).rem_euclid(4);
         let dir = if spun == 2 { -1.0 } else { 1.0 };
-        let pose = if r.tumble > t {
+        let pose = if self.down.is_some() && r.v < 1.0 {
+            Pose::Stand
+        } else if r.tumble > t {
             Pose::Lie
         } else if r.air > 0.0 {
             if r.grab { Pose::Scoop } else if spun % 2 == 1 { Pose::ArmsUp } else { Pose::Jump }
@@ -1284,25 +1835,12 @@ impl Trip {
                 f.px_set(sx - 8 - (a * 8.0) as i32, fy - (a * 5.0) as i32, Rgb::hex(0xffffff));
             }
         }
-        // the score, and what was just pulled off
-        let secs = t - r.started;
-        let line = format!(" {} pts · {:.0} km/h · {secs:.1}s · flags {}/{} · {:.0}% down ", r.score, r.v * 1.6, r.flags, r.gates, (r.x / RUN_LEN * 100.0).min(100.0));
-        f.text(f.w as i32 - line.chars().count() as i32 - 2, 1, &line, Rgb::hex(0xffd36b), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
+        // what was just pulled off, over the skier
         if let Some((s, until)) = &r.pop {
             if t < *until {
                 let n = s.chars().count() as i32;
                 f.text(f.w as i32 / 3 - n / 2, (fy / 2 - 10).max(3), s, Rgb::hex(0xffd36b), Bg::Mix(Rgb::hex(0x1a1014), 0.85), 0.0);
             }
-        }
-        // the standings
-        let mut all: Vec<(String, f32)> = r.rivals.iter().map(|rv| (rv.name.to_string(), rv.x)).collect();
-        all.extend(self.fellows.iter().filter(|fw| fw.at.at == 5).map(|fw| (fw.name.clone(), fw.at.x)));
-        all.extend(self.results.iter().map(|(n, ..)| (n.clone(), RUN_LEN + 1.0)));
-        all.push(("you".into(), r.x));
-        all.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (i, (n, _)) in all.iter().enumerate() {
-            let me = n == "you";
-            f.text(2, 3 + i as i32, &format!("{}. {n}", i + 1), if me { Rgb::hex(0xffd36b) } else { pal::UI_TEXT }, Bg::Mix(pal::UI_PANEL, 0.6), 0.0);
         }
     }
 
@@ -1520,11 +2058,16 @@ mod tests {
         while tr.ride < 1.0 {
             step(&mut tr, &mut t, (0.0, 0.0));
         }
+        // the train in: it stops, and the others get up and off
         for _ in 0..400 {
             step(&mut tr, &mut t, (1.0, 0.0));
         }
+        assert!(tr.stopped.is_some() && tr.pace < 0.05, "the train never stopped");
+        assert!(tr.passengers.iter().all(|p| p.off.is_some() && p.x > 0.9), "folk still in their seats");
+        assert_eq!(tr.prompt(), Some("off at Pine Peak"));
         tr.interact(t);
         assert_eq!(tr.at, Where::Lodge);
+        assert!(!tr.folk.is_empty(), "nobody off the train at the lodge");
         // no lift without skis
         tr.x = LIFT;
         tr.interact(t);
@@ -1535,8 +2078,11 @@ mod tests {
         tr.x = LIFT;
         tr.interact(t);
         assert!(matches!(tr.at, Where::Lift { .. }));
-        // up, and down the mountain (tucked, jumping and spinning now and then)
+        // up, and down the mountain (tucked, jumping and spinning now and
+        // then); everyone waited for at the bottom, then back up the lift
+        let mut waited = false;
         for i in 0..20_000 {
+            waited |= tr.down.is_some();
             let spin = if tr.run.as_ref().is_some_and(|r| r.air > 0.0) { -1.0 } else { 1.0 };
             step(&mut tr, &mut t, (spin, if i % 90 == 0 { -1.0 } else { 0.0 }));
             tr.jump(i % 40 < 10);
@@ -1545,8 +2091,14 @@ mod tests {
             }
         }
         assert_eq!(tr.at, Where::Lodge, "never got down");
+        assert!(waited, "straight back to the top without waiting at the bottom");
         assert_eq!(tr.runs, 1);
         assert!(tr.best_score > 0, "no points at all");
+        // the skis back to the shop
+        tr.x = SHOP;
+        assert_eq!(tr.prompt(), Some("return the skis"));
+        tr.interact(t);
+        assert!(!tr.skis);
         // the train home, and the shuttle back into the village
         tr.x = PLATFORM;
         tr.interact(t);

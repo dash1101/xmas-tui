@@ -46,6 +46,55 @@ pub struct Book {
     pub asking: Vec<Pal>,
     /// Told once where online is (the first-time hint).
     pub tipped: bool,
+    /// Groups: chat rooms shared by code, like a little server.
+    pub groups: Vec<Group>,
+}
+
+/// A group: a chat room anyone with its code can be in.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Group {
+    pub name: String,
+    pub code: String,
+}
+
+impl Card {
+    /// A card from someone else, its words made safe to show.
+    pub fn cleaned(self) -> Card {
+        Card { name: clean(&self.name, 32), motto: clean(&self.motto, 60), pet: clean(&self.pet, 48), ..self }
+    }
+}
+
+impl Avatar {
+    /// Where someone else says they are, kept to sane numbers (nothing
+    /// that could send a drawing off into the billions, or NaN).
+    pub fn cleaned(mut self) -> Avatar {
+        let ok = |v: f32, lim: f32| if v.is_finite() { v.clamp(-lim, lim) } else { 0.0 };
+        self.x = ok(self.x, 1e4);
+        self.y = ok(self.y, 1e4);
+        self.dir = if self.dir < 0.0 { -1.0 } else { 1.0 };
+        self.seat = self.seat.clamp(-1, 8);
+        if let Some(tr) = &mut self.trip {
+            tr.x = ok(tr.x, 1e5);
+            tr.dir = if tr.dir < 0.0 { -1.0 } else { 1.0 };
+            tr.lane = ok(tr.lane, 100.0);
+            tr.air = ok(tr.air, 1e3);
+            tr.el = ok(tr.el, 1e6);
+        }
+        self
+    }
+}
+
+/// Text from someone else, made safe to show: no control characters (no
+/// terminal escapes, no new lines), no direction overrides that would
+/// make it read as something else, and not too long.
+pub fn clean(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -145,19 +194,23 @@ pub mod ask {
     pub const TRIP: u8 = 12;
     /// A snowball fight, the two of them.
     pub const FIGHT: u8 = 13;
+    /// (A guest asking the host to change one of the village's settings:
+    /// only ever an answer, from the host.)
+    pub const SETTING: u8 = 20;
 }
 
 /// A code onto the clipboard (where there's a way to).
 pub fn copy_text(text: &str) {
-    #[cfg(any(target_os = "linux", windows))]
+    // Windows: the system's clipboard itself (`clip` would mangle anything
+    // but plain ASCII, and flash a console window up)
+    #[cfg(windows)]
+    crate::winsys::set_clipboard_text(text);
+    #[cfg(target_os = "linux")]
     {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let text = text.to_string();
         std::thread::spawn(move || {
-            #[cfg(windows)]
-            let tries: &[(&str, &[&str])] = &[("clip", &[])];
-            #[cfg(target_os = "linux")]
             let tries: &[(&str, &[&str])] = &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])];
             for (cmd, args) in tries {
                 let Ok(mut c) = Command::new(cmd).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
@@ -174,14 +227,13 @@ pub fn copy_text(text: &str) {
     let _ = text;
 }
 
-/// What's on the clipboard (where there's a way to read it).
+/// The clipboard's text (a friend's code to paste), cut short.
 pub fn paste_text() -> String {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(windows)]
+    return crate::winsys::clipboard_text().map(|s| s.chars().take(400).collect()).unwrap_or_default();
+    #[cfg(target_os = "linux")]
     {
         use std::process::{Command, Stdio};
-        #[cfg(windows)]
-        let tries: &[(&str, &[&str])] = &[("powershell", &["-NoProfile", "-Command", "Get-Clipboard"])];
-        #[cfg(target_os = "linux")]
         let tries: &[(&str, &[&str])] = &[("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])];
         for (cmd, args) in tries {
             if let Ok(o) = Command::new(cmd).args(*args).stdin(Stdio::null()).stderr(Stdio::null()).output() {
@@ -191,6 +243,7 @@ pub fn paste_text() -> String {
             }
         }
     }
+    #[cfg(not(windows))]
     String::new()
 }
 
@@ -203,6 +256,11 @@ enum Msg {
     Mail { from: String, name: String, text: String },
     /// In a mailbox: come into this village (its code).
     Invite { from: String, name: String, village: String },
+    /// In a mailbox: a ping (a little tone at the friend's end).
+    Ping { from: String, name: String },
+    /// In a group's room: said to everyone in it; and "I'm here" now and
+    /// then (no text).
+    Group { id: u32, name: String, text: String },
     /// One's own "here I am" (kept by the relay): online or not, hosting
     /// (the village code, for friends to join), when; the profile card.
     Here {
@@ -240,10 +298,27 @@ enum Msg {
     Me { id: u32, name: String, av: Avatar },
     /// In a village: said aloud.
     Talk { id: u32, text: String },
+    /// In a village: said to one person only (`to`).
+    Whisper { id: u32, to: u32, name: String, text: String },
+    /// In a village: asking its host to change one of the village's
+    /// settings (see `Rules` in the scene).
+    Want { id: u32, key: String, value: String },
+    /// In a village, from its host: who's out and about in it, and what
+    /// they've said (see `Pup` in the scene), so everyone sees the same.
+    Crowd { id: u32, data: String },
     /// In a village: a snowball thrown (village coordinates, per second).
     Throw { id: u32, x: f32, y: f32, vx: f32, vy: f32 },
-    /// In a village, from its host: the village itself.
-    Village { host: u32, name: String, seed: u32 },
+    /// In a village, from its host: the village itself, its settings, and
+    /// who may change them besides the host.
+    Village {
+        host: u32,
+        name: String,
+        seed: u32,
+        #[serde(default)]
+        rules: String,
+        #[serde(default)]
+        admins: Vec<u32>,
+    },
     /// In a village: gone (`host`: the village closes).
     Bye { id: u32, host: bool },
 }
@@ -275,6 +350,20 @@ pub enum Event {
     Finish { id: u32, name: String, score: u32, secs: f32 },
     /// A linked device's side of the villager (see `crate::sync`).
     Synced { dev: String, at: i64, state: String },
+    /// A friend pinged this villager.
+    Pinged(String),
+    /// Said to this villager only, by someone in the village.
+    Whispered { id: u32, name: String, text: String },
+    /// Said in a group (its name), by whom.
+    GroupSaid { group: String, name: String, text: String },
+    /// Someone asks the host (this villager) to change a village setting;
+    /// `admin`: they may (it's done without asking).
+    Wanted { id: u32, name: String, key: String, value: String, admin: bool },
+    /// The host's village settings (a guest), and whether this villager
+    /// may change them.
+    Rules { rules: String, admin: bool },
+    /// Who's out in the host's village (a guest; see `Msg::Crowd`).
+    Crowd(String),
 }
 
 /// The link to the relay, as the menus show it.
@@ -297,6 +386,10 @@ pub struct Other {
     pub card: Option<Card>,
     /// Waving (or cheering…) until then, and how.
     pub wave: (f32, u8),
+    /// How fast they're going (village units a second), from the last few
+    /// places heard: where they're drawn runs on ahead between messages,
+    /// so walking reads smooth, not in hops.
+    pub vel: (f32, f32),
 }
 
 /// A friend's last "here I am".
@@ -327,6 +420,13 @@ struct Shared {
     code: String,
     seal: Seal,
     topic: String,
+    /// A guest knocking: nobody's answered by then, the village isn't open.
+    knock_until: f32,
+    /// The host's settings last heard (a guest), and whether this
+    /// villager's an admin.
+    rules: (String, bool),
+    /// Who the host is (a guest: as heard).
+    host_id: Option<u32>,
     host: bool,
     /// The host's seed, once heard (a guest).
     seed: Option<u32>,
@@ -364,6 +464,20 @@ pub struct Online {
     /// The friend code changed (a linked device's villager taken on): the
     /// front end closes the link and makes a new one.
     relink: bool,
+    /// The groups' rooms (topic, seal), and who's been heard in each lately
+    /// (id → name, when).
+    rooms: Vec<(String, Seal)>,
+    pub room_seen: Vec<HashMap<u32, (String, f32)>>,
+    next_rooms: f32,
+    /// This village's settings (hosting), for guests; and who else may
+    /// change them.
+    rules: String,
+    admins: Vec<u32>,
+    /// A village to go into once online (asked for while offline).
+    pending_join: Option<String>,
+    /// Heard lately, per sender: (when the window started, how many),
+    /// to shrug off a flood.
+    heard: HashMap<u32, (f32, u32)>,
 }
 
 fn now() -> i64 {
@@ -400,10 +514,24 @@ impl Online {
             next_card: 0.0,
             sync: None,
             relink: false,
+            rooms: vec![],
+            room_seen: vec![],
+            next_rooms: 0.0,
+            rules: String::new(),
+            admins: vec![],
+            pending_join: None,
+            heard: HashMap::new(),
             book,
         };
         o.relive();
+        o.regroup();
         o
+    }
+
+    /// The groups' rooms, from the book.
+    fn regroup(&mut self) {
+        self.rooms = self.book.groups.iter().map(|g| (seal::topic("group", &g.code), Seal::new(&g.code))).collect();
+        self.room_seen.resize_with(self.rooms.len(), HashMap::new);
     }
 
     fn relive(&mut self) {
@@ -587,10 +715,16 @@ impl Online {
             topics.push(format!("{}/+", s.base));
             s.next = 0.0;
         }
+        topics.extend(self.rooms.iter().map(|r| r.0.clone()));
         self.subscribe(topics);
         self.next_here = 0.0;
+        self.next_rooms = self.t + 2.0;
         self.next_ping = self.t + 30.0;
         self.note("✉ online");
+        if let Some(code) = self.pending_join.take() {
+            self.enter(code, false);
+            self.note("⌂ knocking…");
+        }
     }
 
     pub fn disconnected(&mut self) {
@@ -619,13 +753,18 @@ impl Online {
                 Some(Msg::Hi { from, name, back }) => self.hi(from, name, back),
                 Some(Msg::Mail { from, name, text }) => {
                     // only from friends
-                    if self.book.friends.iter().any(|p| seal::norm(&p.code) == seal::norm(&from) && !p.waiting) {
-                        self.events.push(Event::Mail { from: name, text });
+                    if self.is_friend(&from) && self.not_flooded(0, 8) {
+                        self.events.push(Event::Mail { from: clean(&name, 32), text: clean(&text, 280) });
                     }
                 }
                 Some(Msg::Invite { from, name, village }) => {
-                    if self.book.friends.iter().any(|p| seal::norm(&p.code) == seal::norm(&from) && !p.waiting) {
-                        self.events.push(Event::Invited { name, code: village });
+                    if self.is_friend(&from) && self.not_flooded(0, 8) && seal::norm(&village).len() == 12 {
+                        self.events.push(Event::Invited { name: clean(&name, 32), code: seal::norm(&village) });
+                    }
+                }
+                Some(Msg::Ping { from, name }) => {
+                    if self.is_friend(&from) && self.not_flooded(0, 8) {
+                        self.events.push(Event::Pinged(clean(&name, 32)));
                     }
                 }
                 _ => {}
@@ -634,6 +773,9 @@ impl Online {
         }
         if let Some(i) = self.live.iter().position(|l| l.here_topic == topic) {
             if let Some(Msg::Here { name, on, village, at, card }) = parse(&self.live[i].seal) {
+                let name = clean(&name, 32);
+                let village = village.map(|v| seal::norm(&v)).filter(|v| v.len() == 12);
+                let card = card.map(Card::cleaned);
                 let fresh = now() - at < 180;
                 let was_on = self.live[i].here.as_ref().is_some_and(|h| h.on);
                 let on = on && fresh;
@@ -647,6 +789,22 @@ impl Online {
                 if on && !was_on && fresh {
                     let n = self.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
                     self.note(format!("● {n} is online"));
+                }
+            }
+            return;
+        }
+        if let Some(k) = self.rooms.iter().position(|r| r.0 == topic) {
+            if let Some(Msg::Group { id, name, text }) = parse(&self.rooms[k].1) {
+                let (name, text) = (clean(&name, 32), clean(&text, 280));
+                let t = self.t;
+                if let Some(seen) = self.room_seen.get_mut(k) {
+                    if seen.len() < 200 || seen.contains_key(&id) {
+                        seen.insert(id, (name.clone(), t));
+                    }
+                }
+                if id != self.id && !text.is_empty() && self.not_flooded(id, 6) {
+                    let group = self.book.groups.get(k).map(|g| g.name.clone()).unwrap_or_default();
+                    self.events.push(Event::GroupSaid { group, name, text });
                 }
             }
             return;
@@ -668,11 +826,32 @@ impl Online {
         let Some(m) = parse(&v.seal) else { return };
         let t = self.t;
         let me = self.id;
+        // (one sender flooding the village is shrugged off)
+        let sender = match &m {
+            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
+            Msg::Village { host, .. } => *host,
+            Msg::Crowd { id, .. } => *id,
+            _ => 0,
+        };
+        if sender != me && !self.not_flooded(sender, 60) {
+            return;
+        }
+        let admins_here = self.admins.clone();
         let v = self.village.as_mut().unwrap();
         match m {
+            // (room for a few dozen at most)
+            Msg::Me { id, .. } if id != me && !v.others.contains_key(&id) && v.others.len() >= 40 => {}
             Msg::Me { id, name, av } if id != me => {
+                let name = clean(&name, 32);
+                let av = av.cleaned();
                 let new = !v.others.contains_key(&id);
-                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host: false, card: None, wave: (0.0, 0) });
+                let host = v.host_id == Some(id);
+                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host, card: None, wave: (0.0, 0), vel: (0.0, 0.0) });
+                // (their speed: from where they were to where they are now)
+                let gap = (t - o.seen).max(0.05);
+                let v = ((av.x - o.av.x) / gap, (av.y - o.av.y) / gap);
+                let fast = v.0.abs() > 3.0 || v.1.abs() > 3.0;
+                o.vel = if !av.moving || fast || av.away != 0 || o.av.away != av.away { (0.0, 0.0) } else { (o.vel.0 * 0.4 + v.0 * 0.6, o.vel.1 * 0.4 + v.1 * 0.6) };
                 (o.name, o.av, o.seen) = (name.clone(), av, t);
                 if new {
                     self.note(format!("⌂ {name} is here"));
@@ -682,7 +861,7 @@ impl Online {
             }
             Msg::Card { id, card } if id != me => {
                 if let Some(o) = v.others.get_mut(&id) {
-                    o.card = Some(card);
+                    o.card = Some(card.cleaned());
                 }
             }
             Msg::Wave { id, to, what } if id != me && (to == 0 || to == me) => {
@@ -693,25 +872,44 @@ impl Online {
             }
             Msg::Ask { id, to, what, seed } if id != me && (to == 0 || to == me) => self.events.push(Event::Play { id, to, what, seed }),
             Msg::Answer { id, to, what, yes } if to == me => self.events.push(Event::Answer { id, what, yes }),
-            Msg::Table { id, game, seq, kind, state } if id != me => self.events.push(Event::Table { id, game, seq, kind, state }),
+            Msg::Table { id, game, seq, kind, state } if id != me && state.len() <= 8192 => self.events.push(Event::Table { id, game, seq, kind, state }),
             Msg::Up { id, game } if id != me => self.events.push(Event::Up { id, game }),
             Msg::Show { id, what, n, x } if id != me => self.events.push(Event::Show { id, what, n, x }),
             Msg::Tagged { id, it, left } if id != me => self.events.push(Event::Tagged { id, it, left }),
-            Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name, score, secs }),
-            Msg::Talk { id, text } if id != me => self.events.push(Event::Said { id, text }),
-            Msg::Throw { id, x, y, vx, vy } if id != me => self.events.push(Event::Threw { id, x, y, vx, vy }),
-            Msg::Village { host, name, seed } if host != me => {
+            Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
+            Msg::Talk { id, text } if id != me => self.events.push(Event::Said { id, text: clean(&text, 120) }),
+            Msg::Whisper { id, to, name, text } if id != me && to == me => self.events.push(Event::Whispered { id, name: clean(&name, 32), text: clean(&text, 280) }),
+            Msg::Crowd { id, data } if id != me && !v.host && v.host_id == Some(id) && data.len() <= 48 * 1024 => self.events.push(Event::Crowd(data)),
+            Msg::Want { id, key, value } if id != me && v.host && v.others.contains_key(&id) && key.len() <= 24 && value.len() <= 64 => {
+                let name = v.others.get(&id).map(|o| o.name.clone()).unwrap_or_default();
+                self.events.push(Event::Wanted { id, name, key, value, admin: admins_here.contains(&id) });
+            }
+            Msg::Throw { id, x, y, vx, vy } if id != me && [x, y, vx, vy].iter().all(|v| v.is_finite() && v.abs() < 1e4) => self.events.push(Event::Threw { id, x, y, vx, vy }),
+            // (the first host heard is the host: nobody else takes over)
+            Msg::Village { host, .. } if host != me && v.host_id.is_some_and(|h| h != host) => {}
+            Msg::Village { host, name, seed, rules, admins } if host != me => {
                 v.host_seen = t;
+                v.host_id = Some(host);
                 if let Some(o) = v.others.get_mut(&host) {
                     o.host = true;
+                }
+                if !v.host {
+                    let admin = admins.contains(&me);
+                    let rules = if rules.len() <= 4096 { rules } else { String::new() };
+                    if v.rules != (rules.clone(), admin) {
+                        v.rules = (rules.clone(), admin);
+                        self.events.push(Event::Rules { rules, admin });
+                    }
                 }
                 if !v.host && v.seed != Some(seed) {
                     v.seed = Some(seed);
                     self.events.push(Event::Village(seed));
-                    self.note(format!("⌂ into {name}'s village"));
+                    self.note(format!("⌂ into {}'s village", clean(&name, 32)));
                 }
             }
             Msg::Bye { id, host } if id != me => {
+                // (only the host closes the village)
+                let host = host && v.host_id == Some(id);
                 let name = v.others.remove(&id).map(|o| o.name).unwrap_or_default();
                 if host && !v.host {
                     self.leave_village();
@@ -724,7 +922,28 @@ impl Online {
         }
     }
 
+    fn is_friend(&self, code: &str) -> bool {
+        let code = seal::norm(code);
+        self.book.friends.iter().any(|p| seal::norm(&p.code) == code && !p.waiting)
+    }
+
+    /// Fewer than `max` messages from this sender (0: the mailbox) in the
+    /// last couple of seconds? (A flood is dropped, not shown.)
+    fn not_flooded(&mut self, from: u32, max: u32) -> bool {
+        let t = self.t;
+        if self.heard.len() > 400 {
+            self.heard.retain(|_, (at, _)| t - *at < 4.0);
+        }
+        let e = self.heard.entry(from).or_insert((t, 0));
+        if t - e.0 > 2.0 {
+            *e = (t, 0);
+        }
+        e.1 += 1;
+        e.1 <= max
+    }
+
     fn hi(&mut self, from: String, name: String, back: bool) {
+        let name = clean(&name, 32);
         let code = seal::norm(&from);
         if code.len() != 12 || code == seal::norm(&self.book.code) {
             return;
@@ -751,7 +970,7 @@ impl Online {
         if back {
             return;
         }
-        if !self.book.asking.iter().any(|p| seal::norm(&p.code) == code) {
+        if !self.book.asking.iter().any(|p| seal::norm(&p.code) == code) && self.book.asking.len() < 20 {
             self.book.asking.push(Pal { name: name.clone(), code, waiting: false });
             self.dirty = true;
             self.events.push(Event::Asked(name));
@@ -787,6 +1006,14 @@ impl Online {
                 }
             }
         }
+        // in each group's room: "I'm here", now and then
+        if t >= self.next_rooms && !self.rooms.is_empty() {
+            self.next_rooms = t + 60.0;
+            let m = Msg::Group { id: self.id, name: self.name.clone(), text: String::new() };
+            for (topic, seal) in self.rooms.clone() {
+                self.send(&topic, &seal, &m, false);
+            }
+        }
         if self.village.is_some() && t >= self.next_card {
             self.next_card = t + 30.0;
             let m = Msg::Card { id: self.id, card: self.card.clone() };
@@ -797,7 +1024,7 @@ impl Online {
         // the host: the village, every couple of seconds
         if host && t >= self.next_village {
             self.next_village = t + 2.0;
-            let m = Msg::Village { host: self.id, name: self.name.clone(), seed };
+            let m = Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone() };
             self.send(&topic, &seal, &m, false);
         }
         // where this villager is: often while it changes, now and then if not
@@ -820,20 +1047,29 @@ impl Online {
         if !v.host && v.seed.is_some() && t - v.host_seen > 20.0 {
             self.leave_village();
             self.note("⌂ the village's host has gone quiet: home again");
+        } else if !v.host && v.seed.is_none() && t > v.knock_until {
+            // knocked, and nobody came
+            self.leave_village();
+            self.note("⌂ nobody answered: that village isn't open right now (or the code's not right)");
         }
     }
 
     /// The others eased toward where they are (each frame).
     pub fn ease(&mut self, dt: f32) {
+        let t = self.t;
         if let Some(v) = &mut self.village {
-            let k = 1.0 - (-dt * 10.0).exp();
+            let k = 1.0 - (-dt * 12.0).exp();
             for o in v.others.values_mut() {
-                let far = (o.av.x - o.shown.0).abs() > 0.5 || (o.av.y - o.shown.1).abs() > 0.5;
+                // where they'll be by now, going on as they were (for a
+                // moment at most: a message late isn't a walk off forever)
+                let ahead = (t - o.seen).clamp(0.0, 0.3);
+                let (tx, ty) = (o.av.x + o.vel.0 * ahead, o.av.y + o.vel.1 * ahead);
+                let far = (tx - o.shown.0).abs() > 0.5 || (ty - o.shown.1).abs() > 0.5;
                 if far {
-                    o.shown = (o.av.x, o.av.y);
+                    o.shown = (tx, ty);
                 } else {
-                    o.shown.0 += (o.av.x - o.shown.0) * k;
-                    o.shown.1 += (o.av.y - o.shown.1) * k;
+                    o.shown.0 += (tx - o.shown.0) * k;
+                    o.shown.1 += (ty - o.shown.1) * k;
                 }
             }
         }
@@ -852,11 +1088,23 @@ impl Online {
         self.book.on = true;
         self.link = Link::On;
         let code = seal::new_code();
-        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new() };
+        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None };
         for (id, name, av, card) in others {
-            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0) });
+            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0) });
         }
         self.village = Some(v);
+    }
+
+    /// Previews: friends, each online or not (and with a village open).
+    pub fn pretend_friends(&mut self, friends: &[(&str, bool, bool)]) {
+        for (i, (name, on, village)) in friends.iter().enumerate() {
+            let code = format!("PRVW{i:04}ABCD");
+            self.book.friends.push(Pal { name: name.to_string(), code, waiting: false });
+            self.relive();
+            if let Some(l) = self.live.last_mut() {
+                l.here = Some(Here { on: *on, village: village.then(|| "ABCD-EFGH-JKLM".into()), card: None });
+            }
+        }
     }
 
     /// This villager's id in the shared village.
@@ -901,6 +1149,18 @@ impl Online {
         if self.link == Link::On {
             if self.village.is_some() {
                 self.leave_village();
+            }
+            // linked devices: this one's closed (they stop waiting on it)
+            if let Some(sy) = &self.sync {
+                if let Some((at, st)) = &sy.last {
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(st) {
+                        v["live"] = serde_json::Value::Bool(false);
+                        v["open"] = serde_json::Value::String(String::new());
+                        let (topic, seal) = (format!("{}/{}", sy.base, sy.dev), sy.seal.clone());
+                        let m = Msg::Sync { dev: sy.dev.clone(), at: *at, state: v.to_string() };
+                        self.send(&topic, &seal, &m, true);
+                    }
+                }
             }
             let m = self.here_msg(false);
             let (topic, seal) = (self.my_here.clone(), self.me.clone());
@@ -993,7 +1253,7 @@ impl Online {
             self.leave_village();
         }
         let topic = seal::topic("village", &code);
-        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new() });
+        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None });
         self.subscribe(vec![topic]);
         self.next_here = 0.0;
         self.next_village = 0.0;
@@ -1017,7 +1277,13 @@ impl Online {
             return Err("a village code is twelve letters and numbers");
         }
         if self.link != Link::On {
-            return Err("not online yet");
+            // (in as soon as the link's up)
+            if !self.book.on {
+                self.go_online(true);
+            }
+            self.pending_join = Some(code);
+            self.note("✉ going online first…");
+            return Ok(());
         }
         self.enter(code, false);
         self.note("⌂ knocking…");
@@ -1105,6 +1371,128 @@ impl Online {
         let m = Msg::Finish { id: self.id, name: self.name.clone(), score, secs };
         self.to_village(&m);
     }
+
+    /// A ping to friend `i` (a little tone at their end).
+    pub fn ping(&mut self, i: usize) -> bool {
+        let Some(p) = self.book.friends.get(i).filter(|p| !p.waiting) else { return false };
+        if self.link != Link::On {
+            return false;
+        }
+        let code = p.code.clone();
+        let m = Msg::Ping { from: self.book.code.clone(), name: self.name.clone() };
+        self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
+        true
+    }
+
+    /// Said to one person here only.
+    pub fn whisper(&mut self, to: u32, text: &str) {
+        let m = Msg::Whisper { id: self.id, to, name: self.name.clone(), text: text.chars().take(280).collect() };
+        self.to_village(&m);
+    }
+
+    /// A new group (its room's code), with this villager in it.
+    pub fn new_group(&mut self, name: &str) -> String {
+        let code = seal::new_code();
+        self.add_group(name, &code);
+        code
+    }
+
+    /// Into the group with this code (named as it's known here).
+    pub fn join_group(&mut self, name: &str, code: &str) -> Result<(), &'static str> {
+        if seal::norm(code).len() != 12 {
+            return Err("a group code is twelve letters and numbers");
+        }
+        if self.book.groups.iter().any(|g| seal::norm(&g.code) == seal::norm(code)) {
+            return Err("already in that group");
+        }
+        if self.book.groups.len() >= 12 {
+            return Err("that's a lot of groups: leave one first");
+        }
+        self.add_group(name, code);
+        Ok(())
+    }
+
+    fn add_group(&mut self, name: &str, code: &str) {
+        let name = clean(name, 24);
+        let name = if name.is_empty() { format!("group {}", self.book.groups.len() + 1) } else { name };
+        self.book.groups.push(Group { name, code: seal::norm(code) });
+        self.dirty = true;
+        self.regroup();
+        if let Some(r) = self.rooms.last().cloned() {
+            self.subscribe(vec![r.0.clone()]);
+            let m = Msg::Group { id: self.id, name: self.name.clone(), text: String::new() };
+            self.send(&r.0, &r.1, &m, false);
+        }
+    }
+
+    pub fn leave_group(&mut self, i: usize) {
+        if i < self.book.groups.len() {
+            let topic = self.rooms[i].0.clone();
+            self.book.groups.remove(i);
+            self.room_seen.remove(i);
+            self.dirty = true;
+            self.regroup();
+            if self.link == Link::On {
+                self.sub = self.sub.wrapping_add(1).max(1);
+                self.out.extend(mqtt::unsubscribe(self.sub, &[topic]));
+            }
+        }
+    }
+
+    /// Said in group `i`'s room.
+    pub fn group_say(&mut self, i: usize, text: &str) -> bool {
+        let Some((topic, seal)) = self.rooms.get(i).cloned() else { return false };
+        if self.link != Link::On {
+            return false;
+        }
+        let m = Msg::Group { id: self.id, name: self.name.clone(), text: text.chars().take(280).collect() };
+        self.send(&topic, &seal, &m, false);
+        true
+    }
+
+    /// Who's been heard in group `i` lately (names), this villager aside.
+    pub fn group_here(&self, i: usize) -> Vec<String> {
+        let t = self.t;
+        self.room_seen.get(i).map(|s| s.iter().filter(|(id, (_, at))| **id != self.id && t - at < 150.0).map(|(_, (n, _))| n.clone()).collect()).unwrap_or_default()
+    }
+
+    /// Hosting: who's out in the village (and what they said), for the
+    /// guests.
+    pub fn crowd(&mut self, data: String) {
+        if self.village.as_ref().is_some_and(|v| v.host && !v.others.is_empty()) {
+            let m = Msg::Crowd { id: self.id, data };
+            self.to_village(&m);
+        }
+    }
+
+    /// Hosting: the village's settings (for the guests), sent with the
+    /// village from now on.
+    pub fn set_rules(&mut self, rules: String) {
+        if rules != self.rules {
+            self.rules = rules;
+            self.next_village = self.next_village.min(self.t + 0.3);
+        }
+    }
+
+    /// Hosting: let someone here change the village's settings (or not).
+    pub fn set_admin(&mut self, id: u32, on: bool) {
+        self.admins.retain(|&a| a != id);
+        if on {
+            self.admins.push(id);
+        }
+        self.next_village = self.next_village.min(self.t + 0.1);
+    }
+
+    pub fn is_admin(&self, id: u32) -> bool {
+        self.admins.contains(&id)
+    }
+
+    /// A guest: asking the host to change a village setting.
+    pub fn want(&mut self, key: &str, value: &str) {
+        let m = Msg::Want { id: self.id, key: key.to_string(), value: value.to_string() };
+        self.to_village(&m);
+    }
+
 }
 
 #[cfg(test)]
@@ -1397,6 +1785,97 @@ pub(crate) mod tests {
         a.go_online(false);
         step(&mut a, &mut link, 777);
         std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    /// Pings, messages (made harmless), a group, whispers, the host's
+    /// village settings asked about and an admin's, a guest who can't close
+    /// the village, and a knock nobody answers.
+    #[test]
+    fn talking_groups_pings_and_the_hosts_settings() {
+        let mut relay = Relay::default();
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Robin");
+        let mut b = Online::new(Book { on: true, ..Default::default() }, "Sam");
+        a.connected();
+        b.connected();
+        relay.pump(&mut [&mut a, &mut b]);
+        a.add_friend(&b.code()).unwrap();
+        relay.pump(&mut [&mut a, &mut b]);
+        b.accept(0);
+        relay.pump(&mut [&mut a, &mut b]);
+        a.take_events();
+        b.take_events();
+        // a ping, and a message with something nasty in it (a terminal
+        // escape, new lines): it arrives harmless
+        assert!(a.ping(0));
+        assert!(a.mail(0, "hi\x1b[2J\nthere\u{202e}"));
+        relay.pump(&mut [&mut a, &mut b]);
+        let ev = b.take_events();
+        assert!(ev.contains(&Event::Pinged("Robin".into())), "{ev:?}");
+        assert!(ev.contains(&Event::Mail { from: "Robin".into(), text: "hi[2Jthere".into() }), "{ev:?}");
+        // a group: made, joined by its code, talked in
+        let code = a.new_group("carols");
+        b.join_group("", &code).unwrap();
+        assert!(b.join_group("", &code).is_err());
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(b.group_say(0, "anyone about?"));
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(a.take_events().contains(&Event::GroupSaid { group: "carols".into(), name: "Sam".into(), text: "anyone about?".into() }));
+        assert_eq!(a.group_here(0), vec!["Sam".to_string()]);
+        // the village: Robin hosts; Sam knocks and is let in
+        let vcode = a.host();
+        a.set_rules("{\"snow\":2.0}".into());
+        b.join(&vcode).unwrap();
+        relay.pump(&mut [&mut a, &mut b]);
+        a.tick(3.0, Some(Avatar::default()), 5);
+        b.tick(3.0, Some(Avatar::default()), 5);
+        relay.pump(&mut [&mut a, &mut b]);
+        let (ia, ib) = (a.my_id(), b.my_id());
+        let ev = b.take_events();
+        assert!(ev.contains(&Event::Rules { rules: "{\"snow\":2.0}".into(), admin: false }), "{ev:?}");
+        // whispered: only Sam hears
+        a.whisper(ib, "psst");
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(b.take_events().contains(&Event::Whispered { id: ia, name: "Robin".into(), text: "psst".into() }));
+        // Sam asks for more snow; then may change things himself
+        b.tick(3.5, Some(Avatar::default()), 5);
+        relay.pump(&mut [&mut a, &mut b]);
+        b.want("snow", "3.0");
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(a.take_events().contains(&Event::Wanted { id: ib, name: "Sam".into(), key: "snow".into(), value: "3.0".into(), admin: false }));
+        a.set_admin(ib, true);
+        a.tick(6.0, Some(Avatar::default()), 5);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(b.take_events().contains(&Event::Rules { rules: "{\"snow\":2.0}".into(), admin: true }));
+        b.want("snow", "3.0");
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(a.take_events().iter().any(|e| matches!(e, Event::Wanted { admin: true, .. })));
+        // who's out in the village: from the host only
+        a.crowd("{\"folk\":[]}".into());
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(b.take_events().contains(&Event::Crowd("{\"folk\":[]}".into())));
+        // only the host closes the village: a guest's "closing" is just a goodbye
+        let mut c = Online::new(Book { on: true, ..Default::default() }, "Mallory");
+        c.connected();
+        relay.pump(&mut [&mut a, &mut b, &mut c]);
+        c.join(&vcode).unwrap();
+        c.tick(7.0, Some(Avatar::default()), 5);
+        relay.pump(&mut [&mut a, &mut b, &mut c]);
+        let fake = Msg::Bye { id: c.my_id(), host: true };
+        c.to_village(&fake);
+        let fake = Msg::Crowd { id: c.my_id(), data: "{}".into() };
+        c.to_village(&fake);
+        relay.pump(&mut [&mut a, &mut b, &mut c]);
+        assert!(b.guest_seed().is_some(), "a guest closed someone else's village");
+        assert!(!b.take_events().iter().any(|e| matches!(e, Event::Crowd(_))), "a guest's crowd taken for the host's");
+        // knocking at a village nobody has open: told so, home again
+        let mut d = Online::new(Book { on: true, ..Default::default() }, "Kim");
+        d.connected();
+        relay.pump(&mut [&mut d]);
+        d.join("ZZZZ-ZZZZ-ZZZZ").unwrap();
+        d.take_events();
+        d.tick(20.0, Some(Avatar::default()), 5);
+        assert!(d.village().is_none());
+        assert!(d.take_events().iter().any(|e| matches!(e, Event::Note(n) if n.contains("nobody answered"))));
     }
 
     /// In a shared village: asked in by a friend, asked to play (and

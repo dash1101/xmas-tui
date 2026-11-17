@@ -350,6 +350,22 @@ impl Player {
         d.sound(Sfx::Pickup, self.centre(), 0.35);
     }
 
+    /// Carried along (in the balloon's basket): just there, feet at row
+    /// `y`, not falling, perched or climbing.
+    pub fn ride(&mut self, x: f32, y: f32) {
+        self.moving = (x - self.x).abs() > 1e-3;
+        self.x = x;
+        self.y = y;
+        self.fall = None;
+        self.perch = None;
+        self.climb = None;
+        self.held = None;
+        self.lie = None;
+        self.drop_to = None;
+        self.left = None;
+        self.depth = None;
+    }
+
     /// What was underfoot has gone (a window closed or moved off): down.
     pub fn lose_footing(&mut self) {
         self.perch = None;
@@ -699,7 +715,19 @@ impl Player {
             } else {
                 Pose::Stand
             };
-            let holding = if self.snowball && !throwing { Some(Rgb::hex(0xf2f6ff)) } else { self.hold.map(|(_, c)| c) };
+            use super::sprites::Hold;
+            let holding = if self.snowball && !throwing {
+                Some(Hold::Snowball)
+            } else {
+                self.hold.and_then(|(ch, _)| match ch {
+                    '◘' => Some(Hold::Cocoa),
+                    '◆' => Some(Hold::Gingerbread),
+                    'ʃ' => Some(Hold::CandyCane),
+                    '▾' => Some(Hold::Carrot),
+                    '⁘' => Some(Hold::Berries),
+                    _ => None,
+                })
+            };
             let look = Look { holding: if self.lantern { None } else { holding }, lantern: self.lantern, ..Self::look() };
             let light = 0.9 + 0.25 * f.day.max(0.0);
             let pic = sprites::person(&look, pose, self.dir, light);

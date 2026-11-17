@@ -99,6 +99,30 @@ pub extern "C" fn create(w: u32, h: u32, size: f32, seed: u32, local_ms: f64, le
     Box::into_raw(Box::new(Web { game, rgba: vec![255; n], text: vec![] }))
 }
 
+/// New settings (the config text in the scratch buffer), taken in where
+/// things stand: no new village, still online, still in a friend's.
+#[no_mangle]
+pub extern "C" fn configure(w: *mut Web, len: usize, size: f32) {
+    let w = unsafe { &mut *w };
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    if let Ok(cfg) = toml::from_str::<config::Config>(&text) {
+        w.game.configure(cfg, size);
+    }
+}
+
+/// The page resized (or a phone turned): the village keeps going.
+#[no_mangle]
+pub extern "C" fn resize(w: *mut Web, pw: u32, ph: u32, size: f32) {
+    let w = unsafe { &mut *w };
+    let (pw, ph) = (pw.max(64), ph.max(64));
+    w.game.resize(pw as usize, ph as usize, size);
+    w.rgba = vec![255; (pw * ph * 4) as usize];
+}
+
 #[no_mangle]
 pub extern "C" fn destroy(w: *mut Web) {
     if !w.is_null() {
@@ -143,6 +167,11 @@ pub extern "C" fn pan(w: *mut Web, dx: f32) {
 }
 
 /// A list into the text buffer ("title\nchoice\n…"): its length (0: none).
+fn put_str(w: &mut Web, s: &str) -> usize {
+    w.text = s.as_bytes().to_vec();
+    w.text.len()
+}
+
 fn put_list(w: &mut Web, m: Option<(String, Vec<String>)>) -> usize {
     let Some((title, items)) = m else { return 0 };
     let s = std::iter::once(title).chain(items).collect::<Vec<_>>().join("\n");
@@ -172,6 +201,20 @@ pub extern "C" fn pick(w: *mut Web, i: u32) -> usize {
     let w = unsafe { &mut *w };
     let m = w.game.pick(i as usize);
     put_list(w, m)
+}
+
+/// Where the villager is, in a few words (for the page's title).
+#[no_mangle]
+pub extern "C" fn place(w: *mut Web) -> usize {
+    let w = unsafe { &mut *w };
+    let p = w.game.place();
+    put_str(w, &p)
+}
+
+/// The talk line (/).
+#[no_mangle]
+pub extern "C" fn chat(w: *mut Web) {
+    unsafe { &mut *w }.game.chat();
 }
 
 /// The ☰ menu, in the village.

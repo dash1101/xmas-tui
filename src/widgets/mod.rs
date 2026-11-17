@@ -26,8 +26,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const PANEL: Bg = Bg::Mix(pal::UI_PANEL, 0.80);
-/// Clock, system, music, weather, map, visualizer; the shelves come after.
-pub const BUILTIN: usize = 6;
+/// Clock, system, music, weather, map, visualizer, friends; the shelves
+/// come after.
+pub const BUILTIN: usize = 7;
+
+pub use crate::scene::online::FriendsView;
+
+/// Where a click on the friends widget landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FriendsHit {
+    /// A friend (their place in the friends list).
+    Friend(usize),
+    Messages,
+    Talk,
+    Add,
+}
 
 /// Widget `i`'s saved position (fractions of the screen).
 pub fn pos_of(cfg: &Config, i: usize) -> Option<[f32; 2]> {
@@ -94,6 +107,8 @@ pub struct Widgets {
     /// Some while the system / music widget is off (see `Park`).
     sys_park: Option<Park>,
     music_park: Option<Park>,
+    /// What the media watcher said last (see `media_playing`).
+    media_seen: std::cell::Cell<bool>,
     weather: Option<Arc<Mutex<Weather>>>,
     weather_gen: Arc<AtomicU64>,
     viz: Option<Arc<Mutex<viz::Spectrum>>>,
@@ -112,6 +127,10 @@ pub struct Widgets {
     pub rects: Vec<Option<Rect>>,
     /// The village map's data for this frame (from the scene).
     pub map: Option<crate::scene::MiniMap>,
+    /// The friends widget's view (None: not online, so it isn't shown).
+    pub friends: Option<FriendsView>,
+    /// What the pointer's over in it.
+    pub friends_hover: Option<FriendsHit>,
     pub hover: Option<usize>,
     pub dragging: Option<usize>,
 }
@@ -124,6 +143,7 @@ impl Widgets {
             music: None,
             sys_park: None,
             music_park: None,
+            media_seen: std::cell::Cell::new(false),
             weather: None,
             weather_gen: Arc::new(AtomicU64::new(0)),
             viz: None,
@@ -137,6 +157,8 @@ impl Widgets {
             ext_drag: None,
             rects: vec![None; BUILTIN],
             map: None,
+            friends: None,
+            friends_hover: None,
             hover: None,
             dragging: None,
         };
@@ -148,8 +170,24 @@ impl Widgets {
     /// whose widget was switched off.
     /// Some other app is playing media right now (per MPRIS / the Windows
     /// media sessions). Our own synthesized sound isn't a media session.
+    ///
+    /// Never waits: while the watcher is parked (see `Park`) its mutex is
+    /// held for good, and a plain lock here would stop the whole wallpaper
+    /// (sound off with the now-playing widget off did exactly that).
     pub fn media_playing(&self) -> bool {
-        self.music.as_ref().and_then(|m| m.lock().ok().map(|g| g.present && g.playing)).unwrap_or(false)
+        if self.music_park.is_some() {
+            return false;
+        }
+        match self.music.as_ref().map(|m| m.try_lock()) {
+            Some(Ok(g)) => {
+                let on = g.present && g.playing;
+                self.media_seen.set(on);
+                on
+            }
+            // (busy this instant: what it said last)
+            Some(Err(_)) => self.media_seen.get(),
+            None => false,
+        }
     }
 
     fn ensure_threads(&mut self, weather_changed: bool) {
@@ -292,6 +330,16 @@ impl Widgets {
         self.ensure_threads(wx_changed);
     }
 
+    /// A click on the friends widget (not its title, which moves it).
+    pub fn friends_hit(&self, x: i32, y: i32) -> Option<FriendsHit> {
+        let r = self.rects.get(6).copied().flatten()?;
+        let v = self.friends.as_ref()?;
+        if !r.contains(x, y) || y == r.y || x == r.x || x == r.x + r.w - 1 {
+            return None;
+        }
+        friends_rows(r, v).into_iter().find(|(yy, _)| *yy == y).map(|(_, h)| h)
+    }
+
     pub fn enabled(&self, i: usize) -> bool {
         if i >= BUILTIN {
             return i - BUILTIN < self.cfg.shelves.len();
@@ -302,7 +350,8 @@ impl Widgets {
             2 => self.cfg.widgets.music,
             3 => self.cfg.widgets.weather,
             4 => self.cfg.widgets.map && self.map.as_ref().map(|m| m.ww > m.vw + 1.0).unwrap_or(false),
-            _ => self.cfg.widgets.visualizer,
+            5 => self.cfg.widgets.visualizer,
+            _ => self.cfg.widgets.friends && self.friends.is_some(),
         }
     }
 
@@ -345,6 +394,8 @@ impl Widgets {
             }
             // under the weather
             5 => (w - 63, 18),
+            // under the system widget
+            6 => (3, 24),
             // shelves: in the middle, each a little below the last
             _ => {
                 let (sw, _) = self.size(i, w);
@@ -459,11 +510,11 @@ impl Widgets {
                     self.draw_clock(f, r.x, r.y, t);
                 }
                 1 => {
-                    let s = self.sys.as_ref().and_then(|s| s.lock().ok().map(|g| g.clone())).unwrap_or_default();
+                    let s = self.sys.as_ref().filter(|_| self.sys_park.is_none()).and_then(|s| s.lock().ok().map(|g| g.clone())).unwrap_or_default();
                     draw_system(f, r, &s, t);
                 }
                 2 => {
-                    let m = self.music.as_ref().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default();
+                    let m = self.music.as_ref().filter(|_| self.music_park.is_none()).and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default();
                     draw_music(f, r, &m, t);
                 }
                 3 => {
@@ -473,6 +524,11 @@ impl Widgets {
                 4 => {
                     if let Some(m) = &self.map {
                         draw_map(f, r, m, t);
+                    }
+                }
+                6 => {
+                    if let Some(v) = &self.friends {
+                        draw_friends(f, r, v, self.friends_hover, t);
                     }
                 }
                 _ if i >= BUILTIN => {
@@ -617,6 +673,7 @@ fn resizable(i: usize) -> (&'static str, (i32, i32), (i32, i32)) {
         1 => ("system", (54, 9), (46, 9)),
         2 => ("music", (60, 6), (30, 6)),
         3 => ("weather", (60, 8), (44, 8)),
+        6 => ("friends", (40, 10), (28, 6)),
         _ => ("visualizer", (60, 8), (28, 6)),
     }
 }
@@ -984,6 +1041,107 @@ fn draw_countdown(f: &mut Frame, x: i32, y: i32, t: f32) {
 }
 
 // ---------------------------------------------------------------------------
+
+/// The friends widget's rows: (row, what a click there does). The title
+/// row is left alone (it picks the widget up).
+fn friends_rows(r: Rect, v: &FriendsView) -> Vec<(i32, FriendsHit)> {
+    let mut out = vec![];
+    let inner = (r.h - 2).max(0);
+    // the messages take the bottom rows (up to three), the friends the rest
+    let lines = (v.lines.len() as i32).min(3).min(inner / 3);
+    let rows = (inner - lines - 1 - (lines > 0) as i32).max(0);
+    let mut y = r.y + 1;
+    for (_, _, i) in v.friends.iter().take(rows as usize) {
+        out.push((y, FriendsHit::Friend(*i)));
+        y += 1;
+    }
+    if (v.friends.len() as i32) < rows {
+        out.push((y, FriendsHit::Add));
+    }
+    // (a rule, then the lines, just above the talk line)
+    let y = r.y + r.h - 3 - lines;
+    if lines > 0 {
+        for k in 0..=lines {
+            out.push((y + k, FriendsHit::Messages));
+        }
+    }
+    out.push((r.y + r.h - 2, FriendsHit::Talk));
+    out
+}
+
+/// Friends & messages: who's about (● online, ⌂ a village open), the last
+/// few lines said, and a line to talk.
+fn draw_friends(f: &mut Frame, r: Rect, v: &FriendsView, hover: Option<FriendsHit>, t: f32) {
+    let title = match (v.unread, v.here) {
+        (0, 0) => "friends & messages".to_string(),
+        (0, h) => format!("friends · {h} here"),
+        (n, _) => format!("friends · {n} new"),
+    };
+    panel(f, r.x, r.y, r.w, r.h, '✉', &title);
+    if !v.connected {
+        txt(f, r.w + r.x - 13, r.y, " connecting ", pal::UI_DIM);
+    }
+    let width = (r.w - 4).max(4) as usize;
+    let hot = |h: FriendsHit| hover == Some(h);
+    let rows = friends_rows(r, v);
+    let mut shown_lines = false;
+    for (y, what) in &rows {
+        let bg = if hot(*what) { Bg::Mix(Rgb::hex(0x34406a), 0.9) } else { PANEL };
+        match *what {
+            FriendsHit::Friend(i) => {
+                let Some((name, state, _)) = v.friends.iter().find(|fr| fr.2 == i) else { continue };
+                let (mark, c) = match state {
+                    1 => ('●', Rgb::hex(0x9be08a)),
+                    2 => ('⌂', Rgb::hex(0xffd36b)),
+                    3 => ('…', pal::UI_DIM),
+                    _ => ('○', pal::UI_DIM),
+                };
+                for x in r.x + 1..r.x + r.w - 1 {
+                    f.put_g(x, *y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+                }
+                f.put_g(r.x + 2, *y, Glyph::new(mark, c).bg(bg).lit(0.0));
+                let what = match state {
+                    1 => "online",
+                    2 => "village open",
+                    3 => "asked",
+                    _ => "",
+                };
+                let name = clip(name, width.saturating_sub(what.len() + 4));
+                f.text(r.x + 4, *y, &name, if *state == 0 { pal::UI_DIM } else { pal::UI_TEXT }, bg, 0.0);
+                f.text(r.x + r.w - 2 - what.chars().count() as i32, *y, what, pal::UI_DIM, bg, 0.0);
+                if hot(FriendsHit::Friend(i)) {
+                    f.text(r.x + r.w - 4, *y, " ▸", Rgb::hex(0xffd36b), bg, 0.0);
+                }
+            }
+            FriendsHit::Add => {
+                let s = if v.friends.is_empty() { "✚ add a friend (their code)" } else { "✚ add a friend" };
+                f.text(r.x + 2, *y, &clip(s, width), if hot(FriendsHit::Add) { Rgb::hex(0xffd36b) } else { pal::UI_DIM }, bg, 0.0);
+            }
+            FriendsHit::Messages if !shown_lines => {
+                shown_lines = true;
+                let room = rows.iter().filter(|(_, h)| *h == FriendsHit::Messages).count().saturating_sub(1);
+                let lines: Vec<&String> = v.lines.iter().rev().take(room).collect::<Vec<_>>().into_iter().rev().collect();
+                let y0 = rows.iter().find(|(_, h)| *h == FriendsHit::Messages).map(|(y, _)| *y).unwrap_or(*y);
+                let rule: String = "┄".repeat(width);
+                f.text(r.x + 2, y0, &rule, pal::UI_BORDER, PANEL, 0.0);
+                for (k, l) in lines.iter().enumerate() {
+                    let yy = y0 + 1 + k as i32;
+                    let lbg = if hot(FriendsHit::Messages) { Bg::Mix(Rgb::hex(0x34406a), 0.9) } else { PANEL };
+                    for x in r.x + 1..r.x + r.w - 1 {
+                        f.put_g(x, yy, Glyph::new(' ', pal::UI_TEXT).bg(lbg).lit(0.0));
+                    }
+                    f.text(r.x + 2, yy, &clip(l, width), pal::UI_TEXT * 0.9, lbg, 0.0);
+                }
+            }
+            FriendsHit::Messages => {}
+            FriendsHit::Talk => {
+                let blink = (t * 1.5) as i32 % 2 == 0 && hot(FriendsHit::Talk);
+                let s = if v.unread > 0 { format!("✎ talk (/) · ✉ {} new", v.unread) } else { "✎ talk (/) · @name: to one".to_string() };
+                f.text(r.x + 2, *y, &clip(&s, width), if hot(FriendsHit::Talk) || blink { Rgb::hex(0xffd36b) } else { pal::UI_DIM }, bg, 0.0);
+            }
+        }
+    }
+}
 
 fn panel(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, icon: char, title: &str) {
     let b = pal::UI_BORDER;

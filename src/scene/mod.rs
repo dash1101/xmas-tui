@@ -15,6 +15,7 @@ pub mod lines;
 pub mod player;
 pub mod sky;
 pub mod autopilot;
+pub mod balloon;
 pub mod games;
 pub mod play;
 pub mod online;
@@ -139,6 +140,17 @@ pub struct Scene {
     carol: Option<play::Carol>,
     /// Santa, clicked out of his sleigh and on the run; the clicks on him.
     runaway: Option<play::Runaway>,
+    /// The hot-air balloon (now and then; see `balloon.rs`), when the next
+    /// one comes, and whether it's been called for the villager up on the
+    /// big tree's star already (once per climb).
+    balloon: Option<balloon::Balloon>,
+    balloon_next: f32,
+    balloon_star: bool,
+    /// The UI's own layer (its size in its cells, and how much bigger they
+    /// are than the village's), when the front-end draws one: the scene's
+    /// panels go there (see `draw_ui`), not over the village.
+    pub ui_wh: Option<(i32, i32)>,
+    pub ui_k: f32,
     santa_clicks: Vec<f32>,
     /// The pet's being carried about with the pointer (and has been moved).
     pet_drag: Option<bool>,
@@ -684,6 +696,11 @@ impl Scene {
             tag: None,
             carol: None,
             runaway: None,
+            balloon: None,
+            balloon_next: 900.0,
+            balloon_star: false,
+            ui_wh: None,
+            ui_k: 1.0,
             santa_clicks: vec![],
             pet_drag: None,
             table: None,
@@ -872,6 +889,28 @@ impl Scene {
             }
         }
         (title, items)
+    }
+
+    /// A tap (a phone) at screen cell (sx, sy): on someone or something
+    /// with things to do (a friend online, a villager, an animal, the
+    /// villager themself, a house, the cocoa cabin, a snowman or igloo),
+    /// so it opens their menu at once, rather than only a long press.
+    #[cfg_attr(not(any(target_arch = "wasm32", target_os = "android")), allow(dead_code))]
+    pub fn tap_opens_menu(&self, sx: i32, sy: i32) -> bool {
+        if self.inside.is_some() || self.trip.is_some() || self.look.is_some() || self.convo.is_some() {
+            return false;
+        }
+        let (x, y) = (sx + self.cam_i(), sy - self.oy_i());
+        if y < 0 {
+            return false;
+        }
+        let t = self.now();
+        self.player.as_ref().is_some_and(|p| p.contains(x, y))
+            || self.other_at(x, y).is_some()
+            || self.critters.id_at(x, y, t).is_some()
+            || self.shop.as_ref().is_some_and(|s| s.contains(x, y))
+            || self.village.houses.iter().any(|h| h.contains(x, y))
+            || self.builds.hit(x, y).is_some()
     }
 
     fn menu_at_inner(&self, sx: i32, sy: i32) -> (String, Vec<(String, Do)>) {
@@ -1704,7 +1743,7 @@ impl Scene {
     /// A click on the dialogue box (true if it was on it): on an answer
     /// picks it; anywhere else on the box picks the box up to move it.
     pub fn convo_click(&mut self, x: i32, y: i32) -> bool {
-        let (w, h) = (self.w as i32, self.h as i32);
+        let (w, h) = self.ui_wh.unwrap_or((self.w as i32, self.h as i32));
         let Some(c) = &self.convo else { return false };
         if !c.contains(x, y, w, h) {
             return false;
@@ -1753,7 +1792,7 @@ impl Scene {
     /// Moving the dialogue box (it stays put for the next conversation too).
     pub fn convo_drag_to(&mut self, x: i32, y: i32) {
         let (Some((ox, oy)), Some(c)) = (self.convo_drag, &mut self.convo) else { return };
-        let (w, h) = (self.w as i32, self.h as i32);
+        let (w, h) = self.ui_wh.unwrap_or((self.w as i32, self.h as i32));
         c.pos = Some((x - ox, y - oy));
         // stored clamped, so it never drifts off screen
         let at = c.origin(w, h);
@@ -1768,7 +1807,7 @@ impl Scene {
     /// Whether (x, y) is on the dialogue box but not on an answer (it can be
     /// picked up there).
     pub fn convo_grip(&self, x: i32, y: i32) -> bool {
-        let (w, h) = (self.w as i32, self.h as i32);
+        let (w, h) = self.ui_wh.unwrap_or((self.w as i32, self.h as i32));
         self.convo.as_ref().is_some_and(|c| c.contains(x, y, w, h) && c.option_at(x, y, w, h).is_none())
     }
 
@@ -1844,7 +1883,7 @@ impl Scene {
 
     /// The pointer's over the dialogue box (which answer, for the highlight).
     pub fn convo_hover(&mut self, x: i32, y: i32) -> bool {
-        let (w, h) = (self.w as i32, self.h as i32);
+        let (w, h) = self.ui_wh.unwrap_or((self.w as i32, self.h as i32));
         match &self.convo {
             Some(c) if c.contains(x, y, w, h) => {
                 self.convo_hover = c.option_at(x, y, w, h);
@@ -2566,6 +2605,10 @@ impl Scene {
             tr.jump(true);
             return;
         }
+        // (up in the balloon: no jumping out of the basket)
+        if self.balloon.as_ref().is_some_and(|b| b.aboard) {
+            return;
+        }
         if let Some(p) = &mut self.player {
             p.jump(t, &self.ledges, &mut self.director);
         }
@@ -2630,6 +2673,9 @@ impl Scene {
         }
         if let Some(Focus::Build(i, ..)) = self.focus {
             self.work_on(i, t);
+            return;
+        }
+        if self.inside.is_none() && self.balloon_e(t) {
             return;
         }
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
@@ -2889,6 +2935,31 @@ impl Scene {
                     }
                 }
             }
+            return;
+        }
+        // or: the hot-air balloon, come down by the villager (aboard: up
+        // over the village in it)
+        if what == "balloon" || what == "balloon-up" {
+            if let Some(p) = &self.player {
+                let (x, y) = (p.centre() + 6.0, p.y);
+                let mut b = balloon::Balloon::coming(x, y, x, y, 0.0, 3);
+                for _ in 0..30 {
+                    b.update(0.1, 1.0, (0.0, 0.0), y, -40.0, self.ww as f32);
+                }
+                if what == "balloon-up" {
+                    b.board();
+                    for k in 0..40 {
+                        b.update(0.1, 1.0 + k as f32 * 0.1, (0.3, -1.0), y, -40.0, self.ww as f32);
+                    }
+                }
+                self.balloon = Some(b);
+            }
+            // folk out with what they carry
+            for k in 0..6 {
+                let x = self.player.as_ref().map(|p| p.centre()).unwrap_or(40.0) - 30.0 + k as f32 * 9.0;
+                self.critters.spawn_demo(if k % 3 == 2 { events::Kind::Kid } else { events::Kind::Walker }, x, self.now());
+            }
+            self.critters.demo_carry();
             return;
         }
         // or: Santa's sleigh crossing the sky
@@ -3958,7 +4029,11 @@ impl Scene {
             }
             let (g, h) = (&self.ctx.ground_row, self.h as f32);
             let lo = |x: f32| (g[(x.max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
-            p.update(dt, t, mv, lo, self.ww as f32, h, &self.ledges, &mut self.director);
+            match self.balloon.as_ref().filter(|b| b.aboard) {
+                // up in the balloon's basket: carried along with it
+                Some(b) => p.ride(b.x - 1.0, b.y - 0.8),
+                None => p.update(dt, t, mv, lo, self.ww as f32, h, &self.ledges, &mut self.director),
+            }
             // up on a widget: it's fixed to the screen, so the view holds still
             let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.on_screen());
             // the camera keeps the player comfortably in view as they go
@@ -4026,6 +4101,7 @@ impl Scene {
         self.fight_results(t);
         self.update_table(t);
         self.update_runaway(dt, t);
+        self.update_balloon(dt, t);
         // the pet out and about: after an animal now and then (a dog chases,
         // a cat stalks, a bunny hops along with rabbits), or playing with
         // another pet
@@ -4258,7 +4334,12 @@ impl Scene {
         let cam = self.cam;
         let cur = self.cursor.filter(|_| t - self.cursor_seen < 15.0).map(|(x, y)| (x + cam, y - lift, self.cursor_vel.0, self.cursor_vel.1));
         let snowman = self.village.snowmen.first().map(village::snowman_head);
+        self.critters.tree = self.trees.iter().find(|tr| tr.is_big()).map(|tr| (tr.cx as f32, tr.hw_base as f32 + 6.0));
         self.critters.update(dt, t, &self.ctx, &mut self.director, &mut self.lines, cur, snowman);
+        // presents folk brought, under the tree
+        for (_, x, paper) in self.critters.take_placed() {
+            self.present_placed(x, paper, t);
+        }
         self.update_builds(dt, t);
         // speech bubbles follow their speakers (the player included)
         let mut who = self.critters.anchors();
@@ -4647,8 +4728,27 @@ impl Scene {
         }
     }
 
+    /// A present put under the big tree by someone, at column `x`.
+    fn present_placed(&mut self, x: f32, paper: u8, t: f32) {
+        let Some(tree) = self.trees.iter().find(|tr| tr.is_big()) else { return };
+        if self.presents.len() > 90 {
+            return;
+        }
+        let base = tree.base();
+        let u = (self.h as f32 / 75.0).clamp(0.45, 1.3);
+        let (w, h) = (((self.rng.int(5, 9) as f32 * u).round() as i32).max(4), ((self.rng.int(2, 4) as f32 * u).round() as i32).max(2));
+        let b = base + self.rng.int(0, 4);
+        let mut p = Present::new(x.round() as i32 - w / 2, b, w, h, &mut self.rng);
+        let (paper_c, ribbon) = sprites::PAPER[paper as usize % sprites::PAPER.len()];
+        p.recolour(Rgb::hex(paper_c), Rgb::hex(ribbon));
+        p.jiggle_until = t + 1.0;
+        self.presents.push(p);
+        self.presents.sort_by_key(|p| p.base_row());
+        self.director.sound(Sfx::Present, x, 0.4);
+    }
+
     /// A new present appears under the big tree (from Santa).
-    fn present_from_santa(&mut self, t: f32) {
+    pub(super) fn present_from_santa(&mut self, t: f32) {
         let Some(tree) = self.trees.iter().find(|tr| tr.is_big()) else { return };
         if self.presents.len() > 90 {
             return;
@@ -4671,7 +4771,9 @@ impl Scene {
     #[cfg(test)]
     pub fn draw(&self, f: &mut Frame, app_t: f32) {
         self.draw_world(f, app_t);
+        let full = f.ui_in();
         self.draw_overlay(f);
+        f.ui_out(full);
     }
 
     /// Draw everything, the scene magnified by `zoom` (times a room's own
@@ -4698,7 +4800,9 @@ impl Scene {
         }
         self.zoomed.set(false);
         self.draw_iris(f);
+        let full = f.ui_in();
         self.draw_overlay(f);
+        f.ui_out(full);
         xf
     }
 
@@ -4733,18 +4837,40 @@ impl Scene {
         let t = self.now();
         f.ox = 0;
         f.oy = 0;
+        // (where it's in the village: the cocoa cabin's menu over its
+        // counter, the room round a window's view)
         if self.inside.is_some() && self.look.is_none() {
             if let (Some(s), Some((cx, row))) = (self.shop.as_ref().filter(|s| s.open), self.inside.as_ref().and_then(|inn| inn.counter_at())) {
                 s.draw_menu_at(f, &self.pockets, cx, row - 11, self.ui_look);
             }
+        }
+        if let (Some(inn), Some(look)) = (&self.inside, &self.look) {
+            inn.draw_window_frame(f, look, t, self.cfg.glow);
+        }
+        if self.ui_wh.is_none() {
+            self.draw_ui(f);
+        }
+    }
+
+    /// The scene's own panels over it: the trip's keys and caption, the
+    /// dialogue box, the stats and pockets, what's in hand (on the UI's
+    /// layer, when it has one of its own: see `ui_wh`).
+    pub fn draw_ui(&self, f: &mut Frame) {
+        let t = self.now();
+        f.ox = 0;
+        f.oy = 0;
+        // away on a trip: its keys, caption, [E] and scores, clear of the
+        // widgets
+        if let Some(tr) = &self.trip {
+            let k = self.ui_k.max(1.0);
+            let avoid: Vec<(i32, i32, i32, i32)> = self.widget_ledges.iter().map(|&(_, x, y, w, h)| ((x as f32 / k) as i32, (y as f32 / k) as i32, (w as f32 / k).ceil() as i32, (h as f32 / k).ceil() as i32)).collect();
+            tr.draw_ui(f, t, &avoid);
+        }
+        if self.inside.is_some() && self.look.is_none() {
             if let Some(c) = &self.convo {
                 c.draw(f, self.convo_hover, self.ui_look);
             }
             return;
-        }
-        // looking out of a window: the room around the view
-        if let (Some(inn), Some(look)) = (&self.inside, &self.look) {
-            inn.draw_window_frame(f, look, t, self.cfg.glow);
         }
         if let Some(c) = &self.convo {
             c.draw(f, self.convo_hover, self.ui_look);
@@ -4897,11 +5023,20 @@ impl Scene {
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
             }
+            if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
+                b.draw_back(f, t, sprite_k(self.h));
+            }
             if !self.in_igloo {
                 p.draw(f, t, glow, None);
             }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
                 pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
+            }
+            if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
+                b.draw_front(f, sprite_k(self.h));
+                if b.reachable(p.centre(), p.y) && self.convo.is_none() {
+                    player::Player::draw_prompt(f, b.x.round() as i32, (b.y - 4.0 * sprite_k(self.h)).round() as i32, 'E', t);
+                }
             }
         }
         if self.inside.is_none() {
@@ -5658,6 +5793,39 @@ mod tests {
     /// Santa, clicked out of his sleigh, can't be caught however hard
     /// he's chased, and runs clean off the screen.
     #[test]
+    fn santa_slips_on_the_ice_and_is_caught() {
+        let mut s = walker_scene();
+        let t = s.now();
+        s.sleigh.trigger(t);
+        for _ in 0..2000 {
+            s.update(DT, 0.0);
+            if s.sleigh.santa_at(s.now()).is_some_and(|(x, _)| x > 10.0 && x < s.w as f32 - 30.0) {
+                break;
+            }
+        }
+        let t = s.now();
+        for k in 0..5 {
+            s.santa_spammed(t + k as f32 * 0.1);
+        }
+        if let Some(r) = &mut s.runaway {
+            r.slips = true;
+        }
+        // right on his heels the whole way
+        for _ in 0..(40.0 / DT) as usize {
+            if let (Some(r), Some(p)) = (&s.runaway, &mut s.player) {
+                p.sprint = true;
+                p.x = r.x - 1.0 - r.dir * 1.2;
+                s.mv = (r.dir, 0.0);
+            }
+            s.update(DT, 0.0);
+            if s.runaway.is_none() {
+                break;
+            }
+        }
+        assert_eq!(s.pockets.santa_caught, 1, "slipped on the ice, and still got away");
+    }
+
+    #[test]
     fn santa_clicked_out_of_his_sleigh_runs_off_uncaught() {
         let mut s = walker_scene();
         let t = s.now();
@@ -5675,6 +5843,10 @@ mod tests {
         }
         assert!(s.runaway.is_some(), "didn't fall out");
         assert!(s.sleigh.santa_at(t).is_none(), "still in his seat");
+        // (no ice on his way this time)
+        if let Some(r) = &mut s.runaway {
+            r.slips = false;
+        }
         let mut closest = f32::MAX;
         let mut ran = false;
         for _ in 0..(60.0 / DT) as usize {
@@ -5758,6 +5930,37 @@ mod tests {
 
     /// On autopilot, a knock at a neighbour's: in, a game with whoever's
     /// home, played out (or called off), and out again.
+    #[test]
+    fn a_guest_sees_the_hosts_folk() {
+        let cfg = crate::config::SceneCfg::default();
+        let mut host = Scene::new(200, 56, 7, &cfg);
+        let mut guest = Scene::new(150, 42, 7, &cfg);
+        let mut t = 0.0;
+        for _ in 0..400 {
+            host.update(0.1, t);
+            t += 0.1;
+        }
+        let (ax, ay, u) = host.anchor;
+        let folk = host.critters.crowd(t, |x, y| ((x - ax) / u, (y - ay) / u));
+        assert!(!folk.is_empty(), "nobody out in the host's village");
+        let (gx, gy, gu) = guest.anchor;
+        // (as it comes from the host, a few times a second)
+        let data = serde_json::json!({ "folk": folk, "said": [[folk[0].id, "lovely evening", 3.0]] }).to_string();
+        for _ in 0..50 {
+            guest.on_event(crate::net::Event::Crowd(data.clone()), t);
+            guest.update(0.1, t);
+            t += 0.1;
+        }
+        // the same folk, nobody else, where the host has them (in the
+        // guest's own units)
+        let seen = guest.critters.crowd(t, |x, y| ((x - gx) / gu, (y - gy) / gu));
+        assert_eq!(seen.len(), folk.len());
+        for (a, b) in folk.iter().zip(&seen) {
+            assert_eq!((a.id, a.k), (b.id, b.k));
+            assert!((a.x - b.x).abs() <= 120, "{} vs {}", a.x, b.x);
+        }
+    }
+
     #[test]
     fn autopilot_plays_a_neighbour_at_their_table() {
         let mut s = walker_scene();

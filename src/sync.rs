@@ -42,6 +42,11 @@ pub struct Linked {
     /// The villager as last sent or taken (a difference: changed here).
     pub last_you: Option<You>,
     pub last_seed: u32,
+    /// Running now (the others hear so), and the village open here.
+    #[serde(skip)]
+    pub live: bool,
+    #[serde(skip)]
+    pub open: String,
 }
 
 /// Another device's side, as last heard.
@@ -54,6 +59,20 @@ pub struct Theirs {
     pub heard: i64,
     /// Their share of the counters (JSON).
     pub mine: String,
+    /// Running (not closed), and the village they have open (its code).
+    pub live: bool,
+    pub open: String,
+}
+
+/// Two linked devices open at once: what this one should do so they're in
+/// one village (see `Linked::together`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Together {
+    /// Go into the other device's open village (its code, its name).
+    Join(String, String),
+    /// Open this one's village (the other comes in).
+    Host,
+    Alone,
 }
 
 /// What goes to the other devices.
@@ -70,6 +89,11 @@ struct State {
     asking: Vec<Pal>,
     gone: Vec<String>,
     mine: String,
+    /// Running, and the village open here (its code); a beat that changes
+    /// every couple of minutes, so the others hear this one's still about.
+    live: bool,
+    open: String,
+    beat: i64,
 }
 
 /// What a word from another device changed here.
@@ -265,6 +289,9 @@ impl Linked {
             asking: book.asking.clone(),
             gone: self.gone.clone(),
             mine: serde_json::to_string(&share(pockets, &self.others)).unwrap_or_default(),
+            live: self.live,
+            open: self.open.clone(),
+            beat: now / 120,
         };
         serde_json::to_string(&st).unwrap_or_default()
     }
@@ -275,6 +302,19 @@ impl Linked {
         if !self.gone.contains(&c) {
             self.gone.push(c);
         }
+    }
+
+    /// Another of this villager's devices open now too: into its village
+    /// if it has one open; else the one first in line opens theirs.
+    pub fn together(&self, now: i64) -> Together {
+        let live: Vec<(&String, &Theirs)> = self.others.iter().filter(|(_, t)| t.live && now - t.heard < 330).collect();
+        if let Some((_, t)) = live.iter().find(|(_, t)| t.open.len() == 12) {
+            return Together::Join(t.open.clone(), t.label.clone());
+        }
+        if !live.is_empty() && live.iter().all(|(d, _)| self.dev.as_str() < d.as_str()) {
+            return Together::Host;
+        }
+        Together::Alone
     }
 
     /// The others: (name, seconds since heard from).
@@ -360,7 +400,7 @@ impl Linked {
         if old != new {
             out.pockets = Some(take_share(pockets, &old, &new));
         }
-        self.others.insert(dev.to_string(), Theirs { label: st.label.clone(), at, heard: now, mine: st.mine.clone() });
+        self.others.insert(dev.to_string(), Theirs { label: st.label.clone(), at, heard: now, mine: st.mine.clone(), live: st.live, open: crate::net::seal::norm(&st.open) });
     }
 }
 
@@ -370,6 +410,30 @@ mod tests {
 
     fn you(name: &str) -> You {
         You { name: name.into(), ..Default::default() }
+    }
+
+    /// Two devices open at once: the first in line opens its village, the
+    /// other goes in; one closed (or quiet a while) is left alone.
+    #[test]
+    fn two_devices_open_at_once_share_a_village() {
+        let (book, pk) = (Book::default(), Pockets::default());
+        let mut a = Linked::new("ABCD-EFGH-JKLM", false);
+        let mut b = Linked::new("ABCD-EFGH-JKLM", false);
+        (a.dev, b.dev) = ("aaa".into(), "bbb".into());
+        (a.live, b.live) = (true, true);
+        let now = 1_000_000;
+        let sa = a.state(&you("Robin"), 5, &pk, &book, now);
+        let sb = b.state(&you("Robin"), 5, &pk, &book, now);
+        b.take("aaa", now, &sa, now, &you("Robin"), 5, &pk, &book);
+        a.take("bbb", now, &sb, now, &you("Robin"), 5, &pk, &book);
+        assert_eq!(a.together(now), Together::Host);
+        assert_eq!(b.together(now), Together::Alone);
+        a.open = "WXYZWXYZWXYZ".into();
+        let sa = a.state(&you("Robin"), 5, &pk, &book, now + 5);
+        b.take("aaa", now + 5, &sa, now + 5, &you("Robin"), 5, &pk, &book);
+        assert!(matches!(b.together(now + 5), Together::Join(code, _) if code == "WXYZWXYZWXYZ"));
+        // gone quiet (no beat for a good while): not waited on
+        assert_eq!(b.together(now + 1000), Together::Alone);
     }
 
     /// Two devices played at once, each told of the other now and then:

@@ -317,6 +317,11 @@ pub fn spawn(sfx: Sfx, pan: f32, gain: f32, rng: &mut Rng, out: &mut Vec<Voice>)
         Sfx::Chime => {
             out.push(chime(1568.0, 0.5, Bus::Sfx).pan(p).gain(0.5).done());
         }
+        Sfx::Ping => {
+            // G6 then C7: "ding-ding!"
+            out.push(chime(1568.0, 0.35, Bus::Sfx).pan(p).gain(0.55).done());
+            out.push(chime(2093.0, 0.6, Bus::Sfx).pan(p).gain(0.55).at(0.13).done());
+        }
         Sfx::Deer => {
             // a soft, breathy snort and a low "mm"
             let sk = seed();

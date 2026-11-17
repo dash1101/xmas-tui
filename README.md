@@ -27,14 +27,21 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   a light show of any length, fireworks, and a game of chess, checkers, Snowflakes or Twenty-One round the table in
   someone's home (up to four at the cards, dealt off a real deck that slides across the table). A scorecard keeps
   count.
-- **Trips out**: the train from the station up to a ski lodge (skis from the shop, the chairlift, then a run down
-  the mountain through the flags), and a night drive in the car parked by home.
+- **Trips out**: the train from the station up to Pine Peak (folk aboard who get off there too, the station there,
+  skis from the ski shop and back again, the chairlift, then a run down the mountain through the flags, everyone
+  waited for at the bottom and the lift back up), and a night drive in the car parked by home.
+- **Now and then**: a hot-air balloon drifts down and waits a while (climb aboard and fly it about the village); folk
+  out with cocoa, coffee, candy canes and shovels, or a present to put under the big tree; and Santa, tumbled out of
+  his sleigh, is very nearly never caught.
 - **Friends and shared villages, online** (the **✉ friends** button): add friends by friend code, write to them,
   open a village to them or walk into theirs, and play together in real time: chess, checkers and cards round the
   table in the games room, tag, snowball fights, races down the mountain, the train up to the slopes, light shows
   and fireworks everyone sees. A profile card with the villager's own look, one villager across a phone, a laptop
-  and a desktop (linked devices), and more than one villager on a device. On the desktop, the web and a phone alike;
-  opt-in, through a free public relay, sealed end to end.
+  and a desktop (linked devices, which open into one village when they're on at once), and more than one villager on
+  a device. **Talk** with **/** (*@name* to one person, *@group* to a group's chat room), ping a friend, see who's about
+  in the **friends widget**. The host's village is the host's: everyone sees the same folk about in it, and a guest's
+  change to its settings is asked of the host (or made, by someone the host lets). On the desktop, the web and a
+  phone alike; opt-in, through a free public relay, sealed end to end.
 - **Play in a browser**: the same village on the web at **[dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/)**,
   with sound, the same menus and settings, and touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
@@ -57,7 +64,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 - **Play it like a game**: pop the village out into its own window, or take the wallpaper itself full screen and
   back (nothing restarts); zoom in on the villager with Ctrl +/-.
 - **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
-  animals keep their size on a finer grid.
+  animals keep their size on a finer grid. Zoomed in, the village's letters stay letters (drawn big), and **UI size**
+  makes the menus, panels and writing bigger on their own (the window, the Windows wallpaper, a phone, the web).
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
@@ -147,7 +155,8 @@ anything is replaced, and `xmas-tui --update` does the same from a terminal. **R
 
 ## 🎮 Controls
 
-Click the bare desktop first so the wallpaper has keyboard focus.
+Click the bare desktop first so the wallpaper has keyboard focus (on Windows the keyboard then comes to the village,
+every key, Ctrl and all, until something else is clicked).
 
 | Input | What it does |
 |---|---|
@@ -156,7 +165,8 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **Space** | jump; held, higher (up to twice as high); in the air, again: the Christmas spirit lifts the villager once more; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
 | **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
 | **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
-| **O** | friends & online (also the **✉ friends** button, top right): go online, the friend code, add a friend, write, open this village or go into a friend's, play with friends there, the profile card, linked devices |
+| **O** | friends & online (also the **✉ friends** button, top right): go online, friends (each with their own menu: write, ping, ask in, go into their village), groups, messages, open this village or go into a friend's, play with friends there, the profile card, linked devices |
+| **/** | talk: to everyone here; *@name what to say* to one person (a friend anywhere, or someone here, just them); *@group …* to a group's chat room |
 | **Y** / **N** | yes (or no thanks) to what a friend online asks (a game, tag, a race, the train); clicking the question works too |
 | **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
@@ -168,7 +178,7 @@ Click the bare desktop first so the wallpaper has keyboard focus.
 | **C** | the view back on the villager (also the **⌖ centre** button, top right) |
 | **?** / **F1** | the controls card (also the **? controls** button, top right); click a **[key]** on it to change that key |
 | **A** / **D** at a window | lean to look further along the street |
-| **mouse wheel** / **Shift+wheel** | look along the village / up into the sky |
+| **mouse wheel** / **Shift+wheel** | look along the village / up into the sky (on the Windows desktop too, over the bare desktop) |
 | **trackpad** | two fingers up and down: up into the sky and back; sideways: along the village; a pinch (or Ctrl + two fingers): zoom |
 | **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager and the pet too) | carry them about, then drop them in the snow |
@@ -417,20 +427,39 @@ web) shows what's happening online; a click on it opens friends & online.
 - **A friend code** (`XXXX-XXXX-XXXX`) is made for the villager and kept in the save. *My friend code* copies it to
   give to a friend; *add a friend* takes theirs. They see the request (in the post, top left, and in their friends &
   online menu) and say yes, and from then on each sees whether the other is online.
-- **Write** to a friend: their name in the menu → *write to…*. Messages show in the post.
+- **Friends** have a menu of their own (*★ friends*): each one's menu (*write to…*, *ping* — a little tone at their
+  end —, *ask into this village*, *into …'s village*, their profile card), adding one, the friend code. The
+  **friends widget** (Settings → Widgets → Friends; while online) shows who's about (● online, ⌂ a village open),
+  the last few messages and a line to talk; a click on a friend opens their menu. Messages show in the post, and all
+  of them in *✉ messages*.
+- **Talking**: **/** (or *✎ talk*). Plain text is said aloud to everyone in the shared village. *@Sam hello* goes to
+  Sam only: a friend anywhere (sealed to them), or someone here who isn't a friend (just to them). *@carols …* goes to
+  a group.
+- **Groups** (*# groups*): chat rooms anyone with the group's code can be in, like a little server: *a new group*
+  makes one (its code copied, to hand round), *into a group by its code* joins one, and each group shows who's been
+  about in it lately.
 - **Shared villages:** *open this village to friends* makes a village code (copied) and shows friends a ⌂ by the
   villager's name; they choose *into …'s village* (or anyone given the code, *into a village by its code*). Guests
   walk into the host's own village, laid out the same on any screen from the host's seed, and arrive beside the
-  host. Everyone sees everyone else's villager walking, jumping and turning in real time with their name over them;
-  *say something to everyone* puts a speech bubble over the villager for all to see, and snowballs fly for everyone
-  (and hit). Closing the village, or the host going quiet, sends everyone home to their own village.
+  host. Everyone sees everyone else's villager walking, jumping and turning in real time with their name over them
+  (smoothly: each runs on between messages as they were going); what's said puts a speech bubble over them for all
+  to see, and snowballs fly for everyone (and hit). The neighbours and animals about the village are the host's, the
+  same for everyone (where they go, what they say). Knocking at a village nobody has open says so after a few
+  seconds. Closing the village, or the host going quiet, sends everyone home to their own village.
+- **The host's village, the host's settings.** A guest sees the village as its host has set it (snowfall, wind, the
+  glow, the time of day, the sleigh, the folk about…). A guest changing one of those asks the host (*Sam asks:
+  snowfall → 2.00×? Y yes · N no*); the host can *let Sam change the village's settings* from Sam's menu, and then
+  Sam's changes go straight in. Their own settings are kept for their own village.
 - **How:** everyone talks through a free public MQTT broker (a relay that only passes messages along: broker.emqx.io,
   then broker.hivemq.com, then test.mosquitto.org; the web page reads [`relays.json`](web/site/relays.json) beside it).
   Everything is sealed end to end (ChaCha20-Poly1305, keys made from the codes by SHA-256) on topics named by hashes
   of the codes: the relay, or anyone listening, can't read it or tell whose it is, though it does see that some
   device is connected. A friend code is the key to a mailbox and to whether that villager's about, so it's for
-  friends only. Each village runs on its own player's machine; only where the villagers are, what they say and
-  their snowballs go between them. The neighbours, the animals and the weather are each player's own.
+  friends only. Each village runs on its own player's machine, its host's; only where everyone is, what's said and
+  thrown, and (from the host) who's about go between them. Nothing that arrives is run or opened: text from others is
+  shown with control characters and direction tricks taken out, sizes and counts are capped (a relay can't make a
+  player hold a huge message, a flood is dropped, a friend can't ask for ten thousand fireworks), and only a
+  village's host can close it or say who's about in it.
 - The desktop and the Android app connect over TCP (port 1883), the web page over a secure WebSocket. On Android the
   game is online; the wallpaper stays off it.
 
@@ -467,7 +496,9 @@ line, the pet, games and fights won, runs down the mountain and the best score, 
 ### One villager on all your devices
 
 *✉ friends → my devices → link another device: show the link code* (copied) on one device, then on the other *link
-this device to my villager elsewhere* and type it. The second becomes the same villager: the same village, name,
+this device to my villager elsewhere* and type it. Both on at once (online), the first in line opens its village and
+the other walks in: one village on both screens, the same folk about in it (closing or leaving it by hand keeps
+them apart after). The second becomes the same villager: the same village, name,
 look, pet, friends & family, friend code and friends; what's been done on it is added in. From then on the two (or
 more) keep in step through the relay whenever they're online: what each has done adds up (cheer earned on one and
 spent on the other comes out right, even both played at once), and a change to the villager or the village on one
@@ -522,6 +553,11 @@ Snow also falls in front of open windows. It settles on the top edge of each win
 - **Shaking or flinging a window** throws the snow off.
 - **Sweeping the cursor** through a pile brushes the snow away.
 - **Closing or minimizing a window** drops its pile.
+- **Snowballs** (Windows, where the button can be seen): hold the mouse button in a pile and it gathers into a
+  snowball, rolled along the top it grows; drag it up off the top and it's in the hand, and let go mid-swing it's
+  thrown: it flies, splats against the window it meets and slowly slides down the glass and off the bottom (or
+  bursts against the desktop). A fast fling off the top throws it too; a press on a sitting one picks it up again;
+  left alone a while, one melts away.
 - **Lights:** twinkling bulbs hang on a wire around the six topmost windows, and droop along the top edge.
 
 **Settings → Windows** tunes it all: pile height, snowfall, settling speed, how fast the flakes fall, the wind,
@@ -636,10 +672,14 @@ The release has a per-user setup (`xmas-tui-setup-x86_64.exe`, no admin needed) 
 - **Controls:** the **⚙ settings** button (top right) opens settings, which include **Run at startup** and **Quit**.
   **Right-click** on something in the village (or on a widget or shelf) opens its menu; on open ground, in the sky
   and on icons it's Windows' desktop menu, as usual. **Press and hold** the left button opens xmas-tui's menu anywhere.
-  Walking works too: click the bare desktop, then use WASD / the arrows, E, F, R, I and 1–5 (the wheel can't
-  scroll the view there, because the icon layer sits on top; the map widget can be clicked instead).
-- **Weather city:** clicking the city field opens the config in Notepad, because a wallpaper behind the icons
-  can't receive typing.
+  A click on the bare desktop brings the keyboard to the village: every key (T, O, /, Ctrl +, Ctrl V…) and typing
+  in its boxes and settings fields, right there; clicking an icon or a window gives it back. The wheel and a
+  touchpad's scrolls and pinches over the bare desktop move and zoom the village (over an icon, Ctrl + the wheel
+  still sizes the icons).
+- **The taskbar:** the menus, tips, boxes and the post keep above it.
+- **Steady:** a crash is written to `%LOCALAPPDATA%\xmas-tui\wallpaper.log` (where it happened) and the wallpaper
+  starts itself again; one that stops responding is noticed and restarted the same way; *Quit* from the tray always
+  quits.
 - **Window snow and lights:** see above; they're on by default and run in front of all windows.
 - **Fallback:** `--windowed` runs it as a normal window. That's useful with Lively Wallpaper if the
   desktop attach doesn't work on some Windows build.

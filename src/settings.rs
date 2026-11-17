@@ -25,6 +25,7 @@ pub enum F {
     Traffic,
     TimeOfDay,
     Scale,
+    UiScale,
     Zoom,
     Fps,
     Events,
@@ -52,6 +53,7 @@ pub enum F {
     MostAtOnce,
     Viz,
     VizKhz,
+    FriendsW,
     Bushes,
     Player,
     Autopilot,
@@ -189,6 +191,9 @@ pub struct Settings {
     /// Live sound levels (from the audio thread), when there is one.
     pub meters: Option<[f32; crate::audio::METERS]>,
     /// Typing works (false behind the Windows desktop icons).
+    /// The front-end can draw the UI bigger than the village (its own
+    /// letters): the UI size setting works here.
+    pub ui_layer_ok: bool,
     pub keyboard: bool,
     /// The window snow/lights overlay is running.
     pub window_fx: bool,
@@ -332,6 +337,9 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                     cfg.scale = ((1.0 / res) * 10000.0).round() / 10000.0;
                 }
                 F::Zoom => step(&mut cfg.zoom, 0.05 * dir, 1.0, 3.0),
+                F::UiScale => {
+                    cfg.ui.scale = ((cfg.ui.scale + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0;
+                }
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -403,6 +411,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Map => cfg.widgets.map ^= true,
                 F::Viz => cfg.widgets.visualizer ^= true,
                 F::VizKhz => cfg.widgets.visualizer_khz ^= true,
+                F::FriendsW => cfg.widgets.friends ^= true,
                 F::UpdAuto => cfg.updates.auto_install ^= true,
                 F::WinFront => cfg.windows.front ^= true,
                 F::WinBrush => cfg.windows.brush ^= true,
@@ -617,10 +626,12 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Weather => "The weather in the weather city.",
         F::Map => "A strip map of the village: where the villager is.",
         F::Viz => "Bars dancing to whatever's playing (it listens to the sound output; nothing is recorded).",
+        F::FriendsW => "While online: friends (who's about), the last few messages, a click for each friend's menu (ping, invite, write), and a line to talk.",
         F::VizKhz => "Each bar's frequency under it.",
         F::Units => "°F and mph, or °C and km/h.",
         F::Locked => "Stop the widgets being dragged about by accident.",
         F::Scale => "Finer or coarser detail (more or fewer, smaller or bigger characters).",
+        F::UiScale => "The menus, panels, widgets and writing drawn bigger; the village stays its own size. (The window and the Windows wallpaper; a terminal draws one size of letter.)",
         F::Zoom => "Magnify the whole village.",
         F::Sound => "All of the sound.",
         F::SoundCursor => "A soft sparkle as the pointer moves.",
@@ -1329,7 +1340,7 @@ impl Settings {
         self.section(f, lx, yy, "WIDGETS");
         yy += 1;
         let w = &cfg.widgets;
-        for (i, label, field, on) in [(1u8, "System", F::System, w.system), (2, "Music", F::Music, w.music), (3, "Weather", F::Weather, w.weather), (4, "Map", F::Map, w.map), (5, "Visualizer", F::Viz, w.visualizer)] {
+        for (i, label, field, on) in [(1u8, "System", F::System, w.system), (2, "Music", F::Music, w.music), (3, "Weather", F::Weather, w.weather), (4, "Map", F::Map, w.map), (5, "Visualizer", F::Viz, w.visualizer), (6, "Friends", F::FriendsW, w.friends)] {
             self.check(f, lx, yy, label, Act::Toggle(field), on);
             let look = w.looks.get(i as usize).unwrap_or("classic");
             let name = match look {
@@ -1364,6 +1375,9 @@ impl Settings {
         let e = f.text(vx + 7, yy, &format!("{name:<8}"), pal::UI_TITLE, BG, 0.0);
         self.arrow(f, e + 1, yy, '▸', Act::Look(9, 1));
         f.text(e + 4, yy, "(shelves: Shelves tab)", pal::UI_DIM, BG, 0.0);
+        yy += 1;
+        let size = if self.ui_layer_ok { format!("{:.0}%", cfg.ui.scale * 100.0) } else { format!("{:.0}% (not in a terminal)", cfg.ui.scale * 100.0) };
+        self.stepper(f, lx, vx, yy, "UI size", F::UiScale, &size);
         yy += 2;
         self.section(f, lx, yy, "WEATHER");
         yy += 1;

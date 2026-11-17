@@ -9,6 +9,7 @@ mod config;
 mod ctxmenu;
 mod export;
 mod frame;
+mod guard;
 mod icon;
 #[cfg(target_os = "linux")]
 mod linwall;
@@ -354,13 +355,20 @@ fn main() {
             let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             eprintln!("--- xmas-tui {} starting ({}; Windows {major} build {build}; unix time {secs})", env!("CARGO_PKG_VERSION"), if desktop { "wallpaper" } else { "window" });
         }
+        if desktop {
+            guard::after_restart();
+        }
         if desktop && !platform::single_instance() {
             return; // already running
+        }
+        if desktop {
+            guard::install();
         }
         if desktop {
             tray::spawn(path.clone());
         }
         let res = window::run(cfg, seed, path, window::Opts { desktop, rows: args.rows, fullscreen: args.fullscreen });
+        guard::leaving();
         tray::shutdown();
         if let Err(e) = res {
             eprintln!("xmas-tui: {e}");
@@ -799,7 +807,9 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
         scene.render(&mut frame, &mut spare, t, cfg.zoom, None);
         if !args.clean {
             widgets.map = Some(scene.minimap());
+            widgets.friends = scene.friends_view();
             widgets.draw(&mut frame, t);
+            scene.set_widget_ledges(widgets.rects.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r.x, r.y, r.w, r.h))).collect());
             scene.draw_top(&mut frame);
             settings.draw_gear(&mut frame, t);
             settings.draw_online(&mut frame, if scene.online.wanted() { 2 } else { 0 }, 1, scene.asked_now(), t);

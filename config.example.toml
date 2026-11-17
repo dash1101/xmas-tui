@@ -61,6 +61,7 @@ weather = true
 map = true            # a strip map of the whole village
 visualizer = false    # bars dancing to whatever's playing (listens to the default audio output)
 visualizer_khz = false # each bar's frequency in kHz under it
+friends = true        # while online: friends, the last few messages, a line to talk
 disk = "/"            # mount point shown in the DISK row
 
 [widgets.looks]       # each widget's look: "classic", "frosted", "wood" or "gift"
@@ -142,10 +143,14 @@ centre = "c"
 rest = "z"            # lie down in the snow (then jump: a snow angel)
 todo = "t"            # things to do right here
 online = "o"          # friends & online
+chat = "/"            # talk (@name: to one person, @group: to a group)
 
 [ui]
 look = "classic"      # the app's own panels, menus and conversations: "classic",
                       # "frosted", "wood" or "gift" (the widgets' looks)
+scale = 1.0           # the menus, panels, widgets and writing this much bigger (1 to
+                      # 2.5), the village its own size (the window, the Windows
+                      # wallpaper, a phone, the web; a terminal has one size of letter)
 
 [updates]             # release builds only
 check = true          # look for a new version now and then

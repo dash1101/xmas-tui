@@ -161,6 +161,51 @@ struct Flake {
     ch: char,
 }
 
+/// A snowball rolled up out of a pile: sitting on a window's top, being
+/// rolled along it, or picked up off it (dragged up away from the top) and
+/// carried at the pointer, to be thrown.
+#[derive(Clone, Debug)]
+struct Ball {
+    win: String,
+    /// Centre x from the window's left edge.
+    dx: f32,
+    r: f32,
+    rolling: bool,
+    carried: bool,
+    /// Seconds left alone: after a while it melts away.
+    idle: f32,
+}
+
+/// A snowball thrown: in the air, then splatted on a window's glass, sliding
+/// slowly down it and off the bottom edge (or burst against the desktop).
+#[derive(Debug)]
+struct Throw {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    r: f32,
+    age: f32,
+    /// How long it's in the air before it meets the glass.
+    flight: f32,
+    splat: Option<Splat>,
+    seed: u32,
+    done: bool,
+}
+
+#[derive(Debug)]
+struct Splat {
+    win: String,
+    /// Where it hit, from the window's top-left corner.
+    dx: f32,
+    dy: f32,
+    /// How far it's slid down since, and how fast it's going.
+    slid: f32,
+    v: f32,
+    age: f32,
+    r: f32,
+}
+
 struct Part {
     x: f32,
     y: f32,
@@ -184,6 +229,15 @@ pub struct Top {
 }
 
 static TOPS: std::sync::Mutex<Vec<Top>> = std::sync::Mutex::new(Vec::new());
+
+/// The top of a taskbar / panel along the bottom of the screen, as a
+/// fraction of the screen's height (the UI keeps above it).
+static DOCK_TOP: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+pub fn dock_top() -> Option<f32> {
+    DOCK_TOP.lock().ok().and_then(|d| *d)
+}
 
 /// The open windows' tops, as last seen (none while no overlay runs).
 pub fn tops() -> Vec<Top> {
@@ -236,9 +290,12 @@ pub struct Fx {
     cursor_v: (f32, f32),
     /// The mouse button's held down (front-ends that can tell: Windows).
     pub button: bool,
-    /// Snowballs rolled up out of the piles: (window, centre x from the
-    /// window's left edge, radius, still being rolled).
-    balls: Vec<(String, f32, f32, bool)>,
+    /// Snowballs rolled up out of the piles.
+    balls: Vec<Ball>,
+    /// Snowballs thrown: in the air, or splatted on a window.
+    throws: Vec<Throw>,
+    /// The button was down at the last look (presses and releases).
+    was_button: bool,
     rng: Rng,
     melt_acc: f32,
     pub hidden: bool,
@@ -261,6 +318,9 @@ impl Drop for Fx {
     fn drop(&mut self) {
         if let Ok(mut tops) = TOPS.lock() {
             tops.clear();
+        }
+        if let Ok(mut d) = DOCK_TOP.lock() {
+            *d = None;
         }
     }
 }
@@ -286,6 +346,8 @@ impl Fx {
             cursor_t: 0.0,
             button: false,
             balls: vec![],
+            throws: vec![],
+            was_button: false,
             melt_acc: 0.0,
             cursor_v: (0.0, 0.0),
             rng: Rng::new(0x5a0b),
@@ -501,6 +563,15 @@ impl Fx {
         if let Ok(mut tops) = TOPS.lock() {
             *tops = visible_tops(&wins, self.sw, self.sh);
         }
+        // a taskbar / panel along the bottom (across most of the screen)
+        let dock = wins
+            .iter()
+            .filter(|w| w.kind == 1 && w.w > w.h * 3.0 && w.w > self.sw * 0.4 && w.y > self.sh * 0.6 && w.y < self.sh)
+            .map(|w| w.y)
+            .fold(None, |a: Option<f32>, y| Some(a.map_or(y, |a| a.min(y))));
+        if let Ok(mut d) = DOCK_TOP.lock() {
+            *d = dock.filter(|_| self.sh > 0.0).map(|y| y / self.sh);
+        }
         self.wins = wins;
         self.brush();
         self.roll();
@@ -509,22 +580,75 @@ impl Fx {
     /// The button held down over a pile: the snow there gathers into a
     /// snowball, and dragged along the window's top it rolls, picking up
     /// the snow it passes over and growing. Let go, it stays sitting there
-    /// (until the window moves, or goes).
+    /// (until the window goes, or it melts). Dragged up away from the top
+    /// it's picked up, and let go it's thrown (with the pointer's swing); a
+    /// fast fling off the top throws it too. A press on a sitting snowball
+    /// picks it up again.
     fn roll(&mut self) {
         let k = self.scale;
-        // the windows' balls go with them (a window gone: its ball too)
+        let held = self.button;
+        let (pressed, released) = (held && !self.was_button, !held && self.was_button);
+        self.was_button = held;
+        // the windows' balls go with them (a window gone: its ball too),
+        // all but one in the hand
         let ids: Vec<String> = self.wins.iter().map(|w| w.id.clone()).collect();
-        self.balls.retain(|b| ids.contains(&b.0));
-        let Some((cx, cy)) = self.cursor.filter(|_| self.button) else {
+        self.balls.retain(|b| b.carried || ids.contains(&b.win));
+        let Some((cx, cy)) = self.cursor else { return };
+        if released {
+            let (vx, vy) = self.cursor_v;
+            let speed = (vx * vx + vy * vy).sqrt();
+            let cap = 2600.0 * k;
+            let (vx, vy) = if speed > cap { (vx * cap / speed, vy * cap / speed) } else { (vx, vy) };
+            let mut thrown = vec![];
+            for (i, b) in self.balls.iter().enumerate() {
+                let from = if b.carried {
+                    Some((cx, cy))
+                } else if b.rolling && speed > 1100.0 * k {
+                    // flung off the top
+                    self.wins.iter().find(|w| w.id == b.win).map(|w| (w.x + b.dx, w.y - b.r))
+                } else {
+                    None
+                };
+                if let Some((x, y)) = from {
+                    thrown.push((i, x, y, b.r));
+                }
+            }
+            for &(i, x, y, r) in thrown.iter().rev() {
+                self.balls.remove(i);
+                let seed = self.rng.next_u32();
+                let flight = 0.38 + 0.12 * (r / (20.0 * k)).min(1.0);
+                self.throws.push(Throw { x, y, vx, vy, r, age: 0.0, flight, splat: None, seed, done: false });
+            }
             for b in &mut self.balls {
-                b.3 = false;
+                b.rolling = false;
+                b.idle = 0.0;
             }
             return;
-        };
-        let rolling = self.balls.iter().position(|b| b.3);
+        }
+        if !held {
+            return;
+        }
+        let rolling = self.balls.iter().position(|b| b.rolling || b.carried);
+        if rolling.is_none() && pressed {
+            // a press on a sitting snowball: back in hand
+            let hit = self.balls.iter().position(|b| {
+                self.wins.iter().find(|w| w.id == b.win).is_some_and(|w| {
+                    let (bx, by) = (w.x + b.dx, w.y - b.r);
+                    (cx - bx).powi(2) + (cy - by).powi(2) <= (b.r + 6.0 * k).powi(2)
+                })
+            });
+            if let Some(i) = hit {
+                self.balls[i].rolling = true;
+                self.balls[i].idle = 0.0;
+                return;
+            }
+        }
+        if rolling.is_some_and(|i| self.balls[i].carried) {
+            return;
+        }
         // which pile is under the pointer (or the one being rolled along)
         let target = match rolling {
-            Some(i) => self.wins.iter().find(|w| w.id == self.balls[i].0).cloned(),
+            Some(i) => self.wins.iter().find(|w| w.id == self.balls[i].win).cloned(),
             None => self.wins.iter().rev().find(|w| {
                 let Some(p) = self.piles.get(&w.id) else { return false };
                 if cx < w.x || cx >= w.x + w.w {
@@ -536,21 +660,28 @@ impl Fx {
             }).cloned(),
         };
         let Some(w) = target else { return };
+        // dragged up away from the top: picked up
+        if let Some(i) = rolling {
+            if cy < w.y - self.balls[i].r * 2.0 - 24.0 * k {
+                self.balls[i].carried = true;
+                return;
+            }
+        }
         let Some(p) = self.piles.get_mut(&w.id) else { return };
         let i = match rolling {
             Some(i) => i,
             None => {
-                self.balls.push((w.id.clone(), cx - w.x, 2.0 * k, true));
+                self.balls.push(Ball { win: w.id.clone(), dx: cx - w.x, r: 2.0 * k, rolling: true, carried: false, idle: 0.0 });
                 self.balls.len() - 1
             }
         };
-        let r = self.balls[i].2;
+        let r = self.balls[i].r;
         let x = cx.clamp(w.x + r, w.x + w.w - r);
         // the snow under the ball, gathered into it
         let col = self.col;
         let (c0, c1) = (((x - r - w.x) / col).floor().max(0.0) as usize, (((x + r - w.x) / col).ceil() as usize).min(p.cols.len()));
         let mut got = 0.0;
-        for h in &mut p.cols[c0..c1] {
+        for h in &mut p.cols[c0.min(c1)..c1] {
             let take = (*h * 0.25).min(*h);
             *h -= take;
             got += take * col;
@@ -558,7 +689,76 @@ impl Fx {
         // area in, radius up (a little at a time)
         let area = std::f32::consts::PI * r * r + got * 0.8;
         let r2 = (area / std::f32::consts::PI).sqrt().min(40.0 * k);
-        self.balls[i] = (w.id.clone(), x - w.x, r2, true);
+        let b = &mut self.balls[i];
+        b.dx = x - w.x;
+        b.r = r2;
+    }
+
+    /// Snowballs left sitting melt away; thrown ones fly, splat on the
+    /// window they meet, slide down the glass and drop off the bottom.
+    fn update_balls(&mut self, dt: f32) {
+        let k = self.scale;
+        for b in self.balls.iter_mut().filter(|b| !b.rolling && !b.carried) {
+            b.idle += dt;
+            if b.idle > 40.0 {
+                b.r -= dt * 1.2 * k;
+            }
+        }
+        self.balls.retain(|b| b.r > 1.5 * k || b.rolling || b.carried);
+        let g = 1500.0 * k;
+        let mut bursts = vec![];
+        let wins = std::mem::take(&mut self.wins);
+        for th in self.throws.iter_mut() {
+            th.age += dt;
+            match &mut th.splat {
+                None => {
+                    th.vy += g * dt;
+                    th.vx *= 1.0 - (0.8 * dt).min(0.5);
+                    th.x += th.vx * dt;
+                    th.y += th.vy * dt;
+                    if th.x < -200.0 * k || th.x > self.sw + 200.0 * k || th.y > self.sh + 200.0 * k {
+                        th.done = true;
+                    } else if th.age >= th.flight {
+                        // it meets the glass: the window in front there, if any
+                        let hit = wins
+                            .iter()
+                            .filter(|w| (w.kind == 0 || w.kind == 3) && th.x >= w.x && th.x < w.x + w.w && th.y >= w.y && th.y < w.y + w.h)
+                            .max_by_key(|w| w.z);
+                        let r = th.r * (1.0 - 0.3 * (th.age / th.flight).min(1.0));
+                        match hit {
+                            Some(w) => th.splat = Some(Splat { win: w.id.clone(), dx: th.x - w.x, dy: th.y - w.y, slid: 0.0, v: 0.0, age: 0.0, r }),
+                            None => {
+                                bursts.push((th.x, th.y, r));
+                                th.done = true;
+                            }
+                        }
+                    }
+                }
+                Some(s) => {
+                    s.age += dt;
+                    let Some(w) = wins.iter().find(|w| w.id == s.win) else {
+                        th.done = true;
+                        continue;
+                    };
+                    // it sticks a moment, then slides, slowly
+                    if s.age > 0.8 {
+                        s.v = (s.v + 26.0 * k * dt).min(55.0 * k);
+                        s.slid += s.v * dt;
+                    }
+                    if s.dy + s.slid > w.h - s.r * 0.4 {
+                        bursts.push((w.x + s.dx, w.y + w.h, s.r * 0.7));
+                        th.done = true;
+                    } else if s.age > 30.0 {
+                        th.done = true;
+                    }
+                }
+            }
+        }
+        self.wins = wins;
+        self.throws.retain(|t| !t.done);
+        for (x, y, r) in bursts {
+            self.spill(x, y, 0.0, -60.0 * k, (r * r * 0.25).max(self.step));
+        }
     }
 
     /// Sweeping the cursor through a pile knocks the snow away.
@@ -643,6 +843,7 @@ impl Fx {
     }
 
     pub fn update(&mut self, dt: f32, t: f32) {
+        self.update_balls(dt);
         let k = self.scale;
         let wind = (noise1(t * 0.07, 33) - 0.5) * 30.0 * k * self.cfg.wind;
         // melting: now and then each pile loses a little off its highest point
@@ -783,27 +984,60 @@ impl Fx {
             }
             c.rec = true;
         }
-        // snowballs rolled up out of the piles
-        for (id, dx, r, _) in &self.balls {
-            let Some(w) = self.wins.iter().find(|w| &w.id == id) else { continue };
-            let x = &(w.x + dx);
-            if self.covered(*x, w.y - 1.0, w.z) {
-                continue;
-            }
-            let cy = w.y - r;
+        // snowballs rolled up out of the piles (or in the hand)
+        let px = (2.0 * k_of(self.scale)).round().max(2.0);
+        for b in &self.balls {
+            let (x, y, base) = if b.carried {
+                let Some((cx, cy)) = self.cursor else { continue };
+                (cx, cy, None)
+            } else {
+                let Some(w) = self.wins.iter().find(|w| w.id == b.win) else { continue };
+                let x = w.x + b.dx;
+                if self.covered(x, w.y - 1.0, w.z) {
+                    continue;
+                }
+                (x, w.y - b.r, Some(w.y))
+            };
+            let r = b.r;
             c.rec = false;
-            c.touch(x - r - 1.0, cy - r - 1.0, r * 2.0 + 2.0, r * 2.0 + 3.0);
-            let ri = r.ceil() as i32;
-            for dy in -ri..=ri {
-                let half = (r * r - (dy * dy) as f32).max(0.0).sqrt();
-                let shade = 0.82 + 0.18 * (-(dy as f32) / r).clamp(-1.0, 1.0);
-                let g = (0xe6 as f32 * shade) as u8;
-                c.fill(x - half, cy + dy as f32, half * 2.0, 1.0, argb(0xff, g, g.saturating_add(6), 0xff));
+            c.touch(x - r - px * 2.0, y - r - px * 2.0, r * 2.0 + px * 4.0, r * 2.0 + px * 5.0);
+            // a soft shadow under one sitting on a top
+            if let Some(top) = base {
+                c.fill((x - r * 0.8).round(), top - px, (r * 1.6).round(), px, argb(0x60, 0x50, 0x5a, 0x80));
             }
-            // a highlight, and a soft shadow underneath
-            c.fill(x - r * 0.45, cy - r * 0.55, r * 0.35, r * 0.2, argb(0xff, 0xff, 0xff, 0xff));
-            c.fill(x - r * 0.8, w.y - 2.0, r * 1.6, 2.0, argb(0x60, 0x50, 0x5a, 0x80));
+            pixel_ball(c, x, y, r, px, 0xff);
             c.rec = true;
+        }
+        // thrown: in the air (getting smaller as it goes), then splatted
+        for th in &self.throws {
+            match &th.splat {
+                None => {
+                    let r = th.r * (1.0 - 0.3 * (th.age / th.flight).min(1.0));
+                    c.rec = false;
+                    c.touch(th.x - r - px * 2.0, th.y - r - px * 2.0, r * 2.0 + px * 4.0, r * 2.0 + px * 4.0);
+                    pixel_ball(c, th.x, th.y, r, px, 0xff);
+                    c.rec = true;
+                }
+                Some(s) => {
+                    let Some(w) = self.wins.iter().find(|w| w.id == s.win) else { continue };
+                    let (x, y) = (w.x + s.dx, w.y + s.dy + s.slid);
+                    if self.covered(x, y, w.z) {
+                        continue;
+                    }
+                    // fading out at the very end
+                    let a = (((30.0 - s.age) / 2.0).clamp(0.0, 1.0) * 255.0) as u8;
+                    let r = s.r;
+                    c.rec = false;
+                    c.touch(x - r * 2.2 - px * 2.0, w.y + s.dy - r * 1.6 - px * 2.0, r * 4.4 + px * 4.0, s.slid + r * 4.2 + px * 4.0);
+                    // the wet streak it leaves on the way down
+                    if s.slid > px {
+                        let tw = (r * 0.9 / px).round().max(1.0) * px;
+                        c.fill((x - tw / 2.0).round(), (w.y + s.dy).round(), tw, s.slid.round(), argb(a / 6, 0xd8, 0xe6, 0xff));
+                    }
+                    pixel_splat(c, x, y, r, px, th.seed, a);
+                    c.rec = true;
+                }
+            }
         }
         // light strings around the topmost few normal windows
         if self.cfg.lights {
@@ -822,6 +1056,111 @@ impl Fx {
         for p in self.parts.iter().filter(|_| self.cfg.snow) {
             let a = (1.0 - p.age / p.life).clamp(0.0, 1.0);
             c.fill(p.x, p.y, 3.0 * self.scale, 3.0 * self.scale, argb((235.0 * a) as u8, 0xee, 0xf4, 0xff));
+        }
+    }
+}
+
+fn k_of(scale: f32) -> f32 {
+    scale.max(0.5)
+}
+
+fn h32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}
+
+/// The snowball palette: outline, shadow, mid, light, highlight.
+const BALL: [(u8, u8, u8); 5] = [(0x6f, 0x80, 0xa8), (0xa6, 0xb7, 0xd6), (0xcf, 0xdc, 0xf0), (0xec, 0xf2, 0xff), (0xff, 0xff, 0xff)];
+
+fn ball_px(i: usize, a: u8) -> u32 {
+    let (r, g, b) = BALL[i];
+    let k = a as u32;
+    argb(a, (r as u32 * k / 255) as u8, (g as u32 * k / 255) as u8, (b as u32 * k / 255) as u8)
+}
+
+/// A snowball in pixel art: whole `px`-sized blocks, lit from the top
+/// left, a darker rim, one bright glint.
+fn pixel_ball(c: &mut Canvas, x: f32, y: f32, r: f32, px: f32, a: u8) {
+    let (x, y) = (x.round(), y.round());
+    let n = (r / px).ceil() as i32;
+    // (a hair inside the radius: no lone block poking out at each side)
+    let rr = (r - px * 0.35).max(px * 0.5).powi(2);
+    let rim = (r - px * 1.35).max(0.0).powi(2);
+    for j in -n..=n {
+        for i in -n..=n {
+            let (bx, by) = (i as f32 * px, j as f32 * px);
+            let d = bx * bx + by * by;
+            if d > rr {
+                continue;
+            }
+            let (u, v) = (bx / r.max(1.0), by / r.max(1.0));
+            // lit from the top left: a bright cap, a shadowed crescent
+            // underneath, a darker rim round the lower side
+            let lit = (u + 0.28).powi(2) + (v + 0.32).powi(2) < 0.62f32.powi(2);
+            let shade = if d > rim && u + v > -0.35 {
+                0
+            } else if (u + 0.18).powi(2) + (v + 0.2).powi(2) > 0.98f32.powi(2) {
+                1
+            } else if lit {
+                3
+            } else {
+                2
+            };
+            c.fill(x + bx - px / 2.0, y + by - px / 2.0, px, px, ball_px(shade, a));
+        }
+    }
+    // the glint
+    if n >= 2 {
+        let g = (-(n as f32) * 0.45).round() as i32;
+        c.fill(x + g as f32 * px - px / 2.0, y + g as f32 * px - px / 2.0, px, px, ball_px(4, a));
+    }
+}
+
+/// A snowball flattened against the glass: a lumpy pixel blob, a few
+/// flecks round it, and a drip or two hanging under it.
+fn pixel_splat(c: &mut Canvas, x: f32, y: f32, r: f32, px: f32, seed: u32, a: u8) {
+    let (x, y) = (x.round(), y.round());
+    let (ha, hb) = ((r * 1.5).max(px), (r * 0.85).max(px));
+    let (nx, ny) = ((ha * 1.3 / px).ceil() as i32, (hb * 1.3 / px).ceil() as i32);
+    for j in -ny..=ny {
+        for i in -nx..=nx {
+            let (bx, by) = (i as f32 * px, j as f32 * px);
+            let d = (bx / ha).powi(2) + (by / hb).powi(2);
+            // a lumpy edge: a bit more or less in each direction
+            let ang = ((by.atan2(bx) + std::f32::consts::PI) / std::f32::consts::TAU * 12.0) as u32;
+            let lump = (h32(seed ^ ang.wrapping_mul(0x9e37)) % 100) as f32 / 100.0 * 0.45;
+            if d > 1.0 + lump {
+                continue;
+            }
+            let shade = if d > 0.8 + lump * 0.8 {
+                1
+            } else if d < 0.25 && j <= 0 {
+                3
+            } else {
+                2
+            };
+            c.fill(x + bx - px / 2.0, y + by - px / 2.0, px, px, ball_px(shade, a));
+        }
+    }
+    // flecks thrown off round it
+    for f in 0..5u32 {
+        let h = h32(seed.wrapping_add(f * 0x51));
+        let ang = (h % 360) as f32 / 360.0 * std::f32::consts::TAU;
+        let dist = 1.25 + (h >> 9) as f32 % 50.0 / 100.0;
+        let (fx, fy) = ((ang.cos() * ha * dist / px).round() * px, (ang.sin() * hb * dist / px).round() * px);
+        c.fill(x + fx - px / 2.0, y + fy - px / 2.0, px, px, ball_px(3, a));
+    }
+    // drips under it
+    for d in 0..2u32 {
+        let h = h32(seed ^ (0xd00d + d));
+        let dx = ((h % 100) as f32 / 100.0 - 0.5) * ha * 1.2;
+        let len = ((0.4 + (h >> 8) as f32 % 80.0 / 100.0) * r / px).round().max(1.0);
+        let dx = (dx / px).round() * px;
+        for k in 0..len as i32 {
+            c.fill(x + dx - px / 2.0, y + hb + k as f32 * px - px / 2.0, px, px, ball_px(if k as f32 == len - 1.0 { 3 } else { 2 }, a));
         }
     }
 }
@@ -1187,13 +1526,95 @@ mod tests {
         for k in 0..30 {
             fx.set_windows(vec![w.clone()], &[], (500.0 + k as f32 * 8.0, 292.0), 0.1 * k as f32);
         }
-        let (r, rolling) = fx.balls.first().map(|b| (b.2, b.3)).expect("no snowball");
+        let (r, rolling) = fx.balls.first().map(|b| (b.r, b.rolling)).expect("no snowball");
         assert!(rolling && r > 6.0, "radius {r}");
         assert!(fx.piles["a"].cols.iter().sum::<f32>() < before, "no snow picked up");
         // let go: it stays put, done rolling
         fx.button = false;
         fx.set_windows(vec![w], &[], (900.0, 292.0), 4.0);
-        assert!(!fx.balls[0].3);
+        assert!(!fx.balls[0].rolling);
+    }
+
+    #[test]
+    fn a_snowball_picked_up_and_thrown_splats_and_slides_off() {
+        let mut fx = Fx::new(1920.0, 1080.0, FxCfg::default(), 1.0);
+        let a = win("a", 400.0, 300.0, 600.0, 400.0, 1);
+        let b = win("b", 1100.0, 20.0, 700.0, 900.0, 2);
+        fx.set_windows(vec![a.clone(), b.clone()], &[], (0.0, 0.0), 0.0);
+        if let Some(p) = fx.piles.get_mut("a") {
+            p.cols.iter_mut().for_each(|h| *h = 12.0);
+        }
+        fx.button = true;
+        let mut t = 0.0;
+        for k in 0..20 {
+            t = 0.1 * k as f32;
+            fx.set_windows(vec![a.clone(), b.clone()], &[], (500.0 + k as f32 * 6.0, 292.0), t);
+        }
+        assert_eq!(fx.balls.len(), 1);
+        // dragged up off the top: in the hand
+        for k in 0..6 {
+            t += 0.05;
+            fx.set_windows(vec![a.clone(), b.clone()], &[], (620.0 + k as f32 * 4.0, 250.0 - k as f32 * 20.0), t);
+        }
+        assert!(fx.balls[0].carried, "{:?}", fx.balls);
+        // a fling towards the other window, let go
+        fx.set_windows(vec![a.clone(), b.clone()], &[], (700.0, 120.0), t + 0.05);
+        fx.set_windows(vec![a.clone(), b.clone()], &[], (780.0, 100.0), t + 0.1);
+        fx.button = false;
+        fx.set_windows(vec![a.clone(), b.clone()], &[], (860.0, 80.0), t + 0.15);
+        assert!(fx.balls.is_empty() && fx.throws.len() == 1, "not thrown");
+        // it flies, meets the glass of the window in front, and sticks
+        for _ in 0..40 {
+            fx.update(1.0 / 60.0, t);
+        }
+        let s = fx.throws[0].splat.as_ref().expect("didn't splat");
+        assert_eq!(s.win, "b");
+        // then slides down and off the bottom
+        for _ in 0..60 * 30 {
+            fx.update(1.0 / 60.0, t);
+        }
+        assert!(fx.throws.is_empty(), "still on the glass");
+        // drawing one leaves nothing outside what's wiped
+        let mut c = Canvas::new(1920, 1080);
+        let mut g = Glyphs::new();
+        fx.throws.push(Throw { x: 1300.0, y: 500.0, vx: 0.0, vy: 0.0, r: 14.0, age: 1.0, flight: 0.4, splat: Some(Splat { win: "b".into(), dx: 200.0, dy: 300.0, slid: 40.0, v: 0.0, age: 3.0, r: 14.0 }), seed: 7, done: false });
+        fx.balls.push(Ball { win: "a".into(), dx: 100.0, r: 12.0, rolling: false, carried: false, idle: 0.0 });
+        fx.render(&mut c, &mut g, 0.0);
+        let rects = c.clear_touched();
+        assert!(!rects.is_empty());
+        assert!(c.px.iter().all(|&p| p == 0), "pixels left outside the touched rects");
+    }
+
+    /// A look at the snowball drawings: XMAS_SNOW_PPM=out.ppm.
+    #[test]
+    #[ignore]
+    fn snowball_look() {
+        let mut c = Canvas::new(240, 120);
+        c.fill(0.0, 0.0, 240.0, 120.0, argb(0xff, 0x30, 0x3a, 0x55));
+        pixel_ball(&mut c, 30.0, 40.0, 6.0, 2.0, 0xff);
+        pixel_ball(&mut c, 70.0, 40.0, 14.0, 2.0, 0xff);
+        pixel_ball(&mut c, 120.0, 40.0, 24.0, 3.0, 0xff);
+        pixel_splat(&mut c, 60.0, 95.0, 12.0, 2.0, 11, 0xff);
+        pixel_splat(&mut c, 160.0, 90.0, 20.0, 3.0, 5, 0xff);
+        if let Some(out) = std::env::var_os("XMAS_SNOW_PPM") {
+            let mut b = format!("P6 {} {} 255\n", c.w, c.h).into_bytes();
+            for p in &c.px {
+                b.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+            }
+            std::fs::write(out, b).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_snowball_left_alone_melts_away() {
+        let mut fx = Fx::new(1920.0, 1080.0, FxCfg::default(), 1.0);
+        let a = win("a", 400.0, 300.0, 600.0, 400.0, 1);
+        fx.set_windows(vec![a.clone()], &[], (0.0, 0.0), 0.0);
+        fx.balls.push(Ball { win: "a".into(), dx: 100.0, r: 12.0, rolling: false, carried: false, idle: 0.0 });
+        for _ in 0..60 * 60 {
+            fx.update(1.0 / 60.0, 0.0);
+        }
+        assert!(fx.balls.is_empty());
     }
 
     fn win(id: &str, x: f32, y: f32, w: f32, h: f32, z: i64) -> Win {

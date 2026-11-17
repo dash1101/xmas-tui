@@ -114,22 +114,25 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
         stopLoop();
         String cfg = cfgToml();
-        if (game != 0 && !cfg.equals(cfgUsed)) {
-            Native.destroy(game);
-            game = 0;
-        }
-        // (a new size: a new village to fit it; the wallpaper's moved
-        // things on since: from its save)
         java.io.File save = new java.io.File(getFilesDir(), "save.toml");
         // (a save imported, or a new village asked for, in the settings:
-        // this one goes without writing over it)
+        // this one goes without writing over it, and the new one starts)
         boolean replaced = save.lastModified() > savedAt + 500 || (!save.exists() && savedAt > 0);
         if (game != 0 && replaced) {
             Native.forget(game);
-        }
-        if (game != 0 && (w != controls.gw || h != controls.gh || replaced)) {
             Native.destroy(game);
             game = 0;
+        }
+        // new settings, a new size (the phone turned): taken in by the game
+        // where it stands (still in a friend's village, still online)
+        if (game != 0 && !cfg.equals(cfgUsed)) {
+            Native.configure(game, cfg, size());
+            cfgUsed = cfg;
+        }
+        if (game != 0 && (w != controls.gw || h != controls.gh)) {
+            Native.resize(game, w, h, size());
+            controls.gw = w;
+            controls.gh = h;
         }
         if (game == 0) {
             game = Native.create(w, h, size(), cfg);
@@ -239,6 +242,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         immersive();
         if (game != 0) {
             Native.pause(game, false);
+            // back from the settings: what changed, taken in
+            String cfg = cfgToml();
+            if (!cfg.equals(cfgUsed)) {
+                Native.configure(game, cfg, size());
+                cfgUsed = cfg;
+            }
         }
     }
 
@@ -339,6 +348,26 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     startActivity(new Intent(GameActivity.this, SettingsActivity.class));
                 } else if (ask != null && ask.startsWith("text:")) {
                     typeLine(ask.substring(5));
+                } else if (ask != null && ask.startsWith("rules:")) {
+                    // the village's settings, a guest's change said yes to: kept
+                    try {
+                        org.json.JSONObject r = new org.json.JSONObject(ask.substring(6));
+                        android.content.SharedPreferences.Editor e = Prefs.get(GameActivity.this).edit();
+                        e.putInt("snow", (int) Math.round(r.optDouble("snow", 1) * 100));
+                        e.putInt("wind", (int) Math.round(r.optDouble("wind", 1) * 100));
+                        e.putInt("glow", (int) Math.round(r.optDouble("glow", 1) * 100));
+                        e.putInt("events", (int) Math.round(r.optDouble("events", 1) * 100));
+                        e.putInt("critters", (int) Math.round(r.optDouble("critters", 1) * 100));
+                        e.putInt("chattiness", (int) Math.round(r.optDouble("chattiness", 1) * 100));
+                        e.putInt("most_at_once", r.optInt("most_at_once", 24));
+                        e.putInt("sleigh_minutes", (int) Math.round(r.optDouble("sleigh_minutes", 4)));
+                        e.putBoolean("aurora", r.optBoolean("aurora", true));
+                        e.putBoolean("bushes", r.optBoolean("bushes", true));
+                        e.putString("time", r.optString("time", "auto"));
+                        e.apply();
+                        cfgUsed = cfgToml();
+                    } catch (Exception ignored) {
+                    }
                 } else if (ask != null && ask.startsWith("you:")) {
                     // the villager changed in the village (or on a linked device)
                     Prefs.applyYou(GameActivity.this, ask.substring(4));

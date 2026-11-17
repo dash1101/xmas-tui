@@ -704,8 +704,10 @@ impl Scene {
 
 /// Santa, tumbled out of his sleigh (clicked once too often): down into the
 /// snow, a moment seeing stars, then off at a run, away from the villager,
-/// never quite catchable (a touch faster than whoever's chasing him), until
-/// he's run clean off the screen.
+/// a touch faster than whoever's chasing him, until he's run clean off the
+/// screen. Almost never catchable: now and then (not every time) he slips
+/// on a patch of ice once he's been running a while, and someone right on
+/// his heels just then has him.
 pub struct Runaway {
     pub x: f32,
     pub y: f32,
@@ -718,6 +720,11 @@ pub struct Runaway {
     phase: f32,
     next_line: f32,
     pub gone: bool,
+    /// Whether there's a patch of ice ahead for him this time, when he
+    /// slips on it, and when he was caught.
+    pub(super) slips: bool,
+    slip: Option<f32>,
+    caught: Option<f32>,
 }
 
 impl Runaway {
@@ -725,6 +732,8 @@ impl Runaway {
         self.dizzy_until -= s;
         self.next_line -= s;
         self.running = self.running.map(|r| r - s);
+        self.slip = self.slip.map(|v| v - s);
+        self.caught = self.caught.map(|v| v - s);
     }
 }
 
@@ -746,7 +755,7 @@ impl Scene {
             _ => (self.lo_at(x) + 3.0).min(self.h as f32 - 2.0),
         };
         let away = self.player.as_ref().map(|p| (x - p.centre()).signum()).unwrap_or(1.0);
-        self.runaway = Some(Runaway { x, y: sy - self.oy_i() as f32, vy: -4.0, land, dizzy_until: 0.0, running: None, dir: if away == 0.0 { 1.0 } else { away }, phase: 0.0, next_line: 0.0, gone: false });
+        self.runaway = Some(Runaway { x, y: sy - self.oy_i() as f32, vy: -4.0, land, dizzy_until: 0.0, running: None, dir: if away == 0.0 { 1.0 } else { away }, phase: 0.0, next_line: 0.0, gone: false, slips: crate::rng::h01(crate::rng::hash((t * 1000.0) as u32 ^ 0x5a1c)) < 0.25, slip: None, caught: None });
         self.sleigh.santa_out = true;
         self.director.say(x.round() as i32, sy as i32 - 2, "whoa — WHOA!", t, 1.8, 8);
         self.director.sound(Sfx::Magic, x, 0.8);
@@ -779,6 +788,15 @@ impl Scene {
                 self.director.say(r.x.round() as i32, r.y as i32 - 4, "ho ho — you'll never catch me!", t, 2.4, 8);
                 self.director.sound(Sfx::Laugh, r.x, 0.9);
                 r.next_line = t + 4.0;
+                // (one time in four or so, a patch of ice somewhere ahead)
+                if r.slips {
+                    r.slip = Some(t + 6.0 + 8.0 * crate::rng::h01(crate::rng::hash((t * 977.0) as u32)));
+                }
+            }
+        } else if let Some(at) = r.caught {
+            // caught! a word, a gift, then the sleigh's back for him
+            if t - at > 4.5 {
+                r.gone = true;
             }
         } else {
             // away from the villager: walking pace to begin with; chased,
@@ -786,7 +804,28 @@ impl Scene {
             // they've somehow got right up to him)
             let walk = 11.0 * k;
             let mut speed = walk;
-            if let Some((px, _, pace, moving)) = you {
+            // down on the ice a moment: there for the catching
+            let slipping = r.slip.is_some_and(|s| t >= s && t < s + 1.4);
+            if r.slip.is_some_and(|s| t >= s && t - dt < s) {
+                self.director.say(r.x.round() as i32, r.y as i32 - 4, "whoa — ice!", t, 1.4, 8);
+                self.director.snow_puff(r.x, r.y);
+                self.director.sound(Sfx::Drop, r.x, 0.8);
+            }
+            if let (true, Some((px, py, ..))) = (slipping, you) {
+                if (r.x - px).abs() < 2.2 && (r.y - py).abs() < 3.0 {
+                    r.caught = Some(t);
+                    self.santa_caught(r.x, r.y, t);
+                    self.runaway = Some(r);
+                    return;
+                }
+            }
+            if let Some(s) = r.slip.filter(|s| t >= s + 1.4 && t - dt < s + 1.4) {
+                let _ = s;
+                self.director.say(r.x.round() as i32, r.y as i32 - 4, "ho ho — a close one!", t, 1.8, 8);
+            }
+            if slipping {
+                speed = 0.0;
+            } else if let Some((px, _, pace, moving)) = you {
                 let chasing = moving && (r.x - px).signum() == r.dir;
                 if chasing {
                     speed = speed.max(1.1 * 11.0 * pace * k);
@@ -796,7 +835,7 @@ impl Scene {
                 }
             }
             r.x += r.dir * speed * dt;
-            r.phase += dt * 12.0;
+            r.phase += dt * 12.0 * (speed > 0.0) as i32 as f32;
             if t > r.next_line {
                 r.next_line = t + 4.5;
                 let line = *self.rng.pick(SANTA_RUN);
@@ -819,13 +858,111 @@ impl Scene {
         self.runaway = Some(r);
     }
 
+    /// Santa caught: he laughs, a present for the villager (and one under
+    /// the tree), the stats say so.
+    fn santa_caught(&mut self, x: f32, y: f32, t: f32) {
+        self.director.say(x.round() as i32, y as i32 - 4, "ho ho HO! you caught me! the nice list, for sure", t, 4.0, 8);
+        self.director.burst(x, y - 2.0, 30, &[Rgb::hex(0xffd36b), Rgb::WHITE, Rgb::hex(0xd8283a), Rgb::hex(0x7fe0a0)], 6.0, 3.0);
+        self.director.sound(Sfx::Fanfare, x, 0.9);
+        self.pockets.santa_caught += 1;
+        self.cheer(25);
+        self.present_from_santa(t);
+        if let Some(p) = &mut self.player {
+            p.wave_until = t + 2.0;
+        }
+    }
+
+    /// The hot-air balloon: now and then one comes down over the village
+    /// and waits a while; one comes for whoever's up on the big tree's
+    /// star; aboard, it's steered (see `balloon.rs`).
+    pub(super) fn update_balloon(&mut self, dt: f32, t: f32) {
+        let k = super::sprite_k(self.h);
+        if self.balloon.is_none() && self.inside.is_none() && self.trip.is_none() && self.online.guest_seed().is_none() {
+            if let Some(p) = &self.player {
+                let star = self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.star());
+                let on_star = star.is_some_and(|(sx, sy)| p.perch.is_some() && (p.centre() - sx as f32).abs() < 3.0 && p.y <= sy as f32 + 3.0);
+                let (pc, py) = (p.centre(), p.y);
+                if on_star && !self.balloon_star {
+                    // up on the star: one drifts over, its ladder down to them
+                    self.balloon_star = true;
+                    let from = self.cam - 40.0;
+                    let seed = self.rng.next_u32();
+                    self.balloon = Some(super::balloon::Balloon::coming(from, py - 30.0, pc + 5.0 * k, py, 5.0 * k, seed));
+                    self.director.say(pc.round() as i32, py as i32 - 4, "is that… a balloon?!", t, 2.6, 8);
+                } else if !on_star && t > self.balloon_next && p.perch.is_none() {
+                    self.balloon_next = t + self.rng.range(700.0, 1600.0);
+                    // somewhere in view, on the snow (not on a house)
+                    let x = (self.cam + self.w as f32 * self.rng.range(0.2, 0.8)).clamp(8.0, self.ww as f32 - 8.0);
+                    if !self.village.houses.iter().any(|h| h.contains(x as i32, (self.lo_at(x) + 2.0) as i32)) {
+                        let ground = (self.lo_at(x) + 3.0).min(self.h as f32 - 2.0);
+                        let from = if x > pc { self.cam + self.w as f32 + 40.0 } else { self.cam - 40.0 };
+                        let seed = self.rng.next_u32();
+                        self.balloon = Some(super::balloon::Balloon::coming(from, -12.0, x, ground, 0.0, seed));
+                        self.director.say(pc.round() as i32, py as i32 - 4, "look — a hot-air balloon!", t, 2.6, 8);
+                    }
+                }
+                if !on_star {
+                    self.balloon_star = false;
+                }
+            }
+        }
+        let ww = self.ww as f32;
+        let Some(mut b) = self.balloon.take() else { return };
+        let ground = (self.lo_at(b.x.clamp(0.0, ww - 1.0)) + 3.0).min(self.h as f32 - 2.0);
+        let sky = -(self.h as f32) * 0.8;
+        let mv = if b.aboard { self.mv } else { (0.0, 0.0) };
+        if b.update(dt, t, mv, ground, sky, ww) {
+            self.director.sound(Sfx::Puff, b.x, 0.5);
+        }
+        if b.aboard {
+            if let Some(p) = &mut self.player {
+                p.active_at = t;
+                p.ride(b.x - 1.0, b.y - 0.8);
+            }
+        }
+        if !b.gone(ww) {
+            self.balloon = Some(b);
+        }
+    }
+
+    /// E by (or in) the balloon: aboard, or (low over the snow) off again.
+    pub(super) fn balloon_e(&mut self, t: f32) -> bool {
+        let Some(bx) = self.balloon.as_ref().map(|b| b.x) else { return false };
+        let ground = (self.lo_at(bx.clamp(0.0, self.ww as f32 - 1.0)) + 3.0).min(self.h as f32 - 2.0);
+        let (Some(b), Some(p)) = (self.balloon.as_mut(), self.player.as_mut()) else { return false };
+        if b.aboard {
+            if b.landed(ground) {
+                b.hop_off();
+                p.ride(b.x + 3.0, ground);
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, "what a view! thanks, balloon", t, 2.4, 8);
+                self.pockets.balloon += 1;
+            } else {
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, "too high to hop off — ↓ to come down", t, 2.0, 8);
+            }
+            return true;
+        }
+        if b.reachable(p.centre(), p.y) {
+            b.board();
+            p.ride(b.x - 1.0, b.y - 0.8);
+            self.director.say(p.centre().round() as i32, p.y as i32 - 6, "up, up and away! ← → drift · ↑ burner · ↓ down · E on the snow: off", t, 4.5, 8);
+            self.director.sound(Sfx::Magic, b.x, 0.7);
+            return true;
+        }
+        false
+    }
+
     /// Santa running about in the snow (in front of everything in the
     /// village).
     pub(super) fn draw_runaway(&self, f: &mut crate::frame::Frame, t: f32) {
         let Some(r) = &self.runaway else { return };
         use super::sprites::{self, Look, Pose};
         let k = super::sprite_k(self.h);
-        let pose = if r.running.is_some() {
+        let slipping = r.slip.is_some_and(|s| t >= s && t < s + 1.4);
+        let pose = if r.caught.is_some() {
+            if (t * 2.0) as i32 % 2 == 0 { Pose::Wave } else { Pose::Stand }
+        } else if slipping {
+            Pose::Lie
+        } else if r.running.is_some() {
             Pose::Walk((r.phase as i32 % 2) as u8)
         } else if r.dizzy_until > 0.0 {
             Pose::Stand

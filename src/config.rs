@@ -45,18 +45,19 @@ pub struct KeysCfg {
     pub rest: String,
     pub todo: String,
     pub online: String,
+    pub chat: String,
 }
 
 impl Default for KeysCfg {
     fn default() -> Self {
         let k = |s: &str| s.to_string();
-        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t"), online: k("o") }
+        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t"), online: k("o"), chat: k("/") }
     }
 }
 
 /// What each key does, in the order the settings list them: (name, what
 /// it does).
-pub const KEY_ACTIONS: [(&str, &str); 10] = [
+pub const KEY_ACTIONS: [(&str, &str); 11] = [
     ("interact", "talk, use, pick up, help build"),
     ("jump", "jump (hold: higher), leap up onto things"),
     ("snowball", "scoop a snowball, then throw it"),
@@ -67,11 +68,12 @@ pub const KEY_ACTIONS: [(&str, &str); 10] = [
     ("rest", "lie down in the snow (Space: a snow angel)"),
     ("todo", "things to do here"),
     ("online", "friends & online"),
+    ("chat", "talk (@name: to one person, @group: to a group)"),
 ];
 
 impl KeysCfg {
     pub fn get(&self, i: usize) -> &str {
-        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo, &self.online][i.min(9)]
+        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo, &self.online, &self.chat][i.min(10)]
     }
 
     pub fn set(&mut self, i: usize, v: String) {
@@ -85,7 +87,8 @@ impl KeysCfg {
             6 => &mut self.centre,
             7 => &mut self.rest,
             8 => &mut self.todo,
-            _ => &mut self.online,
+            9 => &mut self.online,
+            _ => &mut self.chat,
         };
         *slot = v;
     }
@@ -106,11 +109,15 @@ impl KeysCfg {
 pub struct UiCfg {
     /// "classic", "frosted", "wood" or "gift".
     pub look: String,
+    /// The menus, panels and text over the village drawn this much bigger
+    /// (1: the village's own size), the village itself as it is. (Where
+    /// the front-end draws its own letters: the window, a phone, the web.)
+    pub scale: f32,
 }
 
 impl Default for UiCfg {
     fn default() -> Self {
-        UiCfg { look: "classic".into() }
+        UiCfg { look: "classic".into(), scale: 1.0 }
     }
 }
 
@@ -384,6 +391,7 @@ pub struct LayoutCfg {
     pub weather: Option<[f32; 2]>,
     pub map: Option<[f32; 2]>,
     pub visualizer: Option<[f32; 2]>,
+    pub friends: Option<[f32; 2]>,
     /// The map widget's size in cells (it can be resized).
     pub map_size: Option<[i32; 2]>,
     /// The other widgets' sizes (cells) once resized: "system", "music",
@@ -393,7 +401,7 @@ pub struct LayoutCfg {
 
 impl LayoutCfg {
     pub fn get(&self, i: usize) -> Option<[f32; 2]> {
-        [self.clock, self.system, self.music, self.weather, self.map, self.visualizer][i]
+        [self.clock, self.system, self.music, self.weather, self.map, self.visualizer, self.friends][i.min(6)]
     }
     pub fn set(&mut self, i: usize, v: Option<[f32; 2]>) {
         match i {
@@ -402,7 +410,8 @@ impl LayoutCfg {
             2 => self.music = v,
             3 => self.weather = v,
             4 => self.map = v,
-            _ => self.visualizer = v,
+            5 => self.visualizer = v,
+            _ => self.friends = v,
         }
     }
 }
@@ -457,6 +466,29 @@ pub struct SceneCfg {
     pub wear: FriendCfg,
     /// A line about the villager, on their profile card (friends see it).
     pub motto: String,
+}
+
+impl SceneCfg {
+    /// What the village is built from: a change to any of this makes it
+    /// anew (the rest applies as it is: names, looks, walking speed,
+    /// talk, the time of day, traffic…).
+    pub fn build_key(&self) -> SceneCfg {
+        let mut c = self.clone();
+        c.walk_speed = 0.0;
+        c.most_at_once = 0;
+        c.traffic.clear();
+        c.time.clear();
+        c.talk_time = 0.0;
+        c.chattiness = 0.0;
+        c.pet = Default::default();
+        c.name.clear();
+        c.autopilot = false;
+        c.only_friends = false;
+        c.friends.clear();
+        c.wear = Default::default();
+        c.motto.clear();
+        c
+    }
 }
 
 /// Someone in the friends & family list: a villager of their own.
@@ -610,6 +642,9 @@ pub struct WidgetCfg {
     pub visualizer: bool,
     /// Each visualizer bar's frequency (kHz) under it.
     pub visualizer_khz: bool,
+    /// Friends & messages (while online): who's about, what's been said,
+    /// a click for each friend's menu (ping, invite, write…).
+    pub friends: bool,
     /// Mount point shown in the disk row.
     pub disk: String,
     /// Each widget's look: "classic", "frosted", "wood" or "gift".
@@ -624,12 +659,13 @@ pub struct WidgetLooks {
     pub weather: String,
     pub map: String,
     pub visualizer: String,
+    pub friends: String,
 }
 
 impl Default for WidgetLooks {
     fn default() -> Self {
         let c = || "classic".to_string();
-        WidgetLooks { system: c(), music: c(), weather: c(), map: c(), visualizer: c() }
+        WidgetLooks { system: c(), music: c(), weather: c(), map: c(), visualizer: c(), friends: c() }
     }
 }
 
@@ -642,6 +678,7 @@ impl WidgetLooks {
             3 => &self.weather,
             4 => &self.map,
             5 => &self.visualizer,
+            6 => &self.friends,
             _ => return None,
         })
     }
@@ -653,6 +690,7 @@ impl WidgetLooks {
             3 => &mut self.weather,
             4 => &mut self.map,
             5 => &mut self.visualizer,
+            6 => &mut self.friends,
             _ => return None,
         })
     }
@@ -706,7 +744,7 @@ impl Default for ClockCfg {
 
 impl Default for WidgetCfg {
     fn default() -> Self {
-        WidgetCfg { system: true, music: true, weather: true, map: true, visualizer: false, visualizer_khz: false, disk: "/".into(), looks: WidgetLooks::default() }
+        WidgetCfg { system: true, music: true, weather: true, map: true, visualizer: false, visualizer_khz: false, friends: true, disk: "/".into(), looks: WidgetLooks::default() }
     }
 }
 

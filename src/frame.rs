@@ -40,6 +40,36 @@ pub fn pictures_ok() -> bool {
     PICTURES_OK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A letter as a picture (the font's own shape, in its colour), to draw
+/// the scene's text bigger when zoomed in. Kept for reuse (colours are
+/// rounded a little so a twinkling light doesn't make a new one each frame).
+pub fn glyph_picture(ch: char, fg: Rgb, alpha: f32) -> std::sync::Arc<Picture> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    type Cache = HashMap<(char, u32, u8), Arc<Picture>>;
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+    let [r, g, b] = fg.tonemap();
+    let q = |v: u8| (v >> 3) << 3;
+    let key = (ch, (q(r) as u32) << 16 | (q(g) as u32) << 8 | q(b) as u32, (alpha.clamp(0.0, 1.0) * 7.0).round() as u8);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let c = cache.get_or_insert_with(HashMap::new);
+    if let Some(p) = c.get(&key) {
+        return p.clone();
+    }
+    if c.len() > 6000 {
+        c.clear();
+    }
+    let m = crate::raster::glyph_mask(ch);
+    let a = key.2 as f32 / 7.0;
+    let mut rgba = Vec::with_capacity(m.w * m.h * 4);
+    for &cov in &m.a {
+        rgba.extend_from_slice(&[q(r), q(g), q(b), (cov * a * 255.0).round().min(255.0) as u8]);
+    }
+    let p = Arc::new(Picture::new(m.w, m.h, rgba));
+    c.insert(key, p.clone());
+    p
+}
+
 /// An image (RGBA, straight alpha), shared and identified for caching.
 pub struct Picture {
     pub id: u64,
@@ -279,6 +309,14 @@ pub struct Frame {
     pub h: usize,
     /// Camera: world column shown at the left edge. Drawing helpers take
     /// world x and subtract this; screen-fixed things (sky, UI) draw with 0.
+    /// Rows at the bottom something else covers (the taskbar): the UI
+    /// keeps above them (`ui_in` / `ui_out`).
+    pub safe_bottom: usize,
+    /// Zoomed in: the scene's glyphs, drawn bigger as pictures of the
+    /// font's own letters (kept as text, not blurred into pixels), and the
+    /// cells text was put back in over them (see `zoom`, `zoom_pictures`).
+    zoom_glyphs: Vec<Placed>,
+    zoom_text: Vec<(i32, i32)>,
     pub ox: i32,
     /// Vertical camera: everything scene-drawn moves down this many rows
     /// (looking up into the sky).
@@ -335,6 +373,9 @@ pub struct Frame {
 impl Frame {
     pub fn new(w: usize, h: usize) -> Self {
         let mut f = Frame {
+            safe_bottom: 0,
+            zoom_glyphs: vec![],
+            zoom_text: vec![],
             ox: 0,
             oy: 0,
             day: 0.0,
@@ -401,6 +442,21 @@ impl Frame {
         self.pictures.clear();
         self.cover_pictures = false;
         self.cover_panels = false;
+    }
+
+    /// Drawing the UI from here: the frame's height is what's above the
+    /// taskbar (anything placed from the bottom up lands clear of it). Give
+    /// what this returns to `ui_out` afterwards.
+    pub fn ui_in(&mut self) -> usize {
+        let full = self.h;
+        if self.safe_bottom > 0 && full > self.safe_bottom + 8 {
+            self.h = full - self.safe_bottom;
+        }
+        full
+    }
+
+    pub fn ui_out(&mut self, full: usize) {
+        self.h = full;
     }
 
     /// A sprite (a person, a pet): centred on column `cx`, feet on row
@@ -663,6 +719,21 @@ impl Frame {
     /// left column `x0` and top row `y0`, `z` times bigger).
     pub fn zoom_pictures(&mut self, z: f32, x0: f32, y0: f32) {
         let aspect = self.cell_aspect;
+        self.zoom_pictures_only(z, x0, y0, aspect);
+        // the scene's letters, drawn big (already where they go), under the
+        // speech bubbles and signs put back over them
+        let mut letters = std::mem::take(&mut self.zoom_glyphs);
+        for &(x, y) in &self.zoom_text {
+            for p in letters.iter_mut().filter(|p| x >= p.x && x < p.x + p.cols && y >= p.y && y < p.y + p.rows) {
+                p.hidden.push((x, y));
+            }
+        }
+        let n = self.pictures.len();
+        self.pictures.splice(0..0, letters);
+        let _ = n;
+    }
+
+    fn zoom_pictures_only(&mut self, z: f32, x0: f32, y0: f32, aspect: f32) {
         for p in &mut self.pictures {
             match p.sprite {
                 Some((cx, feet, rows)) => {
@@ -745,7 +816,12 @@ impl Frame {
         // text over the scene: marked so, or letters on a background of
         // their own (signs)
         let ui = |g: &Glyph| g.ui || (g.ch.is_alphanumeric() && !matches!(g.bg, Bg::Scene));
-        // the scene's glyphs, bigger (with their backgrounds)
+        // the scene's glyphs, bigger (with their backgrounds): as the font's
+        // own letters drawn big (pictures), where the front-end shows them;
+        // else as pixels
+        let letters = pictures_ok();
+        self.zoom_glyphs.clear();
+        self.zoom_text.clear();
         for cy in cy0.max(0)..cy1.min(chh) {
             for cx in cx0.max(0)..cx1.min(cw) {
                 let Some(g) = at(cx, cy).filter(|g| !ui(g)) else { continue };
@@ -755,7 +831,18 @@ impl Frame {
                     Bg::Solid(c) => self.fill_rect(px, py, z, 2.0 * z, c, 1.0),
                     Bg::Mix(c, a) => self.fill_rect(px, py, z, 2.0 * z, c, a),
                 }
-                self.big_glyph(px, py, z, 2.0 * z, g.ch, g.fg, g.alpha);
+                if letters && g.ch != ' ' && g.alpha > 0.0 {
+                    let pic = glyph_picture(g.ch, g.fg, g.alpha);
+                    let (scx, feet, rows) = (px + z * 0.5, py / 2.0 + z, z);
+                    let wc = pic.w as f32 / pic.h.max(1) as f32 * rows * self.cell_aspect;
+                    let (x, y) = ((scx - wc / 2.0).floor() as i32, (feet - rows).floor() as i32);
+                    let (cols, rws) = ((scx + wc / 2.0).ceil() as i32 - x, feet.ceil() as i32 - y);
+                    if x + cols >= 0 && y + rws >= 0 && x < self.w as i32 && y < self.h as i32 {
+                        self.zoom_glyphs.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((scx, feet, rows)), hidden: vec![] });
+                    }
+                } else {
+                    self.big_glyph(px, py, z, 2.0 * z, g.ch, g.fg, g.alpha);
+                }
             }
         }
         // text: each connected block keeps its shape, anchored by its
@@ -791,6 +878,7 @@ impl Frame {
                     let (dx, dy) = ((ax + (x as f32 - mid)).round() as i32, (ay - (by1 + 1 - y) as f32).round() as i32);
                     if dx >= 0 && dy >= 0 && dx < cw && dy < chh {
                         self.glyph[(dy * cw + dx) as usize] = at(x, y);
+                        self.zoom_text.push((dx, dy));
                     }
                 }
             }

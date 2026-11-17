@@ -134,6 +134,8 @@ struct Bubble {
     matched: bool,
     /// The speaker's name, shown on the bubble's top edge.
     name: String,
+    /// Told the guests (a shared village's host: see `fresh_said`).
+    sent: bool,
 }
 
 /// A car (or now and then a little bus) on the distant road.
@@ -460,7 +462,28 @@ impl Director {
         let y = y - self.lift;
         self.bubbles.retain(|b| (b.x - x).abs() > 4 || (b.y - y).abs() > 2);
         let life = read_time(text, 3.8);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new() });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new(), sent: false });
+    }
+
+    /// Hosting a shared village: what's been said since last asked, by
+    /// whom (a villager's id), for the guests to see said too.
+    pub fn fresh_said(&mut self, t: f32) -> Vec<(u64, String, f32)> {
+        let mut out = vec![];
+        for b in self.bubbles.iter_mut().filter(|b| b.owner != 0 && !b.sent && b.born <= t) {
+            b.sent = true;
+            out.push((b.owner, b.text.clone(), b.life));
+        }
+        out
+    }
+
+    /// A guest: something said by villager `owner` (at x, y), as the host
+    /// heard it: their bubble, following them.
+    pub fn said_by(&mut self, owner: u64, x: i32, y: i32, text: &str, t: f32, life: f32) {
+        self.say(x, y, text, t, life, 6);
+        if let Some(b) = self.bubbles.last_mut() {
+            b.owner = owner;
+            b.sent = true;
+        }
     }
 
     /// Keep speech bubbles over whoever's speaking. `who`: (id, centre
@@ -504,7 +527,7 @@ impl Director {
             }
         }
         let life = read_time(text, life);
-        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new() });
+        self.bubbles.push(Bubble { x, y, text: text.to_string(), born: t, life, owner: 0, dy: 0, matched: false, name: String::new(), sent: false });
     }
 
     pub fn footprint(&mut self, x: i32, y: i32, t: f32) {

@@ -212,17 +212,36 @@ pub struct Look {
     pub scarf: Option<Rgb>,
     pub skin: Rgb,
     pub mittens: Rgb,
-    /// Something in the front hand (a lantern glows; anything else is a
-    /// little coloured thing).
-    pub holding: Option<Rgb>,
+    /// Something in the front hand (a lantern's its own: it glows).
+    pub holding: Option<Hold>,
     pub lantern: bool,
 }
+
+/// Things carried about in the hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hold {
+    Snowball,
+    /// A mug of hot cocoa (steaming), or of coffee.
+    Cocoa,
+    Coffee,
+    CandyCane,
+    Gingerbread,
+    Carrot,
+    Berries,
+    /// A present (its paper's colour, one of a few), held in front.
+    Present(u8),
+    /// A snow shovel, over the shoulder (or digging).
+    Shovel,
+}
+
+/// A present's paper and ribbon (`Hold::Present`'s colours).
+pub const PAPER: [(u32, u32); 4] = [(0xc8202a, 0xffd36b), (0x1f6e3a, 0xd8283a), (0x2a4c8a, 0xf4f0ea), (0xd8588a, 0xf4f0ea)];
 
 /// A person, posed and facing `dir` (>0 right), lit by `light`.
 pub fn person(l: &Look, pose: Pose, dir: f32, light: f32) -> Arc<Picture> {
     let k = key((
         ("person", l.kid, rgb_key(l.coat), l.hat.map(rgb_key), rgb_key(l.hair), l.scarf.map(rgb_key)),
-        (rgb_key(l.skin), rgb_key(l.mittens), l.holding.map(rgb_key), l.lantern),
+        (rgb_key(l.skin), rgb_key(l.mittens), l.holding, l.lantern),
         (pose, dir > 0.0, (light * 20.0) as i32),
     ));
     cached(k, || {
@@ -363,8 +382,63 @@ fn draw_person(l: &Look, pose: Pose) -> Canvas {
         c.rect(lx, ly + 1, 1, 1, Rgb::hex(0x3a3a44));
         c.rect(lx - 1, ly + 2, 3, 3, Rgb::hex(0xffd27a) * 1.3);
         c.rect(lx - 1, ly + 2, 3, 1, Rgb::hex(0x3a3a44));
-    } else if let Some(t) = l.holding {
-        c.rect(front_hand.0 as i32 - 1, front_hand.1 as i32 - 1, 3, 3, t);
+    } else if let Some(h) = l.holding {
+        let (hx, hy) = (front_hand.0 as i32, front_hand.1 as i32);
+        match h {
+            Hold::Snowball => c.rect(hx - 1, hy - 1, 3, 3, Rgb::hex(0xf2f6ff)),
+            Hold::Cocoa | Hold::Coffee => {
+                // a mug, its handle, steam curling up
+                let (mug, drink) = if h == Hold::Cocoa { (Rgb::hex(0xd8283a), Rgb::hex(0x7a4a2a)) } else { (Rgb::hex(0xf0ece4), Rgb::hex(0x3a2214)) };
+                c.rect(hx - 1, hy - 2, 3, 3, mug);
+                c.set(hx - 1, hy - 2, drink);
+                c.set(hx, hy - 2, drink);
+                c.set(hx + 2, hy - 1, mug * 0.85);
+                c.set(hx, hy - 4, Rgb::hex(0xd8dce8) * 0.8);
+                c.set(hx - 1, hy - 5, Rgb::hex(0xd8dce8) * 0.6);
+            }
+            Hold::CandyCane => {
+                for k in 0..6 {
+                    c.set(hx + 1, hy - 4 + k, if k % 2 == 0 { Rgb::hex(0xe8283c) } else { Rgb::hex(0xf6f2ea) });
+                }
+                c.set(hx, hy - 5, Rgb::hex(0xf6f2ea));
+                c.set(hx - 1, hy - 4, Rgb::hex(0xe8283c));
+            }
+            Hold::Gingerbread => {
+                let g = Rgb::hex(0xc8803a);
+                c.set(hx, hy - 3, g);
+                c.rect(hx - 1, hy - 2, 3, 2, g);
+                c.set(hx - 1, hy, g);
+                c.set(hx + 1, hy, g);
+                c.set(hx, hy - 2, Rgb::hex(0xf6f2ea));
+            }
+            Hold::Carrot => {
+                c.set(hx, hy - 3, Rgb::hex(0x3a9a3a));
+                c.set(hx + 1, hy - 3, Rgb::hex(0x3a9a3a));
+                for k in 0..3 {
+                    c.set(hx + k / 2, hy - 2 + k, Rgb::hex(0xff8a2a));
+                }
+            }
+            Hold::Berries => {
+                for (dx, dy) in [(0, -1), (1, 0), (-1, 0), (0, 0)] {
+                    c.set(hx + dx, hy + dy, Rgb::hex(0xd8202a));
+                }
+                c.set(hx, hy - 2, Rgb::hex(0x2f8a3a));
+            }
+            Hold::Present(i) => {
+                let (paper, ribbon) = PAPER[i as usize % PAPER.len()];
+                c.rect(hx - 4, hy - 3, 5, 4, Rgb::hex(paper));
+                c.rect(hx - 2, hy - 3, 1, 4, Rgb::hex(ribbon));
+                c.rect(hx - 4, hy - 2, 5, 1, Rgb::hex(ribbon));
+                c.set(hx - 3, hy - 4, Rgb::hex(ribbon));
+                c.set(hx - 1, hy - 4, Rgb::hex(ribbon));
+            }
+            Hold::Shovel => {
+                // the handle over the shoulder, the blade down behind
+                c.line(hx as f32, hy as f32 - 4.0, hx as f32 - 4.0, hy as f32 + 5.0, 1, Rgb::hex(0x8a5a2a));
+                c.rect(hx - 6, hy + 4, 4, 3, Rgb::hex(0x9aa4b8));
+                c.set(hx - 6, hy + 4, Rgb::hex(0xc8d0e0));
+            }
+        }
     }
     c.line(shoulder_front.0, shoulder_front.1, front_hand.0, front_hand.1, 2, sleeve);
     c.rect(front_hand.0 as i32, front_hand.1 as i32, 2, 2, l.mittens);

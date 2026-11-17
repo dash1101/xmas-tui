@@ -85,6 +85,15 @@ final class Native {
 
     static native void pause(long game, boolean on);
 
+    /** New settings (the config text), taken in where the game stands. */
+    static native void configure(long game, String cfg, float size);
+
+    /** The screen's new size: the grid made again, the game going on. */
+    static native void resize(long game, int w, int h, float size);
+
+    /** The talk line. */
+    static native void chat(long game);
+
     /** Sound for the AudioTrack (48 kHz stereo); how many samples were real. */
     static native int audio(short[] buf);
 }

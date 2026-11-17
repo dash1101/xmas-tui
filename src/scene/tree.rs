@@ -449,6 +449,12 @@ const BOX_COLORS: [Rgb; 7] = [
 const RIBBONS: [Rgb; 4] = [Rgb::hex(0xffd166), Rgb::hex(0xe8eaf2), Rgb::hex(0xff4d4d), Rgb::hex(0x3ad07a)];
 
 impl Present {
+    /// Wrapped in this paper and ribbon (one brought by someone).
+    pub fn recolour(&mut self, body: Rgb, ribbon: Rgb) {
+        self.body = body;
+        self.ribbon = ribbon;
+    }
+
     pub fn new(x: i32, base: i32, w: i32, h: i32, rng: &mut Rng) -> Self {
         let body = *rng.pick(&BOX_COLORS);
         let mut ribbon = *rng.pick(&RIBBONS);

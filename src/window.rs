@@ -47,6 +47,34 @@ struct Gfx {
     /// Our HWND (Windows), for the desktop attach / liveness checks.
     #[cfg(windows)]
     hwnd: usize,
+    /// The UI's own layer (bigger letters over the village, when it's set
+    /// bigger): its grid and cell size (uw, uh, cw, ch), its letters, what
+    /// was drawn of it last frame (cells, pictures).
+    ui: Option<(usize, usize, usize, usize)>,
+    ui_raster: Raster,
+    ui_prev: Vec<Option<UiCell>>,
+    ui_pics: Vec<crate::frame::Placed>,
+}
+
+/// A cell of the UI's layer as drawn (to tell when it changes).
+#[derive(Clone, Copy, PartialEq)]
+struct UiCell {
+    ch: char,
+    fg: [u8; 3],
+    bg: [u8; 3],
+    bga: u8,
+    fga: u8,
+}
+
+impl UiCell {
+    fn of(g: &crate::frame::Glyph) -> UiCell {
+        let (bg, bga) = match g.bg {
+            crate::frame::Bg::Scene => ([0, 0, 0], 0),
+            crate::frame::Bg::Solid(c) => (c.tonemap(), 255),
+            crate::frame::Bg::Mix(c, a) => (c.tonemap(), (a.clamp(0.0, 1.0) * 255.0) as u8),
+        };
+        UiCell { ch: g.ch, fg: g.fg.tonemap(), bg, bga, fga: (g.alpha.clamp(0.0, 1.0) * 255.0) as u8 }
+    }
 }
 
 /// Windows desktop mode: the window we were attached to is gone (Explorer
@@ -82,6 +110,12 @@ struct Runner {
     keys: [bool; 18],
     /// The render scale the layout was last made for.
     scale: f32,
+    /// The window has the keyboard (desktop mode: after a click on the
+    /// village; keys then come as key events, not polled).
+    focused: bool,
+    /// Desktop mode: bring the keyboard here (until then, or until it's come).
+    #[cfg(windows)]
+    want_focus: Option<Instant>,
     /// Ctrl is held (Ctrl+wheel looks up into the sky).
     ctrl: bool,
     shift: bool,
@@ -141,6 +175,20 @@ struct Runner {
     fixes: (u32, Instant),
 }
 
+/// XMAS_TEST_HANG / XMAS_TEST_PANIC (seconds after starting): trouble on
+/// purpose, to see the guard (`guard.rs`) put it right. Only once per run of
+/// restarts.
+fn test_trouble() -> Option<(&'static str, f32)> {
+    static T: std::sync::OnceLock<Option<(&'static str, f32)>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        if std::env::var_os("XMAS_RESTARTS").is_some() {
+            return None;
+        }
+        let secs = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        secs("XMAS_TEST_HANG").map(|s| ("hang", s)).or_else(|| secs("XMAS_TEST_PANIC").map(|s| ("panic", s)))
+    })
+}
+
 fn cell_size(height: u32, rows: u32) -> (usize, usize) {
     let ch = (height / rows.max(10)).clamp(6, 64) as usize;
     let cw = ((ch as f32 * 0.474).round() as usize).max(3);
@@ -176,6 +224,10 @@ impl Runner {
                 let desktop = self.opts.desktop;
                 let mut app = App::new(self.cfg.clone(), self.seed, &self.path, cols, rows, desktop, !desktop, true);
                 app.set_windowed(!desktop);
+                app.set_can_focus(desktop);
+                // (this front-end draws its own letters: a UI layer of bigger
+                // ones can go over the village)
+                app.set_ui_layer_ok(true);
                 app.start_audio();
                 if crate::save::on() {
                     app.keep_saves();
@@ -183,6 +235,23 @@ impl Runner {
                 self.app = Some(app);
             }
         }
+        #[cfg(windows)]
+        self.update_safe();
+    }
+
+    /// Windows desktop mode: how many rows at the bottom the taskbar
+    /// covers (the village's tips and boxes keep above it).
+    #[cfg(windows)]
+    fn update_safe(&mut self) {
+        let (Some(g), Some(app)) = (self.gfx.as_ref(), self.app.as_mut()) else { return };
+        if !self.opts.desktop || g.hidden {
+            return;
+        }
+        let px = crate::winsys::taskbar_bottom(g.hwnd as _).max(0) as usize;
+        let ch = g.raster.ch.max(1);
+        let rows = app.scene_size().1;
+        let clear = (g.size.1 as usize).saturating_sub(px + g.offset.1) / ch;
+        app.set_safe_bottom(rows.saturating_sub(clear));
     }
 
     /// Desktop mode: the wallpaper comes out in front, full screen, with
@@ -219,11 +288,16 @@ impl Runner {
         g.window.set_fullscreen(if on { None } else { Some(winit::window::Fullscreen::Borderless(None)) });
     }
 
-    /// Physical pixel (window-relative) → cell.
+    /// Physical pixel (window-relative) → cell (the UI's, which is what
+    /// the app takes the pointer in: the village's own, without a layer).
     fn to_cell(&self, x: f64, y: f64) -> (i32, i32) {
         let Some(g) = self.gfx.as_ref() else { return (-1, -1) };
-        let cx = ((x - g.offset.0 as f64) / g.raster.cw as f64).floor() as i32;
-        let cy = ((y - g.offset.1 as f64) / g.raster.ch as f64).floor() as i32;
+        let (cw, ch) = match g.ui {
+            Some((_, _, cw, ch)) => (cw, ch),
+            None => (g.raster.cw, g.raster.ch),
+        };
+        let cx = ((x - g.offset.0 as f64) / cw as f64).floor() as i32;
+        let cy = ((y - g.offset.1 as f64) / ch as f64).floor() as i32;
         (cx, cy)
     }
 
@@ -233,10 +307,22 @@ impl Runner {
         if g.hidden {
             return;
         }
-        let (cols, rows) = (app.w, app.h);
+        let (cols, rows) = app.scene_size();
+        // the UI's own layer: its grid (as the app has it), cells to fit
+        let want_ui = app.ui_layer().map(|(f, _)| (f.w, f.h)).map(|(uw, uh)| (uw, uh, (cols * g.raster.cw / uw.max(1)).max(1), (rows * g.raster.ch / uh.max(1)).max(1)));
+        if want_ui != g.ui {
+            g.ui = want_ui;
+            if let Some((_, _, ucw, uch)) = want_ui {
+                g.ui_raster = Raster::new(ucw, uch);
+            }
+            g.ui_prev.clear();
+            g.ui_pics.clear();
+            g.force = true;
+        }
         // the grid on screen, for putting a file dragged off a shelf where
         // it was let go (Windows desktop: the window is at the monitor's origin)
-        app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, g.raster.cw as i32, g.raster.ch as i32));
+        let (pcw, pch) = g.ui.map(|u| (u.2, u.3)).unwrap_or((g.raster.cw, g.raster.ch));
+        app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, pcw as i32, pch as i32));
         app.screen_map = desktop.then(|| (g.size.0 as f32, g.size.1 as f32, g.offset.0 as f32, g.offset.1 as f32, g.raster.cw as f32, g.raster.ch as f32));
         app.frame.cell_aspect = g.raster.ch as f32 / g.raster.cw.max(1) as f32;
         app.step();
@@ -259,12 +345,51 @@ impl Runner {
                 }
             }
         }
+        // the UI's layer: what changed in it (or went), and its pictures
+        // (now and last frame): the village's cells under those are drawn
+        // again, and the UI over them
+        let ui_now: Vec<Option<UiCell>> = app.ui_layer().map(|(f, _)| f.glyph.iter().map(|g| g.as_ref().map(UiCell::of)).collect()).unwrap_or_default();
+        let ui_pics_now: Vec<crate::frame::Placed> = app.ui_layer().map(|(f, _)| f.pictures.clone()).unwrap_or_default();
+        let mut ui_dirty = vec![false; ui_now.len()];
+        if let Some((uw, uh, ucw, uch)) = g.ui {
+            let scene_cells = |ux: usize, uy: usize, n: usize, m: usize| {
+                let (x0, x1) = (ux * ucw / cw, ((ux + n) * ucw).div_ceil(cw).min(cols));
+                let (y0, y1) = (uy * uch / ch, ((uy + m) * uch).div_ceil(ch).min(rows));
+                (x0, x1, y0, y1)
+            };
+            for i in 0..ui_now.len() {
+                let was = g.ui_prev.get(i).copied().flatten();
+                if full || was != ui_now[i] {
+                    ui_dirty[i] = true;
+                    if was.is_some() || ui_now[i].is_some() {
+                        let (x0, x1, y0, y1) = scene_cells(i % uw, i / uw, 1, 1);
+                        for y in y0..y1 {
+                            for x in x0..x1 {
+                                under[y * cols + x] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            for p in ui_pics_now.iter().chain(g.ui_pics.iter()) {
+                let (x0, x1, y0, y1) = scene_cells(p.x.max(0) as usize, p.y.max(0) as usize, (p.cols + 1).max(0) as usize, (p.rows + 1).max(0) as usize);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        under[y * cols + x] = true;
+                    }
+                }
+            }
+            let _ = uh;
+        }
         let (mut y0, mut y1) = (usize::MAX, 0usize);
+        // (which of the village's cells were drawn again: the UI's over them too)
+        let mut drawn = vec![false; cols * rows];
         for cy in 0..rows {
             for cx in 0..cols {
                 let i = cy * cols + cx;
                 if full || cells[i] != g.prev[i] || under[i] {
                     g.raster.draw_cell(&mut g.fb, stride, g.offset.0 + cx * cw, g.offset.1 + cy * ch, &cells[i]);
+                    drawn[i] = true;
                     y0 = y0.min(cy);
                     y1 = y1.max(cy);
                 }
@@ -277,6 +402,38 @@ impl Runner {
                 None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),
             }
         }
+        // the UI's layer over it all: its cells that changed, or that sit
+        // over the village drawn again (or its pictures), then its pictures
+        if let Some((uw, _, ucw, uch)) = g.ui {
+            let redrawn = |ux: usize, uy: usize| {
+                let (x0, x1) = (ux * ucw / cw, ((ux + 1) * ucw).div_ceil(cw).min(cols));
+                let (y0, y1) = (uy * uch / ch, ((uy + 1) * uch).div_ceil(ch).min(rows));
+                (y0..y1).any(|y| (x0..x1).any(|x| drawn[y * cols + x]))
+            };
+            for (i, c) in ui_now.iter().enumerate() {
+                let Some(c) = c else { continue };
+                let (ux, uy) = (i % uw, i / uw);
+                if ui_dirty[i] || redrawn(ux, uy) {
+                    g.ui_raster.draw_cell_over(&mut g.fb, stride, g.offset.0 + ux * ucw, g.offset.1 + uy * uch, c.ch, c.fg, c.bg, c.bga as f32 / 255.0, c.fga as f32 / 255.0);
+                    y0 = y0.min(uy * uch / ch);
+                    y1 = y1.max((((uy + 1) * uch).div_ceil(ch)).min(rows).saturating_sub(1));
+                }
+            }
+            for p in &ui_pics_now {
+                match p.sprite_px(ucw, uch) {
+                    Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
+                    None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x.max(0) as usize * ucw, g.offset.1 + p.y.max(0) as usize * uch, p.cols as usize * ucw, p.rows as usize * uch),
+                }
+                y0 = y0.min((p.y.max(0) as usize * uch) / ch);
+                y1 = y1.max((((p.y + p.rows).max(0) as usize * uch).div_ceil(ch)).min(rows).saturating_sub(1));
+            }
+            for p in &g.ui_pics {
+                y0 = y0.min((p.y.max(0) as usize * uch) / ch);
+                y1 = y1.max((((p.y + p.rows).max(0) as usize * uch).div_ceil(ch)).min(rows).saturating_sub(1));
+            }
+        }
+        g.ui_prev = ui_now;
+        g.ui_pics = ui_pics_now;
         g.pics = pics;
         let Ok(mut buf) = g.surface.buffer_mut() else { return };
         let (dy0, dy1) = if full || buf.age() != 1 {
@@ -330,16 +487,66 @@ impl Runner {
         self.polled = (p.left, p.right);
         let Some(app) = self.app.as_mut() else { return };
         let now = Instant::now();
+        // the keyboard: ours (after a click on the village) or Explorer's
+        let has = crate::winsys::has_focus(g.hwnd as _);
+        if has != self.focused {
+            self.focused = has;
+            app.set_keyboard(has);
+            app.release_all();
+            self.keys = [false; 18];
+        }
         // what a right-click here would be, worked out now (the hook can't
         // wait to ask): the village's, if something of its own is under the
         // pointer on the bare desktop, not on an icon
         if (cx, cy) != self.rc_seen.0 || now.duration_since(self.rc_seen.1) > Duration::from_millis(300) {
             self.rc_seen = ((cx, cy), now);
-            let ours = inside && p.on_desktop && app.right_click_ours(cx, cy) && !crate::winsys::over_icon(p.x, p.y);
-            let (cw, ch) = (g.raster.cw as i32, g.raster.ch as i32);
+            let bare = inside && p.on_desktop && !crate::winsys::over_icon(p.x, p.y);
+            let ours = bare && app.right_click_ours(cx, cy);
+            // (the app's cells: the UI's, bigger, when it has a layer)
+            let (cw, ch) = g.ui.map(|u| (u.2 as i32, u.3 as i32)).unwrap_or((g.raster.cw as i32, g.raster.ch as i32));
             let x0 = g.origin.0 + g.offset.0 as i32 + cx * cw;
             let y0 = g.origin.1 + g.offset.1 as i32 + cy * ch;
-            crate::winsys::rclick_target((x0, y0, x0 + cw, y0 + ch), ours);
+            crate::winsys::rclick_target((x0, y0, x0 + cw, y0 + ch), ours, bare);
+        }
+        // the wheel (and a touchpad's two-finger scrolls and pinches) over
+        // the bare desktop, taken by the mouse hook
+        for (delta, side, ctrl, shift) in crate::winsys::take_wheel() {
+            let notches = delta as f32 / 120.0;
+            let ev = if ctrl {
+                // a pinch, or Ctrl + the wheel: zoom
+                MouseIn::Zoom((notches * 1.12f32.ln()).exp().clamp(0.5, 2.0))
+            } else if delta % 120 != 0 {
+                // a touchpad's smooth scroll, a few cells per notch's worth:
+                // sideways along the village, up and down into the sky
+                if side {
+                    MouseIn::Pad(-notches * 4.0, 0.0)
+                } else {
+                    MouseIn::Pad(0.0, notches * 3.0)
+                }
+            } else if side {
+                // (a tilt to the right turns the other way to the wheel)
+                MouseIn::ScrollSide(delta > 0)
+            } else if shift {
+                MouseIn::ScrollSky(delta > 0)
+            } else {
+                MouseIn::Scroll(delta > 0)
+            };
+            app.mouse(ev, cx, cy);
+            self.draw_now = true;
+        }
+        // a line to type (or a setting to edit): the keyboard, here
+        if std::mem::take(&mut app.want_keys) {
+            self.want_focus = Some(now + Duration::from_millis(700));
+        }
+        if let Some(until) = self.want_focus {
+            if self.focused || now > until {
+                if !self.focused {
+                    eprintln!("xmas-tui: couldn't take the keyboard from the desktop");
+                }
+                self.want_focus = None;
+            } else if !p.left {
+                crate::winsys::take_focus(g.hwnd as _);
+            }
         }
         // the pointer moving while the hook hears nothing: Windows dropped
         // it (it does that to a hook that was slow to answer); put it back
@@ -368,6 +575,11 @@ impl Runner {
                     self.icon_drag = true;
                 } else {
                     self.left_down = true;
+                    // a click on the village: the keyboard comes here (every
+                    // key, Ctrl and all), until something else is clicked
+                    // (asked for over the next moment: Explorer handles the
+                    // click itself too, and focuses its icons)
+                    self.want_focus = Some(now + Duration::from_millis(700));
                     app.mouse(MouseIn::Down(Btn::Left), cx, cy);
                 }
             }
@@ -387,8 +599,9 @@ impl Runner {
         // a right-click the hook took from the desktop: our menu if there's
         // something of ours there, else Windows' menu after all
         if let Some((sx, sy)) = crate::winsys::take_rclick() {
-            let rx = ((sx - g.origin.0 - g.offset.0 as i32) as f64 / g.raster.cw as f64).floor() as i32;
-            let ry = ((sy - g.origin.1 - g.offset.1 as i32) as f64 / g.raster.ch as f64).floor() as i32;
+            let (cw, ch) = g.ui.map(|u| (u.2, u.3)).unwrap_or((g.raster.cw, g.raster.ch));
+            let rx = ((sx - g.origin.0 - g.offset.0 as i32) as f64 / cw as f64).floor() as i32;
+            let ry = ((sy - g.origin.1 - g.offset.1 as i32) as f64 / ch as f64).floor() as i32;
             if app.right_click(rx, ry) {
                 // the menu shows now, not at the next frame
                 self.draw_now = true;
@@ -410,7 +623,8 @@ impl Runner {
         let _ = was_r;
         // walking around: keys go to Explorer's desktop window, so read
         // them while it's focused and feed presses / releases through
-        let keys = crate::winsys::desktop_keys().unwrap_or([false; 18]);
+        // (unless the keyboard's ours: then they come as key events)
+        let keys = if self.focused { None } else { crate::winsys::desktop_keys() }.unwrap_or([false; 18]);
         app.set_shift(keys[13]);
         let names = [
             KeyIn::Left,
@@ -449,6 +663,8 @@ impl Runner {
     #[cfg(windows)]
     fn check_desktop(&mut self, el: &ActiveEventLoop) {
         use windows_sys::Win32::Foundation::HWND;
+        // (the taskbar may have moved, or started hiding itself)
+        self.update_safe();
         let Some(g) = self.gfx.as_mut() else { return };
         let hwnd = g.hwnd as HWND;
         if self.attached && !crate::winsys::still_attached(hwnd) {
@@ -633,6 +849,10 @@ impl Runner {
             hidden: false,
             #[cfg(windows)]
             hwnd: own_hwnd,
+            ui: None,
+            ui_raster: Raster::new(8, 17),
+            ui_prev: vec![],
+            ui_pics: vec![],
         });
         self.layout(size);
         // window snow & lights in front of the other windows
@@ -722,9 +942,15 @@ impl ApplicationHandler for Runner {
                 el.exit();
             }
             WindowEvent::Resized(size) => self.layout(size),
-            WindowEvent::Focused(false) => {
+            WindowEvent::Focused(on) => {
+                // (behind the icons, the polling above follows the focus)
+                if !self.opts.desktop {
+                    self.focused = on;
+                }
                 if let Some(app) = self.app.as_mut() {
-                    app.release_all();
+                    if !on {
+                        app.release_all();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -766,6 +992,9 @@ impl ApplicationHandler for Runner {
                     MouseScrollDelta::PixelDelta(p) => app.mouse(MouseIn::Zoom((p.y as f32 * 0.006).exp()), cx, cy),
                     // a wheel (a tilt sideways too); Ctrl: zoom; Shift: up
                     // into the sky
+                    // a touchpad on Windows: fractions of a notch (smooth)
+                    MouseScrollDelta::LineDelta(x, y) if self.ctrl && (x.fract() != 0.0 || y.fract() != 0.0) => app.mouse(MouseIn::Zoom((y * 1.12f32.ln()).exp().clamp(0.5, 2.0)), cx, cy),
+                    MouseScrollDelta::LineDelta(x, y) if x.fract() != 0.0 || y.fract() != 0.0 => app.mouse(MouseIn::Pad(x * 4.0, y * 3.0), cx, cy),
                     MouseScrollDelta::LineDelta(x, y) => {
                         if x.abs() > y.abs() {
                             app.mouse(MouseIn::ScrollSide(x < 0.0), cx, cy);
@@ -847,7 +1076,21 @@ impl ApplicationHandler for Runner {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        crate::guard::beat();
+        // testing the guard: XMAS_TEST_HANG / XMAS_TEST_PANIC = seconds in
+        if let Some((what, at)) = test_trouble() {
+            if crate::guard::uptime() > at {
+                if what == "hang" {
+                    eprintln!("xmas-tui: (test) hanging");
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+                panic!("(test) a panic");
+            }
+        }
         if self.app.as_ref().map(|a| a.quit).unwrap_or(false) || crate::tray::quit_requested() || crate::update::restart_requested() {
+            crate::guard::leaving();
             el.exit();
             return;
         }
@@ -988,6 +1231,9 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         polled: (false, false),
         keys: [false; 18],
         scale: 1.0,
+        focused: false,
+        #[cfg(windows)]
+        want_focus: None,
         ctrl: false,
         shift: false,
         wall_full: false,

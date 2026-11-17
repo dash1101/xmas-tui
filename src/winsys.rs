@@ -11,7 +11,7 @@
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, RedrawWindow, ScreenToClient, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW};
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, DESKTOP_SWITCHDESKTOP};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, SetFocus, KEYEVENTF_KEYUP, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, GetFocus, SetFocus, VK_CONTROL, KEYEVENTF_KEYUP, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP};
 use windows_sys::Win32::UI::Shell::{SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -499,6 +499,122 @@ pub fn desktop_ready() -> bool {
     }
 }
 
+/// Desktop mode: take the keyboard into the wallpaper's own window (a
+/// click on the village, a line to type). Our window is a child of
+/// Explorer's desktop, so the two share input: once the desktop's in front
+/// (it is, after a click on it), the keys can come to us instead of to the
+/// icons. They go back the moment anything else is clicked.
+pub fn take_focus(hwnd: HWND) -> bool {
+    unsafe {
+        if GetFocus() == hwnd {
+            return true;
+        }
+        let fg = GetForegroundWindow();
+        let cls = class_of(fg);
+        if cls != "Progman" && cls != "WorkerW" && GetAncestor(hwnd, GA_ROOT) != fg {
+            return false;
+        }
+        SetFocus(hwnd);
+        GetFocus() == hwnd
+    }
+}
+
+/// Does the wallpaper's window have the keyboard? (Asked straight: the
+/// focus events don't always come for a child of the desktop.)
+pub fn has_focus(hwnd: HWND) -> bool {
+    unsafe { GetFocus() == hwnd }
+}
+
+/// How much of the bottom of `hwnd`'s monitor the taskbar covers (the
+/// monitor's height less its work area's), in pixels. 0 for one that hides
+/// itself, or sits at the side or top.
+pub fn taskbar_bottom(hwnd: HWND) -> i32 {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    unsafe {
+        let m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if m.is_null() || GetMonitorInfoW(m, &mut mi) == 0 {
+            return 0;
+        }
+        (mi.rcMonitor.bottom - mi.rcWork.bottom).clamp(0, (mi.rcMonitor.bottom - mi.rcMonitor.top) / 3)
+    }
+}
+
+const CF_UNICODETEXT: u32 = 13;
+
+/// The clipboard's text, if it holds any (the system's own clipboard: no
+/// helper programs, no console windows flashing up).
+pub fn clipboard_text() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+            return None;
+        }
+        // (another program may have it open for a moment)
+        if !(0..5).any(|i| {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            OpenClipboard(std::ptr::null_mut()) != 0
+        }) {
+            return None;
+        }
+        let mut out = None;
+        let h = GetClipboardData(CF_UNICODETEXT);
+        if !h.is_null() {
+            let p = GlobalLock(h) as *const u16;
+            if !p.is_null() {
+                let max = (GlobalSize(h) / 2).min(1 << 16);
+                let mut n = 0;
+                while n < max && *p.add(n) != 0 {
+                    n += 1;
+                }
+                out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)));
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+        out
+    }
+}
+
+/// Put text on the clipboard.
+pub fn set_clipboard_text(text: &str) -> bool {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if !(0..5).any(|i| {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            OpenClipboard(std::ptr::null_mut()) != 0
+        }) {
+            return false;
+        }
+        EmptyClipboard();
+        let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+        let mut ok = false;
+        if !h.is_null() {
+            let p = GlobalLock(h) as *mut u16;
+            if !p.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+                GlobalUnlock(h);
+                // the clipboard owns it from here (unless it said no)
+                ok = !SetClipboardData(CF_UNICODETEXT, h).is_null();
+            }
+            if !ok {
+                GlobalFree(h);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
 pub struct Polled {
     pub x: i32,
     pub y: i32,
@@ -688,8 +804,13 @@ static RC_EATEN: AtomicBool = AtomicBool::new(false);
 /// then are right-clicks taken from the desktop.
 static RC_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The screen rect (the cell) last looked at under the pointer, whether a
-/// right-click there is the village's, and when (GetTickCount).
-static RC_TARGET: Mutex<((i32, i32, i32, i32), bool, u32)> = Mutex::new(((0, 0, 0, 0), false, 0));
+/// right-click there is the village's, whether it's the bare desktop (no
+/// icon, no window: the wheel there is the village's), and when
+/// (GetTickCount).
+static RC_TARGET: Mutex<((i32, i32, i32, i32), bool, bool, u32)> = Mutex::new(((0, 0, 0, 0), false, false, 0));
+/// Wheel turns taken from the desktop: (notches × 120, sideways, Ctrl,
+/// Shift), waiting for the wallpaper.
+static WHEEL: Mutex<Vec<(i32, bool, bool, bool)>> = Mutex::new(Vec::new());
 /// When the hook last saw any mouse event (GetTickCount).
 static RC_SEEN: AtomicU32 = AtomicU32::new(0);
 static RC_THREAD: AtomicU32 = AtomicU32::new(0);
@@ -706,10 +827,16 @@ pub fn rclick_active(on: bool) {
 
 /// The pointer is over screen rect `r` (x0, y0, x1, y1), and a right-click
 /// there is (or isn't) the village's.
-pub fn rclick_target(r: (i32, i32, i32, i32), ours: bool) {
+pub fn rclick_target(r: (i32, i32, i32, i32), ours: bool, bare: bool) {
     if let Ok(mut t) = RC_TARGET.lock() {
-        *t = (r, ours, ticks());
+        *t = (r, ours, bare, ticks());
     }
+}
+
+/// Wheel turns (and touchpad scrolls and pinches, which arrive as wheel
+/// turns, a pinch with Ctrl) over the bare desktop, since the last look.
+pub fn take_wheel() -> Vec<(i32, bool, bool, bool)> {
+    WHEEL.lock().map(|mut w| std::mem::take(&mut *w)).unwrap_or_default()
 }
 
 /// Start taking the village's right-clicks (once).
@@ -794,8 +921,18 @@ fn rclick_ours(x: i32, y: i32) -> bool {
         return false;
     }
     let Ok(t) = RC_TARGET.try_lock() else { return false };
-    let ((x0, y0, x1, y1), ours, at) = *t;
+    let ((x0, y0, x1, y1), ours, _, at) = *t;
     ours && x >= x0 && x < x1 && y >= y0 && y < y1 && ticks().wrapping_sub(at) < 1500
+}
+
+/// Is a wheel turn at (x, y) over the bare desktop (the village's)?
+fn wheel_ours(x: i32, y: i32) -> bool {
+    if !RC_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Ok(t) = RC_TARGET.try_lock() else { return false };
+    let ((x0, y0, x1, y1), _, bare, at) = *t;
+    bare && x >= x0 && x < x1 && y >= y0 && y < y1 && ticks().wrapping_sub(at) < 1500
 }
 
 unsafe extern "system" fn rclick_proc(code: i32, wp: usize, lp: isize) -> isize {
@@ -803,6 +940,18 @@ unsafe extern "system" fn rclick_proc(code: i32, wp: usize, lp: isize) -> isize 
         RC_SEEN.store(ticks(), Ordering::Relaxed);
         let m = &*(lp as *const MSLLHOOKSTRUCT);
         let injected = m.flags & LLMHF_INJECTED != 0;
+        // the wheel over the bare desktop (a touchpad's scrolls and pinches
+        // too, which may come as injected input): the village's
+        if matches!(wp as u32, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) && wheel_ours(m.pt.x, m.pt.y) {
+            let delta = (m.mouseData >> 16) as u16 as i16 as i32;
+            let down = |vk: u16| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0;
+            if let Ok(mut w) = WHEEL.try_lock() {
+                if w.len() < 64 {
+                    w.push((delta, wp as u32 == WM_MOUSEHWHEEL, down(VK_CONTROL), down(VK_SHIFT)));
+                }
+                return 1;
+            }
+        }
         if !injected {
             match wp as u32 {
                 WM_RBUTTONDOWN if rclick_ours(m.pt.x, m.pt.y) => {

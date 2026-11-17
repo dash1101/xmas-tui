@@ -62,6 +62,23 @@ pub enum NetDo {
     /// Villagers kept on this device: switch to one, a new one.
     Villager(u8),
     NewVillager,
+    /// A ping to friend i (a little tone at their end).
+    Ping(u8),
+    /// The talk line (as the / key): to everyone here, or "@name …".
+    Chat,
+    /// Groups: a new one, into one by its code, say something in one, its
+    /// code copied, leave it.
+    GroupNew,
+    GroupJoin,
+    GroupSay(u8),
+    GroupCode(u8),
+    GroupLeave(u8),
+    /// Hosting: let someone here change the village's settings (or not).
+    Admin(u32, bool),
+    /// The messages, all of them (marked read).
+    Messages,
+    /// Something said just to someone here (their id).
+    Whisper(u32),
 }
 
 /// What a line of typing is for (the front end asks for it, see
@@ -77,6 +94,15 @@ pub enum TextFor {
     Link,
     /// A new villager's name.
     NewVillager,
+    /// The talk line: to everyone here, "@name …" to one person (a friend
+    /// anywhere, or someone here), "@group …" to a group.
+    Chat,
+    /// A group: a new one's name; a code to join; something to say in one.
+    GroupNew,
+    GroupJoin,
+    GroupSay(u8),
+    /// Said just to someone here (their id).
+    Whisper(u32),
 }
 
 /// Things only the front end can do (it holds the save and the config).
@@ -94,6 +120,172 @@ pub enum Front {
     NewVillager(String),
     /// A friend unfriended (their code; linked devices drop them too).
     Unfriended(String),
+    /// Hosting: one of the village's settings changed by a guest (asked,
+    /// and said yes to; or an admin's): its key and value (see `Rules`).
+    SetRule(String, String),
+    /// The shared village closed (or left) by hand: linked devices open
+    /// at once stay apart from now on.
+    Apart,
+}
+
+/// A village's own settings: the host's, and what everyone in the village
+/// sees (a guest's own are kept for their own village). A guest's change is
+/// asked of the host instead (or made, by an admin).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Rules {
+    pub snow: f32,
+    pub wind: f32,
+    pub glow: f32,
+    pub events: f32,
+    pub critters: f32,
+    pub most_at_once: u32,
+    pub sleigh_minutes: f32,
+    pub aurora: bool,
+    pub bushes: bool,
+    pub time: String,
+    pub traffic: String,
+    pub chattiness: f32,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Rules::of(&crate::config::SceneCfg::default())
+    }
+}
+
+impl Rules {
+    pub fn of(c: &crate::config::SceneCfg) -> Rules {
+        Rules {
+            snow: c.snow,
+            wind: c.wind,
+            glow: c.glow,
+            events: c.events,
+            critters: c.critters,
+            most_at_once: c.most_at_once,
+            sleigh_minutes: c.sleigh_minutes,
+            aurora: c.aurora,
+            bushes: c.bushes,
+            time: c.time.clone(),
+            traffic: c.traffic.clone(),
+            chattiness: c.chattiness,
+        }
+    }
+
+    pub fn apply(&self, c: &mut crate::config::SceneCfg) {
+        let r = self.clone().clamped();
+        c.snow = r.snow;
+        c.wind = r.wind;
+        c.glow = r.glow;
+        c.events = r.events;
+        c.critters = r.critters;
+        c.most_at_once = r.most_at_once;
+        c.sleigh_minutes = r.sleigh_minutes;
+        c.aurora = r.aurora;
+        c.bushes = r.bushes;
+        c.time = r.time;
+        c.traffic = r.traffic;
+        c.chattiness = r.chattiness;
+    }
+
+    /// Kept to what the settings themselves allow (it came from someone
+    /// else).
+    pub fn clamped(mut self) -> Rules {
+        let f = |v: f32, hi: f32| if v.is_finite() { v.clamp(0.0, hi) } else { 1.0 };
+        self.snow = f(self.snow, 5.0);
+        self.wind = f(self.wind, 5.0);
+        self.glow = f(self.glow, 3.0);
+        self.events = f(self.events, 5.0);
+        self.critters = f(self.critters, 5.0);
+        self.chattiness = f(self.chattiness, 5.0);
+        self.sleigh_minutes = f(self.sleigh_minutes, 240.0);
+        self.most_at_once = self.most_at_once.min(80);
+        if !["auto", "night", "dawn", "morning", "noon", "afternoon", "dusk"].contains(&self.time.as_str()) {
+            self.time = "auto".into();
+        }
+        if !["auto", "left", "right"].contains(&self.traffic.as_str()) {
+            self.traffic = "auto".into();
+        }
+        self
+    }
+
+    pub fn json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn parse(s: &str) -> Option<Rules> {
+        serde_json::from_str::<Rules>(s).ok().map(Rules::clamped)
+    }
+
+    /// What's different in `new`: (key, value) each.
+    pub fn changes(&self, new: &Rules) -> Vec<(String, String)> {
+        let (a, b) = (serde_json::to_value(self).unwrap_or_default(), serde_json::to_value(new).unwrap_or_default());
+        let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else { return vec![] };
+        b.iter().filter(|(k, v)| a.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.to_string())).collect()
+    }
+
+    /// One setting set from a key and its value (as `changes` gives them);
+    /// false if there's no such setting or the value doesn't fit it.
+    pub fn set(&mut self, key: &str, value: &str) -> bool {
+        let Ok(mut all) = serde_json::to_value(&*self) else { return false };
+        let Some(old) = all.get(key).cloned() else { return false };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(value) else { return false };
+        let same_kind = matches!((&old, &v), (serde_json::Value::Number(_), serde_json::Value::Number(_)) | (serde_json::Value::Bool(_), serde_json::Value::Bool(_)) | (serde_json::Value::String(_), serde_json::Value::String(_)));
+        if !same_kind {
+            return false;
+        }
+        all[key] = v;
+        match serde_json::from_value::<Rules>(all) {
+            Ok(r) => {
+                *self = r.clamped();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A setting in words: "snowfall → 2.00×".
+    pub fn words(key: &str, value: &str) -> String {
+        let v = value.trim_matches('"');
+        let num = v.parse::<f32>().ok();
+        match (key, num) {
+            ("snow", Some(n)) => format!("snowfall → {n:.2}×"),
+            ("wind", Some(n)) => format!("wind → {n:.2}×"),
+            ("glow", Some(n)) => format!("glow → {n:.2}×"),
+            ("events", Some(n)) => format!("surprises → {n:.2}×"),
+            ("critters", Some(n)) => format!("animals & people → {n:.2}×"),
+            ("chattiness", Some(n)) => format!("chattiness → {n:.2}×"),
+            ("most_at_once", Some(n)) => format!("most at once → {n:.0}"),
+            ("sleigh_minutes", Some(n)) if n <= 0.0 => "Santa's sleigh → never".to_string(),
+            ("sleigh_minutes", Some(n)) => format!("Santa's sleigh → every {n:.0} min"),
+            ("aurora", _) => format!("aurora → {}", if v == "true" { "on" } else { "off" }),
+            ("bushes", _) => format!("berry bushes → {}", if v == "true" { "on" } else { "off" }),
+            ("time", _) => format!("time of day → {v}"),
+            ("traffic", _) => format!("traffic → {v}"),
+            _ => format!("{key} → {v}"),
+        }
+    }
+}
+
+/// What the friends widget shows (from the village's online side): each
+/// friend (name; 0 offline, 1 online, 2 with a village open, 3 asked and
+/// waiting; their place in the friends list), unread messages, the last
+/// few lines.
+#[derive(Clone, Debug, Default)]
+pub struct FriendsView {
+    pub connected: bool,
+    pub friends: Vec<(String, u8, usize)>,
+    pub unread: u32,
+    pub lines: Vec<String>,
+    /// In a shared village: how many here.
+    pub here: usize,
+}
+
+/// A line in the messages: when (unix seconds), and what.
+#[derive(Clone, Debug)]
+pub struct Line {
+    pub at: i64,
+    pub text: String,
 }
 
 /// The more-menu numbers for the online menus (see `more_menu`).
@@ -101,6 +293,10 @@ pub const MORE_ONLINE: u8 = 10;
 pub const MORE_PEOPLE: u8 = 11;
 pub const MORE_DEVICES: u8 = 12;
 pub const MORE_VILLAGERS: u8 = 13;
+pub const MORE_FRIENDS: u8 = 14;
+pub const MORE_GROUPS: u8 = 15;
+pub const MORE_GROUP: u8 = 16;
+pub const MORE_MESSAGES: u8 = 29;
 pub const MORE_FRIEND: u8 = 32;
 pub const MORE_OTHER: u8 = 64;
 
@@ -126,6 +322,8 @@ pub struct Asked {
     pub until: f32,
     /// Asked of everyone (0) or just this villager.
     pub to: u32,
+    /// A village setting asked to be changed: (key, value).
+    pub rule: Option<(String, String)>,
 }
 
 /// Tag with a friend online: the other player, who's "it" (an id; this
@@ -193,6 +391,26 @@ pub struct Social {
     /// Where the question box and the post were drawn (for clicks).
     prompt_at: std::cell::Cell<Option<(i32, i32, i32, i32, i32)>>,
     post_at: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
+    /// The messages: said here, whispered, mailed, in groups, pings (the
+    /// last few dozen), and how many came in unread.
+    pub log: Vec<Line>,
+    pub unread: u32,
+    /// A guest: the host's village settings, and whether this villager may
+    /// change them (an admin).
+    pub rules_in: Option<(Rules, bool)>,
+    /// Hosting: what was last told the guests.
+    rules_out: Option<Rules>,
+    /// Hosting: when who's out is next told the guests; a guest: when it
+    /// was last heard.
+    crowd_at: f32,
+}
+
+/// Who's out in the village and what they've said, as its host sends it.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct Crowd {
+    folk: Vec<critters::Pup>,
+    said: Vec<(u64, String, f32)>,
 }
 
 /// What's asked, in words ("a game of chess").
@@ -431,6 +649,27 @@ impl Scene {
         };
         self.online.tick(t, me, self.seed);
         self.online.ease(dt);
+        // (back home: the village's own settings again)
+        if self.online.guest_seed().is_none() {
+            self.social.rules_in = None;
+        }
+        // the same folk out and about for everyone in a shared village: the
+        // host says who (a few times a second); a guest shows them
+        match self.online.village() {
+            Some((_, true)) if !self.online.others().is_empty() && t >= self.social.crowd_at => {
+                self.social.crowd_at = t + 0.35;
+                let (ax, ay, u) = self.anchor;
+                let folk = self.critters.crowd(t, |x, y| ((x - ax) / u, (y - ay) / u));
+                let said = self.director.fresh_said(t);
+                if let Ok(data) = serde_json::to_string(&Crowd { folk, said }) {
+                    self.online.crowd(data);
+                }
+            }
+            // (the host's gone quiet about it: the village's own folk again;
+            // home, the village is made anew anyway)
+            _ if self.critters.puppets && t - self.social.crowd_at > 8.0 => self.critters.end_crowd(),
+            _ => {}
+        }
         for e in self.online.take_events() {
             self.on_event(e, t);
         }
@@ -460,16 +699,245 @@ impl Scene {
         p.retain(|(at, _)| t - *at < POST_TIME);
     }
 
+    /// A line in the messages.
+    fn log_line(&mut self, text: String, to_me: bool) {
+        let at = crate::clock::now().timestamp();
+        self.social.log.push(Line { at, text });
+        if self.social.log.len() > 60 {
+            self.social.log.remove(0);
+        }
+        if to_me {
+            self.social.unread = (self.social.unread + 1).min(99);
+        }
+    }
+
+    /// Where the villager is, in a few words (the web page's title):
+    /// "Sam's village", "the games room", "on the slopes"…
+    #[cfg_attr(not(any(target_arch = "wasm32", target_os = "android")), allow(dead_code))]
+    pub fn place_words(&self) -> String {
+        let t = self.now();
+        if let Some(tr) = &self.trip {
+            return match tr.here(t).at {
+                1 => "on the shuttle".into(),
+                2 => "on the train".into(),
+                3 => "at the ski lodge".into(),
+                4 => "on the chairlift".into(),
+                5 => "on the slopes".into(),
+                6 => "out for a drive".into(),
+                _ => "away on a trip".into(),
+            };
+        }
+        if let Some(inn) = &self.inside {
+            let room = inn.kind().title();
+            return if inn.home && !matches!(inn.kind(), interior::RoomKind::Games | interior::RoomKind::Igloo) { "at home".into() } else { room.into() };
+        }
+        if self.online.guest_seed().is_some() {
+            if let Some((_, o)) = self.online.others().into_iter().find(|(_, o)| o.host) {
+                return format!("{}'s village", o.name);
+            }
+            return "a friend's village".into();
+        }
+        match self.your_name().trim() {
+            "" | "a neighbour" | "neighbour" => String::new(),
+            n => format!("{n}'s village"),
+        }
+    }
+
+    /// What the friends widget shows (None: not online).
+    pub fn friends_view(&self) -> Option<FriendsView> {
+        if !self.online.wanted() {
+            return None;
+        }
+        let mut friends: Vec<(String, u8, usize)> = self
+            .online
+            .friends()
+            .iter()
+            .enumerate()
+            .map(|(i, (p, h))| {
+                let state = match h {
+                    _ if p.waiting => 3,
+                    Some(h) if h.village.is_some() => 2,
+                    Some(h) if h.on => 1,
+                    _ => 0,
+                };
+                (p.name.clone(), state, i)
+            })
+            .collect();
+        // a village open, then online, then the rest; by name
+        friends.sort_by_key(|f| ([2, 1, 0, 3][f.1 as usize % 4], f.0.to_lowercase()));
+        let n = self.social.log.len();
+        let lines = self.social.log[n.saturating_sub(3)..].iter().map(|l| l.text.clone()).collect();
+        let here = if self.online.village().is_some() { self.online.others().len() + 1 } else { 0 };
+        Some(FriendsView { connected: self.online.link() == Link::On, friends, unread: self.social.unread, lines, here })
+    }
+
+    pub fn messages_read(&mut self) {
+        self.social.unread = 0;
+    }
+
+    /// Hosting: the village's settings as they stand (told the guests).
+    pub fn set_rules(&mut self, r: &Rules) {
+        if self.social.rules_out.as_ref() != Some(r) {
+            self.social.rules_out = Some(r.clone());
+            self.online.set_rules(r.json());
+        }
+    }
+
+    /// A guest: the host's village settings (what this village is, here),
+    /// and whether this villager may change them.
+    pub fn village_rules(&self) -> Option<&(Rules, bool)> {
+        self.social.rules_in.as_ref().filter(|_| self.online.guest_seed().is_some())
+    }
+
+    /// A guest changing one of the village's settings: asked of the host
+    /// (an admin's goes straight in).
+    pub fn ask_rule(&mut self, key: &str, value: &str) {
+        let Some((_, admin)) = self.village_rules().cloned() else { return };
+        self.online.want(key, value);
+        let words = Rules::words(key, value);
+        if admin {
+            self.post(format!("⚙ {words} (for everyone here)"));
+        } else {
+            let host = self.online.others().iter().find(|(_, o)| o.host).map(|(_, o)| o.name.clone()).unwrap_or_else(|| "the host".into());
+            self.post(format!("⚙ {host} is asked: {words}"));
+        }
+    }
+
+    /// Out in the village (not away on a trip, not indoors): free to go
+    /// into another (a linked device's).
+    pub fn out_and_about(&self) -> bool {
+        self.trip.is_none() && self.inside.is_none() && self.table.is_none() && self.player.is_some()
+    }
+
+    /// The talk line (the / key).
+    pub fn open_chat(&mut self) {
+        let ask = if self.online.village().is_some() { "say something (@name: to one person · @group: to a group)" } else { "@name: to a friend · @group: to a group" };
+        self.text_ask = Some((TextFor::Chat, ask.into()));
+    }
+
+    /// A line from the talk line: "@who what" to one person or a group,
+    /// anything else aloud to everyone here.
+    fn chat(&mut self, text: &str, t: f32) {
+        let Some(rest) = text.strip_prefix('@') else {
+            if self.online.village().is_some() {
+                self.online.say(text);
+                self.log_line(format!("☺ you: {text}"), false);
+            } else if self.player.is_some() {
+                self.post("(nobody online here to hear it: @name for a friend)");
+            }
+            self.you_say(text, t);
+            return;
+        };
+        let (who, what) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let (who, what) = (who.trim().trim_start_matches('#').to_lowercase(), what.trim());
+        if who.is_empty() || what.is_empty() {
+            self.post("@name, then what to say");
+            return;
+        }
+        let starts = |n: &str| {
+            let n = n.to_lowercase();
+            n == who || n.replace(' ', "") == who || n.starts_with(&who)
+        };
+        // a group
+        if let Some(i) = self.online.book.groups.iter().position(|g| starts(&g.name)) {
+            let name = self.online.book.groups[i].name.clone();
+            if self.online.group_say(i, what) {
+                self.log_line(format!("#{name} you: {what}"), false);
+                self.post(format!("#{name} you: {what}"));
+            } else {
+                self.post("not online yet");
+            }
+            return;
+        }
+        // someone here
+        if let Some((id, name)) = self.online.others().iter().find(|(_, o)| starts(&o.name)).map(|(id, o)| (*id, o.name.clone())) {
+            self.online.whisper(id, what);
+            self.log_line(format!("✉ to {name} (just them): {what}"), false);
+            self.post(format!("✉ to {name} (just them): {what}"));
+            return;
+        }
+        // a friend, wherever they are
+        if let Some(i) = self.online.book.friends.iter().position(|p| !p.waiting && starts(&p.name)) {
+            let name = self.online.book.friends[i].name.clone();
+            if self.online.mail(i, what) {
+                self.log_line(format!("✉ to {name}: {what}"), false);
+                self.post(format!("✉ to {name}: {what}"));
+            } else {
+                self.post("✉ not sent (not online yet)");
+            }
+            return;
+        }
+        self.post(format!("nobody called {who}: a friend, someone here, or a group"));
+    }
+
     fn other_name(&self, id: u32) -> String {
         self.online.other(id).map(|o| o.name.clone()).unwrap_or_else(|| "someone".into())
     }
 
-    fn on_event(&mut self, e: Event, t: f32) {
+    pub(super) fn on_event(&mut self, e: Event, t: f32) {
         match e {
             Event::Note(s) => self.post(s),
             Event::Mail { from, text } => {
                 self.post(format!("✉ {from}: {text}"));
+                self.log_line(format!("✉ {from}: {text}"), true);
                 self.chime();
+            }
+            Event::Pinged(name) => {
+                self.post(format!("♪ {name} pinged you"));
+                self.log_line(format!("♪ {name} pinged you"), true);
+                // a little tone: two notes
+                if let Some(p) = &self.player {
+                    let x = p.centre();
+                    self.director.sound(Sfx::Ping, x, 0.8);
+                } else {
+                    self.chime();
+                }
+            }
+            Event::Whispered { id, name, text } => {
+                let _ = id;
+                self.post(format!("✉ {name} (just to you): {text}"));
+                self.log_line(format!("✉ {name} (just to you): {text}"), true);
+                self.chime();
+            }
+            Event::GroupSaid { group, name, text } => {
+                self.post(format!("#{group} {name}: {text}"));
+                self.log_line(format!("#{group} {name}: {text}"), true);
+                self.chime();
+            }
+            Event::Wanted { id, name, key, value, admin } => {
+                let mut probe = self.social.rules_out.clone().unwrap_or_default();
+                if !probe.set(&key, &value) {
+                    return;
+                }
+                let words = Rules::words(&key, &value);
+                if admin {
+                    self.social.front.push(Front::SetRule(key, value));
+                    self.post(format!("⚙ {name} set {words}"));
+                } else {
+                    self.social.asked.retain(|a| !(a.id == id && a.rule.as_ref().is_some_and(|r| r.0 == key)));
+                    self.social.asked.push(Asked { id, name: name.clone(), what: ask::SETTING, seed: 0, until: t + ASK_TIME, to: self.online.my_id(), rule: Some((key, value)) });
+                    self.post(format!("⚙ {name} asks: {words}? (Y yes · N no)"));
+                    self.chime();
+                }
+            }
+            Event::Crowd(data) => {
+                if let Ok(c) = serde_json::from_str::<Crowd>(&data) {
+                    self.social.crowd_at = t;
+                    let (ax, ay, u) = self.anchor;
+                    self.critters.set_crowd(&c.folk, |x, y| (ax + x * u, ay + y * u), t);
+                    // what they said, over their heads
+                    for (id, text, life) in c.said.iter().take(8) {
+                        if let Some((x, y)) = self.critters.where_is(*id) {
+                            let text = crate::net::clean(text, 120);
+                            self.director.said_by(*id, x.round() as i32, y as i32 - 4, &text, t, life.clamp(1.0, 12.0));
+                        }
+                    }
+                }
+            }
+            Event::Rules { rules, admin } => {
+                if let Some(r) = Rules::parse(&rules) {
+                    self.social.rules_in = Some((r, admin));
+                }
             }
             Event::Asked(name) => {
                 self.post(format!("✦ {name} asks to be friends (✉ friends to say yes)"));
@@ -483,8 +951,10 @@ impl Scene {
             Event::Home => self.village_switch = Some(None),
             Event::Said { id, text } => {
                 if let Some(o) = self.online.other(id) {
+                    let name = o.name.clone();
                     let (x, y) = self.local(o.shown.0, o.shown.1);
                     self.director.say(x.round() as i32, y as i32 - 4, &text, t, 4.0, 6);
+                    self.log_line(format!("☺ {name}: {text}"), true);
                 }
             }
             Event::Threw { id, x, y, vx, vy } => {
@@ -512,6 +982,9 @@ impl Scene {
             Event::Invited { name, code } => {
                 self.social.invited.retain(|(n, _)| *n != name);
                 self.social.invited.push((name.clone(), code));
+                if self.social.invited.len() > 6 {
+                    self.social.invited.remove(0);
+                }
                 self.post(format!("⌂ {name} asks you into their village (✉ friends to go)"));
                 self.chime();
             }
@@ -559,13 +1032,20 @@ impl Scene {
                 }
                 let name = self.other_name(id);
                 self.social.asked.retain(|a| !(a.id == id && a.what == what));
-                self.social.asked.push(Asked { id, name: name.clone(), what, seed, until: t + ASK_TIME, to });
+                self.social.asked.push(Asked { id, name: name.clone(), what, seed, until: t + ASK_TIME, to, rule: None });
+                if self.social.asked.len() > 8 {
+                    self.social.asked.remove(0);
+                }
                 let key = if to == 0 { "" } else { " (Y yes · N no)" };
                 self.post(format!("{} {name}: {}?{key}", ask_icon(what), ask_words(what)));
                 self.chime();
             }
             Event::Answer { id, what, yes } => {
                 let name = self.other_name(id);
+                if what == ask::SETTING {
+                    self.post(if yes { format!("⚙ {name} said yes") } else { format!("⚙ {name} would rather not") });
+                    return;
+                }
                 let Some((to, w, seed, _)) = self.social.asking else {
                     if yes && what == ask::RACE {
                         self.post(format!("⇘ {name}'s in the race!"));
@@ -635,12 +1115,14 @@ impl Scene {
                 let (lx, _) = self.local(x, 0.0);
                 match what {
                     0 => {
-                        if self.director.plan_light_show(t, events::SHOW_LEAD * 0.6, n as f32) {
+                        // (as long as the menu's longest, at most)
+                        if self.director.plan_light_show(t, events::SHOW_LEAD * 0.6, (n as f32).min(900.0)) {
                             self.post(format!("✦ {name}'s put on a light show by the big tree"));
                         }
                     }
                     1 => {
-                        self.director.fireworks(t + 0.6, n as usize, lx);
+                        // (as many as the grand finale, at most)
+                        self.director.fireworks(t + 0.6, (n as usize).min(30), lx);
                         self.post(format!("✸ {name}'s setting off fireworks"));
                     }
                     _ => {
@@ -983,6 +1465,13 @@ impl Scene {
         let a = self.social.asked.remove(i);
         let t = self.now();
         self.online.answer(a.id, a.what, yes);
+        if let Some((key, value)) = a.rule {
+            if yes {
+                self.post(format!("⚙ {}", Rules::words(&key, &value)));
+                self.social.front.push(Front::SetRule(key, value));
+            }
+            return;
+        }
         if !yes {
             return;
         }
@@ -1072,6 +1561,10 @@ impl Scene {
         self.post("✉ online");
         self.post("⌂ Sam is here");
         self.post("✦ Alex waves at you");
+        self.online.pretend_friends(&[("Sam", true, false), ("Alex", true, true), ("Kim", false, false), ("Jo", false, false)]);
+        self.log_line("#carols Kim: anyone singing tonight?".into(), true);
+        self.log_line("✉ Alex: come and see the lights!".into(), true);
+        self.log_line("☺ Sam: race you down the mountain".into(), true);
         match what {
             "gamesroom" => {
                 // round the table with Sam and Alex, Twenty-One dealt
@@ -1108,7 +1601,7 @@ impl Scene {
             }
             _ => {
                 let t = self.now();
-                self.social.asked.push(Asked { id: 11, name: "Sam".into(), what: ask::CHESS, seed: 1, until: t + ASK_TIME, to: 1 });
+                self.social.asked.push(Asked { id: 11, name: "Sam".into(), what: ask::CHESS, seed: 1, until: t + ASK_TIME, to: 1, rule: None });
                 self.social.tag = Some(NetTag { other: 12, it: 12, grace: 0.0, until: t + 60.0, tags: 2 });
             }
         }
@@ -1240,7 +1733,10 @@ impl Scene {
         self.social.prompt_at.set(None);
         if let Some(a) = self.social.asked.last() {
             let t = self.now();
-            let q = format!("{} {} asks: {}?", ask_icon(a.what), a.name, ask_words(a.what));
+            let q = match &a.rule {
+                Some((k, v)) => format!("⚙ {} asks: {}?", a.name, Rules::words(k, v)),
+                None => format!("{} {} asks: {}?", ask_icon(a.what), a.name, ask_words(a.what)),
+            };
             let w = (q.chars().count() as i32 + 6).max(36);
             let (x0, y0) = ((f.w as i32 - w) / 2, 1);
             for y in y0..y0 + 3 {
@@ -1300,23 +1796,20 @@ impl Scene {
         if !o.others().is_empty() {
             v.push((format!("☺ with the {} here: play, wave, cards ▸", o.others().len() + 1), Do::More(MORE_PEOPLE)));
         }
-        v.push((format!("my friend code: {} (copy)", o.code()), Do::Net(NetDo::Code)));
-        v.push(("✚ add a friend (their code)…".into(), Do::Net(NetDo::Add)));
-        for (i, (p, here)) in o.friends().iter().enumerate().take(16) {
-            let mark = match here {
-                _ if p.waiting => "…",
-                Some(h) if h.village.is_some() => "⌂",
-                Some(h) if h.on => "●",
-                _ => "○",
-            };
-            let what = match here {
-                _ if p.waiting => " (asked)".to_string(),
-                Some(h) if h.village.is_some() => " (village open)".to_string(),
-                Some(h) if h.on => " (online)".to_string(),
-                _ => String::new(),
-            };
-            v.push((format!("{mark} {}{what} ▸", p.name), Do::More(MORE_FRIEND + i as u8)));
-        }
+        v.push(("✎ talk… (/ · @name: to one person)".into(), Do::Net(NetDo::Chat)));
+        let unread = self.social.unread;
+        v.push((if unread > 0 { format!("✉ messages ({unread} new) ▸") } else { "✉ messages ▸".into() }, Do::More(MORE_MESSAGES)));
+        let fr = o.friends();
+        let about = fr.iter().filter(|(p, h)| !p.waiting && h.as_ref().is_some_and(|h| h.on)).count();
+        let n = fr.iter().filter(|(p, _)| !p.waiting).count();
+        let friends = match (n, about) {
+            (0, _) => "★ friends: add one ▸".to_string(),
+            (n, 0) => format!("★ friends ({n}) ▸"),
+            (n, a) => format!("★ friends ({n} · {a} online) ▸"),
+        };
+        v.push((friends, Do::More(MORE_FRIENDS)));
+        let groups = o.book.groups.len();
+        v.push((if groups == 0 { "# groups (chat rooms shared by code) ▸".to_string() } else { format!("# groups ({groups}) ▸") }, Do::More(MORE_GROUPS)));
         match o.village() {
             Some((code, true)) => {
                 v.push((format!("⌂ this village is open: {code} (copy)"), Do::Net(NetDo::VillageCode)));
@@ -1340,6 +1833,85 @@ impl Scene {
         (title, v)
     }
 
+    /// Friends: each with their own menu; adding one; the friend code.
+    fn friends_menu(&self) -> (String, Vec<(String, Do)>) {
+        let o = &self.online;
+        let mut v: Vec<(String, Do)> = vec![];
+        for (i, p) in o.book.asking.iter().enumerate().take(4) {
+            v.push((format!("✦ {} asks to be friends: yes!", p.name), Do::Net(NetDo::Accept(i as u8))));
+            v.push((format!("   no thanks to {}", p.name), Do::Net(NetDo::Decline(i as u8))));
+        }
+        // online first, then the rest
+        let mut fr: Vec<(usize, (net::Pal, Option<net::Here>))> = o.friends().into_iter().enumerate().take(32).collect();
+        fr.sort_by_key(|(_, (p, h))| (p.waiting, !h.as_ref().is_some_and(|h| h.on), p.name.to_lowercase()));
+        for (i, (p, here)) in fr {
+            let mark = match &here {
+                _ if p.waiting => "…",
+                Some(h) if h.village.is_some() => "⌂",
+                Some(h) if h.on => "●",
+                _ => "○",
+            };
+            let what = match &here {
+                _ if p.waiting => " (asked)".to_string(),
+                Some(h) if h.village.is_some() => " (village open)".to_string(),
+                Some(h) if h.on => " (online)".to_string(),
+                _ => String::new(),
+            };
+            v.push((format!("{mark} {}{what} ▸", p.name), Do::More(MORE_FRIEND + i as u8)));
+        }
+        v.push(("✚ add a friend (their code)…".into(), Do::Net(NetDo::Add)));
+        v.push((format!("my friend code: {} (copy)", o.code()), Do::Net(NetDo::Code)));
+        ("friends".into(), v)
+    }
+
+    /// Groups: chat rooms anyone with the code can be in.
+    fn groups_menu(&self) -> (String, Vec<(String, Do)>) {
+        let o = &self.online;
+        let mut v: Vec<(String, Do)> = vec![];
+        for (i, g) in o.book.groups.iter().enumerate().take(12) {
+            let here = o.group_here(i).len();
+            let s = if here > 0 { format!("# {} ({here} about) ▸", g.name) } else { format!("# {} ▸", g.name) };
+            v.push((s, Do::More(MORE_GROUP + i as u8)));
+        }
+        v.push(("✚ a new group…".into(), Do::Net(NetDo::GroupNew)));
+        v.push(("⇥ into a group by its code…".into(), Do::Net(NetDo::GroupJoin)));
+        ("groups".into(), v)
+    }
+
+    fn group_menu(&self, i: usize) -> (String, Vec<(String, Do)>) {
+        let o = &self.online;
+        let Some(g) = o.book.groups.get(i) else { return self.groups_menu() };
+        let mut v: Vec<(String, Do)> = vec![(format!("✎ say something in #{}…", g.name), Do::Net(NetDo::GroupSay(i as u8)))];
+        let here = o.group_here(i);
+        if !here.is_empty() {
+            let mut names = here.join(", ");
+            if names.chars().count() > 40 {
+                names = names.chars().take(38).collect::<String>() + "…";
+            }
+            v.push((format!("☺ about lately: {names}"), Do::More(MORE_GROUP + i as u8)));
+        }
+        v.push((format!("its code: {} (copy, to ask someone in)", crate::net::seal::pretty(&g.code)), Do::Net(NetDo::GroupCode(i as u8))));
+        v.push(("✕ leave the group".into(), Do::Net(NetDo::GroupLeave(i as u8))));
+        (format!("# {}", g.name), v)
+    }
+
+    /// The messages: the last few dozen, newest first.
+    fn messages_menu(&self) -> (String, Vec<(String, Do)>) {
+        let mut v: Vec<(String, Do)> = vec![("✎ talk… (/ · @name: to one person)".into(), Do::Net(NetDo::Chat))];
+        let now = crate::clock::now().timestamp();
+        for l in self.social.log.iter().rev().take(18) {
+            let mut s: String = l.text.chars().take(58).collect();
+            if l.text.chars().count() > 58 {
+                s.push('…');
+            }
+            v.push((format!("{s} · {}", ago_short(now - l.at)), Do::Net(NetDo::Messages)));
+        }
+        if self.social.log.is_empty() {
+            v.push(("(nothing yet)".into(), Do::Net(NetDo::Messages)));
+        }
+        ("messages".into(), v)
+    }
+
     /// One friend's menu.
     pub fn friend_menu(&self, i: usize) -> (String, Vec<(String, Do)>) {
         let fr = self.online.friends();
@@ -1347,12 +1919,15 @@ impl Scene {
         let mut v = vec![];
         if !p.waiting {
             v.push((format!("✉ write to {}…", p.name), Do::Net(NetDo::Mail(i as u8))));
+            v.push((format!("♪ ping {} (a little tone)", p.name), Do::Net(NetDo::Ping(i as u8))));
         }
         if here.as_ref().is_some_and(|h| h.village.is_some()) {
             v.push((format!("⌂ into {}'s village", p.name), Do::Net(NetDo::Join(i as u8))));
         }
-        if !p.waiting && here.as_ref().is_some_and(|h| h.on) && self.online.village().is_some_and(|(_, host)| host) {
+        if !p.waiting && self.online.village().is_some_and(|(_, host)| host) {
             v.push((format!("⌂ ask {} into this village", p.name), Do::Net(NetDo::Invite(i as u8))));
+        } else if !p.waiting && self.online.village().is_none() {
+            v.push((format!("⌂ open this village and ask {} in", p.name), Do::Net(NetDo::Invite(i as u8))));
         }
         if here.as_ref().is_some_and(|h| h.card.is_some()) {
             v.push((format!("★ {}'s profile card", p.name), Do::Net(NetDo::FriendCard(i as u8))));
@@ -1401,6 +1976,7 @@ impl Scene {
             v.push((format!("⇄ go and join {n} ({where_})"), Do::Net(NetDo::JoinTrip(id))));
         }
         v.push((format!("✦ wave to {n}"), Do::Net(NetDo::Wave(id, 0))));
+        v.push((format!("✉ say something just to {n}…"), Do::Net(NetDo::Whisper(id))));
         v.push((format!("♥ send {n} a heart"), Do::Net(NetDo::Wave(id, 3))));
         for kind in games::Kind::ALL {
             v.push((format!("{} {} with {n}", kind.icon(), kind.name()), Do::Net(NetDo::With(id, kind.code()))));
@@ -1410,6 +1986,13 @@ impl Scene {
         v.push((format!("⇘ a race down the mountain with {n}"), Do::Net(NetDo::With(id, ask::RACE))));
         if o.card.is_some() {
             v.push((format!("★ {n}'s profile card"), Do::Net(NetDo::Card(id))));
+        }
+        if self.online.village().is_some_and(|(_, host)| host) {
+            if self.online.is_admin(id) {
+                v.push((format!("⚙ {n} may change the village's settings: stop that"), Do::Net(NetDo::Admin(id, false))));
+            } else {
+                v.push((format!("⚙ let {n} change the village's settings"), Do::Net(NetDo::Admin(id, true))));
+            }
         }
         (n.clone(), v)
     }
@@ -1451,6 +2034,10 @@ impl Scene {
             MORE_PEOPLE => self.people_menu(),
             MORE_DEVICES => self.devices_menu(),
             MORE_VILLAGERS => self.villagers_menu(),
+            MORE_FRIENDS => self.friends_menu(),
+            MORE_GROUPS => self.groups_menu(),
+            MORE_MESSAGES => self.messages_menu(),
+            k if (MORE_GROUP..MORE_GROUP + 12).contains(&k) => self.group_menu((k - MORE_GROUP) as usize),
             k if k >= MORE_OTHER => self.other_menu((k - MORE_OTHER) as usize),
             k if k >= MORE_FRIEND => self.friend_menu((k - MORE_FRIEND) as usize),
             _ => return None,
@@ -1515,15 +2102,25 @@ impl Scene {
             }
             NetDo::Close => {
                 self.online.leave_village();
+                self.social.front.push(Front::Apart);
                 self.post("⌂ the village is closed");
             }
             NetDo::JoinCode => self.text_ask = Some((TextFor::JoinCode, "the village's code (XXXX-XXXX-XXXX)".into())),
-            NetDo::Leave => self.online.leave_village(),
+            NetDo::Leave => {
+                self.online.leave_village();
+                self.social.front.push(Front::Apart);
+            }
             NetDo::Say => self.text_ask = Some((TextFor::Say, "say something (everyone here hears it)".into())),
             NetDo::Invite(i) => {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
+                if self.online.village().is_none() {
+                    let code = self.online.host();
+                    self.post(format!("⌂ the village is open to friends: code {code}"));
+                }
                 if self.online.invite(i as usize) {
                     self.post(format!("⌂ {name} is asked in"));
+                } else {
+                    self.post("not online yet");
                 }
             }
             NetDo::GoInvited(i) => {
@@ -1608,6 +2205,44 @@ impl Scene {
             NetDo::Unlink => self.social.front.push(Front::Unlink),
             NetDo::Villager(i) => self.social.front.push(Front::Villager(i as usize)),
             NetDo::NewVillager => self.text_ask = Some((TextFor::NewVillager, "the new villager's name".into())),
+            NetDo::Ping(i) => {
+                let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
+                if self.online.ping(i as usize) {
+                    self.post(format!("♪ {name} pinged"));
+                    self.log_line(format!("♪ you pinged {name}"), false);
+                } else {
+                    self.post("not online yet");
+                }
+            }
+            NetDo::Chat => self.open_chat(),
+            NetDo::GroupNew => self.text_ask = Some((TextFor::GroupNew, "the new group's name".into())),
+            NetDo::GroupJoin => self.text_ask = Some((TextFor::GroupJoin, "the group's code (XXXX-XXXX-XXXX), then its name if you like".into())),
+            NetDo::GroupSay(i) => {
+                let name = self.online.book.groups.get(i as usize).map(|g| g.name.clone()).unwrap_or_default();
+                self.text_ask = Some((TextFor::GroupSay(i), format!("say something in #{name}")));
+            }
+            NetDo::GroupCode(i) => {
+                if let Some(g) = self.online.book.groups.get(i as usize) {
+                    let code = crate::net::seal::pretty(&g.code);
+                    self.copy_ask = Some(code.clone());
+                    self.post(format!("# {}'s code {code} copied: whoever has it can join", g.name));
+                }
+            }
+            NetDo::GroupLeave(i) => {
+                let name = self.online.book.groups.get(i as usize).map(|g| g.name.clone()).unwrap_or_default();
+                self.online.leave_group(i as usize);
+                self.post(format!("# left {name}"));
+            }
+            NetDo::Admin(id, on) => {
+                self.online.set_admin(id, on);
+                let name = self.other_name(id);
+                self.post(if on { format!("⚙ {name} may change the village's settings") } else { format!("⚙ {name} asks first again") });
+            }
+            NetDo::Messages => self.messages_read(),
+            NetDo::Whisper(id) => {
+                let name = self.other_name(id);
+                self.text_ask = Some((TextFor::Whisper(id), format!("just to {name}")));
+            }
         }
     }
 
@@ -1626,6 +2261,7 @@ impl Scene {
             TextFor::Mail(i) => {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
                 if self.online.mail(i as usize, text) {
+                    self.log_line(format!("✉ to {name}: {text}"), false);
                     self.post(format!("✉ to {name}: {text}"));
                 } else {
                     self.post("✉ not sent (not online yet)");
@@ -1638,6 +2274,7 @@ impl Scene {
             }
             TextFor::Say => {
                 self.online.say(text);
+                self.log_line(format!("☺ you: {text}"), false);
                 self.you_say(text, t);
             }
             TextFor::Motto => {
@@ -1657,6 +2294,41 @@ impl Scene {
                 }
             }
             TextFor::NewVillager => self.social.front.push(Front::NewVillager(text.chars().take(24).collect())),
+            TextFor::Chat => self.chat(text, t),
+            TextFor::GroupNew => {
+                let code = self.online.new_group(text);
+                let pretty = crate::net::seal::pretty(&code);
+                self.copy_ask = Some(pretty.clone());
+                let name = self.online.book.groups.last().map(|g| g.name.clone()).unwrap_or_default();
+                self.post(format!("# {name} made: its code {pretty} (copied) lets others in · @{} to talk there", name.split_whitespace().next().unwrap_or("")));
+            }
+            TextFor::GroupJoin => {
+                let mut words = text.split_whitespace();
+                let code = words.next().unwrap_or("");
+                let name: String = words.collect::<Vec<_>>().join(" ");
+                match self.online.join_group(&name, code) {
+                    Ok(()) => {
+                        let name = self.online.book.groups.last().map(|g| g.name.clone()).unwrap_or_default();
+                        self.post(format!("# into {name}: @{} to talk there", name.split_whitespace().next().unwrap_or("")));
+                    }
+                    Err(e) => self.post(e),
+                }
+            }
+            TextFor::GroupSay(i) => {
+                let name = self.online.book.groups.get(i as usize).map(|g| g.name.clone()).unwrap_or_default();
+                if self.online.group_say(i as usize, text) {
+                    self.log_line(format!("#{name} you: {text}"), false);
+                    self.post(format!("#{name} you: {text}"));
+                } else {
+                    self.post("not online yet");
+                }
+            }
+            TextFor::Whisper(id) => {
+                let name = self.other_name(id);
+                self.online.whisper(id, text);
+                self.log_line(format!("✉ to {name} (just them): {text}"), false);
+                self.post(format!("✉ to {name} (just them): {text}"));
+            }
         }
     }
 }
@@ -1677,6 +2349,15 @@ pub(super) fn look_of(av: &Avatar, id: u32) -> sprites::Look {
     };
     let hat = (av.hat != 0).then(|| hex(av.hat));
     sprites::Look { kid: false, coat: hex(av.coat), hat, hair, scarf, skin, mittens: scarf.or(hat).unwrap_or(hex(av.coat) * 0.7), holding: None, lantern: false }
+}
+
+fn ago_short(s: i64) -> String {
+    match s {
+        s if s < 60 => "now".into(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
 }
 
 fn ago_words(s: i64) -> String {

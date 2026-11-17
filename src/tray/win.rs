@@ -107,7 +107,18 @@ fn command(id: usize) {
             toggle_flag(config, SOUND);
         }
         ID_AUTOSTART => platform::autostart_set(!platform::autostart_get().unwrap_or(false)),
-        ID_QUIT => quit_wallpaper(),
+        ID_QUIT => {
+            quit_wallpaper();
+            // the wallpaper quits at its next frame; one that's stuck is
+            // taken down from here, so Quit always quits
+            crate::guard::leaving();
+            let _ = std::thread::Builder::new().name("quit".into()).spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                eprintln!("xmas-tui: still here 4 s after Quit; leaving anyway");
+                super::shutdown();
+                std::process::exit(0);
+            });
+        }
         _ => {}
     }
 }

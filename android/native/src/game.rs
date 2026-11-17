@@ -23,8 +23,37 @@ pub const BTN_REST: i32 = 9; // Z: lie down in the snow
 /// 1..5: an answer, or a pocket item (BTN_NUM + n - 1)
 pub const BTN_NUM: i32 = 10;
 
+/// The UI's own layer (menus, cards, the post, questions, the table): its
+/// letters bigger than the village's (`ui.scale`), drawn over it.
+struct UiLayer {
+    frame: Frame,
+    raster: Raster,
+    cw: usize,
+    ch: usize,
+    /// The village's cells it covered last frame (drawn again under it).
+    covered: Vec<usize>,
+}
+
+impl UiLayer {
+    /// For a village of `cols` × `rows` cells of `cw` × `ch` px, its letters
+    /// `scale` times bigger (none: the same size, no layer of its own).
+    fn new(cw: usize, ch: usize, cols: usize, rows: usize, scale: f32) -> Option<UiLayer> {
+        let scale = if scale.is_finite() { scale.clamp(1.0, 2.5) } else { 1.0 };
+        if scale < 1.05 {
+            return None;
+        }
+        let (ucw, uch) = (((cw as f32 * scale).round() as usize).max(cw + 1), ((ch as f32 * scale).round() as usize).max(ch + 1));
+        let (ucols, urows) = ((cols * cw / ucw).max(30), (rows * ch / uch).max(16));
+        let mut frame = Frame::new(ucols, urows);
+        frame.cell_aspect = uch as f32 / ucw as f32;
+        Some(UiLayer { frame, raster: Raster::new(ucw, uch), cw: ucw, ch: uch, covered: vec![] })
+    }
+}
+
 pub struct Game {
     pub scene: Scene,
+    /// The UI's own layer, bigger (see `UiLayer`; None: the village's size).
+    ui: Option<UiLayer>,
     cfg: Config,
     frame: Frame,
     spare: Frame,
@@ -74,6 +103,12 @@ pub struct Game {
     own_seed: u32,
     /// Online at all here (not on the wallpaper).
     online_ok: bool,
+    /// In someone else's village: their settings for it (see `Rules`).
+    rules_on: Option<crate::scene::online::Rules>,
+    /// Linked devices open at once share one village, unless it's been
+    /// closed (or left) by hand; when that's next looked at.
+    apart: bool,
+    together_at: f32,
     #[cfg(not(target_arch = "wasm32"))]
     link: Option<crate::net::tcp::Tcp>,
     /// The controls card shows the keyboard's (a computer's web page).
@@ -347,8 +382,10 @@ impl Game {
         frame.cell_aspect = ch as f32 / cw as f32;
         let audio = if cfg.sound.enabled && !cfg!(target_arch = "wasm32") { Audio::start(&cfg.sound) } else { None };
         let pull = cfg!(target_arch = "wasm32").then(|| audio::Pull::new(&cfg.sound));
+        let ui = UiLayer::new(cw, ch, cols, rows, cfg.ui.scale);
         Game {
             scene,
+            ui,
             frame,
             spare: Frame::new(1, 1),
             raster: Raster::new(cw, ch),
@@ -380,6 +417,9 @@ impl Game {
             text_for: None,
             own_seed: seed,
             online_ok: true,
+            rules_on: None,
+            apart: false,
+            together_at: 0.0,
             #[cfg(not(target_arch = "wasm32"))]
             link: None,
             help_keys: false,
@@ -387,6 +427,89 @@ impl Game {
             table_lift: false,
             cfg,
         }
+    }
+
+    /// New settings, taken in where things stand: the village stays (a
+    /// friend's too), the villager where they are, online and all; only
+    /// what has to be is made again (a new size: a new grid; what the
+    /// village is built from: the village, in place). `size`: the cells'
+    /// size (as at the start).
+    pub fn configure(&mut self, cfg: Config, size: f32) {
+        let old = std::mem::replace(&mut self.cfg, cfg);
+        self.regrid(old, size);
+    }
+
+    /// A new screen size (a window resized, a phone turned): the grid made
+    /// again for it, the village where it stands.
+    pub fn resize(&mut self, pw: usize, ph: usize, size: f32) {
+        if (pw, ph) == (self.pw, self.ph) {
+            return;
+        }
+        self.pw = pw.max(64);
+        self.ph = ph.max(64);
+        self.fb = vec![0x0003_050f; self.pw * self.ph];
+        self.raster = Raster::new(1, 1);
+        let old = self.cfg.clone();
+        self.regrid(old, size);
+    }
+
+    fn regrid(&mut self, old: Config, size: f32) {
+        let (cw, ch, cols, rows) = grid(self.pw, self.ph, size);
+        let regrid = (cw, ch, cols, rows) != (self.raster.cw, self.raster.ch, self.cols, self.rows);
+        if regrid {
+            self.cols = cols;
+            self.rows = rows;
+            self.raster = Raster::new(cw, ch);
+            self.off = ((self.pw - cols * cw) / 2, (self.ph - rows * ch) / 2);
+            self.frame = Frame::new(cols, rows);
+            self.frame.cell_aspect = ch as f32 / cw as f32;
+            self.prev.clear();
+            self.fb.fill(0x0003_050f);
+            self.menu = None;
+            self.card = None;
+        }
+        // the UI's own layer, at its own size
+        let ui_scale = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw as f32).unwrap_or(1.0);
+        if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != (self.cfg.ui.scale >= 1.05)) || (ui_scale - self.cfg.ui.scale).abs() > 0.2 {
+            self.ui = UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, self.cfg.ui.scale);
+            self.menu = None;
+            self.card = None;
+            self.prev.clear();
+        }
+        self.frame.glow_near = self.cfg.scene.glow;
+        self.frame.glow_far = self.cfg.scene.glow;
+        // a guest's change to the village's own settings: asked of the host
+        if self.scene.village_rules().is_some() {
+            use crate::scene::online::Rules;
+            for (k, v) in Rules::of(&old.scene).changes(&Rules::of(&self.cfg.scene)) {
+                self.scene.ask_rule(&k, &v);
+            }
+        }
+        if regrid || old.scene.build_key() != self.cfg.scene.build_key() {
+            let seed = self.scene.seed();
+            self.rebuild(seed);
+            if self.scene.online.guest_seed().is_some() {
+                self.scene.arrive_by_host();
+            }
+        } else {
+            let c = &self.cfg;
+            self.scene.set_autopilot(c.scene.autopilot);
+            self.scene.set_live(c.scene.walk_speed, false, c.scene.most_at_once);
+            self.scene.set_pet(&c.scene.pet);
+            self.scene.set_name(&c.scene.name);
+            self.scene.set_friends(&c.scene.friends);
+            self.scene.set_only_friends(c.scene.only_friends);
+            self.scene.set_ui_look(&c.ui.look);
+            self.scene.set_wear(&c.scene.wear, &c.scene.motto);
+        }
+        let snd = self.cfg.sound.clone();
+        self.set_sound(&snd);
+        if snd.enabled && self.audio.is_none() && !cfg!(target_arch = "wasm32") {
+            self.audio = Audio::start(&snd);
+        } else if !snd.enabled {
+            self.audio = None;
+        }
+        self.saved_at = self.saved_at.min(self.t - 55.0);
     }
 
     /// The web page's own villagers (their names), kept in the browser.
@@ -428,6 +551,18 @@ impl Game {
                     self.cfg.scene.motto = m;
                     let j = self.you_json();
                     self.asks.push(format!("you:{j}"));
+                }
+                Front::Apart => self.apart = true,
+                Front::SetRule(k, v) => {
+                    // a guest's change, said yes to: the village's settings
+                    // (the app keeps them)
+                    let mut r = crate::scene::online::Rules::of(&self.cfg.scene);
+                    if r.set(&k, &v) {
+                        r.apply(&mut self.cfg.scene);
+                        self.asks.push(format!("rules:{}", r.json()));
+                        let seed = self.scene.seed();
+                        self.rebuild(seed);
+                    }
                 }
                 Front::LinkShow => {
                     let l = self.linked.get_or_insert_with(|| crate::sync::Linked::new(&crate::net::seal::new_code(), false));
@@ -534,14 +669,24 @@ impl Game {
     /// The village laid out anew from `seed`: the villager's things, the
     /// online side and their card carried over.
     fn rebuild(&mut self, seed: u32) {
+        // (the same village made again: the villager stays where they were)
+        let at = (seed == self.scene.seed()).then(|| self.scene.player_at()).flatten();
         let pockets = self.scene.take_pockets();
         let online = self.scene.take_online();
         let social = self.scene.take_social();
-        self.scene = Self::make_scene(self.cols, self.rows, seed, &self.cfg);
+        // (someone else's village: their settings for it)
+        let mut cfg = self.cfg.clone();
+        if let Some(r) = &self.rules_on {
+            r.apply(&mut cfg.scene);
+        }
+        self.scene = Self::make_scene(self.cols, self.rows, seed, &cfg);
         self.scene.set_pockets(pockets);
         self.scene.put_online(online);
         self.scene.put_social(social);
         self.scene.set_own_seed(self.own_seed);
+        if at.is_some() {
+            self.scene.place_player(at);
+        }
         self.menu = None;
         self.focus = None;
     }
@@ -552,7 +697,7 @@ impl Game {
             return;
         }
         self.card = None;
-        self.menu = Some(Menu::new(x, y, title, items, self.cols as i32, self.rows as i32));
+        self.menu = Some(Menu::new(x, y, title, items, self.uw(), self.uh()));
     }
 
     fn scene_items(items: Vec<(String, Do)>) -> Vec<(String, Act)> {
@@ -597,14 +742,25 @@ impl Game {
         items.push(("settings".to_string(), Act::Ask("settings")));
         items.push(("the controls".to_string(), Act::Help));
         let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
-        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 6, "☰ more".into(), items);
+        self.open((self.uw() - w) / 2, self.uh() / 6, "☰ more".into(), items);
+    }
+
+    /// Where the villager is, in a few words (a page title).
+    pub fn place(&self) -> String {
+        self.scene.place_words()
+    }
+
+    /// The talk line (/ on a keyboard).
+    pub fn chat(&mut self) {
+        self.menu = None;
+        self.scene.open_chat();
     }
 
     /// Friends & online (O on a keyboard).
     pub fn online_menu(&mut self) {
         let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
         let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
-        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 8, title, Self::scene_items(items));
+        self.open((self.uw() - w) / 2, self.uh() / 8, title, Self::scene_items(items));
     }
 
     /// The controls card (`keys`: the keyboard's; else the touch controls').
@@ -614,14 +770,14 @@ impl Game {
         let lines = if keys { HELP_KEYS } else { HELP };
         let mut c = Card { x: 0, y: 0, title: "⌨ playing in the village".into(), lines: lines.iter().map(|s| s.to_string()).collect() };
         let (w, h) = c.size();
-        c.move_to((self.cols as i32 - w) / 2, (self.rows as i32 - h) / 3, self.cols as i32, self.rows as i32);
+        c.move_to((self.uw() - w) / 2, (self.uh() - h) / 3, self.uw(), self.uh());
         self.card = Some(c);
     }
 
     /// The pointer over the village (not pressed): over a menu, the choice
     /// under it is picked out.
     pub fn hover(&mut self, x: f32, y: f32) {
-        let c = self.cell(x, y);
+        let c = self.ui_cell(x, y);
         if let Some(m) = &mut self.menu {
             if let Some(i) = m.row_at(c.0, c.1) {
                 m.hover = i;
@@ -672,12 +828,54 @@ impl Game {
         }
         if let Some(to) = self.scene.take_village() {
             let seed = to.unwrap_or(self.own_seed);
+            self.rules_on = self.scene.village_rules().filter(|_| to.is_some()).map(|r| r.0.clone());
             self.rebuild(seed);
             self.scene.arrive_by_host();
+        }
+        // hosting: the village's settings, for the guests; a guest: the
+        // host's (the village made again when they change)
+        self.scene.set_rules(&crate::scene::online::Rules::of(&self.cfg.scene));
+        let rules = self.scene.village_rules().map(|r| r.0.clone());
+        if rules != self.rules_on {
+            self.rules_on = rules;
+            let seed = self.scene.seed();
+            self.rebuild(seed);
+            if self.scene.online.guest_seed().is_some() {
+                self.scene.arrive_by_host();
+            }
         }
         if self.online_ok {
             self.do_front();
             self.take_synced();
+            self.together();
+        }
+    }
+
+    /// Two of this villager's devices open at once: one village for both.
+    fn together(&mut self) {
+        let t = self.t;
+        let Some(l) = &mut self.linked else { return };
+        l.live = true;
+        l.open = match self.scene.online.village() {
+            Some((code, true)) => crate::net::seal::norm(&code),
+            _ => String::new(),
+        };
+        if self.apart || t < self.together_at || self.scene.online.link() != crate::net::Link::On || !self.scene.out_and_about() || self.scene.online.village().is_some() {
+            return;
+        }
+        self.together_at = t + 3.0;
+        match l.together(crate::clock::now().timestamp()) {
+            crate::sync::Together::Join(code, label) => {
+                if self.scene.online.join(&code).is_ok() {
+                    self.scene.note(&format!("⇄ into the village on {label}: one villager, one village"));
+                }
+            }
+            crate::sync::Together::Host => {
+                self.scene.online.host();
+                self.scene.note("⇄ your other device is open too: the village opened for both");
+                self.send_sync();
+            }
+            crate::sync::Together::Alone => {}
         }
     }
 
@@ -786,19 +984,101 @@ impl Game {
             _ => want,
         };
         self.focus = Some(f);
+        // (the scene's own panels go on the UI's layer, when it has one)
+        self.scene.ui_wh = self.ui.as_ref().map(|u| (u.frame.w as i32, u.frame.h as i32));
+        self.scene.ui_k = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw.max(1) as f32).unwrap_or(1.0);
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
-        self.scene.draw_top(&mut self.frame);
         let look = self.cfg.ui.look.clone();
+        // the post, questions, the table, menus and cards: over the village
+        // (in a layer of their own, bigger, if the UI's set bigger)
+        let layered = self.ui.is_some();
+        let uf = match &mut self.ui {
+            Some(u) => {
+                u.frame.clear();
+                &mut u.frame
+            }
+            None => &mut self.frame,
+        };
+        if layered {
+            self.scene.draw_ui(uf);
+        }
+        self.scene.draw_top(uf);
         // (a menu or card hides the people and pets under it)
-        self.frame.cover_pictures = true;
+        uf.cover_pictures = true;
         if let Some(m) = &self.menu {
-            m.draw(&mut self.frame, &look);
+            m.draw(uf, &look);
         }
         if let Some(c) = &self.card {
-            c.draw(&mut self.frame, &look);
+            c.draw(uf, &look);
         }
         self.frame.compose();
         self.draw();
+    }
+
+    /// The UI's size in its own cells (the village's, without a layer).
+    fn uw(&self) -> i32 {
+        self.ui.as_ref().map(|u| u.frame.w).unwrap_or(self.cols) as i32
+    }
+
+    fn uh(&self) -> i32 {
+        self.ui.as_ref().map(|u| u.frame.h).unwrap_or(self.rows) as i32
+    }
+
+    /// The UI's cell under screen pixel (x, y).
+    fn ui_cell(&self, x: f32, y: f32) -> (i32, i32) {
+        match &self.ui {
+            Some(u) => {
+                let cx = ((x - self.off.0 as f32) / u.cw as f32).floor() as i32;
+                let cy = ((y - self.off.1 as f32) / u.ch as f32).floor() as i32;
+                (cx.clamp(0, u.frame.w as i32 - 1), cy.clamp(0, u.frame.h as i32 - 1))
+            }
+            None => self.cell(x, y),
+        }
+    }
+
+    /// The UI's layer, over the village just drawn: its cells (where
+    /// there's something), its pictures; the village's cells under it are
+    /// drawn again next frame.
+    fn draw_ui(&mut self) {
+        let Some(u) = &mut self.ui else { return };
+        let stride = self.pw;
+        let (cols, rows) = (self.cols, self.rows);
+        let (scw, sch) = (self.raster.cw, self.raster.ch);
+        let mut covered = vec![];
+        let fw = u.frame.w;
+        for (i, g) in u.frame.glyph.iter().enumerate() {
+            let Some(g) = g else { continue };
+            let (ux, uy) = (i % fw, i / fw);
+            let (px, py) = (self.off.0 + ux * u.cw, self.off.1 + uy * u.ch);
+            let (bg, bg_a) = match g.bg {
+                crate::frame::Bg::Scene => (crate::color::Rgb::BLACK, 0.0),
+                crate::frame::Bg::Solid(c) => (c, 1.0),
+                crate::frame::Bg::Mix(c, a) => (c, a),
+            };
+            u.raster.draw_cell_over(&mut self.fb, stride, px, py, g.ch, g.fg.tonemap(), bg.tonemap(), bg_a, g.alpha.clamp(0.0, 1.0));
+            // the village's cells under it
+            let (x0, x1) = ((px - self.off.0) / scw, ((px - self.off.0 + u.cw).div_ceil(scw)).min(cols));
+            let (y0, y1) = ((py - self.off.1) / sch, ((py - self.off.1 + u.ch).div_ceil(sch)).min(rows));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    covered.push(y * cols + x);
+                }
+            }
+        }
+        for p in &u.frame.pictures {
+            match p.sprite_px(u.cw, u.ch) {
+                Some((x, y, k)) => p.pic.blit_scaled(&mut self.fb, stride, self.off.0 as i32 + x, self.off.1 as i32 + y, k),
+                None => p.pic.blit(&mut self.fb, stride, self.off.0 + p.x.max(0) as usize * u.cw, self.off.1 + p.y.max(0) as usize * u.ch, p.cols as usize * u.cw, p.rows as usize * u.ch),
+            }
+            let (x0, y0) = ((p.x.max(0) as usize * u.cw) / scw, (p.y.max(0) as usize * u.ch) / sch);
+            let (x1, y1) = ((((p.x + p.cols).max(0) as usize * u.cw).div_ceil(scw)).min(cols), (((p.y + p.rows).max(0) as usize * u.ch).div_ceil(sch)).min(rows));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    covered.push(y * cols + x);
+                }
+            }
+        }
+        u.covered = covered;
     }
 
     /// The cells (only those that changed, and those under pictures) and
@@ -820,6 +1100,13 @@ impl Game {
                 }
             }
         }
+        if let Some(u) = &self.ui {
+            for &i in &u.covered {
+                if i < under.len() {
+                    under[i] = true;
+                }
+            }
+        }
         for cy in 0..rows {
             for cx in 0..cols {
                 let i = cy * cols + cx;
@@ -836,6 +1123,7 @@ impl Game {
             }
         }
         self.pics = pics;
+        self.draw_ui();
     }
 
     /// The cell under screen pixel (x, y).
@@ -946,10 +1234,12 @@ impl Game {
     /// 3 cancelled (a long press turned into a menu, a second finger).
     pub fn touch(&mut self, action: i32, x: f32, y: f32) {
         let c = self.cell(x, y);
+        // (the UI's own cell there: bigger, if it's set bigger)
+        let uc = self.ui_cell(x, y);
         let w = self.world(c);
         let t = self.t;
         // the menu or card takes its own touches
-        if self.menu_touch(action, c) {
+        if self.menu_touch(action, uc) {
             return;
         }
         match action {
@@ -958,12 +1248,12 @@ impl Game {
                 self.carrying = false;
                 // a question asked by someone online (yes, no), a profile
                 // card (put away), the post (friends & online)
-                if self.scene.prompt_click(c.0, c.1) || self.scene.close_card() {
+                if self.scene.prompt_click(uc.0, uc.1) || self.scene.close_card() {
                     self.scene.woke();
                     self.press = None;
                     return;
                 }
-                if self.scene.post_click(c.0, c.1) {
+                if self.scene.post_click(uc.0, uc.1) {
                     self.press = None;
                     self.online_menu();
                     return;
@@ -972,16 +1262,16 @@ impl Game {
                 // title bar moves it)
                 if self.scene.at_table() {
                     self.press = None;
-                    if self.scene.table_grab(c.0, c.1) {
+                    if self.scene.table_grab(uc.0, uc.1) {
                         self.table_lift = true;
                     } else {
                         self.scene.woke();
-                        self.scene.table_click(c.0, c.1);
+                        self.scene.table_click(uc.0, uc.1);
                     }
                     return;
                 }
                 // the dialogue box takes its own taps (answers, moving it)
-                if self.scene.convo_click(c.0, c.1) {
+                if self.scene.convo_click(uc.0, uc.1) {
                     self.scene.woke();
                     self.press = None;
                     return;
@@ -992,7 +1282,7 @@ impl Game {
                     self.scene.woke();
                 }
             }
-            1 if self.table_lift => self.scene.table_drag_to(c.0, c.1),
+            1 if self.table_lift => self.scene.table_drag_to(uc.0, uc.1),
             2 | 3 if self.table_lift => {
                 self.table_lift = false;
                 self.scene.table_drop();
@@ -1006,10 +1296,17 @@ impl Game {
                 }
             }
             2 => {
+                let tapped = self.press.is_some() && !self.moved;
                 if self.carrying {
                     self.scene.drag(w.0, w.1);
                     self.scene.release();
-                } else if self.press.is_some() && !self.moved {
+                }
+                if tapped && self.scene.tap_opens_menu(w.0, w.1) {
+                    // a tap on someone (a friend, a villager…) or something
+                    // with things to do: its menu, there and then
+                    let (title, items) = self.scene.menu_at(w.0, w.1);
+                    self.open(uc.0 - 2, uc.1 + 1, title, Self::scene_items(items));
+                } else if tapped && !self.carrying {
                     // a tap: the same as a click
                     self.scene.click(w.0, w.1, t);
                 }
@@ -1030,7 +1327,7 @@ impl Game {
     /// it. Its title bar moves it, ✕ closes it, a choice is picked when the
     /// finger lifts on it; a tap elsewhere closes it.
     fn menu_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
-        let (cols, rows) = (self.cols as i32, self.rows as i32);
+        let (cols, rows) = (self.uw(), self.uh());
         if let Some((dx, dy)) = self.lift {
             if let Some(m) = &mut self.menu {
                 m.move_to(c.0 - dx, c.1 - dy, cols, rows);
@@ -1096,10 +1393,11 @@ impl Game {
     /// (It opens in the village; nothing's handed back.)
     pub fn menu(&mut self, x: f32, y: f32) -> Option<(String, Vec<String>)> {
         let c = self.cell(x, y);
+        let uc = self.ui_cell(x, y);
         let w = self.world(c);
         let (title, items) = self.scene.menu_at(w.0, w.1);
         self.press = None;
-        self.open(c.0 - 2, c.1 + 1, title, Self::scene_items(items));
+        self.open(uc.0 - 2, uc.1 + 1, title, Self::scene_items(items));
         None
     }
 
@@ -1107,7 +1405,7 @@ impl Game {
     pub fn todo(&mut self) -> Option<(String, Vec<String>)> {
         let (title, items) = self.scene.todo_menu();
         let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
-        self.open((self.cols as i32 - w) / 2, self.rows as i32 / 6, title, Self::scene_items(items));
+        self.open((self.uw() - w) / 2, self.uh() / 6, title, Self::scene_items(items));
         None
     }
 
