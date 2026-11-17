@@ -338,6 +338,8 @@ pub extern "C" fn net_stuck(w: *mut Web) -> u32 {
 pub extern "C" fn net_link(w: *mut Web, up: u32) {
     let o = &mut unsafe { &mut *w }.game.scene.online;
     if up != 0 {
+        // (2: through the village's own relay: what it says as itself is believed)
+        o.set_trusted(up == 2);
         o.connected();
     } else {
         o.disconnected();
@@ -455,4 +457,10 @@ pub extern "C" fn weather_in(w: *mut Web, len: usize) {
     let text = String::from_utf8_lossy(&bytes).to_string();
     let (place, json) = text.split_once('\u{0}').unwrap_or(("", &text));
     unsafe { &mut *w }.game.set_weather(json, place);
+}
+
+/// Whether the menu's open (the page's touch pad steps out of its way).
+#[no_mangle]
+pub extern "C" fn panel_open(w: *mut Web) -> u32 {
+    unsafe { &*w }.game.panel_open() as u32
 }

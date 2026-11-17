@@ -284,12 +284,14 @@ fn santa_caption(now: chrono::DateTime<chrono::Local>, t: f32) -> (String, Strin
         }
         None => {
             let today = now.date_naive();
-            let year = if (today.month(), today.day()) > (12, 25) { today.year() + 1 } else { today.year() };
+            let home = today.month() == 12 && today.day() >= 25;
+            let year = if home { today.year() + 1 } else { today.year() };
             let eve = chrono::NaiveDate::from_ymd_opt(year, 12, 24).unwrap_or(today);
             let days = (eve - today).num_days().max(0);
             let wrapped = 3_400_000_000u64 + (((365 - days.min(365)) as f64 / 365.0) * 4_000_000_000.0) as u64 + (t * 37.0) as u64;
             let when = match days {
-                0 => "home again: a sleep, then next year's list".to_string(),
+                _ if home => "home again: a sleep, then next year's list".to_string(),
+                0 => "he sets out tonight!".to_string(),
                 1 => "he sets out tomorrow night!".to_string(),
                 n => format!("he sets out in {n} days"),
             };
@@ -753,5 +755,8 @@ mod tests {
         assert_eq!(santa_trip(at(12, 25, 13)), None);
         assert!(santa_caption(at(12, 24, 20), 0.0).0.starts_with("Santa's over"));
         assert!(santa_caption(at(11, 17, 12), 0.0).0.contains("getting ready"));
+        // Christmas Eve morning, before he's out: tonight; Christmas Day, after: home
+        assert!(santa_caption(at(12, 24, 6), 0.0).0.contains("tonight"), "{:?}", santa_caption(at(12, 24, 6), 0.0));
+        assert!(santa_caption(at(12, 25, 18), 0.0).0.contains("home again"));
     }
 }

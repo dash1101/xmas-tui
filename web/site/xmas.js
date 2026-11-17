@@ -413,7 +413,9 @@ function netPump(now) {
     wsTry++;
     try { ws = /^https?:/.test(url) ? new PollSocket(url) : new WebSocket(url, "mqtt"); } catch (e) { ws = null; wsWait = now + 3000; return; }
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => { wsTry--; wsOpenAt = performance.now(); if (game) wasm.net_link(game, 1); };
+    // (the village's own relay: what it says as itself is believed)
+    const own = /^(wss|https):\/\/xmas-relay\.novalabs\.app\//.test(url);
+    ws.onopen = () => { wsTry--; wsOpenAt = performance.now(); if (game) wasm.net_link(game, own ? 2 : 1); };
     ws.onmessage = (e) => {
       if (!game) return;
       const b = new Uint8Array(e.data);
@@ -602,6 +604,8 @@ function disc(c, cx, cy, r, body, edge, P) {
 function drawPad() {
   const c = pctx, L = layout(), P = Math.max(3, Math.round(Math.min(pad.width, pad.height) / 140));
   c.clearRect(0, 0, pad.width, pad.height);
+  // (the menu open: the joystick and buttons out of its way)
+  if (game && wasm.panel_open(game)) return;
   disc(c, L.stick.x, L.stick.y, L.stick.r, "rgba(200,220,255,0.22)", "rgba(255,211,107,0.7)", P);
   const k = knob || { x: L.stick.x, y: L.stick.y };
   disc(c, k.x, k.y, L.stick.r * 0.42, "rgba(255,236,200,0.75)", "rgba(255,211,107,0.9)", P);
@@ -624,6 +628,8 @@ function padSteer(x, y) {
 pad.addEventListener("pointerdown", (e) => {
   if (!game) return;
   wake();
+  // the menu open: every touch is the menu's
+  if (wasm.panel_open(game)) { canvas.dispatchEvent(new PointerEvent("pointerdown", e)); return; }
   const L = layout(), x = e.clientX * pad.width / innerWidth, y = e.clientY * pad.height / innerHeight;
   if (Math.hypot(x - L.stick.x, y - L.stick.y) < L.stick.r * 1.5 && !stick) {
     stick = e.pointerId; knob = { x, y }; padSteer(x, y); pad.setPointerCapture(e.pointerId); return;

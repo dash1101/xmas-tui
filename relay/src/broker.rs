@@ -188,7 +188,8 @@ impl Broker {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let will = will.filter(|(t, p, _)| ok_topic(t) && p.len() <= self.kept.limits.max_payload);
+        // (a will is published by the relay itself: never on its own topics)
+        let will = will.filter(|(t, p, _)| ok_topic(t) && !t.starts_with(ADMIN) && p.len() <= self.kept.limits.max_payload);
         let burst = self.kept.limits.burst;
         self.conns.insert(id, Conn { ip, client, since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
         (id, old)
@@ -571,8 +572,11 @@ mod tests {
         let (a, _) = b.join(ip(1), "a".into(), None, ta);
         b.publish(a, "xmas-tui/1/sync/abc/dev1", b"my side", true).unwrap();
         b.publish(a, "xmas-tui/1/here/abc", b"on", true).unwrap();
-        // pretending to be the relay: not kept, not passed on
+        // pretending to be the relay: not kept, not passed on (nor as a will)
         b.publish(a, ADMIN_SQUARES, b"{\"North Pole Square\":{\"time\":\"noon\"}}", true).unwrap();
+        let (tw, _rw) = channel(64);
+        let (w, _) = b.join(ip(9), "w".into(), Some((ADMIN_SQUARES.into(), b"{\"North Pole Square\":{}}".to_vec(), true)), tw);
+        b.leave(w, false);
         b.kept.squares.insert("Frosty Hollow".into(), serde_json::json!({ "time": "night" }));
         b.say_squares();
         let snap = b.snapshot();

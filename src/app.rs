@@ -2728,7 +2728,9 @@ impl App {
             // a guest: the host's clock (the same sky for everyone there)
             self.scene.online.set_clock(mins, rise, set);
             let (mins, rise, set) = self.scene.online.village_clock().unwrap_or((mins, rise, set));
-            self.scene.set_daylight(crate::scene::daylight::compute(&self.cfg.scene.time, mins, rise, set));
+            // (the village's time of day: the host's, or a square's, when it's theirs)
+            let time = self.rules_on.as_ref().map(|r| r.time.as_str()).unwrap_or(self.cfg.scene.time.as_str());
+            self.scene.set_daylight(crate::scene::daylight::compute(time, mins, rise, set));
         }
         self.scene.update(dt, t);
         let mut sounds = self.scene.take_sounds();

@@ -138,6 +138,7 @@ pub struct Game {
     sun: Option<(f32, f32)>,
     friends_at: Option<crate::widgets::Rect>,
     friends_hover: Option<crate::widgets::face::FriendsHit>,
+    friends_press: bool,
 }
 
 /// What a choice in a menu does.
@@ -359,8 +360,11 @@ const HELP: &[&str] = &[
 /// windows size), on top of letters about 18 px tall at `size` (the screen's
 /// pixels to a point: the village has at least 75 rows, often smaller than
 /// that, and its menus and talk mustn't shrink with it).
-fn ui_k(setting: f32, size: f32, ch: usize) -> f32 {
-    setting.clamp(1.0, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0)
+fn ui_k(setting: f32, size: f32, ch: usize, cols: usize, rows: usize) -> f32 {
+    let k = setting.clamp(1.0, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0);
+    // never so big the menu (80 columns) doesn't fit across, or there are
+    // fewer than 24 rows of it
+    k.min(cols as f32 / 80.0).min(rows as f32 / 24.0).max(1.0)
 }
 
 /// Cells for a screen: rows from the short side (about 18 px a row at
@@ -419,7 +423,7 @@ impl Game {
         frame.cell_aspect = ch as f32 / cw as f32;
         let audio = if cfg.sound.enabled && !cfg!(target_arch = "wasm32") { Audio::start(&cfg.sound) } else { None };
         let pull = cfg!(target_arch = "wasm32").then(|| audio::Pull::new(&cfg.sound));
-        let ui = UiLayer::new(cw, ch, cols, rows, ui_k(cfg.ui.scale, size, ch));
+        let ui = UiLayer::new(cw, ch, cols, rows, ui_k(cfg.ui.scale, size, ch, cols, rows));
         Game {
             scene,
             ui,
@@ -480,6 +484,7 @@ impl Game {
             sun: None,
             friends_at: None,
             friends_hover: None,
+            friends_press: false,
             cfg,
         }
     }
@@ -527,7 +532,7 @@ impl Game {
         }
         // the UI's own layer, at its own size
         let ui_scale = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw as f32).unwrap_or(1.0);
-        let want = ui_k(self.cfg.ui.scale, size, self.raster.ch);
+        let want = ui_k(self.cfg.ui.scale, size, self.raster.ch, self.cols, self.rows);
         if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != (want >= 1.05)) || (ui_scale - want).abs() > 0.2 {
             self.ui = UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, want);
             self.menu = None;
@@ -843,9 +848,12 @@ impl Game {
     /// under it is picked out.
     pub fn hover(&mut self, x: f32, y: f32) {
         // the friends widget's row under the pointer, picked out
-        if self.friends_at.is_some() {
+        if let Some(r) = self.friends_at {
             let vc = self.cell(x, y);
-            self.friends_touch(1, vc);
+            self.friends_hover = match (r.contains(vc.0, vc.1), self.scene.friends_view()) {
+                (true, Some(v)) => crate::widgets::face::friends_rows(r, &v).into_iter().find(|(y, _)| *y == vc.1).map(|(_, h)| h),
+                _ => None,
+            };
         }
         let c = self.ui_cell(x, y);
         if self.panel.open {
@@ -930,6 +938,11 @@ impl Game {
             }
             Err(_) => self.weather = crate::widgets::face::Weather { status: json.chars().take(120).collect(), ..Default::default() },
         }
+    }
+
+    /// The menu's open (the page's touch pad steps out of its way).
+    pub fn panel_open(&self) -> bool {
+        self.panel.open
     }
 
     /// The sound's on.
@@ -1053,15 +1066,38 @@ impl Game {
     fn friends_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
         use crate::scene::online::{NetDo, MORE_FRIEND, MORE_MESSAGES, MORE_PUBLIC};
         use crate::widgets::face::{friends_rows, FriendsHit};
-        let Some(r) = self.friends_at.filter(|r| r.contains(c.0, c.1)) else {
+        let over = self.friends_at.filter(|r| r.contains(c.0, c.1));
+        let pressed = self.friends_press;
+        match action {
+            // a press there: the widget's
+            0 => {
+                self.friends_press = over.is_some();
+                if over.is_none() {
+                    return false;
+                }
+            }
+            // a finger lifted: the widget's only if it went down there
+            2 => {
+                self.friends_press = false;
+                if !pressed {
+                    return false;
+                }
+            }
+            3 => {
+                self.friends_press = false;
+                return pressed;
+            }
+            _ => {}
+        }
+        let Some(r) = over else {
             self.friends_hover = None;
-            return false;
+            return pressed;
         };
         let Some(v) = self.scene.friends_view() else { return false };
         let hit = friends_rows(r, &v).into_iter().find(|(y, _)| *y == c.1).map(|(_, h)| h);
         self.friends_hover = hit;
         if action != 2 {
-            return true;
+            return action == 0 || pressed;
         }
         let more = match hit {
             Some(FriendsHit::GoOnline) => return { self.scene.act(Do::Net(NetDo::On)); true },
@@ -1131,8 +1167,23 @@ impl Game {
             S::FriendSel(i) => self.panel.friend_sel = if self.panel.friend_sel == Some(i) { None } else { Some(i) },
             S::Locked | S::PopOut | S::FullScreen | S::BackToWallpaper | S::RestartNow | S::RestartLater | S::Quit | S::Autostart | S::OpenConfig | S::OpenLog | S::CheckUpdate | S::InstallUpdate | S::DismissUpdate | S::ShelfOpen(_) | S::ShelfFolder(_) | S::ShelfNewFrom | S::DismissWallOffer | S::LockScreen | S::LockRedraw | S::InstallFfmpeg => {}
             a => {
-                // a guest: the village's own settings are the host's (asked
-                // of them in regrid); in a square, not to be changed at all
+                // a guest in a friend's village: a change to the village's
+                // own settings is asked of the host (worked out from theirs,
+                // as shown), and this villager's own stay as they are; the
+                // rest (sound, looks…) are this villager's
+                use crate::scene::online::{Lock, Rules};
+                if let Some((r, Lock::Host | Lock::Admin)) = self.scene.rules_now(&self.cfg.scene) {
+                    let mut probe = self.cfg.clone();
+                    r.apply(&mut probe.scene);
+                    st::apply(&mut probe, a);
+                    let asked = r.changes(&Rules::of(&probe.scene));
+                    if !asked.is_empty() {
+                        for (k, v) in asked {
+                            self.scene.ask_rule(&k, &v);
+                        }
+                        return;
+                    }
+                }
                 let mut c = self.cfg.clone();
                 if st::apply(&mut c, a) {
                     self.set_cfg(c);
@@ -1184,7 +1235,9 @@ impl Game {
         if let Some(f) = self.editing.take() {
             if self.panel.edit == Some(f) {
                 let mut c = self.cfg.clone();
-                if text.trim().is_empty() && !matches!(f, crate::settings::Field::Friend(_)) {
+                // (nothing typed, or the box put away: left as it was; a
+                // friend comes off the list with their ✕, not by this)
+                if text.trim().is_empty() {
                     self.panel.cancel_edit();
                 } else {
                     self.panel.editing = Some(text.to_string());
@@ -1365,7 +1418,8 @@ impl Game {
             let (rise, set) = self.sun.unwrap_or((450.0, 1020.0));
             self.scene.online.set_clock(mins, rise, set);
             let (mins, rise, set) = self.scene.online.village_clock().unwrap_or((mins, rise, set));
-            self.scene.set_daylight(daylight::compute(&self.cfg.scene.time, mins, rise, set));
+            let time = self.rules_on.as_ref().map(|r| r.time.clone()).unwrap_or_else(|| self.cfg.scene.time.clone());
+            self.scene.set_daylight(daylight::compute(&time, mins, rise, set));
         }
         self.scene.update(dt, t);
         // the pet named (or recoloured) in the village: kept, and saved

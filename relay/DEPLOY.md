@@ -6,10 +6,10 @@ game is already at xmas.novalabs.app (its DNS is done).
 
 ## Image
 
-`ghcr.io/dash1101/xmas-relay:1.2.0`, also tagged `:latest`.
+`ghcr.io/dash1101/xmas-relay:1.2.1`, also tagged `:latest`.
 - 1.1.0 added long polling at `/poll`, for networks that break WebSockets.
 - 1.2.0 keeps what it holds (linked devices' sides, listings) in `data/kept.bin` across restarts, and adds the public
-  squares' settings to the console.
+  squares' settings to the console. 1.2.1: a client's last will can't speak on the relay's own topics.
 - Neither changes anything on the server's side.
 - Built for linux/amd64 by the repo's `relay` workflow from `relay/`, whenever it changes.
 - Runs as a non-root user (uid 10001).
