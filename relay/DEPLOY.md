@@ -1,56 +1,68 @@
 # Deploying xmas-relay (for the Homelab server)
 
-This is what's needed on the server for the xmas-tui village's own relay, and for the web
-game's new address. Parker's request: build the relay, host it through the server's
-Cloudflare tunnel for free, add it to the Nova app as a service, and give him an admin
-console that only his Cloudflare account can open. The web game moves from
-dash1101.github.io/xmas-tui to xmas.novalabs.app.
+The xmas-tui village's own relay, on the server: amd64, Debian 13, Docker with Compose v2,
+and the existing Cloudflare tunnel (routes managed from the dashboard and Nova). The web
+game is already at xmas.novalabs.app (its DNS is done).
 
-## 1. The web game's address (DNS only)
+## Image
 
-In the Cloudflare zone `novalabs.app`:
-- CNAME record: name `xmas`, target `dash1101.github.io`, **proxy off** (grey cloud, "DNS
-  only"). GitHub has to see the record directly to issue the HTTPS certificate.
-- No other A, AAAA or CNAME records for `xmas`.
+`ghcr.io/dash1101/xmas-relay:1.0.0`, also tagged `:latest`.
+- Built for linux/amd64 by the repo's `relay` workflow from `relay/`, whenever it changes.
+- Runs as a non-root user (uid 10001).
+- Has a healthcheck.
 
-The xmas-tui side then sets the custom domain in the repo's Pages settings.
-
-## 2. The relay container
+## Steps
 
 ```bash
-git clone https://github.com/dash1101/xmas-tui    # or git pull
-cd xmas-tui/relay
-echo "ADMIN_EMAIL=<Parker's Cloudflare Access login>" > .env   # not committed
-docker compose up -d --build
+sudo mkdir -p /opt/xmas-relay/data
+sudo chown 10001:10001 /opt/xmas-relay/data      # the container's user writes its limits and bans there
+cd /opt/xmas-relay
+sudo curl -fsSLo compose.yaml https://raw.githubusercontent.com/dash1101/xmas-tui/main/relay/compose.yaml
+echo "ADMIN_EMAIL=<the owner's Cloudflare Access login>" | sudo tee .env >/dev/null   # value not shared
+sudo chmod 600 .env
+sudo docker compose up -d
+sudo docker compose logs --tail 5    # "WebSocket on :8080/mqtt, admin console on :8081"
 ```
 
-- `compose.yaml` expects an external Docker network named `tunnel`, the one cloudflared is
-  on. Change it to the actual cloudflared network, or run cloudflared beside it.
-- Do **not** publish ports 8080/8081 on the host.
-- The log should say: `WebSocket on :8080/mqtt, admin console on :8081`.
+`compose.yaml`:
+- `restart: unless-stopped`;
+- publishes `127.0.0.1:8080:8080` and `127.0.0.1:8081:8081` only;
+- bind-mounts `./data` (so it's in Nova's backups);
+- read-only root, all capabilities dropped, no new privileges, 512 MB and 2 CPUs at most;
+- a healthcheck on `/health`.
 
-## 3. Tunnel hostnames
+## Tunnel routes
 
 | hostname | service | access |
 |---|---|---|
-| `xmas-relay.novalabs.app` | `http://xmas-relay:8080` | public (WebSockets on) |
-| `xmas-admin.novalabs.app` | `http://xmas-relay:8081` | a Cloudflare Access self-hosted app allowing only Parker's account |
+| `xmas-relay.novalabs.app` | `http://localhost:8080` | public, no login (WebSocket at `/mqtt`) |
+| `xmas-admin.novalabs.app` | `http://localhost:8081` | the same Access application as Nova |
 
-The game already tries `wss://xmas-relay.novalabs.app/mqtt` first, so please keep that
-exact hostname.
+## Environment
 
-## 4. Nova
+- `ADMIN_EMAIL` (in `.env`): the owner's Access login. The console then answers only requests
+  Cloudflare Access signed in as exactly that address (it reads the
+  `Cf-Access-Authenticated-User-Email` header Access adds). Unset, any Access sign-in gets in.
+  There's no other admin secret.
+- `TRUST_CF=1` (set in the compose file): client addresses come from `CF-Connecting-IP`, for
+  the per-address limits and bans.
+- Optional: `RELAY_PORT`, `ADMIN_PORT`, `RELAY_DATA` (defaults 8080, 8081, `/data`).
 
-Add it as a service:
-- health: `http://xmas-relay:8080/health`, or `https://xmas-relay.novalabs.app/health`
-  (answers `ok`);
-- admin UI: `https://xmas-admin.novalabs.app`.
+## Updating
 
-## 5. Check
+```bash
+cd /opt/xmas-relay
+sudo docker compose pull
+sudo docker compose up -d
+```
 
-- `curl https://xmas-relay.novalabs.app/health` gives `ok`.
-- `https://xmas-admin.novalabs.app` shows "❄ Village relay" after the Access sign-in, and a
-  `403` without it.
+## Check
 
-Then tell the xmas-tui session (or Parker) it's up, and the game gets tested against it end
-to end.
+- `curl -s https://xmas-relay.novalabs.app/health` gives `ok`.
+- https://xmas-admin.novalabs.app shows "❄ Village relay" after the Access sign-in, and is
+  refused without it.
+- `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/` on the server gives
+  `403`: no Access header means no console, even locally.
+
+Then tell the xmas-tui session (or Parker) it's up. The game gets tested against it end to
+end.

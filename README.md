@@ -42,7 +42,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   in the **friends widget**. The host's village is the host's: everyone sees the same folk about in it, and a guest's
   change to its settings is asked of the host (or made, by someone the host lets). On the desktop, the web and a
   phone alike; opt-in, through a free public relay, sealed end to end.
-- **Play in a browser**: the same village on the web at **[dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/)**,
+- **Play in a browser**: the same village on the web at **[xmas.novalabs.app](https://xmas.novalabs.app/)**,
   with sound, the same menus and settings, and touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
   along, step inside houses, and spend "cheer" at the cocoa cabin (a log cabin with a fire, tables, shelves of gifts
@@ -119,7 +119,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
 | **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
 | **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons, or a game controller); the live wallpaper is the same village on autopilot. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
-| **Web** | [dash1101.github.io/xmas-tui](https://dash1101.github.io/xmas-tui/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone), with sound. Saves in the browser, and imports a desktop or phone save (the villager's name, pet and friends too). |
+| **Web** | [xmas.novalabs.app](https://xmas.novalabs.app/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone), with sound. Saves in the browser, and imports a desktop or phone save (the villager's name, pet and friends too). |
 
 All of these are on the [latest release](https://github.com/dash1101/xmas-tui/releases/latest). Both platforms also
 have a one-line installer straight from the repo. On **Linux** (no sudo):
