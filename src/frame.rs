@@ -519,6 +519,9 @@ pub struct Frame {
     pre_on: bool,
     pub glow_near: f32,
     pub glow_far: f32,
+    /// How much bigger the view's drawn (zoomed in): the glow spreads as
+    /// far again, so it looks as it does at 1×, only bigger.
+    glow_k: f32,
 }
 
 impl Frame {
@@ -557,6 +560,7 @@ impl Frame {
             pre_on: false,
             glow_near: 1.0,
             glow_far: 1.0,
+            glow_k: 1.0,
         };
         f.resize(w, h);
         f
@@ -584,6 +588,7 @@ impl Frame {
     pub fn clear(&mut self) {
         self.px.fill(Rgb::BLACK);
         self.light.fill(Rgb::BLACK);
+        self.glow_k = 1.0;
         self.soft.fill(0);
         self.pre_on = false;
         self.ui = false;
@@ -950,14 +955,25 @@ impl Frame {
         // the lights, magnified with everything else (and spread over the
         // bigger area they cover), then bloomed here at full size: a tight
         // glow round each light, not one blurry wash scaled up
-        let k = 1.0 / z.powf(1.5);
+        // (smoothly, not in blocks: a light's glow is round at any size)
+        let k = 1.0 / z.powf(0.5);
+        let taps: Vec<(usize, usize, f32)> = (0..pw)
+            .map(|x| {
+                let f = (x0 + (x as f32 + 0.5) / z - 0.5).clamp(0.0, (pw - 1) as f32);
+                let i = f as usize;
+                (i, (i + 1).min(pw - 1), f.fract())
+            })
+            .collect();
         for y in 0..ph {
-            let sy = ((2.0 * y0 + (y as f32 + 0.5) / z) as usize).min(ph - 1);
-            let (src, dst) = (&spare.light[sy * pw..(sy + 1) * pw], &mut self.light[y * pw..(y + 1) * pw]);
-            for (d, &c) in dst.iter_mut().zip(&cols) {
-                *d = src[c] * k;
+            let f = (2.0 * y0 + (y as f32 + 0.5) / z - 0.5).clamp(0.0, (ph - 1) as f32);
+            let (r0, r1, ty) = (f as usize, (f as usize + 1).min(ph - 1), f.fract());
+            let (a, b) = (&spare.light[r0 * pw..(r0 + 1) * pw], &spare.light[r1 * pw..(r1 + 1) * pw]);
+            let dst = &mut self.light[y * pw..(y + 1) * pw];
+            for (d, &(i0, i1, tx)) in dst.iter_mut().zip(&taps) {
+                *d = a[i0].lerp(a[i1], tx).lerp(b[i0].lerp(b[i1], tx), ty) * k;
             }
         }
+        self.glow_k = z;
         self.pre_on = false;
         let (ox, oy) = (self.ox, self.oy);
         (self.ox, self.oy) = (0, 0);
@@ -1149,10 +1165,13 @@ impl Frame {
     /// `near` (the total light at each pixel).
     fn bloom(&mut self) {
         let (pw, ph) = (self.pw, self.ph);
-        // near glow: tight halo
+        // near glow: tight halo (as far again as the view's bigger, zoomed in)
+        let zk = self.glow_k.max(1.0);
+        let near_r = (zk.round() as usize).max(1);
+        let far_r = ((4.0 * zk).round() as usize).max(4);
         self.near.copy_from_slice(&self.light);
         for _ in 0..3 {
-            box_blur(&mut self.near, &mut self.tmp, pw, ph, 1);
+            box_blur(&mut self.near, &mut self.tmp, pw, ph, near_r);
         }
         // far glow: wide ambient pool, blurred at half resolution and
         // upsampled bilinearly back into `light` (4x cheaper, same look)
@@ -1168,7 +1187,7 @@ impl Frame {
             }
         }
         for _ in 0..3 {
-            box_blur(&mut self.half, &mut self.half_tmp, hw, hh, 4);
+            box_blur(&mut self.half, &mut self.half_tmp, hw, hh, far_r);
         }
         // bilinear taps depend only on the coordinate: work them out once per
         // column/row instead of once per pixel

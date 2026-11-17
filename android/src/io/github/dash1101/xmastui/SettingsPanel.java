@@ -256,6 +256,13 @@ final class SettingsPanel {
             text("Pet's name", "pet_name", "(it asks)", 16);
         }
 
+        section("ONLINE");
+        choiceInt("Most visitors", "village_limit", new int[] {2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48},
+                new String[] {"2 at once", "3 at once", "4 at once", "6 at once", "8 at once", "10 at once", "12 at once", "16 at once", "20 at once", "24 at once", "32 at once", "48 at once"}, 8);
+        note("The most in your village when it's open to friends (or listed in Public villages). The public squares take 16.");
+        check("Star out strong language", "clean_words", true);
+        note("In what others write online. Links are always hidden behind a button.");
+
         section("FRIENDS & FAMILY");
         note("Each comes by as a villager of their own (\"any\": picked from the name).");
         check("Only them (the animals still come)", "only_friends", false);
@@ -385,6 +392,31 @@ final class SettingsPanel {
 
         section("CONTROLS");
         note("Joystick: walk (all the way: run). E: talk, use, help build. Jump: hold to go higher, again in the air. ❄ snowball · ✦ things to do · ☰ pockets, invite along · ◎ back to the villager. Tap things; press and hold for what can be done there; two fingers look along the village.");
+        section("UPKEEP");
+        LinearLayout r = new LinearLayout(a);
+        r.setPadding(0, dp(4), 0, dp(4));
+        r.addView(button("⟲ reset settings", v -> new android.app.AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setMessage("Every setting back as it first was? The villager, their look, the pet, friends & family and the village stay.")
+                .setPositiveButton("Reset them", (d, w) -> {
+                    Prefs.resetKeepingOwn(a);
+                    host.changed();
+                    showTab(4);
+                })
+                .setNegativeButton("No", null)
+                .show()));
+        r.addView(gap(dp(8)));
+        r.addView(button("⌫ uninstall…", v -> {
+            // the system's own page for the app: its Uninstall asks first
+            Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + a.getPackageName()));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                a.startActivity(i);
+            } catch (Exception e) {
+                // (no such page on this phone)
+            }
+        }));
+        col.addView(r);
+        note("Uninstall opens the phone's page for the app (its Uninstall button asks first). Export the save first to keep the village.");
     }
 
     private void save() {

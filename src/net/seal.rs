@@ -62,6 +62,25 @@ pub fn random() -> u64 {
 const LETTERS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// A new code, "XXXX-XXXX-XXXX" (no I, O, 0 or 1 to mix up).
+/// A code made from `parts` (the same for everyone: a public square's).
+pub fn code_of(parts: &[&[u8]]) -> String {
+    let d = digest(parts);
+    let mut s = String::new();
+    for (i, b) in d.iter().take(12).enumerate() {
+        if i > 0 && i % 4 == 0 {
+            s.push('-');
+        }
+        s.push(LETTERS[(*b as usize) % LETTERS.len()] as char);
+    }
+    s
+}
+
+/// A number from `parts` (the same for everyone: a public square's seed).
+pub fn number_of(parts: &[&[u8]]) -> u32 {
+    let d = digest(parts);
+    u32::from_le_bytes([d[0], d[1], d[2], d[3]])
+}
+
 pub fn new_code() -> String {
     let (a, b) = (random(), random());
     let mut s = String::new();

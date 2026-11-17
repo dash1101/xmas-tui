@@ -62,6 +62,8 @@ pub enum F {
     AutoAfter,
     AutoArea,
     AutoReach,
+    VillageLimit,
+    CleanWords,
     OnlyFriends,
     UpdCheck,
     Map,
@@ -112,6 +114,15 @@ pub enum Act {
     ImportSave,
     Quit,
     Autostart,
+    /// Upkeep: asking first (a yes / no on the panel), then done.
+    Uninstall,
+    UninstallNow,
+    ResetSettings,
+    ResetNow,
+    OpenConfig,
+    OpenLog,
+    /// "No" to what was asked.
+    NotNow,
     /// Switch the panel to another tab (UI state only, not config).
     Tab(u8),
     CheckUpdate,
@@ -227,6 +238,8 @@ pub struct Settings {
     pub restart_ask: bool,
     /// Whose look is being chosen (You tab).
     pub friend_sel: Option<u8>,
+    /// Asked on the panel, waiting for yes or no (uninstall, reset).
+    pub confirm: Option<Act>,
     /// A brief note at the top (zoom / resolution changes): text, until.
     pub toast: Option<(String, f32)>,
     /// Linux, in a window of its own: offer to make it the desktop
@@ -257,6 +270,8 @@ const MOST_STEPS: [f32; 14] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16
 pub const AUTO_AFTER_STEPS: [f32; 11] = [5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0];
 /// How wide a stretch autopilot keeps to (screens).
 pub const AUTO_REACH_STEPS: [f32; 7] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+/// The most in this villager's own village when it's open.
+const VISITOR_STEPS: [f32; 12] = [2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 32.0, 48.0];
 /// Where autopilot keeps to.
 pub const AUTO_AREAS: [&str; 4] = ["anywhere", "home", "tree", "here"];
 
@@ -335,6 +350,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Sleigh => cfg.scene.sleigh_minutes = step_list(&SLEIGH_STEPS, cfg.scene.sleigh_minutes, dir as i32),
                 F::AutoAfter => cfg.scene.autopilot_after = step_list(&AUTO_AFTER_STEPS, cfg.scene.autopilot_after, dir as i32),
                 F::AutoReach => cfg.scene.autopilot_reach = step_list(&AUTO_REACH_STEPS, cfg.scene.autopilot_reach, dir as i32),
+                F::VillageLimit => cfg.scene.village_limit = step_list(&VISITOR_STEPS, cfg.scene.village_limit as f32, dir as i32) as u32,
                 F::AutoArea => {
                     let i = AUTO_AREAS.iter().position(|o| *o == cfg.scene.autopilot_area).unwrap_or(0) as i32;
                     cfg.scene.autopilot_area = AUTO_AREAS[(i + dir as i32).rem_euclid(AUTO_AREAS.len() as i32) as usize].to_string();
@@ -453,6 +469,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Bushes => cfg.scene.bushes ^= true,
                 F::Player => cfg.scene.player ^= true,
                 F::Autopilot => cfg.scene.autopilot ^= true,
+                F::CleanWords => cfg.scene.clean_words ^= true,
                 F::OnlyFriends => cfg.scene.only_friends ^= true,
                 F::UpdCheck => cfg.updates.check ^= true,
                 F::Map => cfg.widgets.map ^= true,
@@ -551,7 +568,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
-        Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
+        Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
 }
 
@@ -637,6 +654,10 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::BackToWallpaper => return Some("Back behind the desktop icons."),
         Act::Autostart => return Some("Start the wallpaper when the computer starts."),
         Act::Quit => return Some("Stop the wallpaper (the desktop goes back to normal)."),
+        Act::Uninstall => return Some("Take xmas-tui off this computer (asked first; your village, villager and settings are kept, should it come back)."),
+        Act::ResetSettings => return Some("Every setting back as it first was: your villager, their friends, the pet and the village itself stay."),
+        Act::OpenConfig => return Some("The settings file, in a text editor (for the ones there's no row for)."),
+        Act::OpenLog => return Some("What the wallpaper's noted down (handy when something's gone wrong)."),
         Act::SetWallpaper => return Some("Make the village the desktop wallpaper (sets up the service that keeps it running)."),
         Act::LockScreen | Act::LockRedraw => return Some("Show a looping video of the village on KDE's lock screen."),
         Act::InstallFfmpeg => return Some("Install ffmpeg with the system's package manager (it asks for your password first). Then redraw the lock screen and it moves."),
@@ -662,6 +683,8 @@ fn tip(a: Act) -> Option<&'static str> {
         F::AutoAfter => "How long the villager's left alone before autopilot takes over.",
         F::AutoArea => "Where autopilot keeps the villager: anywhere, round their home, round the big tree, or round wherever it took over.",
         F::AutoReach => "How wide a stretch autopilot keeps to, in screens.",
+        F::VillageLimit => "The most in your village when it's open to friends (or listed for anyone): newcomers past that are told it's full. The public squares take 16.",
+        F::CleanWords => "Strong language in what others write online starred out (links are always hidden behind a button).",
         F::WalkSpeed => "How fast the villager walks (Shift runs).",
         F::TalkTime => "How long speech bubbles stay up.",
         F::Chatty => "How often people stop to chat and remark on things.",
@@ -1089,7 +1112,9 @@ impl Settings {
         if !self.open {
             return;
         }
-        let (w, h) = (PANEL_W, PANEL_H);
+        // as tall as the tab needs (a look being chosen, autopilot's rows…),
+        // at least the usual, as much as there's room for
+        let (w, h) = (PANEL_W, self.tab_height(cfg, t).max(PANEL_H).min((f.h as i32).max(PANEL_H)));
         // centred, unless it's been dragged somewhere (kept on screen)
         let (x, y) = match self.pos {
             Some((px, py)) => (px.clamp(0, (f.w as i32 - w).max(0)), py.clamp(0, (f.h as i32 - h).max(0))),
@@ -1155,6 +1180,29 @@ impl Settings {
             f.put_g(xx, y + 2, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
         }
 
+        self.tab_body(f, cfg, x, y, w, t);
+        // what the setting under the pointer does, in place of the tips
+        let (hx, hy) = self.hover;
+        self.footer(f, x, y, w, h, hx, hy);
+    }
+
+    /// The panel's height for the tab as it stands: drawn once out of sight
+    /// and measured (its last row, the tips under it, the frame).
+    fn tab_height(&mut self, cfg: &Config, t: f32) -> i32 {
+        let (regions, hints, rect) = (self.regions.len(), self.hints.len(), self.rect);
+        self.rect = Some(Rect { x: 0, y: 0, w: PANEL_W, h: 200 });
+        let mut probe = Frame::new(PANEL_W as usize + 2, 200);
+        self.tab_body(&mut probe, cfg, 0, 0, PANEL_W, t);
+        let last_glyph = (0..probe.h).rev().find(|&yy| (0..probe.w).any(|xx| probe.get_g(xx as i32, yy as i32).is_some())).map(|y| y as i32).unwrap_or(0);
+        let last_pic = probe.pictures.iter().map(|p| p.y + p.rows - 1).max().unwrap_or(0);
+        self.regions.truncate(regions);
+        self.hints.truncate(hints);
+        self.rect = rect;
+        last_glyph.max(last_pic) + 1 + 4
+    }
+
+    /// The tab's own rows, under the tab bar of a panel at (x, y), `w` wide.
+    fn tab_body(&mut self, f: &mut Frame, cfg: &Config, x: i32, y: i32, w: i32, t: f32) {
         let lx = x + 3;
         let vx = x + 20;
         let yy = y + 4;
@@ -1168,8 +1216,13 @@ impl Settings {
             TAB_DESKTOP => self.tab_desktop(f, cfg, lx, yy, x + w - 1, t),
             _ => self.tab_village(f, cfg, lx, vx, yy, t),
         }
-        // what the setting under the pointer does, in place of the tips
-        let (hx, hy) = self.hover;
+    }
+
+    /// The panel's last two rows: what the setting under the pointer does,
+    /// or the tips.
+    #[allow(clippy::too_many_arguments)]
+    fn footer(&mut self, f: &mut Frame, x: i32, y: i32, w: i32, h: i32, hx: i32, hy: i32) {
+        let lx = x + 3;
         let under = self.regions.iter().rev().chain(self.hints.iter()).find(|(r, _)| r.contains(hx, hy)).map(|(_, a)| *a);
         if let Some(text) = under.and_then(tip) {
             let width = (x + w - 1 - lx) as usize;
@@ -1314,6 +1367,10 @@ impl Settings {
         yy += 1;
         let chat = if cfg.scene.chattiness <= 0.0 { "quiet".to_string() } else { format!("{:.2}×", cfg.scene.chattiness) };
         self.slider(f, lx, vx, yy, "Chattiness", F::Chatty, pct(cfg.scene.chattiness, 2.0), &chat, t);
+        yy += 1;
+        let most = cfg.scene.village_limit.clamp(2, 48);
+        self.stepper(f, lx, vx, yy, "Most visitors", F::VillageLimit, &format!("{most} at once, when my village is open"));
+        self.check(f, vx + 42, yy, "star out strong language", Act::Toggle(F::CleanWords), cfg.scene.clean_words);
         yy += 2;
         self.section(f, lx, yy, "THE PET");
         yy += 1;
@@ -1599,6 +1656,34 @@ impl Settings {
         self.section(f, lx, yy, "DISPLAY");
         yy += 1;
         yy = self.display_rows(f, cfg, lx, lx + 17, yy);
+        yy += 1;
+        self.section(f, lx, yy, "UPKEEP");
+        yy += 1;
+        match self.confirm {
+            Some(Act::Uninstall) => {
+                f.text(lx, yy, "Take xmas-tui off this computer? Your village and settings are kept.", Rgb::hex(0xffd36b), BG, 0.0);
+                yy += 1;
+                let x = self.button(f, lx, yy, "⌫ yes, uninstall", Act::UninstallNow);
+                self.button(f, x + 2, yy, "no", Act::NotNow);
+            }
+            Some(Act::ResetSettings) => {
+                f.text(lx, yy, "Reset every setting? Your villager, friends and village stay.", Rgb::hex(0xffd36b), BG, 0.0);
+                yy += 1;
+                let x = self.button(f, lx, yy, "⟲ yes, reset them", Act::ResetNow);
+                self.button(f, x + 2, yy, "no", Act::NotNow);
+            }
+            _ => {
+                let mut x = self.button(f, lx, yy, "⟲ reset settings", Act::ResetSettings) + 2;
+                x = self.button(f, x, yy, "✎ the settings file", Act::OpenConfig) + 2;
+                if crate::platform::log_path().is_some() {
+                    x = self.button(f, x, yy, "≡ the log", Act::OpenLog) + 2;
+                }
+                if !self.standalone || cfg!(windows) {
+                    self.button(f, x, yy, "⌫ uninstall…", Act::Uninstall);
+                }
+            }
+        }
+        yy += 1;
         #[cfg(target_os = "linux")]
         {
             use crate::linwall::Job;
@@ -1919,13 +2004,15 @@ impl Settings {
         end
     }
 
-    fn button(&mut self, f: &mut Frame, x: i32, y: i32, label: &str, act: Act) {
+    /// A button; returns the column after it.
+    fn button(&mut self, f: &mut Frame, x: i32, y: i32, label: &str, act: Act) -> i32 {
         let len = label.chars().count() as i32 + 2;
         let r = Rect { x, y, w: len, h: 1 };
         let hot = r.contains(self.hover.0, self.hover.1);
         let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { Bg::Mix(Rgb::hex(0x1c1a2c), 0.95) };
         f.text(x, y, &format!(" {label} "), if hot { Rgb::hex(0xffd36b) * 1.2 } else { pal::UI_TEXT }, bg, 0.0);
         self.regions.push((r, act));
+        x + len
     }
 }
 
@@ -2001,6 +2088,86 @@ mod tests {
         s.commit(&mut cfg);
         assert!(cfg.scene.friends.is_empty(), "cleared: off the list");
         assert!(!apply(&mut cfg, Act::FriendRemove(0)));
+    }
+
+    /// Choosing a look (the villager's own, or a friend's) with autopilot's
+    /// rows showing and a full list of friends: it's all on the panel, over
+    /// its tips, nothing off its bottom.
+    #[test]
+    fn a_look_being_chosen_fits_on_the_panel() {
+        let mut cfg = Config::default();
+        cfg.scene.autopilot = true;
+        cfg.scene.autopilot_area = "home".into();
+        for k in 0..MAX_FRIENDS {
+            cfg.scene.friends.push(crate::config::FriendCfg { name: format!("Friend {k}"), ..Default::default() });
+        }
+        for sel in [YOU_LOOK, (MAX_FRIENDS - 1) as u8] {
+            let mut s = Settings { open: true, tab: TAB_YOU, friend_sel: Some(sel), ..Default::default() };
+            let mut f = Frame::new(200, 60);
+            s.draw(&mut f, &cfg, 0.0);
+            let r = s.rect.expect("drawn");
+            // the look's title row, and its last row of choices
+            let row_of = |needle: &str| (r.y..r.y + r.h).find(|&y| {
+                let line: String = (r.x..r.x + r.w).map(|x| f.get_g(x, y).map(|g| g.ch).unwrap_or(' ')).collect();
+                line.contains(needle)
+            });
+            let title = row_of(if sel == YOU_LOOK { "Your look" } else { "Friend 9's look" }).expect("the look's on the panel");
+            assert!(title + 1 < r.y + r.h - 3, "the look's rows clear of the tips: {title} in {r:?}");
+            assert!(row_of("skin").is_some_and(|y| y < r.y + r.h - 3), "{r:?}");
+            assert!(f.pictures.iter().all(|p| p.y + p.rows <= r.y + r.h), "the picture of them on the panel");
+        }
+        // and a plain tab keeps the usual size
+        let mut s = Settings { open: true, tab: TAB_SOUND, ..Default::default() };
+        let mut f = Frame::new(200, 60);
+        s.draw(&mut f, &Config::default(), 0.0);
+        assert_eq!(s.rect.unwrap().h, PANEL_H);
+    }
+
+    /// The Desktop tab's upkeep row: on the panel, each button clicking to
+    /// its own action, and asking before an uninstall or a reset.
+    #[test]
+    fn upkeep_asks_first_and_keeps_the_villager() {
+        let cfg = Config::default();
+        let find = |f: &Frame, r: Rect, needle: &str| {
+            (r.y..r.y + r.h).find_map(|y| {
+                let line: String = (r.x..r.x + r.w).map(|x| f.get_g(x, y).map(|g| g.ch).unwrap_or(' ')).collect();
+                line.find(needle).map(|i| (r.x + line[..i].chars().count() as i32, y))
+            })
+        };
+        let mut s = Settings { open: true, tab: TAB_DESKTOP, ..Default::default() };
+        let mut f = Frame::new(200, 80);
+        s.draw(&mut f, &cfg, 0.0);
+        let r = s.rect.expect("drawn");
+        for (label, act) in [("reset settings", Act::ResetSettings), ("the settings file", Act::OpenConfig), ("uninstall…", Act::Uninstall)] {
+            let (x, y) = find(&f, r, label).unwrap_or_else(|| panic!("{label} on the panel"));
+            assert!(x + label.chars().count() as i32 <= r.x + r.w - 1 && y < r.y + r.h - 3, "{label} inside the panel, clear of the tips");
+            assert_eq!(s.click(x, y), Some(act), "{label}");
+        }
+        for (ask, yes, act) in [(Act::Uninstall, "yes, uninstall", Act::UninstallNow), (Act::ResetSettings, "yes, reset them", Act::ResetNow)] {
+            let mut s = Settings { open: true, tab: TAB_DESKTOP, confirm: Some(ask), ..Default::default() };
+            let mut f = Frame::new(200, 80);
+            s.draw(&mut f, &cfg, 0.0);
+            let r = s.rect.unwrap();
+            let (x, y) = find(&f, r, yes).expect("asked");
+            assert_eq!(s.click(x, y), Some(act));
+            let (x, y) = find(&f, r, " no ").expect("and no");
+            assert_eq!(s.click(x + 1, y), Some(Act::NotNow));
+            assert!(find(&f, r, "uninstall…").is_none());
+        }
+        // a reset keeps who they are and where they live
+        let mut c = Config::default();
+        c.seed = 42;
+        c.fps = 60.0;
+        c.scene.name = "Holly".into();
+        c.scene.motto = "ho ho".into();
+        c.scene.friends.push(crate::config::FriendCfg { name: "Ivy".into(), ..Default::default() });
+        c.scene.snow = 0.1;
+        c.weather.city = "Oslo".into();
+        c.ui.look = "wood".into();
+        let r = c.reset_keeping_own();
+        assert_eq!((r.seed, r.scene.name.as_str(), r.scene.motto.as_str(), r.scene.friends.len(), r.weather.city.as_str()), (42, "Holly", "ho ho", 1, "Oslo"));
+        let d = Config::default();
+        assert_eq!((r.fps, r.scene.snow, r.ui.look.as_str()), (d.fps, d.scene.snow, d.ui.look.as_str()));
     }
 
     #[test]

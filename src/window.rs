@@ -163,6 +163,9 @@ struct Runner {
     /// there is the village's, and when (see winsys::rclick_target).
     #[cfg(windows)]
     rc_seen: ((i32, i32), Instant),
+    /// Desktop mode: the mouse (or keyboard) in use until then. The desktop
+    /// is polled often while it is, less while it's left alone.
+    input_hot: Instant,
     /// Since when the pointer has been moving with the right-click hook
     /// hearing nothing (Windows dropped it?), and when it was last put back.
     #[cfg(windows)]
@@ -500,6 +503,10 @@ impl Runner {
         let (fx, fy) = self.to_scene(lx, ly);
         let (cx, cy) = (fx.floor() as i32, fy.floor() as i32);
         let (was_l, was_r) = self.polled;
+        // (in use: moving over the village, a button down, the keyboard ours)
+        if (inside && (lx, ly) != self.cursor) || p.left || p.right || self.focused || self.want_focus.is_some() {
+            self.input_hot = Instant::now() + Duration::from_millis(1500);
+        }
         self.polled = (p.left, p.right);
         let Some(app) = self.app.as_mut() else { return };
         let now = Instant::now();
@@ -527,6 +534,7 @@ impl Runner {
         // the wheel (and a touchpad's two-finger scrolls and pinches) over
         // the bare desktop, taken by the mouse hook
         for (delta, side, ctrl, shift) in crate::winsys::take_wheel() {
+            self.input_hot = now + Duration::from_millis(1500);
             let notches = delta as f32 / 120.0;
             let ev = if ctrl {
                 // a pinch, or Ctrl + the wheel: zoom
@@ -1222,8 +1230,10 @@ impl ApplicationHandler for Runner {
             }
         }
         // poll input a few times per frame in desktop mode for snappy clicks
-        // (not while paused: then we only wake every 500 ms to re-check)
-        let wake = if self.opts.desktop && !self.paused && !self.wall_full { self.next.min(now + Duration::from_millis(8)) } else { self.next };
+        // while the mouse is in use; less often left alone (a click still
+        // lasts longer than that); not while paused (then only every 500 ms)
+        let poll = Duration::from_millis(if now < self.input_hot { 8 } else { 24 });
+        let wake = if self.opts.desktop && !self.paused && !self.wall_full { self.next.min(now + poll) } else { self.next };
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
@@ -1281,6 +1291,7 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         fixes: (0, Instant::now()),
         #[cfg(windows)]
         rc_seen: ((i32::MIN, i32::MIN), Instant::now()),
+        input_hot: Instant::now(),
         #[cfg(windows)]
         hook_doubt: (None, Instant::now()),
     };

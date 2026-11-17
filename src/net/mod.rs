@@ -18,22 +18,86 @@
 //! (`take_out`); the front end carries them (a TCP connection, see `tcp`,
 //! or the web page's WebSocket).
 
+pub mod filter;
 pub mod mqtt;
 pub mod seal;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ws;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lp;
 
 use seal::Seal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// The relays: (host, TCP port, WebSocket address), free public brokers,
-/// tried in turn. (The web page reads relays.json beside it first.)
+/// The relays, tried in turn: (host, TCP port, WebSocket address). The
+/// village's own first: a WebSocket on the web's own port (443), which
+/// networks that block the others' ports let through (TCP port 0: only
+/// its WebSocket, or its https:// long polling). Then free public brokers
+/// (the apps over plain TCP). (The web page reads relays.json beside it
+/// first; XMAS_RELAY, a ws(s):// or http(s):// address, puts another one
+/// first.)
 pub const RELAYS: &[(&str, u16, &str)] = &[
+    ("xmas-relay.novalabs.app", 0, "wss://xmas-relay.novalabs.app/mqtt"),
+    // (the same relay over plain HTTPS requests, where a network's proxy
+    // or filter breaks WebSockets)
+    ("xmas-relay.novalabs.app", 0, "https://xmas-relay.novalabs.app/poll"),
     ("broker.emqx.io", 1883, "wss://broker.emqx.io:8084/mqtt"),
     ("broker.hivemq.com", 1883, "wss://broker.hivemq.com:8884/mqtt"),
     ("test.mosquitto.org", 1883, "wss://test.mosquitto.org:8081/mqtt"),
 ];
+
+/// The public squares: villages anyone can walk into, always there (as a
+/// few copies of each, should one fill up). Each is the same village
+/// whoever's hosting it: the first in hosts, and when they go, the next
+/// takes over.
+pub const SQUARES: &[&str] = &["North Pole Square", "Candy Cane Lane", "Frosty Hollow", "Pine Peak Lodge"];
+/// The most in one copy of a square.
+pub const SQUARE_LIMIT: usize = 16;
+/// Copies of a square, tried in turn when the first are full.
+pub const SQUARE_COPIES: u32 = 6;
+/// The most any village takes; one's own, unless it's set otherwise.
+pub const MAX_LIMIT: usize = 48;
+pub const DEFAULT_LIMIT: usize = 8;
+
+/// Square `i`'s code (copy `n`, from 1): the same for everyone.
+pub fn square_code(i: usize, n: u32) -> String {
+    seal::norm(&seal::code_of(&[b"xmas-tui square", SQUARES[i % SQUARES.len()].as_bytes(), &n.to_le_bytes()]))
+}
+
+/// Square `i`'s village (its seed): the same whoever hosts.
+pub fn square_seed(i: usize) -> u32 {
+    seal::number_of(&[b"xmas-tui square seed", SQUARES[i % SQUARES.len()].as_bytes()]).max(1)
+}
+
+/// Where public villages say how they are (kept by the relay): a square's
+/// copy, and one a villager's listed.
+fn status_topic(code: &str) -> String {
+    seal::topic("public", code)
+}
+
+fn listed_topic(id: u32) -> String {
+    format!("xmas-tui/1/listed/{id:08x}")
+}
+
+/// The seal everyone opens a public village's status with (it's public).
+fn public_seal() -> Seal {
+    Seal::new("xmas-tui public")
+}
+
+/// A public village, as its host last said: (name, code, how many in it,
+/// the most it takes, a square).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listing {
+    pub name: String,
+    pub code: String,
+    pub n: usize,
+    pub limit: usize,
+    pub square: bool,
+    at: i64,
+}
 
 /// Kept in the save: online or not, this villager's friend code, friends.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -48,6 +112,9 @@ pub struct Book {
     pub tipped: bool,
     /// Groups: chat rooms shared by code, like a little server.
     pub groups: Vec<Group>,
+    /// This villager's own village, when open, listed for anyone to find
+    /// (in Public villages).
+    pub listed: bool,
 }
 
 /// A group: a chat room anyone with its code can be in.
@@ -318,9 +385,18 @@ enum Msg {
         rules: String,
         #[serde(default)]
         admins: Vec<u32>,
+        /// The most it takes (0: as many as there's room for).
+        #[serde(default)]
+        limit: u16,
     },
-    /// In a village: gone (`host`: the village closes).
+    /// In a village: gone (`host`: the village closes; a square's next
+    /// villager takes over).
     Bye { id: u32, host: bool },
+    /// The host, to someone come in when the village is full.
+    Full { id: u32, to: u32 },
+    /// A public village's state (kept by the relay, on a topic of its own):
+    /// its name, its code, how many are in it, the most it takes, when.
+    Status { name: String, code: String, n: u16, limit: u16, at: i64, square: bool },
 }
 
 /// What happened, for the scene to show.
@@ -328,14 +404,15 @@ enum Msg {
 pub enum Event {
     /// A line for the post (top left).
     Note(String),
-    Mail { from: String, text: String },
+    /// (`links`: the links taken out of `text`, kept for showing if wanted.)
+    Mail { from: String, text: String, links: Vec<String> },
     /// Someone's asking to be friends.
     Asked(String),
     /// Into a shared village: its seed (the village made anew from it).
     Village(u32),
     /// Out of the shared village (home again).
     Home,
-    Said { id: u32, text: String },
+    Said { id: u32, text: String, links: Vec<String> },
     Threw { id: u32, x: f32, y: f32, vx: f32, vy: f32 },
     /// A friend asks this villager into their village (its code).
     Invited { name: String, code: String },
@@ -353,9 +430,9 @@ pub enum Event {
     /// A friend pinged this villager.
     Pinged(String),
     /// Said to this villager only, by someone in the village.
-    Whispered { id: u32, name: String, text: String },
+    Whispered { id: u32, name: String, text: String, links: Vec<String> },
     /// Said in a group (its name), by whom.
-    GroupSaid { group: String, name: String, text: String },
+    GroupSaid { group: String, name: String, text: String, links: Vec<String> },
     /// Someone asks the host (this villager) to change a village setting;
     /// `admin`: they may (it's done without asking).
     Wanted { id: u32, name: String, key: String, value: String, admin: bool },
@@ -432,6 +509,10 @@ struct Shared {
     seed: Option<u32>,
     host_seen: f32,
     others: HashMap<u32, Other>,
+    /// A public square (which, and which copy).
+    square: Option<(usize, u32)>,
+    /// The most it takes.
+    limit: usize,
 }
 
 pub struct Online {
@@ -481,6 +562,17 @@ pub struct Online {
     admins: Vec<u32>,
     /// A village to go into once online (asked for while offline).
     pending_join: Option<String>,
+    /// A square to go into once the link's up.
+    pending_square: Option<usize>,
+    /// The most in this villager's own village, and whether it's listed
+    /// for anyone to find (in Public villages) when open.
+    pub limit: usize,
+    /// Strong language in what others say starred out.
+    pub clean_words: bool,
+    /// Public villages heard of (by code), and listening for them until.
+    public: HashMap<String, Listing>,
+    watch_until: f32,
+    next_status: f32,
     /// Heard lately, per sender: (when the window started, how many),
     /// to shrug off a flood.
     heard: HashMap<u32, (f32, u32)>,
@@ -529,6 +621,12 @@ impl Online {
             rules: String::new(),
             admins: vec![],
             pending_join: None,
+            pending_square: None,
+            limit: DEFAULT_LIMIT,
+            clean_words: true,
+            public: HashMap::new(),
+            watch_until: 0.0,
+            next_status: 0.0,
             heard: HashMap::new(),
             book,
         };
@@ -742,6 +840,11 @@ impl Online {
             self.enter(code, false);
             self.note("⌂ knocking…");
         }
+        if let Some(i) = self.pending_square.take() {
+            self.join_square(i);
+        }
+        // (how the public villages are, ready for when they're looked at)
+        self.watch_public();
     }
 
     pub fn disconnected(&mut self) {
@@ -780,13 +883,29 @@ impl Online {
 
     fn got(&mut self, topic: &str, payload: &[u8]) {
         let parse = |seal: &Seal| seal.open(payload).and_then(|p| serde_json::from_slice::<Msg>(&p).ok());
+        // a public village's state (a square's copy, or one listed)
+        if topic.starts_with("xmas-tui/1/public/") || topic.starts_with("xmas-tui/1/listed/") {
+            if let Some(Msg::Status { name, code, n, limit, at, square }) = parse(&public_seal()) {
+                let code = seal::norm(&code);
+                // (a square's status only on its own topic; a listing only
+                // for a real code)
+                let ok = code.len() == 12 && (!square || status_topic(&code) == topic) && self.public.len() < 400;
+                if ok {
+                    let name = if self.clean_words { filter::words(&clean(&name, 40)) } else { clean(&name, 40) };
+                    let limit = (limit as usize).clamp(2, MAX_LIMIT);
+                    self.public.insert(code.clone(), Listing { name, code, n: (n as usize).min(limit), limit, square, at });
+                }
+            }
+            return;
+        }
         if topic == self.my_mail {
             match parse(&self.me) {
                 Some(Msg::Hi { from, name, back }) => self.hi(from, name, back),
                 Some(Msg::Mail { from, name, text }) => {
                     // only from friends
                     if self.is_friend(&from) && self.not_flooded(0, 8) {
-                        self.events.push(Event::Mail { from: clean(&name, 32), text: clean(&text, 280) });
+                        let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
+                        self.events.push(Event::Mail { from: clean(&name, 32), text, links });
                     }
                 }
                 Some(Msg::Invite { from, name, village }) => {
@@ -836,7 +955,9 @@ impl Online {
                 }
                 if id != self.id && !text.is_empty() && self.not_flooded(id, 6) {
                     let group = self.book.groups.get(k).map(|g| g.name.clone()).unwrap_or_default();
-                    self.events.push(Event::GroupSaid { group, name, text });
+                    let (text, links) = filter::tidy(&text, self.clean_words);
+                    let name = if self.clean_words { filter::words(&name) } else { name };
+                    self.events.push(Event::GroupSaid { group, name, text, links });
                 }
             }
             return;
@@ -862,7 +983,7 @@ impl Online {
         let sender = match &m {
             Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
             Msg::Village { host, .. } => *host,
-            Msg::Crowd { id, .. } => *id,
+            Msg::Crowd { id, .. } | Msg::Full { id, .. } => *id,
             _ => 0,
         };
         if sender != me && !self.not_flooded(sender, 60) {
@@ -871,10 +992,17 @@ impl Online {
         let admins_here = self.admins.clone();
         let v = self.village.as_mut().unwrap();
         match m {
-            // (room for a few dozen at most)
-            Msg::Me { id, .. } if id != me && !v.others.contains_key(&id) && v.others.len() >= 40 => {}
+            // full (the host turns them away; anyone else just doesn't take
+            // in more than the most there's ever room for)
+            Msg::Me { id, .. } if id != me && !v.others.contains_key(&id) && v.host && v.others.len() + 1 >= v.limit => {
+                let (topic, seal) = (v.topic.clone(), v.seal.clone());
+                if self.not_flooded(id ^ 0x5f11_0000, 3) {
+                    self.send(&topic, &seal, &Msg::Full { id: me, to: id }, false);
+                }
+            }
+            Msg::Me { id, .. } if id != me && !v.others.contains_key(&id) && v.others.len() >= MAX_LIMIT => {}
             Msg::Me { id, name, av } if id != me => {
-                let name = clean(&name, 32);
+                let name = if self.clean_words { filter::words(&clean(&name, 32)) } else { clean(&name, 32) };
                 let av = av.cleaned();
                 let new = !v.others.contains_key(&id);
                 let host = v.host_id == Some(id);
@@ -909,19 +1037,50 @@ impl Online {
             Msg::Show { id, what, n, x } if id != me => self.events.push(Event::Show { id, what, n, x }),
             Msg::Tagged { id, it, left } if id != me => self.events.push(Event::Tagged { id, it, left }),
             Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
-            Msg::Talk { id, text } if id != me => self.events.push(Event::Said { id, text: clean(&text, 120) }),
-            Msg::Whisper { id, to, name, text } if id != me && to == me => self.events.push(Event::Whispered { id, name: clean(&name, 32), text: clean(&text, 280) }),
+            Msg::Talk { id, text } if id != me => {
+                let (text, links) = filter::tidy(&clean(&text, 120), self.clean_words);
+                self.events.push(Event::Said { id, text, links });
+            }
+            Msg::Whisper { id, to, name, text } if id != me && to == me => {
+                let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
+                let name = if self.clean_words { filter::words(&clean(&name, 32)) } else { clean(&name, 32) };
+                self.events.push(Event::Whispered { id, name, text, links });
+            }
             Msg::Crowd { id, data } if id != me && !v.host && v.host_id == Some(id) && data.len() <= 48 * 1024 => self.events.push(Event::Crowd(data)),
             Msg::Want { id, key, value } if id != me && v.host && v.others.contains_key(&id) && key.len() <= 24 && value.len() <= 64 => {
                 let name = v.others.get(&id).map(|o| o.name.clone()).unwrap_or_default();
                 self.events.push(Event::Wanted { id, name, key, value, admin: admins_here.contains(&id) });
             }
             Msg::Throw { id, x, y, vx, vy } if id != me && [x, y, vx, vy].iter().all(|v| v.is_finite() && v.abs() < 1e4) => self.events.push(Event::Threw { id, x, y, vx, vy }),
+            Msg::Full { id, to } if to == me && !v.host && v.host_id.is_none_or(|h| h == id) => {
+                match v.square {
+                    // a square: the next copy of it
+                    Some((i, n)) if n < SQUARE_COPIES => {
+                        self.leave_village_quietly();
+                        self.enter_square(i, n + 1);
+                    }
+                    _ => {
+                        self.leave_village();
+                        self.note("⌂ that village is full right now");
+                    }
+                }
+            }
+            // a square with two hosts (both came in at once): the lower id
+            // keeps it, the other steps down
+            Msg::Village { host, .. } if host != me && v.square.is_some() && v.host && host < me => {
+                v.host = false;
+                v.host_id = Some(host);
+                v.host_seen = t;
+            }
+            Msg::Village { host, .. } if host != me && v.square.is_some() && (v.host || v.host_id.is_some_and(|h| h < host)) => {}
             // (the first host heard is the host: nobody else takes over)
-            Msg::Village { host, .. } if host != me && v.host_id.is_some_and(|h| h != host) => {}
-            Msg::Village { host, name, seed, rules, admins } if host != me => {
+            Msg::Village { host, .. } if host != me && v.square.is_none() && v.host_id.is_some_and(|h| h != host) => {}
+            Msg::Village { host, name, seed, rules, admins, limit } if host != me => {
                 v.host_seen = t;
                 v.host_id = Some(host);
+                if limit > 0 {
+                    v.limit = (limit as usize).clamp(2, MAX_LIMIT);
+                }
                 if let Some(o) = v.others.get_mut(&host) {
                     o.host = true;
                 }
@@ -943,7 +1102,10 @@ impl Online {
                 // (only the host closes the village)
                 let host = host && v.host_id == Some(id);
                 let name = v.others.remove(&id).map(|o| o.name).unwrap_or_default();
-                if host && !v.host {
+                if host && v.square.is_some() {
+                    // a square stays open: the next villager hosts it
+                    self.next_host();
+                } else if host && !v.host {
                     self.leave_village();
                     self.note(format!("⌂ {name} closed their village: home again"));
                 } else if !name.is_empty() {
@@ -1016,6 +1178,10 @@ impl Online {
         if self.link != Link::On {
             return;
         }
+        if self.watch_until > 0.0 && t >= self.watch_until {
+            self.watch_until = 0.0;
+            self.unwatch_public();
+        }
         if t >= self.next_ping {
             self.next_ping = t + 30.0;
             self.out.extend(mqtt::ping());
@@ -1053,11 +1219,31 @@ impl Online {
         }
         let Some(v) = &self.village else { return };
         let (topic, seal, host) = (v.topic.clone(), v.seal.clone(), v.host);
-        // the host: the village, every couple of seconds
+        // the host: the village, every couple of seconds (a square: as it
+        // is, the same for whoever hosts it)
+        let square = self.village.as_ref().and_then(|v| v.square);
+        let limit = self.village.as_ref().map(|v| v.limit).unwrap_or(DEFAULT_LIMIT);
         if host && t >= self.next_village {
             self.next_village = t + 2.0;
-            let m = Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone() };
+            let m = match square {
+                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16 },
+                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16 },
+            };
             self.send(&topic, &seal, &m, false);
+        }
+        // a public village's host: how it is, for Public villages (kept by
+        // the relay), now and then
+        if host && (square.is_some() || self.book.listed) && t >= self.next_status {
+            self.next_status = t + 15.0;
+            let v = self.village.as_ref().unwrap();
+            let n = (v.others.len() + 1) as u16;
+            let (name, code, at) = match square {
+                Some((i, c)) => (if c > 1 { format!("{} #{c}", SQUARES[i]) } else { SQUARES[i].to_string() }, v.code.clone(), now()),
+                None => (format!("{}'s village", self.name), v.code.clone(), now()),
+            };
+            let m = Msg::Status { name, code: code.clone(), n, limit: limit as u16, at, square: square.is_some() };
+            let st = if square.is_some() { status_topic(&code) } else { listed_topic(self.id) };
+            self.send(&st, &public_seal(), &m, true);
         }
         // where this villager is: often while it changes, now and then if not
         if let Some(av) = me {
@@ -1074,6 +1260,16 @@ impl Online {
         let gone: Vec<u32> = v.others.iter().filter(|(_, o)| t - o.seen > 12.0).map(|(k, _)| *k).collect();
         for k in gone {
             v.others.remove(&k);
+        }
+        // a square: nobody there to answer (the first in hosts it), or its
+        // host gone quiet (the next takes over)
+        if v.square.is_some() && !v.host {
+            if v.host_id.is_none() && t > v.knock_until {
+                self.host_square();
+            } else if v.host_id.is_some() && t - v.host_seen > 8.0 {
+                self.next_host();
+            }
+            return;
         }
         // a guest whose host's gone quiet: home again
         if !v.host && v.seed.is_some() && t - v.host_seen > 20.0 {
@@ -1120,7 +1316,7 @@ impl Online {
         self.book.on = true;
         self.link = Link::On;
         let code = seal::new_code();
-        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None };
+        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT };
         for (id, name, av, card) in others {
             v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0) });
         }
@@ -1155,7 +1351,7 @@ impl Online {
 
     /// A guest in someone's village, its seed heard.
     pub fn guest_seed(&self) -> Option<u32> {
-        self.village.as_ref().filter(|v| !v.host).and_then(|v| v.seed)
+        self.village.as_ref().filter(|v| !v.host || v.square.is_some()).and_then(|v| v.seed)
     }
 
     /// Friends, and what they're up to.
@@ -1285,7 +1481,8 @@ impl Online {
             self.leave_village();
         }
         let topic = seal::topic("village", &code);
-        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None });
+        let limit = if host { self.limit.clamp(2, MAX_LIMIT) } else { MAX_LIMIT };
+        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None, square: None, limit });
         self.subscribe(vec![topic]);
         self.next_here = 0.0;
         self.next_village = 0.0;
@@ -1322,17 +1519,151 @@ impl Online {
         Ok(())
     }
 
-    /// Out of the shared village (closing it, if hosting).
-    pub fn leave_village(&mut self) {
+    /// Into a public square (the first copy of it with room, as last
+    /// heard), going online first if need be.
+    pub fn join_square(&mut self, i: usize) {
+        let i = i % SQUARES.len();
+        if self.link != Link::On {
+            if !self.book.on {
+                self.go_online(true);
+            }
+            self.pending_square = Some(i);
+            self.note("✉ going online first…");
+            return;
+        }
+        let fresh = now() - 60;
+        let n = (1..=SQUARE_COPIES).find(|&n| self.public.get(&square_code(i, n)).is_none_or(|l| l.at < fresh || l.n < l.limit)).unwrap_or(1);
+        self.enter_square(i, n);
+    }
+
+    fn enter_square(&mut self, i: usize, n: u32) {
+        self.enter(square_code(i, n), false);
+        let seed = square_seed(i);
+        let t = self.t;
+        if let Some(v) = self.village.as_mut() {
+            v.square = Some((i, n));
+            v.seed = Some(seed);
+            v.limit = SQUARE_LIMIT;
+            // (nobody answering in a moment: it's empty, and this villager hosts it)
+            v.knock_until = t + 5.0;
+        }
+        self.events.push(Event::Village(seed));
+        self.note(format!("⌂ into {}{}…", SQUARES[i], if n > 1 { format!(" #{n}") } else { String::new() }));
+    }
+
+    /// Nobody else in the square: this villager hosts it.
+    fn host_square(&mut self) {
+        let me = self.id;
+        if let Some(v) = self.village.as_mut() {
+            v.host = true;
+            v.host_id = Some(me);
+            v.limit = SQUARE_LIMIT;
+        }
+        self.next_village = 0.0;
+        self.next_status = 0.0;
+    }
+
+    /// A square's host has gone: whoever's here with the lowest id takes
+    /// over (everyone works out the same one).
+    fn next_host(&mut self) {
+        let me = self.id;
+        let t = self.t;
+        let Some(v) = self.village.as_mut() else { return };
+        let old = v.host_id;
+        if let Some(o) = old {
+            v.others.remove(&o);
+        }
+        let first = v.others.keys().copied().chain(std::iter::once(me)).min().unwrap_or(me);
+        if first == me {
+            self.host_square();
+            if let Some((i, _)) = self.village.as_ref().and_then(|v| v.square) {
+                self.note(format!("⌂ hosting {} now (it carries on when you go)", SQUARES[i]));
+            }
+        } else {
+            v.host = false;
+            v.host_id = None;
+            // (waiting a moment for the new host to say so)
+            v.host_seen = t;
+            v.knock_until = t + 8.0;
+        }
+    }
+
+    /// Off to another copy of a square: out without a fuss.
+    fn leave_village_quietly(&mut self) {
         let Some(v) = self.village.take() else { return };
-        let m = Msg::Bye { id: self.id, host: v.host };
+        let m = Msg::Bye { id: self.id, host: false };
         self.send(&v.topic, &v.seal, &m, false);
         if self.link == Link::On {
             self.sub = self.sub.wrapping_add(1).max(1);
             self.out.extend(mqtt::unsubscribe(self.sub, &[v.topic.clone()]));
         }
+    }
+
+    /// In a public square: which (its name, with the copy), and hosting it.
+    pub fn square(&self) -> Option<(String, bool)> {
+        self.village.as_ref().and_then(|v| v.square.map(|(i, n)| (if n > 1 { format!("{} #{n}", SQUARES[i]) } else { SQUARES[i].to_string() }, v.host)))
+    }
+
+    /// How many are in this village, and the most it takes.
+    pub fn headcount(&self) -> Option<(usize, usize)> {
+        self.village.as_ref().map(|v| (v.others.len() + 1, v.limit))
+    }
+
+    /// Listen for the public villages (the squares, and villages listed by
+    /// their hosts) a while: Public villages is open.
+    pub fn watch_public(&mut self) {
+        if self.link != Link::On {
+            return;
+        }
+        if self.t >= self.watch_until {
+            let mut topics: Vec<String> = (0..SQUARES.len()).flat_map(|i| (1..=SQUARE_COPIES).map(move |n| status_topic(&square_code(i, n)))).collect();
+            topics.push("xmas-tui/1/listed/+".into());
+            self.subscribe(topics);
+        }
+        self.watch_until = self.t + 90.0;
+    }
+
+    fn unwatch_public(&mut self) {
+        if self.link == Link::On {
+            let mut topics: Vec<String> = (0..SQUARES.len()).flat_map(|i| (1..=SQUARE_COPIES).map(move |n| status_topic(&square_code(i, n)))).collect();
+            topics.push("xmas-tui/1/listed/+".into());
+            self.sub = self.sub.wrapping_add(1).max(1);
+            self.out.extend(mqtt::unsubscribe(self.sub, &topics));
+        }
+    }
+
+    /// The squares, and how many are in each (all its copies), as heard.
+    pub fn squares(&self) -> Vec<(String, usize)> {
+        let fresh = now() - 60;
+        SQUARES.iter().enumerate().map(|(i, name)| (name.to_string(), (1..=SQUARE_COPIES).filter_map(|n| self.public.get(&square_code(i, n))).filter(|l| l.at >= fresh).map(|l| l.n).sum())).collect()
+    }
+
+    /// Villages their hosts have listed for anyone, as heard (busiest
+    /// first; a few dozen at most).
+    pub fn listings(&self) -> Vec<Listing> {
+        let fresh = now() - 60;
+        let own = self.village.as_ref().map(|v| v.code.clone());
+        let mut v: Vec<Listing> = self.public.values().filter(|l| !l.square && l.at >= fresh && Some(&l.code) != own.as_ref()).cloned().collect();
+        v.sort_by(|a, b| b.n.cmp(&a.n).then(a.name.cmp(&b.name)));
+        v.truncate(30);
+        v
+    }
+
+    /// Out of the shared village (closing it, if hosting).
+    pub fn leave_village(&mut self) {
+        let Some(v) = self.village.take() else { return };
+        let m = Msg::Bye { id: self.id, host: v.host };
+        self.send(&v.topic, &v.seal, &m, false);
+        // a listed village closing: off the list
+        if v.host && v.square.is_none() && self.book.listed && self.link == Link::On {
+            self.out.extend(mqtt::publish(&listed_topic(self.id), &[], true));
+        }
+        if self.link == Link::On {
+            self.sub = self.sub.wrapping_add(1).max(1);
+            self.out.extend(mqtt::unsubscribe(self.sub, &[v.topic.clone()]));
+        }
         self.next_here = 0.0;
-        if !v.host && v.seed.is_some() {
+        if (!v.host || v.square.is_some()) && v.seed.is_some() {
             self.events.push(Event::Home);
         }
     }
@@ -1606,6 +1937,126 @@ pub(crate) mod tests {
         }
     }
 
+    fn run(relay: &mut Relay, all: &mut [&mut Online], t: &mut f32, secs: f32) {
+        for _ in 0..(secs * 10.0) as usize {
+            for o in all.iter_mut() {
+                o.tick(*t, Some(Avatar::default()), 1);
+            }
+            relay.pump(all);
+            *t += 0.1;
+        }
+    }
+
+    /// The public squares: the first in hosts; the next is a guest; the
+    /// host going, the guest takes over. A village full turns newcomers
+    /// away; a listed one shows in Public villages, with how many are in it.
+    #[test]
+    fn public_squares_hand_over_and_villages_fill_up() {
+        let mut relay = Relay::default();
+        let mk = |n: &str| {
+            let mut o = Online::new(Book { on: true, ..Default::default() }, n);
+            o.connected();
+            o
+        };
+        let (mut a, mut b, mut c, mut d) = (mk("Ann"), mk("Bo"), mk("Cy"), mk("Di"));
+        let mut t = 1.0;
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 0.5);
+        assert_eq!(a.link(), Link::On);
+        // into an empty square: a hosts it
+        a.join_square(0);
+        assert!(a.take_events().contains(&Event::Village(square_seed(0))), "the square's village, for the scene");
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 6.0);
+        assert_eq!(a.square(), Some(("North Pole Square".to_string(), true)));
+        // the next: a guest there
+        b.join_square(0);
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 2.0);
+        assert_eq!(b.square(), Some(("North Pole Square".to_string(), false)));
+        assert_eq!(a.headcount(), Some((2, SQUARE_LIMIT)));
+        assert_eq!(b.guest_seed(), Some(square_seed(0)));
+        // the host goes: the square stays, and Bo hosts it
+        a.leave_village();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 1.0);
+        assert_eq!(b.square(), Some(("North Pole Square".to_string(), true)));
+        assert!(b.village().is_some());
+        // a village for two at most, listed: Ann in, Di turned away
+        c.limit = 2;
+        c.book.listed = true;
+        let code = c.host();
+        a.join(&code).unwrap();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 2.0);
+        assert!(a.village().is_some_and(|(_, host)| !host), "Ann's in");
+        d.join(&code).unwrap();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 2.0);
+        assert!(d.village().is_none(), "Di's turned away: it's full");
+        assert!(d.take_events().iter().any(|e| matches!(e, Event::Note(n) if n.contains("full"))));
+        // Public villages, as Di sees it: Cy's village, two of two; the
+        // square with Bo in it
+        d.watch_public();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 16.0);
+        let l = d.listings();
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert_eq!((l[0].name.as_str(), l[0].n, l[0].limit), ("Cy's village", 2, 2));
+        assert_eq!(d.squares()[0], ("North Pole Square".to_string(), 1));
+        // closed: off the list
+        c.leave_village();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d], &mut t, 1.0);
+        let mut e = mk("Ed");
+        e.watch_public();
+        run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d, &mut e], &mut t, 1.0);
+        assert!(e.listings().is_empty(), "{:?}", e.listings());
+    }
+
+    /// A public square through a real relay (needs the internet, or
+    /// XMAS_RELAY): the first in hosts it, the next finds them there.
+    /// With XMAS_SQUARE_HOSTED=1, someone else (the web page, say) is
+    /// hosting North Pole Square already: only the second comes, and finds
+    /// them.
+    #[test]
+    #[ignore]
+    fn a_square_through_the_real_relay() {
+        let hosted = std::env::var("XMAS_SQUARE_HOSTED").is_ok_and(|v| v == "1");
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Square A");
+        let mut b = Online::new(Book { on: true, ..Default::default() }, "Square B");
+        let (mut la, mut lb) = (None, None);
+        let mut t = 0.0;
+        let av = Some(Avatar { x: 1.0, ..Default::default() });
+        let step = |a: &mut Online, b: &mut Online, la: &mut Option<tcp::Tcp>, lb: &mut Option<tcp::Tcp>, t: &mut f32| {
+            if !hosted {
+                tcp::pump(a, la);
+                a.tick(*t, av, 1);
+            }
+            tcp::pump(b, lb);
+            b.tick(*t, av, 1);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            *t += 0.05;
+        };
+        for _ in 0..600 {
+            step(&mut a, &mut b, &mut la, &mut lb, &mut t);
+            if (hosted || a.link() == Link::On) && b.link() == Link::On {
+                break;
+            }
+        }
+        assert_eq!(b.link(), Link::On, "couldn't reach a relay");
+        if !hosted {
+            a.join_square(0);
+            for _ in 0..200 {
+                step(&mut a, &mut b, &mut la, &mut lb, &mut t);
+            }
+            assert_eq!(a.square(), Some(("North Pole Square".to_string(), true)), "the first in hosts it");
+        }
+        b.join_square(0);
+        let mut met = false;
+        for _ in 0..300 {
+            step(&mut a, &mut b, &mut la, &mut lb, &mut t);
+            if b.headcount().is_some_and(|(n, _)| n >= 2) && b.square().is_some_and(|(_, host)| !host) {
+                met = true;
+                break;
+            }
+        }
+        assert!(met, "the second found the square's host: {:?} {:?}", b.square(), b.headcount());
+        assert_eq!(b.headcount().map(|h| h.1), Some(SQUARE_LIMIT));
+    }
+
     /// Through a real public relay (needs the internet):
     /// `cargo test --release net::tests::through_the_real_relay -- --ignored`
     #[test]
@@ -1870,7 +2321,7 @@ pub(crate) mod tests {
         relay.pump(&mut [&mut a, &mut b]);
         let ev = b.take_events();
         assert!(ev.contains(&Event::Pinged("Robin".into())), "{ev:?}");
-        assert!(ev.contains(&Event::Mail { from: "Robin".into(), text: "hi[2Jthere".into() }), "{ev:?}");
+        assert!(ev.contains(&Event::Mail { from: "Robin".into(), text: "hi[2Jthere".into(), links: vec![] }), "{ev:?}");
         // a group: made, joined by its code, talked in
         let code = a.new_group("carols");
         b.join_group("", &code).unwrap();
@@ -1878,7 +2329,7 @@ pub(crate) mod tests {
         relay.pump(&mut [&mut a, &mut b]);
         assert!(b.group_say(0, "anyone about?"));
         relay.pump(&mut [&mut a, &mut b]);
-        assert!(a.take_events().contains(&Event::GroupSaid { group: "carols".into(), name: "Sam".into(), text: "anyone about?".into() }));
+        assert!(a.take_events().contains(&Event::GroupSaid { group: "carols".into(), name: "Sam".into(), text: "anyone about?".into(), links: vec![] }));
         assert_eq!(a.group_here(0), vec!["Sam".to_string()]);
         // the village: Robin hosts; Sam knocks and is let in
         let vcode = a.host();
@@ -1894,7 +2345,7 @@ pub(crate) mod tests {
         // whispered: only Sam hears
         a.whisper(ib, "psst");
         relay.pump(&mut [&mut a, &mut b]);
-        assert!(b.take_events().contains(&Event::Whispered { id: ia, name: "Robin".into(), text: "psst".into() }));
+        assert!(b.take_events().contains(&Event::Whispered { id: ia, name: "Robin".into(), text: "psst".into(), links: vec![] }));
         // Sam asks for more snow; then may change things himself
         b.tick(3.5, Some(Avatar::default()), 5);
         relay.pump(&mut [&mut a, &mut b]);
@@ -2110,7 +2561,7 @@ pub(crate) mod tests {
         // a message
         assert!(b.mail(0, "snowball fight at the tree?"));
         relay.pump(&mut [&mut a, &mut b]);
-        assert!(a.take_events().contains(&Event::Mail { from: "Sam".into(), text: "snowball fight at the tree?".into() }));
+        assert!(a.take_events().contains(&Event::Mail { from: "Sam".into(), text: "snowball fight at the tree?".into(), links: vec![] }));
         // Sam opens up; Robin sees the code in Sam's "here I am" and joins
         let vcode = b.host();
         b.tick(2.0, Some(Avatar { x: 0.5, y: 0.1, ..Default::default() }), 4242);

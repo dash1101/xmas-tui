@@ -1,10 +1,10 @@
-//! The link to the relay over TCP (the desktop and the Android app): a
-//! thread that connects (each relay in turn, backing off when none will),
-//! and passes bytes both ways. What's sent is sealed already (see `seal`).
+//! The link to the relay (the desktop and the Android app): a thread that
+//! connects (each relay in turn, backing off when none will), and passes
+//! bytes both ways, over TCP, a WebSocket or HTTPS long polling. What's sent is sealed already (see `seal`).
 
 use super::{Link, Online, RELAYS};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -71,26 +71,104 @@ impl Drop for Tcp {
     }
 }
 
+/// A link to one relay: plain MQTT over TCP, over a WebSocket, or over
+/// HTTPS long polling.
+enum Pipe {
+    Tcp(TcpStream),
+    Ws(super::ws::Ws),
+    Lp(super::lp::Lp),
+}
+
+impl Pipe {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Pipe::Tcp(s) => s.read(b),
+            Pipe::Ws(w) => w.read(b),
+            Pipe::Lp(l) => l.read(b),
+        }
+    }
+
+    fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
+        match self {
+            Pipe::Tcp(s) => s.write_all(b),
+            Pipe::Ws(w) => w.write_all(b),
+            Pipe::Lp(l) => l.write_all(b),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            Pipe::Tcp(s) => {
+                let _ = s.flush();
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            Pipe::Ws(w) => w.close(),
+            Pipe::Lp(l) => l.close(),
+        }
+    }
+}
+
+/// A relay, and how it's reached.
+#[derive(Debug, PartialEq)]
+pub enum Relay {
+    /// A WebSocket (wss://…).
+    Ws(String),
+    /// HTTPS long polling (https://…/poll): the village's own relay, where
+    /// WebSockets don't get through.
+    Poll(String),
+    /// Plain MQTT over TCP.
+    Tcp(String, u16),
+}
+
+/// The relays to try, in turn: XMAS_RELAY first if it's set (a ws(s)://
+/// or an http(s):// address), then the village's own (WebSocket, then long
+/// polling), then the free ones.
+pub fn relays() -> Vec<Relay> {
+    let mut v = vec![];
+    if let Ok(r) = std::env::var("XMAS_RELAY") {
+        if super::ws::parse(&r).is_some() {
+            v.push(if r.starts_with("http") { Relay::Poll(r) } else { Relay::Ws(r) });
+        }
+    }
+    for &(host, port, url) in RELAYS {
+        v.push(match port {
+            0 if url.starts_with("http") => Relay::Poll(url.to_string()),
+            0 => Relay::Ws(url.to_string()),
+            _ => Relay::Tcp(host.to_string(), port),
+        });
+    }
+    v
+}
+
+fn open(relay: &Relay) -> Option<Pipe> {
+    let poll = Duration::from_millis(40);
+    let timeout = Duration::from_secs(6);
+    match relay {
+        Relay::Ws(url) => super::ws::open(&super::ws::parse(url)?, timeout, poll).ok().map(Pipe::Ws),
+        Relay::Poll(url) => super::lp::open(&super::ws::parse(url)?, timeout, poll).ok().map(Pipe::Lp),
+        Relay::Tcp(host, port) => {
+            let s = super::ws::connect(host, *port, timeout).ok()?;
+            let _ = s.set_read_timeout(Some(poll));
+            let _ = s.set_nodelay(true);
+            Some(Pipe::Tcp(s))
+        }
+    }
+}
+
 fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usize) {
     let mut wait = Duration::from_secs(2);
+    let list = relays();
     let mut which = first;
     while !stop.load(Ordering::Relaxed) {
-        let (host, port, _) = RELAYS[which % RELAYS.len()];
+        let relay = &list[which % list.len()];
         which += 1;
-        let addr = (host, port).to_socket_addrs().ok().and_then(|mut a| a.next());
-        let Some(addr) = addr else {
-            sleep_watching(&stop, wait);
-            continue;
-        };
-        let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(6)) else {
-            if which % RELAYS.len() == 0 {
+        let Some(mut s) = open(relay) else {
+            if which % list.len() == 0 {
                 sleep_watching(&stop, wait);
                 wait = (wait * 2).min(Duration::from_secs(60));
             }
             continue;
         };
-        let _ = s.set_read_timeout(Some(Duration::from_millis(40)));
-        let _ = s.set_nodelay(true);
         // (anything queued for an earlier connection is stale)
         while out.try_recv().is_ok() {}
         if up.send(Up::Connected).is_err() {
@@ -105,10 +183,7 @@ fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usi
             }
             loop {
                 match out.try_recv() {
-                    Ok(b) if b.is_empty() => {
-                        let _ = s.flush();
-                        break 'conn true;
-                    }
+                    Ok(b) if b.is_empty() => break 'conn true,
                     Ok(b) => {
                         if s.write_all(&b).is_err() {
                             break 'conn false;
@@ -129,7 +204,7 @@ fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usi
                 Err(_) => break false,
             }
         };
-        let _ = s.shutdown(std::net::Shutdown::Both);
+        s.close();
         if closing || up.send(Up::Closed).is_err() {
             return;
         }

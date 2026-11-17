@@ -40,6 +40,10 @@ pub enum FriendsHit {
     Messages,
     Talk,
     Add,
+    /// Offline: going online.
+    GoOnline,
+    /// The public villages' menu.
+    Public,
 }
 
 /// Widget `i`'s saved position (fractions of the screen).
@@ -1046,6 +1050,25 @@ fn draw_countdown(f: &mut Frame, x: i32, y: i32, t: f32) {
 /// row is left alone (it picks the widget up).
 fn friends_rows(r: Rect, v: &FriendsView) -> Vec<(i32, FriendsHit)> {
     let mut out = vec![];
+    // offline: going online, the public villages, and the friends as they
+    // were (nobody's about)
+    if !v.online {
+        let mut y = r.y + 1;
+        for h in [FriendsHit::GoOnline, FriendsHit::Public] {
+            if y < r.y + r.h - 1 {
+                out.push((y, h));
+                y += 1;
+            }
+        }
+        for (_, _, i) in &v.friends {
+            if y >= r.y + r.h - 1 {
+                break;
+            }
+            out.push((y, FriendsHit::Friend(*i)));
+            y += 1;
+        }
+        return out;
+    }
     let inner = (r.h - 2).max(0);
     // the messages take the bottom rows (up to three), the friends the rest
     let lines = (v.lines.len() as i32).min(3).min(inner / 3);
@@ -1057,6 +1080,10 @@ fn friends_rows(r: Rect, v: &FriendsView) -> Vec<(i32, FriendsHit)> {
     }
     if (v.friends.len() as i32) < rows {
         out.push((y, FriendsHit::Add));
+        y += 1;
+    }
+    if (v.friends.len() as i32) + 1 < rows {
+        out.push((y, FriendsHit::Public));
     }
     // (a rule, then the lines, just above the talk line)
     let y = r.y + r.h - 3 - lines;
@@ -1072,13 +1099,14 @@ fn friends_rows(r: Rect, v: &FriendsView) -> Vec<(i32, FriendsHit)> {
 /// Friends & messages: who's about (● online, ⌂ a village open), the last
 /// few lines said, and a line to talk.
 fn draw_friends(f: &mut Frame, r: Rect, v: &FriendsView, hover: Option<FriendsHit>, t: f32) {
-    let title = match (v.unread, v.here) {
-        (0, 0) => "friends & messages".to_string(),
-        (0, h) => format!("friends · {h} here"),
-        (n, _) => format!("friends · {n} new"),
+    let title = match (v.online, v.unread, v.here) {
+        (false, ..) => "friends · offline".to_string(),
+        (_, 0, 0) => "friends & messages".to_string(),
+        (_, 0, h) => format!("friends · {h} here"),
+        (_, n, _) => format!("friends · {n} new"),
     };
     panel(f, r.x, r.y, r.w, r.h, '✉', &title);
-    if !v.connected {
+    if v.online && !v.connected {
         txt(f, r.w + r.x - 13, r.y, " connecting ", pal::UI_DIM);
     }
     let width = (r.w - 4).max(4) as usize;
@@ -1134,6 +1162,13 @@ fn draw_friends(f: &mut Frame, r: Rect, v: &FriendsView, hover: Option<FriendsHi
                 }
             }
             FriendsHit::Messages => {}
+            FriendsHit::GoOnline => {
+                let c = if hot(FriendsHit::GoOnline) { Rgb::hex(0xffd36b) } else { Rgb::hex(0x9be08a) };
+                f.text(r.x + 2, *y, &clip("● go online: friends, talk, villages", width), c, bg, 0.0);
+            }
+            FriendsHit::Public => {
+                f.text(r.x + 2, *y, &clip("⌂ public villages: drop in ▸", width), if hot(FriendsHit::Public) { Rgb::hex(0xffd36b) } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
+            }
             FriendsHit::Talk => {
                 let blink = (t * 1.5) as i32 % 2 == 0 && hot(FriendsHit::Talk);
                 let s = if v.unread > 0 { format!("✎ talk (/) · ✉ {} new", v.unread) } else { "✎ talk (/) · @name: to one".to_string() };

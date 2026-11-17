@@ -1,5 +1,24 @@
 {
-  "about": "The relays the village talks through when online: free public MQTT brokers, tried in turn. Everything sent through them is sealed end to end; they only pass it along.",
-  "ws": ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt", "wss://test.mosquitto.org:8081/mqtt"],
-  "tcp": [["broker.emqx.io", 1883], ["broker.hivemq.com", 1883], ["test.mosquitto.org", 1883]]
+  "about": "The relays the village talks through when online: its own first (on the web's own port, 443, as a WebSocket, else as plain HTTPS requests where a network breaks WebSockets), then free public MQTT brokers, tried in turn. Everything sent through them is sealed end to end; they only pass it along.",
+  "ws": [
+    "wss://xmas-relay.novalabs.app/mqtt",
+    "https://xmas-relay.novalabs.app/poll",
+    "wss://broker.emqx.io:8084/mqtt",
+    "wss://broker.hivemq.com:8884/mqtt",
+    "wss://test.mosquitto.org:8081/mqtt"
+  ],
+  "tcp": [
+    [
+      "broker.emqx.io",
+      1883
+    ],
+    [
+      "broker.hivemq.com",
+      1883
+    ],
+    [
+      "test.mosquitto.org",
+      1883
+    ]
+  ]
 }

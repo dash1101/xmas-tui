@@ -466,6 +466,10 @@ pub struct SceneCfg {
     pub autopilot_area: String,
     /// How big that stretch is, in screens wide.
     pub autopilot_reach: f32,
+    /// The most in this villager's own village when it's open (2 to 48).
+    pub village_limit: u32,
+    /// Strong language in what others write starred out.
+    pub clean_words: bool,
     /// Only friends & family (the names set) come by as people; the
     /// animals still do.
     pub only_friends: bool,
@@ -759,7 +763,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, village_limit: 8, clean_words: true, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
     }
 }
 
@@ -883,6 +887,25 @@ pub fn clean_fps(fps: f32) -> f32 {
 }
 
 impl Config {
+    /// Settings back to how they start, keeping what's the villager's own:
+    /// their village (seed), name, look, motto, pet and friends, the
+    /// shelves' folders, and where the weather's for.
+    pub fn reset_keeping_own(&self) -> Config {
+        let mut c = Config::default();
+        c.seed = self.seed;
+        c.scene.name = self.scene.name.clone();
+        c.scene.wear = self.scene.wear.clone();
+        c.scene.motto = self.scene.motto.clone();
+        c.scene.pet = self.scene.pet.clone();
+        c.scene.friends = self.scene.friends.clone();
+        c.shelves = self.shelves.clone();
+        c.weather.city = self.weather.city.clone();
+        c.weather.latitude = self.weather.latitude;
+        c.weather.longitude = self.weather.longitude;
+        c.weather.units = self.weather.units.clone();
+        c
+    }
+
     /// Clamp every number to what the app can handle (the settings panel's
     /// ranges, a bit wider where hand-editing makes sense). TOML happily
     /// accepts `fps = nan` or `snow = 1e9`; those would panic in

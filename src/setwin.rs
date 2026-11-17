@@ -285,6 +285,30 @@ impl Panel {
                     self.close = true;
                 }
                 Act::Tab(i) => self.settings.tab = i as usize,
+                Act::Uninstall | Act::ResetSettings => self.settings.confirm = Some(a),
+                Act::NotNow => self.settings.confirm = None,
+                Act::UninstallNow => {
+                    self.settings.confirm = None;
+                    let (msg, quit) = platform::uninstall();
+                    self.settings.toast = Some((msg, t + 6.0));
+                    if quit {
+                        crate::tray::request_wallpaper_quit();
+                    }
+                }
+                Act::ResetNow => {
+                    self.settings.confirm = None;
+                    self.cfg = self.cfg.reset_keeping_own();
+                    self.settings.toast = Some(("settings reset".into(), t + 3.0));
+                }
+                Act::OpenConfig => {
+                    self.commit_city();
+                    platform::open_in_editor(self.sync.path());
+                }
+                Act::OpenLog => {
+                    if let Some(p) = platform::log_path() {
+                        platform::open_in_editor(&p);
+                    }
+                }
                 // the wallpaper process runs the updater: ask it
                 Act::CheckUpdate => crate::update::request("check"),
                 Act::InstallUpdate => crate::update::request("install"),

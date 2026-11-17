@@ -757,6 +757,13 @@ pub fn pause_reason(own: HWND) -> Option<(String, f32)> {
         if SHQueryUserNotificationState(&mut st) != 0 {
             return None;
         }
+        // a maximized window on this monitor: the village is all behind it
+        // (the window snow runs on by itself; the village waits)
+        if !matches!(st, 1 | 4) {
+            if let Some(w) = maximized_over(own) {
+                return Some((format!("behind a maximized window: {w}"), 1.0));
+            }
+        }
         match st {
             // QUNS_NOT_PRESENT: locked, screen saver, fast user switching
             1 => Some(("the session isn't present (locked or screen saver)".into(), 0.0)),
@@ -769,6 +776,66 @@ pub fn pause_reason(own: HWND) -> Option<(String, f32)> {
             }
             _ => None,
         }
+    }
+}
+
+/// A maximized window (or a borderless one covering the monitor) on the
+/// monitor `own` is on, if there is one: nothing of the wallpaper shows
+/// (but the taskbar's sliver). Windows on other virtual desktops (cloaked),
+/// tool windows, menus, the shell's own and our own don't count.
+fn maximized_over(own: HWND) -> Option<String> {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> BOOL {
+        (*(l as *mut Vec<HWND>)).push(h);
+        TRUE
+    }
+    unsafe {
+        if own.is_null() {
+            return None;
+        }
+        let mon = MonitorFromWindow(own, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if mon.is_null() || GetMonitorInfoW(mon, &mut mi) == 0 {
+            return None;
+        }
+        let m = mi.rcMonitor;
+        let me = std::process::id();
+        let mut hs: Vec<HWND> = Vec::with_capacity(256);
+        EnumWindows(Some(each), &mut hs as *mut Vec<HWND> as LPARAM);
+        for h in hs {
+            if IsWindowVisible(h) == 0 || IsIconic(h) != 0 || MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) != mon {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid == me {
+                continue;
+            }
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32;
+            if ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE) != 0 || GetWindowTextLengthW(h) == 0 {
+                continue;
+            }
+            let cls = class_of(h);
+            if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "#32768" | "Xaml_WindowedPopupClass" | "Microsoft.UI.Content.PopupWindowSiteBridge") {
+                continue;
+            }
+            let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(h, &mut r);
+            let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
+            if IsZoomed(h) == 0 && !(covers && style & WS_CAPTION != WS_CAPTION) {
+                continue;
+            }
+            let mut cloaked: u32 = 0;
+            DwmGetWindowAttribute(h, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut _, 4);
+            if cloaked != 0 {
+                continue;
+            }
+            return Some(window_label(h));
+        }
+        None
     }
 }
 

@@ -55,6 +55,66 @@ pub fn autostart_set(on: bool) {
     }
 }
 
+/// Take xmas-tui off this computer, as it was installed: Windows, the
+/// installer's own uninstaller (it asks, and takes the program, its
+/// shortcuts and "run at startup" away); Linux, what the installer set up
+/// (the service, the program in ~/.local/share/xmas-tui, its link in
+/// ~/.local/bin). The settings and the save are kept either way. Returns
+/// what was done (or why it couldn't be), and whether the wallpaper should
+/// now quit.
+pub fn uninstall() -> (String, bool) {
+    let Ok(exe) = std::env::current_exe() else { return ("couldn't find the program".into(), false) };
+    #[cfg(windows)]
+    {
+        if let Some(un) = exe.parent().map(|d| d.join("unins000.exe")).filter(|p| p.exists()) {
+            // (its own window asks; nothing's removed unless that's said
+            // yes to, and then it stops the wallpaper itself)
+            return match Command::new(&un).spawn() {
+                Ok(_) => ("the uninstaller's open: it asks before it takes anything away".into(), false),
+                Err(e) => (format!("couldn't start the uninstaller: {e}"), false),
+            };
+        }
+        // a copy that wasn't installed: off "run at startup" (the file is the user's to delete)
+        autostart_set(false);
+        (format!("not started with Windows any more; {} can be deleted", exe.display()), true)
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("xmas-tui");
+        let units = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("systemd/user");
+        let installed = exe.starts_with(&data);
+        if !installed {
+            return if exe.starts_with("/usr") || exe.starts_with("/opt") {
+                ("installed as a package: `sudo apt remove xmas-tui` (or the distro's own way) takes it away".into(), false)
+            } else {
+                (format!("this copy wasn't put in by the installer ({}): it can simply be deleted", exe.display()), false)
+            };
+        }
+        let link = home.join(".local/bin/xmas-tui");
+        // (in a process of its own: stopping the service stops this one)
+        let script = format!(
+            "sleep 1; systemctl --user disable --now xmas-tui.service; rm -f '{u}'; systemctl --user daemon-reload; rm -rf '{d}'; if [ -L '{l}' ]; then rm -f '{l}'; fi",
+            u = units.join("xmas-tui.service").display(),
+            d = data.display(),
+            l = link.display()
+        );
+        match Command::new("setsid").args(["sh", "-c", &script]).spawn().or_else(|_| Command::new("sh").args(["-c", &script]).spawn()) {
+            Ok(_) => ("taken off this computer (the settings and the save are kept, in ~/.config/xmas-tui)".into(), true),
+            Err(e) => (format!("couldn't: {e}"), false),
+        }
+    }
+}
+
+/// The wallpaper's log, if there is one.
+pub fn log_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let p = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?.join("xmas-tui").join("wallpaper.log");
+    #[cfg(not(windows))]
+    let p = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state")).join("xmas-tui").join("wallpaper.log");
+    p.exists().then_some(p)
+}
+
 /// Open the config in the user's text editor (used where we can't take
 /// keyboard input ourselves).
 pub fn open_in_editor(path: &Path) {

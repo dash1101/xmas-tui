@@ -27,7 +27,7 @@ const DEFAULTS = {
   critters: 100, most: 24, bushes: true, events: 100, sleigh: 4, chattiness: 100, talk_time: 100,
   sound: true, master: 50, music: 60, sfx: 70, ambience: 50, track: "shuffle",
   look: "classic", uiscale: touchy ? 140 : 100, btnscale: 100,
-  autoafter: "20", autoarea: "anywhere", autoreach: "1",
+  autoafter: "20", autoarea: "anywhere", autoreach: "1", vlimit: "8", cleanwords: true,
 };
 function opts() {
   let o = {};
@@ -44,6 +44,7 @@ function config(o) {
   s += `critters = ${o.critters / 100}\nmost_at_once = ${o.most | 0}\nbushes = ${!!o.bushes}\nevents = ${o.events / 100}\nsleigh_minutes = ${o.sleigh}\n`;
   s += `chattiness = ${o.chattiness / 100}\ntalk_time = ${o.talk_time / 100}\nonly_friends = ${!!o.only_friends}\nmotto = ${q(o.motto)}\n`;
   s += `autopilot_after = ${+o.autoafter || 20}\nautopilot_area = ${q(o.autoarea)}\nautopilot_reach = ${+o.autoreach || 1}\n`;
+  s += `village_limit = ${Math.max(2, Math.min(48, +o.vlimit || 8))}\nclean_words = ${o.cleanwords !== false}\n`;
   s += `[scene.wear]\ncoat = ${q(o.wcoat)}\nhat = ${q(o.what)}\nhair = ${q(o.whair)}\nskin = ${q(o.wskin)}\nscarf = ${o.wscarf !== false}\n`;
   s += `[scene.pet]\nkind = ${q(o.pet)}\ncoat = ${q(o.petcoat)}\nname = ${q(o.petname)}\n`;
   for (const f of o.friends) {
@@ -229,10 +230,101 @@ document.getElementById("ask-no").onclick = () => askDone("");
 askIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); askDone(""); } e.stopPropagation(); });
 
 // ------------------------------------------------------------ online
-// The relay (a free public MQTT broker) through a WebSocket; the village
-// seals and unseals what goes through it, the page only carries bytes.
+// The relay (the village's own, else a free public MQTT broker) through a
+// WebSocket, or plain HTTPS requests where a network breaks WebSockets; the
+// village seals and unseals what goes through it, the page only carries
+// bytes.
 
-const RELAYS = ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt", "wss://test.mosquitto.org:8081/mqtt"];
+const RELAYS = ["wss://xmas-relay.novalabs.app/mqtt", "https://xmas-relay.novalabs.app/poll", "wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt", "wss://test.mosquitto.org:8081/mqtt"];
+
+// The same MQTT over plain HTTPS requests ("long polling", the relay's
+// /poll): one request always waiting for what's coming (answered the moment
+// there's something), and what's sent in requests of its own, in order.
+// Shaped like a WebSocket, so the rest doesn't mind which it has.
+class PollSocket {
+  constructor(url) {
+    this.url = url.replace(/\/$/, "");
+    this.readyState = 0;
+    this.onopen = this.onmessage = this.onclose = this.onerror = null;
+    this.queue = [];
+    this.sending = false;
+    this.id = null;
+    this.start();
+  }
+  async post(path, body, ms, keep) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    try {
+      // (text/plain: a "simple" request, so no CORS preflight before each
+      // one; the relay takes the bytes as they are)
+      return await fetch(this.url + path, { method: "POST", body: body || new Uint8Array(0), headers: { "content-type": "text/plain" }, signal: ctl.signal, cache: "no-store", keepalive: !!keep });
+    } finally { clearTimeout(t); }
+  }
+  async start() {
+    try {
+      const r = await this.post("", null, 8000);
+      const id = (await r.text()).trim();
+      if (!r.ok || !/^[0-9a-f]{32}$/.test(id)) throw new Error("no session");
+      if (this.readyState !== 0) return;
+      this.id = id;
+      this.readyState = 1;
+      if (this.onopen) this.onopen({});
+      this.down();
+      this.flush();
+    } catch (e) { this.end(); }
+  }
+  async down() {
+    while (this.readyState === 1) {
+      let b;
+      try {
+        const r = await this.post(`/${this.id}/down`, null, 35000);
+        if (r.status !== 200) throw new Error("over");
+        b = await r.arrayBuffer();
+      } catch (e) { this.end(); return; }
+      if (b.byteLength && this.readyState === 1 && this.onmessage) this.onmessage({ data: b });
+    }
+  }
+  send(b) {
+    if (this.readyState !== 1) return;
+    this.queue.push(new Uint8Array(b));
+    this.flush();
+  }
+  take() {
+    const parts = this.queue.splice(0), body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { body.set(p, at); at += p.length; }
+    return body;
+  }
+  async flush() {
+    if (this.sending || !this.queue.length || this.readyState !== 1) return;
+    this.sending = true;
+    try {
+      const r = await this.post(`/${this.id}/up`, this.take(), 15000, true);
+      if (r.status !== 204) throw new Error("over");
+    } catch (e) { this.sending = false; this.end(); return; }
+    this.sending = false;
+    this.flush();
+  }
+  // what's queued (a goodbye) still goes, then the session's closed
+  async close() {
+    if (this.readyState >= 2) return;
+    const was = this.readyState;
+    this.readyState = 2;
+    if (was === 1) {
+      while (this.sending) await new Promise((r) => setTimeout(r, 20));
+      try {
+        if (this.queue.length) await this.post(`/${this.id}/up`, this.take(), 5000, true);
+        await this.post(`/${this.id}/close`, null, 5000, true);
+      } catch (e) {}
+    }
+    this.end();
+  }
+  end() {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    if (this.onclose) this.onclose({});
+  }
+}
 let ws = null, wsTry = 0, wsWait = 0, relays = null;
 fetch("relays.json").then((r) => r.json()).then((j) => { if (Array.isArray(j.ws) && j.ws.length) relays = j.ws; }).catch(() => {});
 function netPump(now) {
@@ -252,7 +344,7 @@ function netPump(now) {
     const list = relays || RELAYS;
     const url = list[wsTry % list.length];
     wsTry++;
-    try { ws = new WebSocket(url, "mqtt"); } catch (e) { ws = null; wsWait = now + 3000; return; }
+    try { ws = /^https?:/.test(url) ? new PollSocket(url) : new WebSocket(url, "mqtt"); } catch (e) { ws = null; wsWait = now + 3000; return; }
     ws.binaryType = "arraybuffer";
     ws.onopen = () => { wsTry--; if (game) wasm.net_link(game, 1); };
     ws.onmessage = (e) => {
@@ -618,6 +710,10 @@ function show(i) {
     pickWords("Keeps to", "autoarea", ["anywhere", "home", "tree", "here"], ["anywhere in the village", "near home", "by the big tree", "where it took over"]);
     pickWords("That stretch is", "autoreach", ["0.5", "0.75", "1", "1.5", "2", "3", "4"], ["½ screen wide", "¾ screen wide", "1 screen wide", "1½ screens wide", "2 screens wide", "3 screens wide", "4 screens wide"]);
   } else if (i === 1) {
+    h3("ONLINE");
+    pickWords("Most visitors", "vlimit", ["2", "3", "4", "6", "8", "10", "12", "16", "20", "24", "32", "48"], ["2 at once", "3 at once", "4 at once", "6 at once", "8 at once", "10 at once", "12 at once", "16 at once", "20 at once", "24 at once", "32 at once", "48 at once"]);
+    note("The most in your village when it's open to friends (or listed in Public villages). The public squares take 16.");
+    check("Star out strong language (links are always hidden)", "cleanwords");
     h3("FRIENDS & FAMILY");
     note("Some of the folk who come by take these names, know the villager, and wear what's chosen for them (\"any\": picked from the name).");
     check("Only them (no strangers; the animals still come)", "only_friends");
@@ -661,6 +757,9 @@ function show(i) {
     note("The village (the same houses, home where it was), the villager's pockets, stats and scorecard, and the villager themself: their name, the pet, friends & family. Kept in this browser as it goes. The desktop app and the Android app read the same save files.");
     pane.append(button("⇩ export", exportSave), button("⇧ import", () => document.getElementById("o-file").click()), button("✦ a new village", fresh, true));
     pane.append(el("div", { className: "note", innerHTML: 'The apps: <a style="color:var(--gold)" href="https://github.com/dash1101/xmas-tui">github.com/dash1101/xmas-tui</a>' }));
+    h3("UPKEEP");
+    pane.append(button("⟲ reset settings", resetOpts), button("⌫ forget this browser's village", forget, true));
+    note("Forgetting takes the village, the villager and the settings out of this browser (export first to keep them).");
   }
 }
 function openOpts(on) {
@@ -723,6 +822,28 @@ document.getElementById("o-file").onchange = async (e) => {
   show(tab);
   toast(o.name ? `imported ${o.name}'s village` : "imported the village");
 };
+// every setting back to how it starts, keeping the villager's own: name,
+// motto, look, the pet, friends & family
+function resetOpts() {
+  if (!confirm("Every setting back as it first was? (the villager, their look, the pet, friends & family and the village stay)")) return;
+  const o = opts(), keep = {};
+  for (const k of ["name", "motto", "pet", "petcoat", "petname", "wcoat", "what", "whair", "wskin", "wscarf", "friends"]) keep[k] = o[k];
+  setOpts(keep);
+  try { localStorage.removeItem(PLACE); } catch (e) {}
+  if (game) { wasm.destroy(game); game = 0; }
+  build();
+  show(tab);
+  toast("settings reset");
+}
+// everything xmas-tui kept in this browser, gone
+function forget() {
+  if (!confirm("Forget this browser's village? The village, the villager and the settings go (an exported save brings them back).")) return;
+  if (game) { wasm.destroy(game); game = 0; }
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith("xmas-tui")) localStorage.removeItem(k);
+  } catch (e) {}
+  location.reload();
+}
 function fresh() {
   if (!confirm("A new village? (this one's pockets and scorecard go with it)")) return;
   if (game) { wasm.destroy(game); game = 0; }

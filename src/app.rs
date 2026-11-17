@@ -168,6 +168,8 @@ pub struct App {
     /// Whether typed keys can reach us (false behind the Windows desktop icons).
     keyboard: bool,
     pub quit: bool,
+    /// Quit at this app time (after uninstalling: once it's been said).
+    quit_at: Option<f32>,
     /// Direction keys (left, right, up, down): held until this app time.
     held: [f32; 4],
     /// The front-end reports key releases (otherwise a press holds a key
@@ -385,6 +387,7 @@ impl App {
             wallpaper,
             keyboard,
             quit: false,
+            quit_at: None,
             resizing: None,
             bar_drag: None,
             picking: None,
@@ -960,9 +963,14 @@ impl App {
     /// talk line, adding a friend.
     fn friends_click(&mut self, h: crate::widgets::FriendsHit, x: i32, y: i32) {
         use crate::ctxmenu::{CtxMenu, MenuAct};
-        use crate::scene::online::{NetDo, MORE_FRIEND, MORE_MESSAGES};
+        use crate::scene::online::{NetDo, MORE_FRIEND, MORE_MESSAGES, MORE_PUBLIC};
         use crate::widgets::FriendsHit;
         let more = match h {
+            FriendsHit::GoOnline => {
+                self.scene.act(crate::scene::Do::Net(NetDo::On));
+                return;
+            }
+            FriendsHit::Public => MORE_PUBLIC,
             FriendsHit::Friend(i) => MORE_FRIEND + i.min(31) as u8,
             FriendsHit::Messages => {
                 self.scene.messages_read();
@@ -2270,6 +2278,9 @@ impl App {
         }
         let old = self.applied.clone();
         let mut reseed = false;
+        if self.quit_at.is_some_and(|q| self.t() >= q) {
+            self.quit = true;
+        }
         for a in std::mem::take(&mut self.acts) {
             match a {
                 Act::Close => {
@@ -2324,6 +2335,35 @@ impl App {
                     }
                 }
                 Act::Quit => self.quit = true,
+                Act::Uninstall | Act::ResetSettings => self.settings.confirm = Some(a),
+                Act::NotNow => self.settings.confirm = None,
+                Act::UninstallNow => {
+                    self.settings.confirm = None;
+                    let (msg, quit) = platform::uninstall();
+                    let t = self.t();
+                    self.settings.toast = Some((msg, t + 6.0));
+                    if quit {
+                        self.quit_at = Some(t + 2.0);
+                    }
+                }
+                Act::ResetNow => {
+                    self.settings.confirm = None;
+                    self.cfg = self.cfg.reset_keeping_own();
+                    let t = self.t();
+                    self.settings.toast = Some(("settings reset".into(), t + 3.0));
+                }
+                Act::OpenConfig => {
+                    self.commit_city();
+                    if !self.sync.path().exists() {
+                        self.sync.save_now(&self.cfg);
+                    }
+                    platform::open_in_editor(self.sync.path());
+                }
+                Act::OpenLog => {
+                    if let Some(p) = platform::log_path() {
+                        platform::open_in_editor(&p);
+                    }
+                }
                 Act::PopOut => self.pop_out(false),
                 Act::FullScreen if self.windowed => self.fullscreen_toggle = true,
                 Act::FullScreen if self.wallpaper => self.set_wall_full(true),

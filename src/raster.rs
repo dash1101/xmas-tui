@@ -24,7 +24,7 @@ struct Bitmap {
 pub struct Raster {
     pub cw: usize,
     pub ch: usize,
-    fonts: Vec<Font>,
+    fonts: std::sync::Arc<Vec<Font>>,
     px: f32,
     baseline: f32,
     cache: HashMap<char, Bitmap>,
@@ -53,7 +53,10 @@ impl Raster {
     /// `cw` x `ch` pixel cells. The font is sized so DejaVu Sans Mono's
     /// advance fills the cell width.
     pub fn new(cw: usize, ch: usize) -> Self {
-        let fonts: Vec<Font> = FONT_DATA.iter().filter_map(|d| Font::from_bytes(*d, FontSettings::default()).ok()).collect();
+        // (the fonts read once and shared: each one read holds every glyph's
+        // outline, megabytes of it, and a window has a few of these)
+        static FONTS: std::sync::OnceLock<std::sync::Arc<Vec<Font>>> = std::sync::OnceLock::new();
+        let fonts = FONTS.get_or_init(|| std::sync::Arc::new(FONT_DATA.iter().filter_map(|d| Font::from_bytes(*d, FontSettings::default()).ok()).collect())).clone();
         let px = (cw as f32 / 0.602).min(ch as f32 / 1.17);
         let baseline = fonts
             .first()
@@ -358,4 +361,23 @@ pub fn glyph_mask(c: char) -> std::sync::Arc<Mask> {
     let mask = Arc::new(Mask { w: MASK_W, h: MASK_H, a: buf.iter().map(|p| (p & 0xff) as f32 / 255.0).collect() });
     g.1.insert(c, mask.clone());
     mask
+}
+
+#[cfg(test)]
+mod mem_probe {
+    fn rss() -> usize {
+        std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmRSS")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())).unwrap_or(0)
+    }
+
+    #[test]
+    #[ignore]
+    fn how_much_the_fonts_take() {
+        let a = rss();
+        let r = super::Raster::new(9, 19);
+        let b = rss();
+        let r2 = super::Raster::new(12, 25);
+        let c = rss();
+        println!("fonts: first raster +{} KB, second +{} KB", b - a, c - b);
+        drop((r, r2));
+    }
 }

@@ -56,6 +56,8 @@ final class Prefs {
         s.append("walk_speed = ").append(p.getInt("walk_speed", 100) / 100f).append('\n');
         s.append("only_friends = ").append(p.getBoolean("only_friends", false)).append('\n');
         s.append("autopilot = ").append(wallpaper || p.getBoolean("autopilot", false)).append('\n');
+        s.append("village_limit = ").append(Math.max(2, Math.min(48, p.getInt("village_limit", 8)))).append('\n');
+        s.append("clean_words = ").append(p.getBoolean("clean_words", true)).append('\n');
         // (the wallpaper: on autopilot from the start, anywhere)
         if (!wallpaper) {
             s.append("autopilot_after = ").append(num(p.getString("auto_after", "20"), 20f)).append('\n');
@@ -192,6 +194,17 @@ final class Prefs {
     }
 
     /** The wallpaper is the classic one (the snowy dock), or the game's own village on autopilot. */
+    /** Every setting back to how it starts, keeping the villager's own: name, motto, look, pet, friends & family (the village is in the save). */
+    static void resetKeepingOwn(Context c) {
+        SharedPreferences p = get(c);
+        SharedPreferences.Editor e = p.edit();
+        for (String k : p.getAll().keySet()) {
+            boolean own = k.equals("name") || k.equals("motto") || k.startsWith("wear_") || k.startsWith("pet") || k.equals("friends") || k.equals("game_seen");
+            if (!own) e.remove(k);
+        }
+        e.apply();
+    }
+
     static boolean nativeWallpaper(Context c) {
         return get(c).getString("wall_style", "classic").equals("village");
     }

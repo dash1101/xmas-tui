@@ -79,6 +79,14 @@ pub enum NetDo {
     Messages,
     /// Something said just to someone here (their id).
     Whisper(u32),
+    /// The link(s) hidden in a message (its place in the messages, newest
+    /// first): shown, and copied.
+    ShowLink(u8),
+    /// Public villages: into a square, into a listed village (its place in
+    /// the list), this villager's own open village listed for anyone (or not).
+    Square(u8),
+    Listed(u8),
+    ListMine(bool),
 }
 
 /// What a line of typing is for (the front end asks for it, see
@@ -273,6 +281,8 @@ impl Rules {
 /// few lines.
 #[derive(Clone, Debug, Default)]
 pub struct FriendsView {
+    /// Going online at all (off: the widget offers to).
+    pub online: bool,
     pub connected: bool,
     pub friends: Vec<(String, u8, usize)>,
     pub unread: u32,
@@ -286,6 +296,8 @@ pub struct FriendsView {
 pub struct Line {
     pub at: i64,
     pub text: String,
+    /// Links taken out of it (shown only when asked for).
+    pub links: Vec<String>,
 }
 
 /// The more-menu numbers for the online menus (see `more_menu`).
@@ -297,6 +309,7 @@ pub const MORE_FRIENDS: u8 = 14;
 pub const MORE_GROUPS: u8 = 15;
 pub const MORE_GROUP: u8 = 16;
 pub const MORE_MESSAGES: u8 = 29;
+pub const MORE_PUBLIC: u8 = 30;
 pub const MORE_FRIEND: u8 = 32;
 pub const MORE_OTHER: u8 = 64;
 
@@ -352,6 +365,8 @@ pub struct NetFight {
 /// being looked at, what the front end's been asked to do.
 #[derive(Default)]
 pub struct Social {
+    /// Public villages looked at (or about to be): listen for how they are.
+    pub want_public: std::cell::Cell<bool>,
     pub wear: crate::config::FriendCfg,
     pub motto: String,
     pub asked: Vec<Asked>,
@@ -625,6 +640,12 @@ impl Scene {
 
     /// Each frame: the online side moves on, and what it heard is shown.
     pub(super) fn update_online(&mut self, dt: f32, t: f32) {
+        if self.social.want_public.replace(false) {
+            self.online.watch_public();
+        }
+        // (the villager's own settings for being online)
+        self.online.limit = (self.cfg.village_limit as usize).clamp(2, crate::net::MAX_LIMIT);
+        self.online.clean_words = self.cfg.clean_words;
         let name = if self.you_name.trim().is_empty() { "a neighbour".to_string() } else { self.you_name.trim().to_string() };
         self.online.set_name(&name);
         if t >= self.social.next_card {
@@ -701,8 +722,12 @@ impl Scene {
 
     /// A line in the messages.
     fn log_line(&mut self, text: String, to_me: bool) {
+        self.log_line_with(text, to_me, vec![]);
+    }
+
+    fn log_line_with(&mut self, text: String, to_me: bool, links: Vec<String>) {
         let at = crate::clock::now().timestamp();
-        self.social.log.push(Line { at, text });
+        self.social.log.push(Line { at, text, links });
         if self.social.log.len() > 60 {
             self.social.log.remove(0);
         }
@@ -731,6 +756,9 @@ impl Scene {
             let room = inn.kind().title();
             return if inn.home && !matches!(inn.kind(), interior::RoomKind::Games | interior::RoomKind::Igloo) { "at home".into() } else { room.into() };
         }
+        if let Some((name, _)) = self.online.square() {
+            return name;
+        }
         if self.online.guest_seed().is_some() {
             if let Some((_, o)) = self.online.others().into_iter().find(|(_, o)| o.host) {
                 return format!("{}'s village", o.name);
@@ -745,9 +773,6 @@ impl Scene {
 
     /// What the friends widget shows (None: not online).
     pub fn friends_view(&self) -> Option<FriendsView> {
-        if !self.online.wanted() {
-            return None;
-        }
         let mut friends: Vec<(String, u8, usize)> = self
             .online
             .friends()
@@ -768,7 +793,7 @@ impl Scene {
         let n = self.social.log.len();
         let lines = self.social.log[n.saturating_sub(3)..].iter().map(|l| l.text.clone()).collect();
         let here = if self.online.village().is_some() { self.online.others().len() + 1 } else { 0 };
-        Some(FriendsView { connected: self.online.link() == Link::On, friends, unread: self.social.unread, lines, here })
+        Some(FriendsView { online: self.online.wanted(), connected: self.online.link() == Link::On, friends, unread: self.social.unread, lines, here })
     }
 
     pub fn messages_read(&mut self) {
@@ -877,9 +902,9 @@ impl Scene {
     pub(super) fn on_event(&mut self, e: Event, t: f32) {
         match e {
             Event::Note(s) => self.post(s),
-            Event::Mail { from, text } => {
+            Event::Mail { from, text, links } => {
                 self.post(format!("✉ {from}: {text}"));
-                self.log_line(format!("✉ {from}: {text}"), true);
+                self.log_line_with(format!("✉ {from}: {text}"), true, links);
                 self.chime();
             }
             Event::Pinged(name) => {
@@ -893,15 +918,15 @@ impl Scene {
                     self.chime();
                 }
             }
-            Event::Whispered { id, name, text } => {
+            Event::Whispered { id, name, text, links } => {
                 let _ = id;
                 self.post(format!("✉ {name} (just to you): {text}"));
-                self.log_line(format!("✉ {name} (just to you): {text}"), true);
+                self.log_line_with(format!("✉ {name} (just to you): {text}"), true, links);
                 self.chime();
             }
-            Event::GroupSaid { group, name, text } => {
+            Event::GroupSaid { group, name, text, links } => {
                 self.post(format!("#{group} {name}: {text}"));
-                self.log_line(format!("#{group} {name}: {text}"), true);
+                self.log_line_with(format!("#{group} {name}: {text}"), true, links);
                 self.chime();
             }
             Event::Wanted { id, name, key, value, admin } => {
@@ -949,12 +974,12 @@ impl Scene {
                 }
             }
             Event::Home => self.village_switch = Some(None),
-            Event::Said { id, text } => {
+            Event::Said { id, text, links } => {
                 if let Some(o) = self.online.other(id) {
                     let name = o.name.clone();
                     let (x, y) = self.local(o.shown.0, o.shown.1);
                     self.director.say(x.round() as i32, y as i32 - 4, &text, t, 4.0, 6);
-                    self.log_line(format!("☺ {name}: {text}"), true);
+                    self.log_line_with(format!("☺ {name}: {text}"), true, links);
                 }
             }
             Event::Threw { id, x, y, vx, vy } => {
@@ -1684,7 +1709,11 @@ impl Scene {
         }
         if let Some((code, host)) = self.online.village() {
             let n = self.online.others().len();
-            let s = if host { format!(" ⌂ village open: {code} · {} here ", n + 1) } else { format!(" ⌂ a shared village · {} here ", n + 1) };
+            let s = match (self.online.square(), self.online.headcount()) {
+                (Some((name, _)), Some((n, most))) => format!(" ⌂ {name} · {n} of {most} here "),
+                _ if host => format!(" ⌂ village open: {code} · {} here ", n + 1),
+                _ => format!(" ⌂ a shared village · {} here ", n + 1),
+            };
             wide = wide.max(f.text(x0, y, &s, Rgb::hex(0xffd36b), bg, 0.0) - x0);
             y += 1;
         }
@@ -1770,15 +1799,20 @@ impl Scene {
     pub fn online_menu(&self) -> (String, Vec<(String, Do)>) {
         let o = &self.online;
         let mut v: Vec<(String, Do)> = vec![];
+        // (the friends menu open: how the public villages are, soon wanted)
+        self.social.want_public.set(true);
         if !o.wanted() {
             v.push(("● go online: friends, messages, shared villages".into(), Do::Net(NetDo::On)));
+            v.push(("⌂ public villages: drop in, anyone's welcome ▸".into(), Do::More(MORE_PUBLIC)));
             v.push(("★ my profile card".into(), Do::Net(NetDo::MyCard)));
             v.push(("⇄ my devices (one villager on all of them) ▸".into(), Do::More(MORE_DEVICES)));
             v.push(("☺ villagers on this device ▸".into(), Do::More(MORE_VILLAGERS)));
             return ("friends & online".into(), v);
         }
-        let title = match o.link() {
-            Link::On => "friends & online ●".to_string(),
+        let title = match (o.link(), o.headcount(), o.square()) {
+            (Link::On, Some((n, most)), Some((name, _))) => format!("{name} · {n} of {most} here"),
+            (Link::On, Some((n, most)), None) => format!("friends & online ● · {n} of {most} here"),
+            (Link::On, None, _) => "friends & online ●".to_string(),
             _ => "friends & online (connecting…)".to_string(),
         };
         // asked: yes or no
@@ -1795,6 +1829,9 @@ impl Scene {
         }
         if !o.others().is_empty() {
             v.push((format!("☺ with the {} here: play, wave, cards ▸", o.others().len() + 1), Do::More(MORE_PEOPLE)));
+        }
+        if o.village().is_none() {
+            v.push(("⌂ public villages: drop in, anyone's welcome ▸".into(), Do::More(MORE_PUBLIC)));
         }
         v.push(("✎ talk… (/ · @name: to one person)".into(), Do::Net(NetDo::Chat)));
         let unread = self.social.unread;
@@ -1819,6 +1856,7 @@ impl Scene {
             Some((_, false)) => {
                 v.push(("✎ say something to everyone…".into(), Do::Net(NetDo::Say)));
                 v.push(("⌂ home again".into(), Do::Net(NetDo::Leave)));
+                v.push(("⌂ public villages ▸".into(), Do::More(MORE_PUBLIC)));
             }
             None => {
                 v.push(("⌂ open this village to friends (play together)".into(), Do::Net(NetDo::Host)));
@@ -1896,15 +1934,54 @@ impl Scene {
     }
 
     /// The messages: the last few dozen, newest first.
+    /// Public villages: the squares (anyone can walk in; always there), and
+    /// villages their hosts have listed; this villager's own, listed or not.
+    fn public_menu(&self) -> (String, Vec<(String, Do)>) {
+        self.social.want_public.set(true);
+        let o = &self.online;
+        let mut v: Vec<(String, Do)> = vec![];
+        let on = o.link() == Link::On;
+        for (i, (name, n)) in o.squares().into_iter().enumerate() {
+            let here = match (on, n) {
+                (false, _) => "anyone's welcome".to_string(),
+                (true, 0) => "nobody yet: be the first".to_string(),
+                (true, 1) => "1 here".to_string(),
+                (true, n) => format!("{n} here"),
+            };
+            v.push((format!("⌂ {name} · {here}"), Do::Net(NetDo::Square(i as u8))));
+        }
+        let listed = o.listings();
+        if !listed.is_empty() {
+            for (k, l) in listed.iter().enumerate().take(12) {
+                let full = l.n >= l.limit;
+                v.push((format!("⌂ {} · {} of {}{}", l.name, l.n, l.limit, if full { " (full)" } else { "" }), Do::Net(NetDo::Listed(k as u8))));
+            }
+        } else if on {
+            v.push(("(no villagers' own villages listed right now)".into(), Do::More(MORE_PUBLIC)));
+        }
+        if o.village().is_some_and(|(_, host)| host) && o.square().is_none() {
+            let mine = o.book.listed;
+            v.push((if mine { "☑ my village is listed here for anyone".into() } else { "☐ list my village here for anyone".into() }, Do::Net(NetDo::ListMine(!mine))));
+        } else if o.village().is_none() {
+            v.push(("⌂ open my village (and list it here for anyone)".into(), Do::Net(NetDo::ListMine(true))));
+        }
+        v.push(("↻ look again".into(), Do::More(MORE_PUBLIC)));
+        ("public villages".into(), v)
+    }
+
     fn messages_menu(&self) -> (String, Vec<(String, Do)>) {
         let mut v: Vec<(String, Do)> = vec![("✎ talk… (/ · @name: to one person)".into(), Do::Net(NetDo::Chat))];
         let now = crate::clock::now().timestamp();
-        for l in self.social.log.iter().rev().take(18) {
+        for (k, l) in self.social.log.iter().rev().take(18).enumerate() {
             let mut s: String = l.text.chars().take(58).collect();
             if l.text.chars().count() > 58 {
                 s.push('…');
             }
             v.push((format!("{s} · {}", ago_short(now - l.at)), Do::Net(NetDo::Messages)));
+            // (a link in it: hidden, unless asked for)
+            if !l.links.is_empty() {
+                v.push((format!("   🔗 show the link{} (copied too)", if l.links.len() > 1 { "s" } else { "" }), Do::Net(NetDo::ShowLink(k as u8))));
+            }
         }
         if self.social.log.is_empty() {
             v.push(("(nothing yet)".into(), Do::Net(NetDo::Messages)));
@@ -2037,6 +2114,7 @@ impl Scene {
             MORE_FRIENDS => self.friends_menu(),
             MORE_GROUPS => self.groups_menu(),
             MORE_MESSAGES => self.messages_menu(),
+            MORE_PUBLIC => self.public_menu(),
             k if (MORE_GROUP..MORE_GROUP + 12).contains(&k) => self.group_menu((k - MORE_GROUP) as usize),
             k if k >= MORE_OTHER => self.other_menu((k - MORE_OTHER) as usize),
             k if k >= MORE_FRIEND => self.friend_menu((k - MORE_FRIEND) as usize),
@@ -2239,6 +2317,43 @@ impl Scene {
                 self.post(if on { format!("⚙ {name} may change the village's settings") } else { format!("⚙ {name} asks first again") });
             }
             NetDo::Messages => self.messages_read(),
+            NetDo::ShowLink(k) => {
+                let n = self.social.log.len();
+                if let Some(l) = (k as usize).checked_add(1).and_then(|k| n.checked_sub(k)).and_then(|i| self.social.log.get_mut(i)) {
+                    let links = l.links.join(" ");
+                    if !links.is_empty() {
+                        for link in &l.links {
+                            l.text = l.text.replacen("🔗link", link, 1);
+                        }
+                        l.links.clear();
+                        self.copy_ask = Some(links.clone());
+                        self.post(format!("🔗 {links} (copied: open it only if you trust who sent it)"));
+                    }
+                }
+            }
+            NetDo::Square(i) => {
+                if self.online.village().is_some() {
+                    self.online.leave_village();
+                }
+                self.online.join_square(i as usize);
+            }
+            NetDo::Listed(k) => {
+                if let Some(l) = self.online.listings().get(k as usize).cloned() {
+                    if self.online.village().is_some() {
+                        self.online.leave_village();
+                    }
+                    let _ = self.online.join(&l.code);
+                }
+            }
+            NetDo::ListMine(on) => {
+                self.online.book.listed = on;
+                self.online.dirty = true;
+                if on && self.online.village().is_none() {
+                    self.net_do(NetDo::Host);
+                } else {
+                    self.post(if on { "⌂ your village is listed in Public villages while it's open" } else { "⌂ your village isn't listed any more (friends and codes still work)" });
+                }
+            }
             NetDo::Whisper(id) => {
                 let name = self.other_name(id);
                 self.text_ask = Some((TextFor::Whisper(id), format!("just to {name}")));

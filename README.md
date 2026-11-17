@@ -41,7 +41,9 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   a device. **Talk** with **/** (*@name* to one person, *@group* to a group's chat room), ping a friend, see who's about
   in the **friends widget**. The host's village is the host's: everyone sees the same folk about in it, and a guest's
   change to its settings is asked of the host (or made, by someone the host lets). On the desktop, the web and a
-  phone alike; opt-in, through a free public relay, sealed end to end.
+  phone alike; opt-in, through the village's own relay (or a free public one), sealed end to end. **Public
+  villages**: squares anyone can walk into, always there, and villages their hosts list for anyone, each with a limit
+  (8 by default, up to 48; a square takes 16).
 - **Play in a browser**: the same village on the web at **[xmas.novalabs.app](https://xmas.novalabs.app/)**,
   with sound, the same menus and settings, and touch controls on a phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
@@ -433,9 +435,22 @@ web) shows what's happening online; a click on it opens friends & online.
   online menu) and say yes, and from then on each sees whether the other is online.
 - **Friends** have a menu of their own (*★ friends*): each one's menu (*write to…*, *ping* — a little tone at their
   end —, *ask into this village*, *into …'s village*, their profile card), adding one, the friend code. The
-  **friends widget** (Settings → Widgets → Friends; while online) shows who's about (● online, ⌂ a village open),
-  the last few messages and a line to talk; a click on a friend opens their menu. Messages show in the post, and all
-  of them in *✉ messages*.
+  **friends widget** (Settings → Widgets → Friends) shows who's about (● online, ⌂ a village open), the last few
+  messages, a line to talk and *⌂ public villages*. A click on a friend opens their menu. Offline, it offers
+  *● go online*. Messages show in the post, and all of them in *✉ messages*.
+- **Public villages** (*⌂ public villages*, in friends & online and on the friends widget; one click, online or not):
+  - **The squares**: North Pole Square, Candy Cane Lane, Frosty Hollow and Pine Peak Lodge. Each is always there,
+    the same village whoever's in it, with how many are about.
+    - The first one in hosts it, and when they go, whoever's next takes over: nobody's sent home.
+    - A square takes 16. A full one opens another copy of itself (#2, #3…), and joining finds the first with room.
+  - **Villagers' villages**: a host can list their open village there for anyone (*list my village here for
+    anyone*), showing how many are in it of how many it takes.
+  - **A village's limit**: Settings → You → *Most visitors* (8 by default, 2 to 48). Past it, a newcomer is told
+    it's full.
+- **What strangers write**:
+  - Links are hidden ("🔗link"), with *show the link* in ✉ messages (it's copied too).
+  - Strong language is starred out unless *star out strong language* is turned off (Settings → You).
+  - Names are tidied the same way.
 - **Talking**: **/** (or *✎ talk*). Plain text is said aloud to everyone in the shared village. *@Sam hello* goes to
   Sam only: a friend anywhere (sealed to them), or someone here who isn't a friend (just to them). *@carols …* goes to
   a group.
@@ -454,8 +469,13 @@ web) shows what's happening online; a click on it opens friends & online.
   glow, the time of day, the sleigh, the folk about…). A guest changing one of those asks the host (*Sam asks:
   snowfall → 2.00×? Y yes · N no*); the host can *let Sam change the village's settings* from Sam's menu, and then
   Sam's changes go straight in. Their own settings are kept for their own village.
-- **How:** everyone talks through a free public MQTT broker (a relay that only passes messages along: broker.emqx.io,
-  then broker.hivemq.com, then test.mosquitto.org; the web page reads [`relays.json`](web/site/relays.json) beside it).
+- **How:** everyone talks through a relay that only passes messages along. The village's own comes first
+  ([`relay/`](relay), at xmas-relay.novalabs.app). It's a WebSocket on the web's own port, 443, which school and work
+  networks let through, with limits on everything. Where a network's proxy or filter breaks WebSockets, the same
+  relay is reached over plain HTTPS requests instead (long polling at `/poll`). The free public MQTT brokers follow
+  if it can't be reached: broker.emqx.io, broker.hivemq.com, test.mosquitto.org. The web page reads
+  [`relays.json`](web/site/relays.json) beside it, and `XMAS_RELAY=wss://…` (or `https://…/poll`) puts another relay
+  first.
   Everything is sealed end to end (ChaCha20-Poly1305, keys made from the codes by SHA-256) on topics named by hashes
   of the codes: the relay, or anyone listening, can't read it or tell whose it is, though it does see that some
   device is connected. A friend code is the key to a mailbox and to whether that villager's about, so it's for
@@ -464,8 +484,11 @@ web) shows what's happening online; a click on it opens friends & online.
   shown with control characters and direction tricks taken out, sizes and counts are capped (a relay can't make a
   player hold a huge message, a flood is dropped, a friend can't ask for ten thousand fireworks), and only a
   village's host can close it or say who's about in it.
-- The desktop and the Android app connect over TCP (port 1883), the web page over a secure WebSocket. On Android the
-  game is online; the wallpaper stays off it.
+- The village's own relay is reached over a secure WebSocket from everywhere (or HTTPS long polling). The public
+  brokers are reached over TCP
+  (port 1883) from the desktop and the Android app, and a secure WebSocket from the web page. A relay that takes the
+  connection and then goes nowhere is left for the next after ten seconds. On Android the game is online; the
+  wallpaper stays off it.
 
 ### Playing together
 
@@ -784,6 +807,13 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
   keyboard, and **back to wallpaper** returns it; F11 does both), the KDE lock screen, and updates. In the kitty
   wallpaper a new resolution applies live; if kitty can't change its font, a banner asks before restarting. A
   window also works from the command line: `xmas-tui --windowed` and `xmas-tui --fullscreen`.
+- **Upkeep** (the Desktop tab): **reset settings** (every setting as it first was, keeping the villager, their look,
+  the pet, friends & family, the village, the shelves' folders and where the weather's for), **the settings file**
+  in a text editor, **the log**, and **uninstall…** (it asks first). On Windows it opens the installer's own
+  uninstaller; on Linux it takes away what the installer put in (the service, the program and its link), and a
+  package from apt or a distro is removed the usual way. The settings and the save are kept, should it come back. A
+  phone's Phone tab has *reset settings* and *uninstall…* (the phone's own page for the app); the web's Save tab has
+  *reset settings* and *forget this browser's village*.
 
 **Widget looks.** Like the shelves, every widget panel can have a look of its own: the **classic** panel, **frosted**
 (icy edges with snow piled along the top), a **wooden** frame (a snowy board for the title, a plank along the
