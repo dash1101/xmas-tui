@@ -1,6 +1,7 @@
 //! xmas-relay: the village's own relay for online play. Clients (the
 //! desktop app, the phone app, the web page) speak a little MQTT over a
-//! WebSocket at /mqtt on the public port; the admin console (stats,
+//! WebSocket at /mqtt on the public port (or, where a network breaks
+//! WebSockets, over plain HTTPS requests at /poll: see poll.rs); the admin console (stats,
 //! connections, limits, bans) is on a port of its own, meant to be reached
 //! only through Cloudflare Access.
 //!
@@ -17,6 +18,7 @@
 mod admin;
 mod broker;
 mod codec;
+mod poll;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -37,6 +39,8 @@ pub struct App {
     pub data: PathBuf,
     pub admin_email: Option<String>,
     pub trust_cf: bool,
+    /// Clients on HTTPS long polling (where WebSockets don't get through).
+    pub polls: poll::Polls,
 }
 
 impl App {
@@ -66,6 +70,7 @@ async fn main() {
         data,
         admin_email: std::env::var("ADMIN_EMAIL").ok().filter(|e| !e.trim().is_empty()).map(|e| e.trim().to_lowercase()),
         trust_cf: env("TRUST_CF", "1") != "0",
+        polls: poll::Polls::default(),
     };
     // now and then: kept messages more than a week old forgotten
     {
@@ -77,17 +82,28 @@ async fn main() {
             }
         });
     }
+    // long-polling sessions: the ones over, or left, let go
+    {
+        let p = app.polls.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                p.sweep();
+            }
+        });
+    }
     let public = Router::new()
         .route("/mqtt", get(ws))
         .route("/health", get(|| async { "ok" }))
-        .route("/", get(|| async { "xmas-tui relay: the village's online play goes through here (WebSocket at /mqtt)\n" }))
-        .with_state(app.clone());
+        .route("/", get(|| async { "xmas-tui relay: the village's online play goes through here (WebSocket at /mqtt, or HTTPS long polling at /poll)\n" }))
+        .with_state(app.clone())
+        .merge(poll::router(app.clone()));
     let admin = admin::router(app.clone());
     let port: u16 = env("RELAY_PORT", "8080").parse().unwrap_or(8080);
     let aport: u16 = env("ADMIN_PORT", "8081").parse().unwrap_or(8081);
     let pl = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("the relay's port");
     let al = tokio::net::TcpListener::bind(("0.0.0.0", aport)).await.expect("the admin port");
-    eprintln!("xmas-relay {}: WebSocket on :{port}/mqtt, admin console on :{aport}", env!("CARGO_PKG_VERSION"));
+    eprintln!("xmas-relay {}: WebSocket on :{port}/mqtt (and long polling at /poll), admin console on :{aport}", env!("CARGO_PKG_VERSION"));
     if app.admin_email.is_none() {
         eprintln!("xmas-relay: ADMIN_EMAIL isn't set: the console takes anyone Cloudflare Access lets through");
     }
@@ -122,52 +138,70 @@ async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): Connect
     ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, app, max))
 }
 
-/// One client, from its hello to its goodbye.
+/// A WebSocket client: its frames in and out, through a session.
 async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
-    use codec::In;
     let (mut sink, mut stream) = socket.split();
-    let mut reader = codec::Reader::new(max + 512);
-    // the hello first, soon
-    let hello = tokio::time::timeout(Duration::from_secs(10), async {
+    let queue = app.broker.lock().unwrap_or_else(|e| e.into_inner()).limits().max_queue;
+    let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (down_tx, mut down_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(queue.max(16));
+    let reader = tokio::spawn(async move {
         while let Some(Ok(m)) = stream.next().await {
-            if let Message::Binary(b) = m {
-                reader.feed(&b).ok()?;
-                if let Ok(Some(p)) = reader.next() {
-                    return Some(p);
+            match m {
+                Message::Binary(b) => {
+                    if up_tx.send(b).await.is_err() {
+                        break;
+                    }
                 }
-            } else if let Message::Close(_) = m {
-                return None;
+                Message::Close(_) => break,
+                _ => {}
             }
         }
-        None
-    })
-    .await;
-    let Ok(Some(In::Connect { client, keepalive, will })) = hello else { return };
-    let queue = app.broker.lock().unwrap_or_else(|e| e.into_inner()).limits().max_queue;
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(queue.max(16));
-    let client: String = client.chars().take(64).collect();
-    let (id, _) = app.broker.lock().unwrap_or_else(|e| e.into_inner()).join(ip, client, will, tx);
-    if sink.send(Message::Binary(codec::connack(0))).await.is_err() {
-        app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, false);
-        return;
-    }
-    // what's going out: its own task
+    });
     let writer = tokio::spawn(async move {
-        while let Some(b) = rx.recv().await {
+        while let Some(b) = down_rx.recv().await {
             if sink.send(Message::Binary(b)).await.is_err() {
                 break;
             }
         }
         let _ = sink.close().await;
     });
+    session(up_rx, down_tx, ip, app, max).await;
+    reader.abort();
+    // (what's queued still goes out, then the socket's closed)
+    let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+}
+
+/// One client, from its hello to its goodbye, whichever way its bytes come
+/// (a WebSocket, or HTTPS long polling): what it sends arrives on `up` (it's
+/// gone when that closes), and what goes to it is put on `down`.
+pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::sync::mpsc::Sender<Vec<u8>>, ip: IpAddr, app: App, max: usize) {
+    use codec::In;
+    let mut reader = codec::Reader::new(max + 512);
+    // the hello first, soon
+    let hello = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(b) = up.recv().await {
+            reader.feed(&b).ok()?;
+            if let Ok(Some(p)) = reader.next() {
+                return Some(p);
+            }
+        }
+        None
+    })
+    .await;
+    let Ok(Some(In::Connect { client, keepalive, will })) = hello else { return };
+    let client: String = client.chars().take(64).collect();
+    let (id, _) = app.broker.lock().unwrap_or_else(|e| e.into_inner()).join(ip, client, will, down.clone());
+    if down.send(codec::connack(0)).await.is_err() {
+        app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, false);
+        return;
+    }
+    drop(down);
     // (silent past one and a half times its keep-alive: gone)
     let idle = Duration::from_secs((keepalive.clamp(10, 600) as u64 * 3) / 2);
     let mut clean = false;
     'conn: loop {
-        let next = tokio::time::timeout(idle, stream.next()).await;
-        let bytes = match next {
-            Ok(Some(Ok(Message::Binary(b)))) => b,
-            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Text(_)))) => continue,
+        let bytes = match tokio::time::timeout(idle, up.recv()).await {
+            Ok(Some(b)) => b,
             _ => break,
         };
         if reader.feed(&bytes).is_err() {
@@ -208,5 +242,4 @@ async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
         }
     }
     app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, clean);
-    writer.abort();
 }

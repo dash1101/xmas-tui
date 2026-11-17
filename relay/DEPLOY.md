@@ -6,7 +6,8 @@ game is already at xmas.novalabs.app (its DNS is done).
 
 ## Image
 
-`ghcr.io/dash1101/xmas-relay:1.0.0`, also tagged `:latest`.
+`ghcr.io/dash1101/xmas-relay:1.1.0`, also tagged `:latest`. (1.1.0 adds long polling at
+`/poll`, for networks that break WebSockets; nothing changes on the server's side.)
 - Built for linux/amd64 by the repo's `relay` workflow from `relay/`, whenever it changes.
 - Runs as a non-root user (uid 10001).
 - Has a healthcheck.
@@ -35,7 +36,7 @@ sudo docker compose logs --tail 5    # "WebSocket on :8080/mqtt, admin console o
 
 | hostname | service | access |
 |---|---|---|
-| `xmas-relay.novalabs.app` | `http://localhost:8080` | public, no login (WebSocket at `/mqtt`) |
+| `xmas-relay.novalabs.app` | `http://localhost:8080` | public, no login (WebSocket at `/mqtt`, long polling at `/poll`) |
 | `xmas-admin.novalabs.app` | `http://localhost:8081` | the same Access application as Nova |
 
 ## Environment
@@ -52,6 +53,7 @@ sudo docker compose logs --tail 5    # "WebSocket on :8080/mqtt, admin console o
 
 ```bash
 cd /opt/xmas-relay
+sudo curl -fsSLo compose.yaml https://raw.githubusercontent.com/dash1101/xmas-tui/main/relay/compose.yaml   # the new version's tag
 sudo docker compose pull
 sudo docker compose up -d
 ```
@@ -59,6 +61,8 @@ sudo docker compose up -d
 ## Check
 
 - `curl -s https://xmas-relay.novalabs.app/health` gives `ok`.
+- `curl -s -X POST https://xmas-relay.novalabs.app/poll` gives 32 hex digits (a long-polling
+  session, closed by itself in under a minute).
 - https://xmas-admin.novalabs.app shows "❄ Village relay" after the Access sign-in, and is
   refused without it.
 - `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/` on the server gives

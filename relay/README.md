@@ -13,6 +13,21 @@ It speaks just enough MQTT 3.1.1 over a WebSocket for the village:
 Everything the village sends is sealed end to end, so the relay passes bytes along without
 being able to read them.
 
+## Long polling, where WebSockets don't get through
+
+Some networks' proxies and filters break WebSockets but let ordinary web requests through. For
+those, the same MQTT goes over plain HTTPS requests at `https://xmas-relay.novalabs.app/poll`
+(since 1.1.0), and the apps and the web page fall back to it when the WebSocket fails:
+- `POST /poll` opens a session and answers its id (32 hex digits, the session's only key);
+- `POST /poll/<id>/up` carries MQTT's bytes to the relay, in order, one request after another;
+- `POST /poll/<id>/down` waits up to 20 seconds and answers with whatever's come for the
+  client (answered the moment there's something), and with 410 once the session's over;
+- `POST /poll/<id>/close` ends it.
+
+Each session counts against the same connection limits, and one nobody's asked after for 45
+seconds is closed. Any page may use it (`Access-Control-Allow-Origin: *`); the web page sends
+`text/plain`, so there's no CORS preflight before each request.
+
 ## Limits
 
 Everything has a limit, kept within bounds and adjustable from the console:
@@ -39,7 +54,7 @@ reaches them:
 
 | hostname | service | who |
 |---|---|---|
-| `xmas-relay.novalabs.app` | `http://xmas-relay:8080` | everyone (WebSocket at `/mqtt`, `/health`) |
+| `xmas-relay.novalabs.app` | `http://xmas-relay:8080` | everyone (WebSocket at `/mqtt`, long polling at `/poll`, `/health`) |
 | `xmas-admin.novalabs.app` | `http://xmas-relay:8081` | a Cloudflare Access app allowing only the admin |
 
 Environment:
@@ -54,8 +69,8 @@ Environment:
 ## The console
 
 `xmas-admin.<domain>`:
-- what's happening now (connections, addresses, messages a second, in and out, kept messages
-  by kind);
+- what's happening now (connections, how many by long polling, addresses, messages a second,
+  in and out, kept messages by kind);
 - who's connected (kick, ban);
 - every limit (edit and save; they take hold at once, and "closed" turns new connections
   away);

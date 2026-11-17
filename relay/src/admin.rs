@@ -50,7 +50,7 @@ async fn guard(State(app): State<App>, headers: HeaderMap, req: Request, next: N
 
 async fn stats(State(app): State<App>) -> Json<serde_json::Value> {
     let b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-    Json(json!({ "stats": b.stats(), "limits": b.limits(), "bans": b.kept.bans, "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "stats": b.stats(), "limits": b.limits(), "bans": b.kept.bans, "polling": app.polls.len(), "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn conns(State(app): State<App>) -> Json<serde_json::Value> {
@@ -180,7 +180,7 @@ async function refresh() {
     const s = r.stats;
     $("ver").textContent = "v" + r.version;
     $("up").textContent = "up " + ago(s.uptime_s);
-    const cards = [["connected", s.conns], ["addresses", s.ips], ["messages/s", s.rate.toFixed(1)], ["in", s.msgs_in + " · " + size(s.bytes_in)], ["out", s.msgs_out + " · " + size(s.bytes_out)], ["kept", s.retained + " · " + size(s.retained_bytes)], ["refused", s.refused], ["dropped", s.dropped], ["let go", s.kicked]];
+    const cards = [["connected", s.conns], ["by long polling", r.polling], ["addresses", s.ips], ["messages/s", s.rate.toFixed(1)], ["in", s.msgs_in + " · " + size(s.bytes_in)], ["out", s.msgs_out + " · " + size(s.bytes_out)], ["kept", s.retained + " · " + size(s.retained_bytes)], ["refused", s.refused], ["dropped", s.dropped], ["let go", s.kicked]];
     $("cards").innerHTML = cards.map(([k, v]) => `<div class="card"><i>${k}</i><b>${esc(v)}</b></div>`).join("");
     $("kinds").textContent = "kept by kind: " + (Object.entries(s.kinds).map(([k, n]) => k + " " + n).join(" · ") || "none");
     $("bans").innerHTML = r.bans.map((ip) => `<tr><td>${esc(ip)}</td><td><button data-unban="${esc(ip)}">unban</button></td></tr>`).join("") || `<tr><td class="note">nobody</td></tr>`;

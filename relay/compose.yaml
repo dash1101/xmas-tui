@@ -1,11 +1,11 @@
 # xmas-relay, for /opt/xmas-relay/compose.yaml on the server. Both ports are
 # published on 127.0.0.1 only: the Cloudflare tunnel (on the same machine)
 # reaches them there, and nothing else on the network can.
-#   xmas-relay.novalabs.app → http://localhost:8080   (public: the game's WebSocket at /mqtt)
+#   xmas-relay.novalabs.app → http://localhost:8080   (public: the game's WebSocket at /mqtt, long polling at /poll)
 #   xmas-admin.novalabs.app → http://localhost:8081   (behind Cloudflare Access)
 services:
   xmas-relay:
-    image: ghcr.io/dash1101/xmas-relay:1.0.0
+    image: ghcr.io/dash1101/xmas-relay:1.1.0
     container_name: xmas-relay
     restart: unless-stopped
     ports:
