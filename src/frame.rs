@@ -56,7 +56,7 @@ pub fn glyph_picture(ch: char, fg: Rgb, alpha: f32) -> std::sync::Arc<Picture> {
     if let Some(p) = c.get(&key) {
         return p.clone();
     }
-    if c.len() > 6000 {
+    if c.len() > 2500 {
         c.clear();
     }
     let m = crate::raster::glyph_mask(ch);
@@ -195,6 +195,10 @@ pub struct Placed {
     /// It's drawn at the biggest whole-number scale that fits, crisp, with
     /// its feet on that row. None: fitted into its cells (an icon).
     pub sprite: Option<(f32, f32, f32)>,
+    /// Stretched to fill exactly this rectangle (x, y, w, h: cells, from
+    /// the grid's corner, fractions fine): a zoomed-in letter, filling its
+    /// big cell edge to edge so lines and blocks join up with the next.
+    pub fit: Option<[f32; 4]>,
     /// Cells a panel's been drawn over (that much of it isn't shown).
     pub hidden: Vec<(i32, i32)>,
 }
@@ -218,6 +222,9 @@ impl Placed {
         if let Some(cx) = self.sprite.map(|s| ((s.0 * 8.0) as i32, (s.1 * 8.0) as i32)) {
             cx.hash(&mut h);
         }
+        if let Some(r) = self.fit {
+            r.map(|v| (v * 8.0) as i32).hash(&mut h);
+        }
         let key = (self.pic.id, h.finish());
         if let Some(p) = CUTS.with(|c| c.borrow().get(&key).cloned()) {
             return (!p.rgba.is_empty()).then_some(p);
@@ -225,6 +232,10 @@ impl Placed {
         let (w, hgt) = (self.pic.w, self.pic.h);
         // where each of the picture's pixels lands (in cells)
         let (x0, y0, sx, sy) = match self.sprite {
+            _ if self.fit.is_some() => {
+                let [x, y, fw, fh] = self.fit.unwrap_or_default();
+                (x, y, fw / w.max(1) as f32, fh / hgt.max(1) as f32)
+            }
             Some((cx, feet, rows)) => {
                 let wc = w as f32 / hgt.max(1) as f32 * rows * aspect;
                 (cx - wc / 2.0, feet - rows, wc / w.max(1) as f32, rows / hgt.max(1) as f32)
@@ -266,6 +277,110 @@ impl Placed {
         let s = ((rows * ch as f32 / self.pic.h.max(1) as f32).floor() as usize).max(1);
         let (pw, ph) = ((self.pic.w * s) as f32, (self.pic.h * s) as f32);
         Some(((cx * cw as f32 - pw / 2.0).round() as i32, (feet * ch as f32 - ph).round() as i32, s))
+    }
+
+    /// A fitted picture's pixel rectangle (x, y, w, h), for cells `cw`×`ch`
+    /// pixels: edges on whole pixels, so neighbours meet without a gap.
+    pub fn fit_px(&self, cw: usize, ch: usize) -> Option<(i32, i32, usize, usize)> {
+        let [x, y, w, h] = self.fit?;
+        let (cw, ch) = (cw as f32, ch as f32);
+        let (x0, y0) = ((x * cw).round() as i32, (y * ch).round() as i32);
+        let (x1, y1) = (((x + w) * cw).round() as i32, ((y + h) * ch).round() as i32);
+        Some((x0, y0, (x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize))
+    }
+
+    /// Draw a fitted picture into `buf` (the grid's corner at (ox, oy));
+    /// false if it isn't one (the caller draws it its own way).
+    pub fn draw_fitted(&self, buf: &mut [u32], stride: usize, ox: i32, oy: i32, cw: usize, ch: usize) -> bool {
+        let Some((x, y, w, h)) = self.fit_px(cw, ch) else { return false };
+        if w > 0 && h > 0 {
+            self.pic.fitted(w, h).blit_scaled(buf, stride, ox + x, oy + y, 1);
+        }
+        true
+    }
+}
+
+thread_local! {
+    /// Pictures resized to fit (a zoomed letter at this zoom's size), kept
+    /// while they're shown.
+    static FITTED: std::cell::RefCell<std::collections::HashMap<(u64, usize, usize), std::sync::Arc<Picture>>> = Default::default();
+}
+
+impl Picture {
+    /// This picture resized to exactly `w`×`h` (smoothly: averaged down,
+    /// blended up), kept for reuse.
+    pub fn fitted(&self, w: usize, h: usize) -> std::sync::Arc<Picture> {
+        let key = (self.id, w, h);
+        if let Some(p) = FITTED.with(|c| c.borrow().get(&key).cloned()) {
+            return p;
+        }
+        let p = std::sync::Arc::new(Picture::new(w, h, self.resample(w, h)));
+        FITTED.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() > 4000 {
+                c.clear();
+            }
+            c.insert(key, p.clone());
+        });
+        p
+    }
+
+    /// The pixels resized to `w`×`h` (straight alpha in and out; colours
+    /// weighted by how solid they are): each new pixel the average of the
+    /// old ones it covers, or between them when growing.
+    fn resample(&self, w: usize, h: usize) -> Vec<u8> {
+        let mut out = vec![0u8; w * h * 4];
+        if self.w == 0 || self.h == 0 || w == 0 || h == 0 {
+            return out;
+        }
+        let (kx, ky) = (self.w as f32 / w as f32, self.h as f32 / h as f32);
+        // the old pixels each new one spans (with how much of each)
+        let span = |i: usize, k: f32, n: usize| -> Vec<(usize, f32)> {
+            if k <= 1.0 {
+                // growing: between the two nearest
+                let f = ((i as f32 + 0.5) * k - 0.5).clamp(0.0, (n - 1) as f32);
+                let i0 = f as usize;
+                let i1 = (i0 + 1).min(n - 1);
+                vec![(i0, 1.0 - f.fract()), (i1, f.fract())]
+            } else {
+                let (a, b) = (i as f32 * k, (i as f32 + 1.0) * k);
+                let mut v = vec![];
+                let mut j = a.floor() as usize;
+                while (j as f32) < b && j < n {
+                    let cover = (b.min(j as f32 + 1.0) - a.max(j as f32)).max(0.0);
+                    if cover > 0.0 {
+                        v.push((j, cover / k));
+                    }
+                    j += 1;
+                }
+                v
+            }
+        };
+        let xs: Vec<Vec<(usize, f32)>> = (0..w).map(|x| span(x, kx, self.w)).collect();
+        for y in 0..h {
+            let ys = span(y, ky, self.h);
+            for (x, xs) in xs.iter().enumerate() {
+                let mut c = [0f32; 4];
+                for &(sy, wy) in &ys {
+                    for &(sx, wx) in xs {
+                        let i = (sy * self.w + sx) * 4;
+                        let a = self.rgba[i + 3] as f32 * wx * wy;
+                        c[0] += self.rgba[i] as f32 * a;
+                        c[1] += self.rgba[i + 1] as f32 * a;
+                        c[2] += self.rgba[i + 2] as f32 * a;
+                        c[3] += a;
+                    }
+                }
+                if c[3] > 0.0 {
+                    let o = (y * w + x) * 4;
+                    out[o] = (c[0] / c[3]).round().min(255.0) as u8;
+                    out[o + 1] = (c[1] / c[3]).round().min(255.0) as u8;
+                    out[o + 2] = (c[2] / c[3]).round().min(255.0) as u8;
+                    out[o + 3] = c[3].round().min(255.0) as u8;
+                }
+            }
+        }
+        out
     }
 }
 
@@ -471,7 +586,7 @@ impl Frame {
         if x + cols < 0 || y + rws < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return;
         }
-        self.pictures.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((cx, feet, rows)), hidden: vec![] });
+        self.pictures.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((cx, feet, rows)), fit: None, hidden: vec![] });
     }
 
     /// A picture over `cols`×`rows` cells at (x, y) (the cells under it are
@@ -483,7 +598,7 @@ impl Frame {
             let w = self.w;
             let ui = (y..y + rows).any(|yy| (x..x + cols).any(|xx| self.glyph[yy as usize * w + xx as usize].is_some_and(|g| g.ui)));
             if !ui {
-                self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None, hidden: vec![] });
+                self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None, fit: None, hidden: vec![] });
             }
         }
     }
@@ -735,6 +850,13 @@ impl Frame {
 
     fn zoom_pictures_only(&mut self, z: f32, x0: f32, y0: f32, aspect: f32) {
         for p in &mut self.pictures {
+            if let Some([x, y, w, h]) = p.fit {
+                let r = [(x - x0) * z, (y - y0) * z, w * z, h * z];
+                (p.x, p.y) = (r[0].floor() as i32, r[1].floor() as i32);
+                (p.cols, p.rows) = ((r[0] + r[2]).ceil() as i32 - p.x, (r[1] + r[3]).ceil() as i32 - p.y);
+                p.fit = Some(r);
+                continue;
+            }
             match p.sprite {
                 Some((cx, feet, rows)) => {
                     let (cx, feet, rows) = ((cx - x0) * z, (feet - y0) * z, rows * z);
@@ -832,13 +954,14 @@ impl Frame {
                     Bg::Mix(c, a) => self.fill_rect(px, py, z, 2.0 * z, c, a),
                 }
                 if letters && g.ch != ' ' && g.alpha > 0.0 {
+                    // (filling the big cell exactly: a line or a block runs
+                    // on into the next one, as it does at 1×)
                     let pic = glyph_picture(g.ch, g.fg, g.alpha);
-                    let (scx, feet, rows) = (px + z * 0.5, py / 2.0 + z, z);
-                    let wc = pic.w as f32 / pic.h.max(1) as f32 * rows * self.cell_aspect;
-                    let (x, y) = ((scx - wc / 2.0).floor() as i32, (feet - rows).floor() as i32);
-                    let (cols, rws) = ((scx + wc / 2.0).ceil() as i32 - x, feet.ceil() as i32 - y);
+                    let (fx, fy) = (px, py / 2.0);
+                    let (x, y) = (fx.floor() as i32, fy.floor() as i32);
+                    let (cols, rws) = ((fx + z).ceil() as i32 - x, (fy + z).ceil() as i32 - y);
                     if x + cols >= 0 && y + rws >= 0 && x < self.w as i32 && y < self.h as i32 {
-                        self.zoom_glyphs.push(Placed { x, y, cols, rows: rws, pic, sprite: Some((scx, feet, rows)), hidden: vec![] });
+                        self.zoom_glyphs.push(Placed { x, y, cols, rows: rws, pic, sprite: None, fit: Some([fx, fy, z, z]), hidden: vec![] });
                     }
                 } else {
                     self.big_glyph(px, py, z, 2.0 * z, g.ch, g.fg, g.alpha);

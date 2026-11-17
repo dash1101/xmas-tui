@@ -56,6 +56,12 @@ final class Prefs {
         s.append("walk_speed = ").append(p.getInt("walk_speed", 100) / 100f).append('\n');
         s.append("only_friends = ").append(p.getBoolean("only_friends", false)).append('\n');
         s.append("autopilot = ").append(wallpaper || p.getBoolean("autopilot", false)).append('\n');
+        // (the wallpaper: on autopilot from the start, anywhere)
+        if (!wallpaper) {
+            s.append("autopilot_after = ").append(num(p.getString("auto_after", "20"), 20f)).append('\n');
+            s.append("autopilot_area = ").append(q(p.getString("auto_area", "anywhere"))).append('\n');
+            s.append("autopilot_reach = ").append(num(p.getString("auto_reach", "1"), 1f)).append('\n');
+        }
         s.append("motto = ").append(q(p.getString("motto", ""))).append('\n');
         s.append("[scene.wear]\n");
         for (String part : new String[] {"coat", "hat", "hair", "skin"}) {
@@ -88,6 +94,16 @@ final class Prefs {
         s.append("ambience = ").append(p.getInt("vol_ambience", 50) / 100f).append('\n');
         s.append("track = ").append(q(p.getString("track", "shuffle"))).append('\n');
         return s.toString();
+    }
+
+    /** A number from a stored choice (or `def`, if it isn't one). */
+    static float num(String v, float def) {
+        try {
+            float f = Float.parseFloat(v);
+            return Float.isNaN(f) || Float.isInfinite(f) ? def : f;
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 
     static String q(String v) {

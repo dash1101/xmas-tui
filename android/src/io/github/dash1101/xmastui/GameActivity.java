@@ -45,10 +45,16 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     private String cfgUsed = "";
     private SurfaceView surface;
     private Controls controls;
+    /** Everything on the screen (the village, the controls, the settings over them). */
+    private FrameLayout root;
+    /** The settings, over the village while they're open (null: shut). */
+    private SettingsPanel settings;
     private volatile boolean running;
     private Thread loop;
     private Thread sound;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    /** The frame rate the loop runs at. */
+    private int loopFps;
     /** When this game last wrote the save (the wallpaper's later saves are picked up). */
     private long savedAt;
 
@@ -60,7 +66,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         if (Build.VERSION.SDK_INT >= 28) {
             getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(3, 5, 15));
         surface = new SurfaceView(this);
         surface.getHolder().addCallback(this);
@@ -160,6 +166,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         running = true;
         final long g = game;
         final int fps = Math.max(15, Math.min(60, Prefs.get(this).getInt("game_fps", 30)));
+        loopFps = fps;
         loop = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -240,6 +247,9 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     protected void onResume() {
         super.onResume();
         immersive();
+        if (controls != null) {
+            controls.rescale();
+        }
         if (game != 0) {
             Native.pause(game, false);
             // back from the settings: what changed, taken in
@@ -345,7 +355,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 if ("wallpaper".equals(ask)) {
                     setWallpaper();
                 } else if ("settings".equals(ask)) {
-                    startActivity(new Intent(GameActivity.this, SettingsActivity.class));
+                    openSettings();
                 } else if (ask != null && ask.startsWith("text:")) {
                     typeLine(ask.substring(5));
                 } else if (ask != null && ask.startsWith("rules:")) {
@@ -424,10 +434,107 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     public void onBackPressed() {
+        if (settings != null) {
+            closeSettings();
+            return;
+        }
         if (game != 0 && Native.back(game)) {
             return;
         }
         super.onBackPressed();
+    }
+
+    // ------------------------------------------------------------ settings
+
+    /** The settings, over the village (as the desktop's panel is): changes show at once. */
+    void openSettings() {
+        if (settings != null) {
+            return;
+        }
+        settings = new SettingsPanel(this, new SettingsPanel.Host() {
+            @Override
+            public void changed() {
+                ui.removeCallbacks(applySettings);
+                ui.postDelayed(applySettings, 150);
+            }
+
+            @Override
+            public void close() {
+                closeSettings();
+            }
+
+            @Override
+            public void wallpaper() {
+                setWallpaper();
+            }
+
+            @Override
+            public void freshVillage() {
+                restartGame();
+            }
+        }, true);
+        root.addView(settings.view(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        settings.view().requestApplyInsets();
+    }
+
+    void closeSettings() {
+        if (settings == null) {
+            return;
+        }
+        // (a name being typed: the keyboard goes too)
+        android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (im != null) {
+            im.hideSoftInputFromWindow(root.getWindowToken(), 0);
+        }
+        root.removeView(settings.view());
+        settings = null;
+        applySettings.run();
+        immersive();
+    }
+
+    /** What was changed in the settings, taken in where the game stands. */
+    private final Runnable applySettings = new Runnable() {
+        @Override
+        public void run() {
+            ui.removeCallbacks(this);
+            controls.rescale();
+            if (game == 0) {
+                return;
+            }
+            String cfg = cfgToml();
+            if (!cfg.equals(cfgUsed)) {
+                Native.configure(game, cfg, size());
+                cfgUsed = cfg;
+            }
+            // a new frame rate: the loop again at it
+            int fps = Math.max(15, Math.min(60, Prefs.get(GameActivity.this).getInt("game_fps", 30)));
+            if (running && fps != loopFps) {
+                stopLoop();
+                startLoop();
+            }
+        }
+    };
+
+    /** A different save in place (imported, or a new village): the game starts again from it. */
+    private void restartGame() {
+        stopLoop();
+        if (game != 0) {
+            Native.forget(game);
+            Native.destroy(game);
+            game = 0;
+        }
+        SurfaceHolder h = surface.getHolder();
+        if (h.getSurface() != null && h.getSurface().isValid() && surface.getWidth() > 0) {
+            surfaceChanged(h, 0, surface.getWidth(), surface.getHeight());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        if (SettingsPanel.onResult(this, req, res, data, this::restartGame)) {
+            return;
+        }
+        super.onActivityResult(req, res, data);
     }
 
     // ------------------------------------------------------------ gamepad
@@ -503,9 +610,19 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         int gw, gh;
         boolean pockets;
         private final Paint fill = new Paint();
-        private final float d = getResources().getDisplayMetrics().density;
+        /** A dp, times the buttons' size (Settings → Village). */
+        private float d = getResources().getDisplayMetrics().density;
         /** One art pixel, in screen pixels. */
-        private final int P = Math.max(2, Math.round(3 * getResources().getDisplayMetrics().density));
+        private int P = Math.max(2, Math.round(3 * getResources().getDisplayMetrics().density));
+
+        /** The buttons' size, as set (taken in again back from the settings). */
+        void rescale() {
+            float k = Math.max(60, Math.min(250, Prefs.get(GameActivity.this).getInt("btn_scale", 100))) / 100f;
+            float dens = getResources().getDisplayMetrics().density;
+            d = dens * k;
+            P = Math.max(2, Math.round(3 * dens * k));
+            invalidate();
+        }
         /** The joystick's pointer, its centre and the thumb. */
         private int stickId = -1;
         private float tx, ty;
@@ -539,6 +656,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
 
         Controls(Context c) {
             super(c);
+            rescale();
             fill.setAntiAlias(false);
             for (int i = 0; i < pressed.length; i++) {
                 pressed[i] = -1;
@@ -733,7 +851,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 1: Native.button(game, Native.JUMP); break;
                 case 2: Native.button(game, Native.SNOWBALL); break;
                 case 3: more(); break;
-                case 4: startActivity(new Intent(GameActivity.this, SettingsActivity.class)); break;
+                case 4: openSettings(); break;
                 case 5: Native.button(game, Native.CENTRE); break;
                 case 6: todo(); break;
                 case 7: Native.online(game); break;

@@ -682,6 +682,8 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
     // the exporter's cells are 9×19 pixels
     frame.cell_aspect = 19.0 / 9.0;
     let mut scene = Scene::new(w, h, seed, &cfg.scene);
+    // (the panels in the look they're set to)
+    scene.set_ui_look(&cfg.ui.look);
     let mut widgets = Widgets::new(cfg);
     // give the data threads a moment to report
     std::thread::sleep(Duration::from_millis(2600));

@@ -9,7 +9,8 @@ use super::ledges::Kind as LKind;
 use super::story::PetAct;
 use super::{pets, Do, Scene};
 
-/// How long the villager is left alone before getting on with things (s).
+/// How long the villager is left alone before getting on with things (s),
+/// unless it's set otherwise (Settings → You).
 pub const IDLE: f32 = 20.0;
 
 #[derive(Default)]
@@ -22,6 +23,10 @@ pub(super) struct Auto {
     pub next_at: f32,
     /// The goal being walked to is autopilot's own.
     pub goal_mine: bool,
+    /// Where the villager was when autopilot took over (keeping "here").
+    pub anchor: Option<f32>,
+    /// On the way back into the stretch it keeps to.
+    pub returning: bool,
     /// How many times each kind of thing was taken up (tests).
     #[cfg(test)]
     pub tried: [u32; 14],
@@ -93,6 +98,7 @@ impl Scene {
     pub fn woke(&mut self) {
         let t = self.now();
         self.auto.touched = t;
+        self.auto.anchor = None;
         if self.auto.plan.is_some() || self.auto.goal_mine {
             self.auto_stop(t);
         }
@@ -101,7 +107,35 @@ impl Scene {
     /// Autopilot is steering the villager right now.
     #[cfg(test)]
     pub fn on_autopilot(&self) -> bool {
-        self.auto.on && self.player.is_some() && self.now() - self.auto.touched >= IDLE
+        self.auto.on && self.player.is_some() && self.now() - self.auto.touched >= self.auto_idle()
+    }
+
+    /// How long the villager's left alone before autopilot takes over.
+    pub(super) fn auto_idle(&self) -> f32 {
+        let s = self.cfg.autopilot_after;
+        if s.is_finite() && s > 0.0 {
+            s.clamp(3.0, 4.0 * 3600.0)
+        } else {
+            IDLE
+        }
+    }
+
+    /// The stretch of the village autopilot keeps to (columns): all of it,
+    /// or so many screens round home, the big tree, or where it took over.
+    pub(super) fn auto_zone(&self) -> (f32, f32) {
+        let ww = self.ww as f32;
+        let tree = self.anchor.0;
+        let mid = match self.cfg.autopilot_area.as_str() {
+            "home" => self.home.and_then(|i| self.village.houses.get(i)).map(|h| h.door() as f32).unwrap_or(tree),
+            "tree" => tree,
+            "here" => self.auto.anchor.or_else(|| self.player.as_ref().map(|p| p.centre())).unwrap_or(tree),
+            _ => return (0.0, ww),
+        };
+        let reach = if self.cfg.autopilot_reach.is_finite() { self.cfg.autopilot_reach.clamp(0.25, 20.0) } else { 1.0 };
+        let half = (reach * self.w as f32 * 0.5).max(20.0).min(ww * 0.5);
+        // (the whole stretch, moved in off the world's ends)
+        let lo = (mid - half).clamp(0.0, (ww - 2.0 * half).max(0.0));
+        (lo, (lo + 2.0 * half).min(ww))
     }
 
     fn auto_stop(&mut self, t: f32) {
@@ -113,6 +147,7 @@ impl Scene {
             self.auto.goal_mine = false;
         }
         self.auto.plan = None;
+        self.auto.returning = false;
         self.auto.next_at = t + 2.0;
         if let Some(p) = &mut self.player {
             p.sprint = false;
@@ -142,8 +177,11 @@ impl Scene {
     /// A frame of autopilot (before the villager moves): the direction keys
     /// it holds, if any (walking to a goal steers itself).
     pub(super) fn autopilot(&mut self, t: f32) -> Option<(f32, f32)> {
-        if !self.auto.on || self.player.is_none() || t - self.auto.touched < IDLE {
+        if !self.auto.on || self.player.is_none() || t - self.auto.touched < self.auto_idle() {
             return None;
+        }
+        if self.auto.anchor.is_none() && self.inside.is_none() && self.trip.is_none() {
+            self.auto.anchor = self.player.as_ref().map(|p| p.centre());
         }
         // at a neighbour's for a game
         if let (Some(Plan::Game { stage, next, until }), true) = (self.auto.plan, self.inside.is_some()) {
@@ -166,6 +204,32 @@ impl Scene {
         }
         if self.goal.is_none() {
             self.auto.goal_mine = false;
+        }
+        // strayed out of the stretch it keeps to (or left there by hand):
+        // whatever it was, back in first
+        if let Some(px) = self.player.as_ref().filter(|p| p.perch.is_none()).map(|p| p.centre()) {
+            let (lo, hi) = self.auto_zone();
+            let out = px < lo - 2.0 || px > hi + 2.0;
+            if self.auto.returning {
+                if !out || self.goal.is_none() {
+                    self.auto.returning = false;
+                    if out {
+                        self.auto.next_at = t + 1.0;
+                    }
+                }
+                return None;
+            }
+            if out && t >= self.auto.next_at {
+                if self.auto.plan.is_some() || self.auto.goal_mine {
+                    self.auto_stop(t);
+                }
+                let x = px.clamp(lo + 6.0, (hi - 6.0).max(lo + 6.0));
+                let y = self.lo_at(x);
+                self.auto_goal(Do::WalkTo(x, y));
+                self.auto.returning = true;
+                self.auto.plan = Some(Plan::Errand { then_e: false, until: t + 60.0 });
+                return None;
+            }
         }
         let Some(plan) = self.auto.plan else {
             if t >= self.auto.next_at {
@@ -389,7 +453,8 @@ impl Scene {
             return Some((0.0, 0.0));
         }
         let away = -dx.signum();
-        let room = if away < 0.0 { px } else { self.ww as f32 - px };
+        let (zlo, zhi) = self.auto_zone();
+        let room = if away < 0.0 { px - zlo } else { zhi - px };
         let (mx, dodge, commit) = if t < commit {
             (dodge, dodge, commit)
         } else if room < 26.0 {
@@ -405,7 +470,8 @@ impl Scene {
     /// Something to do next, from what's about.
     fn auto_pick(&mut self, t: f32) {
         let Some((px, py, berries)) = self.player.as_ref().map(|p| (p.centre(), p.y, p.berries)) else { return };
-        let near = |x: f32| (x - px).abs() < 60.0;
+        let (zlo, zhi) = self.auto_zone();
+        let near = |x: f32| (x - px).abs() < 60.0 && x >= zlo && x <= zhi;
         let people: Vec<(u64, f32, f32, bool)> = self.critters.people().into_iter().filter(|p| near(p.1)).collect();
         let kids: Vec<u64> = people.iter().filter(|p| p.3).map(|p| p.0).collect();
         let animals: Vec<(u64, f32, f32)> = self.critters.animals().into_iter().filter(|a| near(a.1)).collect();
@@ -498,7 +564,7 @@ impl Scene {
                 if self.rng.chance(0.5) {
                     offs.iter_mut().for_each(|o| *o = -*o);
                 }
-                let spot = offs.iter().map(|o| px + o).find_map(|x| {
+                let spot = offs.iter().map(|o| px + o).filter(|&x| x >= zlo + 3.0 && x <= zhi - 3.0).find_map(|x| {
                     let base = (lo(self, x) + 3.0).min(self.h as f32 - 1.0);
                     self.build_spot_free(x, base as i32, half).then_some((x, base))
                 });
@@ -598,6 +664,8 @@ impl Scene {
             // a wander
             _ => {
                 let x = (px + self.rng.range(12.0, 35.0) * if self.rng.chance(0.5) { 1.0 } else { -1.0 }).clamp(4.0, self.ww as f32 - 6.0);
+                // (keeping to its stretch: turning back at the ends)
+                let x = if x < zlo + 4.0 || x > zhi - 6.0 { (2.0 * px - x).clamp(zlo + 4.0, (zhi - 6.0).max(zlo + 4.0)) } else { x };
                 let lo = lo(self, x);
                 let y = self.rng.range(lo, (lo + 6.0).min(self.h as f32 - 2.0)).round();
                 self.auto_goal(Do::WalkTo(x, y));

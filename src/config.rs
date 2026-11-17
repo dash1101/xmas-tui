@@ -439,6 +439,14 @@ pub struct SceneCfg {
     pub player: bool,
     /// Left alone a while, the villager goes about their own day.
     pub autopilot: bool,
+    /// How long they're left alone before autopilot takes over (seconds).
+    pub autopilot_after: f32,
+    /// Where autopilot keeps to: "anywhere" (the whole village), "home"
+    /// (round the villager's house), "tree" (round the big tree) or "here"
+    /// (round wherever it took over).
+    pub autopilot_area: String,
+    /// How big that stretch is, in screens wide.
+    pub autopilot_reach: f32,
     /// Only friends & family (the names set) come by as people; the
     /// animals still do.
     pub only_friends: bool,
@@ -732,7 +740,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
     }
 }
 

@@ -71,6 +71,11 @@ pub fn apply(f: &mut Frame, r: Rect, look: &str, panel: Bg, seed: u32) {
     };
     let grain = |x: i32, y: i32| if h(x * 7 + y * 131, seed) % 5 == 0 { WOOD_DARK } else { WOOD };
     let (x1, y1) = (r.x + r.w - 1, r.y + r.h - 1);
+    // (restyling the panel's own cells covers nothing new: whatever was
+    // under the panel was cut away when it was drawn, and a picture it
+    // shows itself — a game's board — stays)
+    let cover = (f.cover_pictures, f.cover_panels);
+    (f.cover_pictures, f.cover_panels) = (false, false);
     for y in r.y..=y1 {
         for x in r.x..=x1 {
             let Some(g) = f.get_g(x, y) else { continue };
@@ -127,6 +132,7 @@ pub fn apply(f: &mut Frame, r: Rect, look: &str, panel: Bg, seed: u32) {
             }
         }
     }
+    (f.cover_pictures, f.cover_panels) = cover;
     // on top: snow (frosted, wood), or the bow (gift)
     match look {
         "gift" => {
@@ -169,5 +175,31 @@ mod tests {
         assert!(matches!(f.get_g(r.x + 1, r.y + 2).unwrap().bg, Bg::Mix(..)));
         assert_eq!(f.get_g(5, 3).unwrap().ch, 's', "the title stays");
         assert_eq!(f.get_g(r.x + r.w / 2, r.y - 1).unwrap().ch, '✿', "a bow on top");
+    }
+
+    /// A game's board is a picture on its panel: dressing the panel up
+    /// afterwards mustn't cut it away (the frosted look left an empty
+    /// table).
+    #[test]
+    fn a_panels_own_picture_survives_its_look() {
+        for look in ["frosted", "wood", "gift"] {
+            let mut f = Frame::new(40, 20);
+            f.cover_pictures = true;
+            let panel = Bg::Mix(pal::UI_PANEL, 0.95);
+            let r = Rect { x: 2, y: 2, w: 30, h: 14 };
+            // something of the village's under the panel (hidden by it)
+            let pic = std::sync::Arc::new(crate::frame::Picture::new(2, 2, vec![255; 16]));
+            f.picture(5, 5, 2, 2, pic.clone());
+            for y in r.y..r.y + r.h {
+                for x in r.x..r.x + r.w {
+                    f.put_g(x, y, Glyph::new(' ', pal::UI_BORDER).bg(panel));
+                }
+            }
+            // the board, then the look
+            f.picture(10, 4, 8, 6, pic);
+            apply(&mut f, r, look, panel, 1);
+            assert!(!f.pictures[0].hidden.is_empty(), "{look}: what's under the panel stays hidden");
+            assert!(f.pictures[1].hidden.is_empty(), "{look}: the board was cut away");
+        }
     }
 }

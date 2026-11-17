@@ -1,6 +1,6 @@
 [package]
 name = "xmas-tui"
-version = "1.19.0"
+version = "1.20.0"
 edition = "2021"
 description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
 license = "MIT"

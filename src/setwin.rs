@@ -80,6 +80,9 @@ impl Panel {
         settings.keyboard = true;
         settings.autostart = platform::autostart_get();
         settings.window_fx = window_fx_supported();
+        // (the Windows wallpaper draws its UI bigger when asked; the Linux
+        // one is a terminal, one size of letter)
+        settings.ui_layer_ok = cfg!(windows);
         let mut p = Panel {
             sync: config::FileSync::new(path, &cfg, Duration::from_millis(500)),
             cfg,
@@ -98,6 +101,16 @@ impl Panel {
         let (w, h) = p.grid();
         p.resize(w, h);
         p
+    }
+
+    /// How much bigger this window's cells are drawn: the UI size, where
+    /// the wallpaper honours it (Windows).
+    pub fn ui_k(&self) -> f64 {
+        if cfg!(windows) {
+            self.cfg.ui.scale.clamp(1.0, 2.5) as f64
+        } else {
+            1.0
+        }
     }
 
     /// Cells needed to show the whole panel plus the backdrop margin.
@@ -465,11 +478,30 @@ struct Runner {
     pointer: &'static str,
     mods: ModifiersState,
     focused: bool,
+    /// The UI size the window's laid out for.
+    ui_was: f64,
+}
+
+/// The window's cell size: the display's scale times the UI size, but no
+/// bigger than lets the whole panel fit on the screen.
+fn cell_size(win: &Window, p: &mut Panel) -> (usize, usize) {
+    let base = win.scale_factor();
+    let mut s = base * p.ui_k();
+    if let Some(m) = win.current_monitor().filter(|_| s > base) {
+        let (cols, rows) = p.grid();
+        let (cw, ch) = cell_for(s);
+        let (mw, mh) = (m.size().width as f64, m.size().height as f64);
+        let k = (0.86 * mh / (rows * ch).max(1) as f64).min(0.95 * mw / (cols * cw).max(1) as f64);
+        if k < 1.0 {
+            s = (s * k).max(base);
+        }
+    }
+    cell_for(s)
 }
 
 /// Cell size for a display scale factor (≈ the wallpaper's 10pt kitty cells).
 fn cell_for(scale: f64) -> (usize, usize) {
-    let ch = (18.0 * scale).round().clamp(12.0, 48.0) as usize;
+    let ch = (18.0 * scale).round().clamp(12.0, 64.0) as usize;
     (((ch as f32 * 0.474).round() as usize).max(5), ch)
 }
 
@@ -477,7 +509,7 @@ impl Runner {
     fn layout(&mut self, size: PhysicalSize<u32>) {
         let (Some(g), Some(p)) = (self.gfx.as_mut(), self.panel.as_mut()) else { return };
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let (cw, ch) = cell_for(g.window.scale_factor());
+        let (cw, ch) = cell_size(&g.window, p);
         if (cw, ch) != (g.raster.cw, g.raster.ch) {
             g.raster = Raster::new(cw, ch);
         }
@@ -494,7 +526,7 @@ impl Runner {
     fn fit(&mut self) {
         let (Some(g), Some(p)) = (self.gfx.as_ref(), self.panel.as_mut()) else { return };
         let (cols, rows) = p.grid();
-        let (cw, ch) = cell_for(g.window.scale_factor());
+        let (cw, ch) = cell_size(&g.window, p);
         let want = PhysicalSize::new((cols * cw) as u32, (rows * ch) as u32);
         g.window.set_min_inner_size(Some(want));
         if g.size.0 < want.width || g.size.1 < want.height {
@@ -557,8 +589,16 @@ impl ApplicationHandler for Runner {
         let mut panel = Panel::new(cfg, &self.path);
         let (cols, rows) = panel.grid();
         // cell size from the primary monitor's scale until the window knows its own
-        let scale = el.primary_monitor().map(|m| m.scale_factor()).unwrap_or(1.0);
-        let (cw, ch) = cell_for(scale);
+        let mon = el.primary_monitor();
+        let scale = mon.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+        let (cw, ch) = {
+            // (as big as the UI size, if the panel still fits the screen)
+            let s = scale * panel.ui_k();
+            let (cw, ch) = cell_for(s);
+            let k = mon.as_ref().map(|m| (0.86 * m.size().height as f64 / (rows * ch).max(1) as f64).min(0.95 * m.size().width as f64 / (cols * cw).max(1) as f64)).unwrap_or(1.0);
+            cell_for(if k < 1.0 { (s * k).max(scale) } else { s })
+        };
+        self.ui_was = panel.ui_k();
         let icon = Icon::from_rgba(crate::tray::icon_rgba(64), 64, 64).ok();
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
@@ -662,6 +702,14 @@ impl ApplicationHandler for Runner {
             el.exit();
             return;
         }
+        // the UI size changed: this window's letters too
+        if let (Some(k), Some(size)) = (self.panel.as_ref().map(|p| p.ui_k()), self.gfx.as_ref().map(|g| PhysicalSize::new(g.size.0, g.size.1))) {
+            if (k - self.ui_was).abs() > 1e-3 {
+                self.ui_was = k;
+                self.layout(size);
+                self.fit();
+            }
+        }
         // smooth while in use, gentle in the background
         let dt = Duration::from_millis(if self.focused { 33 } else { 100 });
         let now = Instant::now();
@@ -693,6 +741,7 @@ pub fn run(cfg: Config, path: PathBuf) -> Result<(), Box<dyn std::error::Error>>
         pointer: "",
         mods: ModifiersState::empty(),
         focused: true,
+        ui_was: 1.0,
     };
     el.run_app(&mut r)?;
     Ok(())

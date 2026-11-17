@@ -511,7 +511,7 @@ impl App {
             settings::apply(&mut self.cfg, if up { Act::Inc(F::Scale) } else { Act::Dec(F::Scale) });
             self.settings.toast = Some((format!("resolution {:.2}× detail", settings::resolution(self.cfg.scale)), t + 1.4));
         } else if up || down {
-            self.zoom_by(if up { 1.15 } else { 1.0 / 1.15 });
+            self.zoom_step(if up { 1 } else { -1 });
         } else if c == '0' {
             self.cfg.zoom = 1.0;
             self.settings.toast = Some(("zoom 1.00×".into(), t + 1.4));
@@ -926,13 +926,24 @@ impl App {
 
     /// Zoom in (k > 1) or out, centred on the villager; eased into on screen.
     pub fn zoom_by(&mut self, k: f32) {
-        let t = self.t();
         let mut z = (self.cfg.zoom * k).clamp(1.0, 4.0);
-        if z < 1.04 {
+        if z < 1.02 {
             z = 1.0;
         }
         self.cfg.zoom = (z * 100.0).round() / 100.0;
-        self.settings.toast = Some((format!("zoom {:.1}×  (Ctrl+wheel or pinch · Ctrl 0: back)", ((self.cfg.zoom * 2.0).round() / 2.0).max(1.0)), t + 1.4));
+        self.zoom_toast();
+    }
+
+    /// The next zoom along (`dir` 1: closer, -1: back out): the buttons,
+    /// Ctrl + and Ctrl −.
+    pub fn zoom_step(&mut self, dir: i32) {
+        self.cfg.zoom = settings::zoom_step(self.cfg.zoom, dir);
+        self.zoom_toast();
+    }
+
+    fn zoom_toast(&mut self) {
+        let t = self.t();
+        self.settings.toast = Some((format!("zoom {:.2}×  (Ctrl+wheel or pinch · Ctrl 0: back)", settings::zoom_settled(self.cfg.zoom)), t + 1.4));
     }
 
     /// The wallpaper itself goes full screen (or back behind the desktop):
@@ -1094,20 +1105,24 @@ impl App {
                         self.settings.help = false;
                     }
                 } else if settings::zoom_rects(self.w as i32).0.contains(x, y) {
-                    self.zoom_by(1.0 / 1.25);
+                    self.zoom_step(-1);
                 } else if settings::zoom_rects(self.w as i32).1.contains(x, y) {
-                    self.zoom_by(1.25);
+                    self.zoom_step(1);
                 } else if settings::centre_rect(self.w as i32).contains(x, y) {
                     self.scene.recenter();
                 } else if settings::help_rect(self.w as i32).contains(x, y) {
                     self.settings.help = true;
                 } else if settings::online_rect(self.w as i32).contains(x, y) {
                     self.open_online();
+                } else if settings::gear_rect(self.w as i32).contains(x, y) {
+                    // (the buttons up there always answer: a game, a
+                    // conversation or a card open doesn't take them)
+                    self.settings.open = true;
                 } else if self.scene.prompt_click(x, y) || self.scene.close_card() {
                     // (a question answered, a profile card put away)
                 } else if self.scene.post_click(x, y) {
                     self.open_online();
-                } else if self.scene.at_table() {
+                } else if self.scene.on_table(x, y) {
                     // (its title bar picks it up to move it)
                     if !self.scene.table_grab(x, y) {
                         self.scene.table_click(x, y);
@@ -1115,8 +1130,6 @@ impl App {
                 } else if self.scene.convo_click(x, y) {
                     // answered in the dialogue box (by hand: autopilot stands down)
                     self.scene.woke();
-                } else if settings::gear_rect(self.w as i32).contains(x, y) {
-                    self.settings.open = true;
                 } else if let Some(i) = self.widgets.on_grip(x, y).filter(|_| !self.cfg.layout.locked) {
                     self.resizing = Some((i, crate::widgets::shelf::EDGE_R | crate::widgets::shelf::EDGE_B));
                     self.widgets.dragging = Some(i);
@@ -1131,6 +1144,9 @@ impl App {
                     self.drag = Some((i, x - r.x, y - r.y));
                     self.press_at = (x, y);
                     self.widgets.dragging = Some(i);
+                } else if self.scene.at_table() {
+                    // (sat at a game, a click off the table leaves the
+                    // village alone)
                 } else {
                     self.press = Some((x, y, self.t()));
                     let (wx, wy) = self.world_pt(x, y);
@@ -2459,9 +2475,8 @@ impl App {
         };
         self.zoom_focus = Some(f);
         // the zoom eases to where it's been set
-        // (it settles on a half step: 1, 1.5, 2 … so the pixels come out
-        // even and nothing shimmers)
-        let want = ((self.cfg.zoom * 2.0).round() / 2.0).clamp(1.0, 4.0);
+        // (it settles on a twentieth: 1.1, 1.25 … wherever it was set)
+        let want = settings::zoom_settled(self.cfg.zoom);
         let dz = want - self.zoom_now;
         self.zoom_now = if dz.abs() < 0.01 { want } else { self.zoom_now + dz * (1.0 - (-dt * 9.0).exp()) };
         // (the scene's own panels go on the UI's layer, when it has one)
@@ -2912,6 +2927,25 @@ mod tests {
     /// pointer; Ctrl Shift + steps the resolution by 0.05; Esc opens the
     /// settings when nothing else is open, and the controls card comes and
     /// goes with "?".
+    /// Sat at a game (autopilot's chess with a neighbour, say), the
+    /// buttons up top still answer.
+    #[test]
+    fn the_top_buttons_answer_at_a_table() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-table-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.step();
+        app.scene.sit_at_test_table();
+        assert!(app.scene.at_table());
+        let g = settings::gear_rect(app.w as i32);
+        app.mouse(MouseIn::Down(Btn::Left), g.x + 3, g.y);
+        app.mouse(MouseIn::Up(Btn::Left), g.x + 3, g.y);
+        assert!(app.settings.open, "the settings opened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn zoom_resolution_and_keys() {
         let dir = std::env::temp_dir().join(format!("xmas-app-zoom-{}", std::process::id()));
@@ -2928,13 +2962,13 @@ mod tests {
         assert_eq!(app.world_pt(100, 30), (100, 30));
         app.ctrl_key('=', false);
         app.ctrl_key('=', false);
-        assert!((app.cfg.zoom - 1.32).abs() < 1e-3, "{}", app.cfg.zoom);
-        // (the view eases in to it, settling on a half step: 1.5)
-        for _ in 0..40 {
+        assert!((app.cfg.zoom - 1.2).abs() < 1e-3, "{}", app.cfg.zoom);
+        // (the view eases in to it, settling there)
+        for _ in 0..60 {
             app.step();
         }
         let (z, x0, y0) = app.zoom_xf;
-        assert!(z > 1.0 && z <= 1.5, "{z}");
+        assert!(z > 1.1 && z <= 1.2 + 1e-3, "{z}");
         let (wx, wy) = app.world_pt(150, 30);
         assert_eq!((wx, wy), ((x0 + 150.5 / z) as i32, (y0 + 30.5 / z) as i32));
         app.ctrl_key('0', false);

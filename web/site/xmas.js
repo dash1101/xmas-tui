@@ -26,7 +26,8 @@ const DEFAULTS = {
   time: "auto", snow: 100, wind: 100, aurora: true, glow: 100, size: 100, zoom: 100,
   critters: 100, most: 24, bushes: true, events: 100, sleigh: 4, chattiness: 100, talk_time: 100,
   sound: true, master: 50, music: 60, sfx: 70, ambience: 50, track: "shuffle",
-  look: "classic", uiscale: touchy ? 140 : 100,
+  look: "classic", uiscale: touchy ? 140 : 100, btnscale: 100,
+  autoafter: "20", autoarea: "anywhere", autoreach: "1",
 };
 function opts() {
   let o = {};
@@ -42,6 +43,7 @@ function config(o) {
   s += `time = ${q(o.time)}\nsnow = ${o.snow / 100}\nwind = ${o.wind / 100}\naurora = ${!!o.aurora}\nglow = ${o.glow / 100}\n`;
   s += `critters = ${o.critters / 100}\nmost_at_once = ${o.most | 0}\nbushes = ${!!o.bushes}\nevents = ${o.events / 100}\nsleigh_minutes = ${o.sleigh}\n`;
   s += `chattiness = ${o.chattiness / 100}\ntalk_time = ${o.talk_time / 100}\nonly_friends = ${!!o.only_friends}\nmotto = ${q(o.motto)}\n`;
+  s += `autopilot_after = ${+o.autoafter || 20}\nautopilot_area = ${q(o.autoarea)}\nautopilot_reach = ${+o.autoreach || 1}\n`;
   s += `[scene.wear]\ncoat = ${q(o.wcoat)}\nhat = ${q(o.what)}\nhair = ${q(o.whair)}\nskin = ${q(o.wskin)}\nscarf = ${o.wscarf !== false}\n`;
   s += `[scene.pet]\nkind = ${q(o.pet)}\ncoat = ${q(o.petcoat)}\nname = ${q(o.petname)}\n`;
   for (const f of o.friends) {
@@ -409,7 +411,7 @@ const ICONS = [
 ];
 let stick = null, knob = null, pressed = new Map();
 function layout() {
-  const w = pad.width, h = pad.height, s = Math.min(w, h) / 360;
+  const w = pad.width, h = pad.height, s = Math.min(w, h) / 360 * btnScale();
   return {
     stick: { x: 40 * s + 58 * s, y: h - 36 * s - 58 * s, r: 58 * s },
     btn: [
@@ -507,6 +509,7 @@ function change(k, v, live) {
   const o = opts();
   o[k] = v;
   setOpts(o);
+  if (k === "btnscale") { sizeButtons(); return; }
   if (live) { if (k === "sound" && v) wake(); sound(); return; }
   reconfigure();
 }
@@ -535,6 +538,19 @@ function pick(label, k, items, after) {
   s.value = v == null || !items.includes(v) ? items[0] : v;
   s.onchange = () => { change(k, s.value); if (after) after(); };
   row(label, s);
+}
+function pickWords(label, k, values, words) {
+  const s = el("select", {}, ...values.map((v, i) => el("option", { value: v, textContent: words[i] })));
+  const v = String(opts()[k]);
+  s.value = values.includes(v) ? v : values[0];
+  s.onchange = () => change(k, s.value);
+  row(label, s);
+}
+// the buttons' size (the bar up top, the joystick and buttons on a touch screen)
+function btnScale() { return Math.max(60, Math.min(250, +opts().btnscale || 100)) / 100; }
+function sizeButtons() {
+  document.documentElement.style.setProperty("--btn", btnScale());
+  if (touchy) drawPad();
 }
 function slide(label, k, min, max, unit, live) {
   const v = opts()[k];
@@ -592,6 +608,10 @@ function show(i) {
     }
     slide("Walking speed", "walk", 50, 300, "%");
     check("Autopilot (left alone: off doing their own thing)", "auto");
+    pickWords("Takes over after", "autoafter", ["5", "10", "20", "30", "45", "60", "120", "300", "600", "1800", "3600"],
+      ["5 s alone", "10 s alone", "20 s alone", "30 s alone", "45 s alone", "1 min alone", "2 min alone", "5 min alone", "10 min alone", "30 min alone", "1 h alone"]);
+    pickWords("Keeps to", "autoarea", ["anywhere", "home", "tree", "here"], ["anywhere in the village", "near home", "by the big tree", "where it took over"]);
+    pickWords("That stretch is", "autoreach", ["0.5", "0.75", "1", "1.5", "2", "3", "4"], ["½ screen wide", "¾ screen wide", "1 screen wide", "1½ screens wide", "2 screens wide", "3 screens wide", "4 screens wide"]);
   } else if (i === 1) {
     h3("FRIENDS & FAMILY");
     note("Some of the folk who come by take these names, know the villager, and wear what's chosen for them (\"any\": picked from the name).");
@@ -605,8 +625,10 @@ function show(i) {
     slide("Wind", "wind", 0, 300, "%");
     check("Northern lights", "aurora");
     slide("Size", "size", 50, 200, "%");
-    slide("Zoom", "zoom", 100, 300, "%");
-    slide("UI size (menus, panels, text)", "uiscale", 100, 250, "%");
+    slide("Zoom", "zoom", 100, 400, "%");
+    h3("SIZES");
+    slide("Menus, windows & dialogs", "uiscale", 100, 250, "%");
+    slide("Buttons", "btnscale", 60, 250, "%");
     h3("FOLK & HAPPENINGS");
     slide("Animals & people coming by", "critters", 0, 300, "%");
     slide("The most out at once", "most", 2, 40, "");
@@ -711,6 +733,7 @@ document.getElementById("b-more").onclick = () => { if (!game) return; if (wasm.
 document.getElementById("b-centre").onclick = () => game && wasm.button(game, BTN.CENTRE);
 document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.online(game); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
+sizeButtons();
 document.getElementById("b-opts").onclick = () => openOpts();
 document.getElementById("b-sound").onclick = () => {
   const o = opts();

@@ -304,9 +304,11 @@ impl Term {
         let spots: Vec<(u64, i32, i32, i32, i32)> = self
             .pictures
             .iter()
-            .map(|p| match p.sprite_px(cw, ch) {
-                Some((x, y, k)) => (p.pic.id << 4 | k.min(15) as u64, x, y, -1, k as i32),
-                None => (p.pic.id << 4, p.x, p.y, p.cols, p.rows),
+            .map(|p| match (p.fit_px(cw, ch), p.sprite_px(cw, ch)) {
+                // (a zoomed letter: sent already sized, shown 1:1)
+                (Some((x, y, w, h)), _) => (p.pic.fitted(w.max(1), h.max(1)).id << 4, x, y, -2, 1),
+                (_, Some((x, y, k))) => (p.pic.id << 4 | k.min(15) as u64, x, y, -1, k as i32),
+                _ => (p.pic.id << 4, p.x, p.y, p.cols, p.rows),
             })
             .collect();
         self.frames += 1;
@@ -334,7 +336,12 @@ impl Term {
             if self.sent.insert(spot.0) {
                 // (a sprite is sent already scaled: kitty shows it 1:1)
                 let scaled;
-                let img = if spot.3 < 0 {
+                let fitted;
+                let img = if spot.3 == -2 {
+                    let (_, _, w, h) = p.fit_px(cw, ch).unwrap_or((0, 0, 1, 1));
+                    fitted = p.pic.fitted(w.max(1), h.max(1));
+                    &*fitted
+                } else if spot.3 < 0 {
                     scaled = p.pic.scaled(spot.4 as usize);
                     &scaled
                 } else {

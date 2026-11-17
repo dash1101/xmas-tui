@@ -3952,7 +3952,7 @@ impl Scene {
         // (left alone a while, on autopilot: off doing something, at a
         // steady pace)
         let auto = self.autopilot(t);
-        let steering = self.auto.on && t - self.auto.touched >= autopilot::IDLE;
+        let steering = self.auto.on && t - self.auto.touched >= self.auto_idle();
         if let Some(p) = &mut self.player {
             p.auto_pace = steering;
         }
@@ -5058,7 +5058,7 @@ impl Scene {
         self.critters.draw_top(f, t, glow);
         // what E would do, while the player is out walking
         // (not while autopilot's steering: nobody's there to press it)
-        let steering = self.auto.on && t - self.auto.touched >= autopilot::IDLE;
+        let steering = self.auto.on && t - self.auto.touched >= self.auto_idle();
         if let (Some(p), Some(fc), false) = (&self.player, self.focus, steering) {
             if t - p.active_at < 20.0 {
                 // over the person / bush; for village things, over the player's head
@@ -5606,6 +5606,41 @@ mod tests {
         s.set_autopilot(false);
         run(&mut s, autopilot::IDLE + 5.0);
         assert!(s.auto.plan.is_none());
+    }
+
+    /// Autopilot waits as long as it's set to, and keeps to the stretch
+    /// it's given (walking back into it if it's somewhere else).
+    #[test]
+    fn autopilot_keeps_to_its_stretch_and_its_time() {
+        let mut s = scene();
+        s.cfg.autopilot_after = 5.0;
+        s.cfg.autopilot_area = "tree".into();
+        s.cfg.autopilot_reach = 0.5;
+        s.set_autopilot(true);
+        run(&mut s, 4.0);
+        assert!(!s.on_autopilot(), "not yet");
+        run(&mut s, 2.0);
+        assert!(s.on_autopilot(), "after the 5 s it's set to");
+        let (lo, hi) = s.auto_zone();
+        let tree = s.anchor.0;
+        assert!(lo <= tree && tree <= hi && hi - lo <= s.w as f32 * 0.5 + 1.0, "{lo}..{hi} round {tree}");
+        // left well outside it: back in it goes, and stays
+        let far = if tree - lo > 60.0 { lo - 50.0 } else { (hi + 50.0).min(s.ww as f32 - 10.0) };
+        s.place_player(Some([far, s.lo_at(far)]));
+        let mut back = false;
+        let mut worst = 0.0f32;
+        for _ in 0..240 {
+            run(&mut s, 1.0);
+            let x = s.player.as_ref().unwrap().centre();
+            if x >= lo - 2.0 && x <= hi + 2.0 {
+                back = true;
+            }
+            if back {
+                worst = worst.max(lo - x).max(x - hi);
+            }
+        }
+        assert!(back, "walked back into its stretch");
+        assert!(worst < 8.0, "and kept to it ({worst} out)");
     }
 
     /// A jump held goes about twice as high as a tap; and up again in the

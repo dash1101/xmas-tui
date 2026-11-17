@@ -65,7 +65,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   back (nothing restarts); zoom in on the villager with Ctrl +/-.
 - **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
   animals keep their size on a finer grid. Zoomed in, the village's letters stay letters (drawn big), and **UI size**
-  makes the menus, panels and writing bigger on their own (the window, the Windows wallpaper, a phone, the web).
+  makes the menus, windows, dialogs, buttons and writing bigger on their own (the window, the Windows wallpaper, a
+  phone, the web; on a phone and the web the buttons have a size of their own too).
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.
@@ -185,7 +186,7 @@ every key, Ctrl and all, until something else is clicked).
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
 | **⚙ settings** (top right) | the settings panel; drag its title bar to move it |
 | **F11** | full screen and back: the wallpaper itself, or a popped-out window |
-| **Ctrl +** / **Ctrl -** / **Ctrl 0**, **Ctrl+wheel**, the **− +** buttons | zoom in (up to 4×), out, back to 1× (it eases in) |
+| **Ctrl +** / **Ctrl -** / **Ctrl 0**, **Ctrl+wheel**, the **− +** buttons | zoom in (1.1×, 1.2× … up to 4×), out, back to 1× (it eases in) |
 | **Ctrl Shift +** / **Ctrl Shift -** | resolution: finer or coarser detail, everything the same size |
 
 ## 🌟 What's in the scene
@@ -260,7 +261,9 @@ always be found in Explorer or Dolphin.
   in a dizzy tumble; a jump or hop down lands on its feet.
 - **Back to the villager.** After looking along the village with the wheel (or the map), **C** or the **⌖ centre**
   button (top right) brings the view back to the villager.
-- **Autopilot** (You tab, off by default). Left alone for about 20 seconds, the villager goes about a day of their
+- **Autopilot** (You tab, off by default). Left alone a while (20 seconds unless set otherwise: 5 seconds to an
+  hour), and kept to a stretch of the village if asked (round home, round the big tree, or round wherever it took
+  over, so many screens wide), the villager goes about a day of their
   own: lending the kids a hand with a snowman or igloo (or starting one, and sometimes crawling into the finished
   igloo for a rest), snowballs at the neighbours, berries off a bush for the animals, a chat (answering for
   themselves), a game with the pet, a game of tag with one of the kids (tag, run off, get tagged back), a look round
@@ -630,16 +633,21 @@ game, so each carries on from the other.
   lights, the sky gets a shooting star, and a tap on the dock knocks its snow off.
 - **Day and night** follow the phone's clock (or stay at a chosen time), and the village pans gently as the home
   screens are swiped.
-**Settings** (⚙ in the game, or the gear in the wallpaper picker), a tab at a time as on the desktop:
-- **Village:** the villager's name, the pet, its coat and name, walking speed; time of day, snowfall, wind, the
-  northern lights, the lights' glow, size (50% to 200%; the village keeps its size whichever way the screen is
-  turned) and zoom; how many animals and people come by and the most at once, berry bushes, surprises, Santa's sleigh,
-  chattiness and how long speech bubbles stay up.
-- **Friends:** friends & family, each with a name, a kid or not, and their coat, hat, hair and skin; *only them*.
-- **Sound & looks:** sound on or off, the volumes, the music; the panels' and menus' look (classic, frosted, wood or
-  gift).
-- **Playing:** autopilot, hiding the controls, the frame rate.
-- **Wallpaper:** classic or the village, folk on the classic wallpaper, its frame rate, and the dock.
+**Settings** (⚙ in the game, or the gear in the wallpaper picker): the desktop's panel, made for a phone. It opens
+over the village (a tap outside, the ✕ or Back puts it away) in the same dark-and-gold look, a tab at a time, with
+◂ ▸ to step a setting, candy-cane bars to slide one and [✓] boxes, every row a finger's height; each change shows in
+the village at once.
+- **Village:** time of day, snowfall, wind, the lights' glow, surprises, Santa's sleigh, the northern lights, berry
+  bushes, size (50% to 200%; the village keeps its size whichever way the screen is turned) and zoom (1× to 4×); how
+  many animals and people come by and the most at once, chattiness and how long speech bubbles stay up.
+- **You:** the villager's name, card's line, look and walking speed; autopilot (when it takes over, and where it
+  keeps to); the pet, its coat and name; friends & family, each with a name, a kid or not, and their coat, hat, hair
+  and skin; *only them*.
+- **Sound:** sound on or off, the volumes, the music.
+- **Looks:** the size of the menus, windows and dialogs (this panel too), and of the buttons; the panels' and menus'
+  look (classic, frosted, wood or gift).
+- **Phone:** hiding the controls, the frame rate; the wallpaper (classic or the village, folk, its frame rate) and the
+  dock.
 - **Save:** export a copy, import one (from the desktop or the web too: the village, the pockets, and the villager's
   name, pet and friends), or start a new village.
 
@@ -768,7 +776,7 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
   - snow on the taskbar, with its own pile height
   - light colours (multicolour, warm white, icy blue, candy cane), how many windows get lights, and brightness
 - **Desktop:** setting the village up as the wallpaper (Linux), run at startup, **resolution** (0.5× to 2× in 0.05
-  steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 3×, centred on the villager;
+  steps: more detail, with everything the same size; Ctrl Shift +/-), **zoom** (1× to 4×, centred on the villager;
   Ctrl +/-: the village magnified crisply with a soft glow, people and animals drawn at the bigger size, speech
   bubbles kept readable), the frame rate, **pop out** (the village in a window of its own, to play it like a game;
   the wallpaper rests while it's open) and **full screen** (the wallpaper itself comes out in front, with the

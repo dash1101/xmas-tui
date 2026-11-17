@@ -29,6 +29,9 @@ impl Exporter {
             }
         }
         for p in &self.pictures {
+            if p.draw_fitted(&mut buf, iw, 0, 0, cw, ch) {
+                continue;
+            }
             match p.sprite_px(cw, ch) {
                 Some((x, y, k)) => p.pic.blit_scaled(&mut buf, iw, x, y, k),
                 None => p.pic.blit(&mut buf, iw, p.x as usize * cw, p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),

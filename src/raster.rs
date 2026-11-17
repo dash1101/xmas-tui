@@ -339,8 +339,8 @@ pub struct Mask {
     pub a: Vec<f32>,
 }
 
-const MASK_W: usize = 16;
-const MASK_H: usize = 32;
+const MASK_W: usize = 32;
+const MASK_H: usize = 64;
 
 /// The (cached) coverage mask for a character.
 pub fn glyph_mask(c: char) -> std::sync::Arc<Mask> {

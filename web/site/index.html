@@ -15,7 +15,7 @@
   #pad { width: 100vw; height: 100vh; pointer-events: none; }
   body.touch #pad { pointer-events: auto; }
   .box { position: fixed; background: var(--panel); color: var(--text); border: 1px solid var(--gold); border-radius: 3px; font: 14px/1.45 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace; box-shadow: 0 4px 0 rgba(0,0,0,.35); }
-  #bar { top: 8px; right: 8px; display: flex; gap: 2px; padding: 1px 4px; }
+  #bar { top: 8px; right: 8px; display: flex; gap: 2px; padding: 1px 4px; font-size: calc(14px * var(--btn, 1)); }
   #bar span { cursor: pointer; padding: 0 7px; }
   #bar span:hover { color: var(--gold); }
   #opts { display: none; width: min(94vw, 440px); max-height: min(86vh, 640px); flex-direction: column; }

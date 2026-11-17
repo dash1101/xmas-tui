@@ -599,6 +599,12 @@ impl Table {
         y == y0 && x >= x0 && x < x0 + w
     }
 
+    /// On the table's panel anywhere (clicks there are the game's).
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        let (x0, y0, w) = self.at.get();
+        w > 0 && x >= x0 && x < x0 + w && y >= y0 && y < y0 + 24
+    }
+
     /// Where it's drawn (its top-left).
     pub fn corner(&self) -> (i32, i32) {
         let (x0, y0, _) = self.at.get();

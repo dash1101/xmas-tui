@@ -1066,9 +1066,11 @@ impl Game {
             }
         }
         for p in &u.frame.pictures {
-            match p.sprite_px(u.cw, u.ch) {
-                Some((x, y, k)) => p.pic.blit_scaled(&mut self.fb, stride, self.off.0 as i32 + x, self.off.1 as i32 + y, k),
-                None => p.pic.blit(&mut self.fb, stride, self.off.0 + p.x.max(0) as usize * u.cw, self.off.1 + p.y.max(0) as usize * u.ch, p.cols as usize * u.cw, p.rows as usize * u.ch),
+            if !p.draw_fitted(&mut self.fb, stride, self.off.0 as i32, self.off.1 as i32, u.cw, u.ch) {
+                match p.sprite_px(u.cw, u.ch) {
+                    Some((x, y, k)) => p.pic.blit_scaled(&mut self.fb, stride, self.off.0 as i32 + x, self.off.1 as i32 + y, k),
+                    None => p.pic.blit(&mut self.fb, stride, self.off.0 + p.x.max(0) as usize * u.cw, self.off.1 + p.y.max(0) as usize * u.ch, p.cols as usize * u.cw, p.rows as usize * u.ch),
+                }
             }
             let (x0, y0) = ((p.x.max(0) as usize * u.cw) / scw, (p.y.max(0) as usize * u.ch) / sch);
             let (x1, y1) = ((((p.x + p.cols).max(0) as usize * u.cw).div_ceil(scw)).min(cols), (((p.y + p.rows).max(0) as usize * u.ch).div_ceil(sch)).min(rows));
@@ -1117,6 +1119,9 @@ impl Game {
         }
         self.prev = cells.to_vec();
         for p in &pics {
+            if p.draw_fitted(&mut self.fb, stride, self.off.0 as i32, self.off.1 as i32, cw, ch) {
+                continue;
+            }
             match p.sprite_px(cw, ch) {
                 Some((x, y, k)) => p.pic.blit_scaled(&mut self.fb, stride, self.off.0 as i32 + x, self.off.1 as i32 + y, k),
                 None => p.pic.blit(&mut self.fb, stride, self.off.0 + p.x as usize * cw, self.off.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),

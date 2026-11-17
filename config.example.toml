@@ -5,7 +5,7 @@ fps = 30          # frames per second (lower = less CPU)
 seed = 0          # 0 = the save file's village (a new one the first time); any other number = that layout
 scale = 1.0       # cell size, 0.5..2: smaller = more cells, finer detail, everything the
                   # same size (Settings shows it as resolution = 1 / scale)
-zoom = 1.0        # 1..3: magnify the view, centred on the villager (Ctrl +/-)
+zoom = 1.0        # 1..4: magnify the view, centred on the villager (Ctrl +/-)
 
 [scene]
 aurora = true
@@ -18,6 +18,12 @@ most_at_once = 24     # the most animals & people out at once (1..40)
 bushes = true         # festive berry bushes the animals snack from
 player = true         # the villager walked around with WASD / the arrow keys
 walk_speed = 1.0      # how fast the villager walks (0.25..6)
+autopilot = false     # left alone a while, the villager goes about their own day
+autopilot_after = 20  # seconds left alone before autopilot takes over
+autopilot_area = "anywhere"  # where it keeps to: "anywhere", "home" (round the
+                      # villager's house), "tree" (round the big tree) or "here"
+                      # (round wherever it took over)
+autopilot_reach = 1.0 # how wide that stretch is, in screens
 time = "auto"         # time of day: "auto" (real sunrise & sunset at the weather city),
                       # or "night", "dawn", "morning", "noon", "afternoon", "dusk"
 traffic = "auto"      # side of the road: "auto" (from the weather city), "right" or "left"
@@ -148,7 +154,7 @@ chat = "/"            # talk (@name: to one person, @group: to a group)
 [ui]
 look = "classic"      # the app's own panels, menus and conversations: "classic",
                       # "frosted", "wood" or "gift" (the widgets' looks)
-scale = 1.0           # the menus, panels, widgets and writing this much bigger (1 to
+scale = 1.0           # the menus, windows, dialogs, buttons, widgets and writing this much bigger (1 to
                       # 2.5), the village its own size (the window, the Windows
                       # wallpaper, a phone, the web; a terminal has one size of letter)
 

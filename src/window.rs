@@ -397,6 +397,9 @@ impl Runner {
         }
         g.prev = cells.to_vec();
         for p in &pics {
+            if p.draw_fitted(&mut g.fb, stride, g.offset.0 as i32, g.offset.1 as i32, cw, ch) {
+                continue;
+            }
             match p.sprite_px(cw, ch) {
                 Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
                 None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),
@@ -420,9 +423,11 @@ impl Runner {
                 }
             }
             for p in &ui_pics_now {
-                match p.sprite_px(ucw, uch) {
-                    Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
-                    None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x.max(0) as usize * ucw, g.offset.1 + p.y.max(0) as usize * uch, p.cols as usize * ucw, p.rows as usize * uch),
+                if !p.draw_fitted(&mut g.fb, stride, g.offset.0 as i32, g.offset.1 as i32, ucw, uch) {
+                    match p.sprite_px(ucw, uch) {
+                        Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
+                        None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x.max(0) as usize * ucw, g.offset.1 + p.y.max(0) as usize * uch, p.cols as usize * ucw, p.rows as usize * uch),
+                    }
                 }
                 y0 = y0.min((p.y.max(0) as usize * uch) / ch);
                 y1 = y1.max((((p.y + p.rows).max(0) as usize * uch).div_ceil(ch)).min(rows).saturating_sub(1));

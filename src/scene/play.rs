@@ -372,6 +372,12 @@ impl Scene {
         super::games::Kind::ALL.iter().map(|&k| (format!("{} {} with {}", k.icon(), k.name(), if k.seats() > 2 { &all } else { first }), Do::Game(k))).collect()
     }
 
+    /// Tests: sat at a game of chess, wherever the villager is.
+    #[cfg(test)]
+    pub fn sit_at_test_table(&mut self) {
+        self.table = Some(super::games::Table::with(super::games::Kind::Chess, &["Ivy"], 1));
+    }
+
     /// Sit down at the table for a game with whoever's at home.
     pub(super) fn start_game(&mut self, kind: super::games::Kind) {
         if let Some(old) = self.table.take() {
@@ -391,6 +397,11 @@ impl Scene {
     /// At the table (keys and clicks go to the game).
     pub fn at_table(&self) -> bool {
         self.table.is_some()
+    }
+
+    /// A click on the table's panel (the game's, not what's behind it).
+    pub fn on_table(&self, x: i32, y: i32) -> bool {
+        self.table.as_ref().filter(|_| self.table_shows()).is_some_and(|tb| tb.contains(x, y))
     }
 
     /// The table picked up by its title bar (true): it moves with the

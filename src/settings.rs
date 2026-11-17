@@ -57,6 +57,9 @@ pub enum F {
     Bushes,
     Player,
     Autopilot,
+    AutoAfter,
+    AutoArea,
+    AutoReach,
     OnlyFriends,
     UpdCheck,
     Map,
@@ -245,6 +248,33 @@ const PANEL_H: i32 = 30;
 const SLEIGH_STEPS: [f32; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 10.0, 15.0, 30.0];
 const FPS_STEPS: [f32; 6] = [15.0, 20.0, 24.0, 30.0, 45.0, 60.0];
 const MOST_STEPS: [f32; 14] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 32.0, 40.0];
+/// How long the villager's left alone before autopilot (seconds).
+pub const AUTO_AFTER_STEPS: [f32; 11] = [5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0];
+/// How wide a stretch autopilot keeps to (screens).
+pub const AUTO_REACH_STEPS: [f32; 7] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+/// Where autopilot keeps to.
+pub const AUTO_AREAS: [&str; 4] = ["anywhere", "home", "tree", "here"];
+
+/// Autopilot's wait, in words: "20 s", "2 min", "1 h".
+pub fn auto_after_words(s: f32) -> String {
+    if s >= 3600.0 {
+        format!("{:.0} h", s / 3600.0)
+    } else if s >= 60.0 {
+        format!("{:.0} min", s / 60.0)
+    } else {
+        format!("{s:.0} s")
+    }
+}
+
+/// Where autopilot keeps to, in words.
+pub fn auto_area_words(a: &str) -> &'static str {
+    match a {
+        "home" => "near home",
+        "tree" => "by the big tree",
+        "here" => "where it took over",
+        _ => "anywhere in the village",
+    }
+}
 
 /// A live level bar: `level` is a 0..1 peak, shown on a -48..0 dB scale.
 fn meter_bar(f: &mut Frame, x: i32, y: i32, level: f32, w: i32) {
@@ -298,6 +328,12 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Glow => step(&mut cfg.scene.glow, 0.1 * dir, 0.0, 2.0),
                 F::Events => step(&mut cfg.scene.events, 0.25 * dir, 0.0, 3.0),
                 F::Sleigh => cfg.scene.sleigh_minutes = step_list(&SLEIGH_STEPS, cfg.scene.sleigh_minutes, dir as i32),
+                F::AutoAfter => cfg.scene.autopilot_after = step_list(&AUTO_AFTER_STEPS, cfg.scene.autopilot_after, dir as i32),
+                F::AutoReach => cfg.scene.autopilot_reach = step_list(&AUTO_REACH_STEPS, cfg.scene.autopilot_reach, dir as i32),
+                F::AutoArea => {
+                    let i = AUTO_AREAS.iter().position(|o| *o == cfg.scene.autopilot_area).unwrap_or(0) as i32;
+                    cfg.scene.autopilot_area = AUTO_AREAS[(i + dir as i32).rem_euclid(AUTO_AREAS.len() as i32) as usize].to_string();
+                }
                 F::Fps => cfg.fps = step_list(&FPS_STEPS, cfg.fps, dir as i32),
                 F::SoundMaster => step(&mut cfg.sound.master, 0.05 * dir, 0.0, 1.0),
                 F::SoundMusic => step(&mut cfg.sound.music, 0.05 * dir, 0.0, 1.0),
@@ -336,7 +372,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                     let res = (resolution(cfg.scale) + 0.05 * dir).clamp(0.5, 2.0);
                     cfg.scale = ((1.0 / res) * 10000.0).round() / 10000.0;
                 }
-                F::Zoom => step(&mut cfg.zoom, 0.05 * dir, 1.0, 3.0),
+                F::Zoom => cfg.zoom = zoom_step(cfg.zoom, if dir > 0.0 { 1 } else { -1 }),
                 F::UiScale => {
                     cfg.ui.scale = ((cfg.ui.scale + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0;
                 }
@@ -612,6 +648,9 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Player => "The villager: walk about with WASD or the arrow keys.",
         F::OnlyFriends => "Only the friends & family named here come by as people (the animals still wander through). Off: the village's own folk come by too.",
         F::Autopilot => "Left alone a while, the villager goes about their own day: snowmen and igloos, snowballs, feeding the animals, chats, tag with the kids. Any key takes over again.",
+        F::AutoAfter => "How long the villager's left alone before autopilot takes over.",
+        F::AutoArea => "Where autopilot keeps the villager: anywhere, round their home, round the big tree, or round wherever it took over.",
+        F::AutoReach => "How wide a stretch autopilot keeps to, in screens.",
         F::WalkSpeed => "How fast the villager walks (Shift runs).",
         F::TalkTime => "How long speech bubbles stay up.",
         F::Chatty => "How often people stop to chat and remark on things.",
@@ -631,7 +670,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Units => "°F and mph, or °C and km/h.",
         F::Locked => "Stop the widgets being dragged about by accident.",
         F::Scale => "Finer or coarser detail (more or fewer, smaller or bigger characters).",
-        F::UiScale => "The menus, panels, widgets and writing drawn bigger; the village stays its own size. (The window and the Windows wallpaper; a terminal draws one size of letter.)",
+        F::UiScale => "The menus, windows, dialogs, the buttons up top, the widgets and their writing drawn bigger; the village stays its own size. (The window and the Windows wallpaper; a terminal draws one size of letter.)",
         F::Zoom => "Magnify the whole village.",
         F::Sound => "All of the sound.",
         F::SoundCursor => "A soft sparkle as the pointer moves.",
@@ -662,6 +701,25 @@ fn tip(a: Act) -> Option<&'static str> {
         F::WinLightCount => "How many windows get lights (the ones in front).",
         F::WinLightGlow => "How bright the lights are.",
     })
+}
+
+/// The zooms the buttons (and Ctrl + / −, and Settings) step through:
+/// small steps close to 1×, bigger ones further in.
+pub const ZOOMS: [f32; 13] = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0];
+
+/// The next zoom along from `z` (`dir` 1: closer, -1: further out).
+pub fn zoom_step(z: f32, dir: i32) -> f32 {
+    if dir > 0 {
+        ZOOMS.iter().copied().find(|&s| s > z + 0.01).unwrap_or(4.0)
+    } else {
+        ZOOMS.iter().rev().copied().find(|&s| s < z - 0.01).unwrap_or(1.0)
+    }
+}
+
+/// Where a zoom set by hand (a pinch, the wheel) comes to rest: the
+/// nearest twentieth, 1× to 4×.
+pub fn zoom_settled(z: f32) -> f32 {
+    ((z * 20.0).round() / 20.0).clamp(1.0, 4.0)
 }
 
 /// The settings button: always there, top right.
@@ -1223,6 +1281,20 @@ impl Settings {
         self.hints.push((Rect { x: lx, y: yy, w: 9, h: 1 }, Act::Toggle(F::Autopilot)));
         self.check(f, vx, yy, "left alone, off doing their own thing", Act::Toggle(F::Autopilot), cfg.scene.autopilot);
         yy += 1;
+        if cfg.scene.autopilot {
+            self.stepper(f, lx, vx, yy, "  takes over", F::AutoAfter, &format!("after {} alone", auto_after_words(cfg.scene.autopilot_after)));
+            yy += 1;
+            self.stepper(f, lx, vx, yy, "  keeps to", F::AutoArea, auto_area_words(&cfg.scene.autopilot_area));
+            if cfg.scene.autopilot_area != "anywhere" {
+                let cx = vx + 26;
+                f.text(cx, yy, "wide", pal::UI_TEXT, BG, 0.0);
+                self.arrow(f, cx + 5, yy, '◂', Act::Dec(F::AutoReach));
+                let r = cfg.scene.autopilot_reach;
+                let c = f.text(cx + 7, yy, &format!("{} screen{}", if r.fract() == 0.0 { format!("{r:.0}") } else { format!("{r}") }, if r == 1.0 { "" } else { "s" }), pal::UI_TITLE, BG, 0.0);
+                self.arrow(f, c + 1, yy, '▸', Act::Inc(F::AutoReach));
+            }
+            yy += 1;
+        }
         self.slider(f, lx, vx, yy, "Walk speed", F::WalkSpeed, pct(cfg.scene.walk_speed, 6.0), &format!("{:.2}×", cfg.scene.walk_speed), t);
         yy += 1;
         self.slider(f, lx, vx, yy, "Speech bubbles", F::TalkTime, pct(cfg.scene.talk_time, 3.0), &format!("{:.2}× as long", cfg.scene.talk_time), t);
@@ -1376,8 +1448,7 @@ impl Settings {
         self.arrow(f, e + 1, yy, '▸', Act::Look(9, 1));
         f.text(e + 4, yy, "(shelves: Shelves tab)", pal::UI_DIM, BG, 0.0);
         yy += 1;
-        let size = if self.ui_layer_ok { format!("{:.0}%", cfg.ui.scale * 100.0) } else { format!("{:.0}% (not in a terminal)", cfg.ui.scale * 100.0) };
-        self.stepper(f, lx, vx, yy, "UI size", F::UiScale, &size);
+        self.ui_size_row(f, cfg, lx, vx, yy);
         yy += 2;
         self.section(f, lx, yy, "WEATHER");
         yy += 1;
@@ -1401,6 +1472,13 @@ impl Settings {
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
     }
 
+    /// The size of everything over the village: menus, windows, dialogs,
+    /// the buttons up top, the widgets.
+    fn ui_size_row(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, yy: i32) {
+        let size = if self.ui_layer_ok { format!("{:.0}%  (menus, windows, dialogs, buttons, widgets)", cfg.ui.scale * 100.0) } else { format!("{:.0}% (not in a terminal)", cfg.ui.scale * 100.0) };
+        self.stepper(f, lx, vx, yy, "UI size", F::UiScale, &size);
+    }
+
     /// Resolution, zoom, frame rate, and playing it in a window.
     fn display_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32) -> i32 {
         let res = format!("{:.2}× detail", resolution(cfg.scale));
@@ -1418,6 +1496,8 @@ impl Settings {
             None => format!("{:.0} fps", cfg.fps),
         };
         self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
+        yy += 1;
+        self.ui_size_row(f, cfg, lx, vx, yy);
         yy += 1;
         // play it like a game: in a window of its own, or full screen
         if !self.standalone {
