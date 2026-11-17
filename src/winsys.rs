@@ -515,7 +515,36 @@ pub fn take_focus(hwnd: HWND) -> bool {
             return false;
         }
         SetFocus(hwnd);
+        // (and still under the icons)
+        keep_under_icons(hwnd);
         GetFocus() == hwnd
+    }
+}
+
+/// Keep the wallpaper under the desktop icons (a child of Progman beside
+/// the icons' view): taking the keyboard, or Explorer shuffling its
+/// children, can lift it over them, and the icons vanish behind the
+/// village. Cheap; returns true if it had to.
+pub fn keep_under_icons(hwnd: HWND) -> bool {
+    unsafe {
+        let parent = GetAncestor(hwnd, GA_PARENT);
+        if parent.is_null() || class_of(parent) != "Progman" {
+            return false;
+        }
+        let defview = FindWindowExW(parent, std::ptr::null_mut(), wide("SHELLDLL_DefView").as_ptr(), std::ptr::null());
+        if defview.is_null() {
+            return false;
+        }
+        // which comes first, top down: us (wrong) or the icons
+        let mut w = GetWindow(parent, GW_CHILD);
+        while !w.is_null() && w != hwnd && w != defview {
+            w = GetWindow(w, GW_HWNDNEXT);
+        }
+        if w != hwnd {
+            return false;
+        }
+        SetWindowPos(hwnd, defview, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        true
     }
 }
 

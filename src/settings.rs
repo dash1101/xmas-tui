@@ -26,6 +26,8 @@ pub enum F {
     TimeOfDay,
     Scale,
     UiScale,
+    WidgetsScale,
+    ButtonsScale,
     Zoom,
     Fps,
     Events,
@@ -187,6 +189,9 @@ pub struct Settings {
     banner: Vec<(Rect, Act)>,
     pub rect: Option<Rect>,
     pub hover: (i32, i32),
+    /// The pointer over the buttons up top (in their own cells: they can
+    /// be a size of their own).
+    pub btn_hover: (i32, i32),
     /// Native-window extras (quit button, start-with-OS toggle).
     pub extras: bool,
     /// Some(state) where start-with-OS is supported.
@@ -374,8 +379,14 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 }
                 F::Zoom => cfg.zoom = zoom_step(cfg.zoom, if dir > 0.0 { 1 } else { -1 }),
                 F::UiScale => {
+                    // (the widgets and buttons, if not set apart, stay as they were)
+                    let (w, b) = (cfg.ui.widgets_k(), cfg.ui.buttons_k());
                     cfg.ui.scale = ((cfg.ui.scale + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0;
+                    cfg.ui.widgets = Some(w);
+                    cfg.ui.buttons = Some(b);
                 }
+                F::WidgetsScale => cfg.ui.widgets = Some(((cfg.ui.widgets_k() + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0),
+                F::ButtonsScale => cfg.ui.buttons = Some(((cfg.ui.buttons_k() + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0),
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -670,7 +681,9 @@ fn tip(a: Act) -> Option<&'static str> {
         F::Units => "°F and mph, or °C and km/h.",
         F::Locked => "Stop the widgets being dragged about by accident.",
         F::Scale => "Finer or coarser detail (more or fewer, smaller or bigger characters).",
-        F::UiScale => "The menus, windows, dialogs, the buttons up top, the widgets and their writing drawn bigger; the village stays its own size. (The window and the Windows wallpaper; a terminal draws one size of letter.)",
+        F::UiScale => "The windows, menus, dialogs, the games' table and the cards drawn bigger; the village stays its own size. (The window and the Windows wallpaper; a terminal draws one size of letter.)",
+        F::WidgetsScale => "The widgets (the clock, system, weather, the map…) drawn bigger, apart from everything else.",
+        F::ButtonsScale => "The buttons up top (friends, zoom, centre, controls, settings) drawn bigger.",
         F::Zoom => "Magnify the whole village.",
         F::Sound => "All of the sound.",
         F::SoundCursor => "A soft sparkle as the pointer moves.",
@@ -1010,7 +1023,7 @@ impl Settings {
         // zoom out / in
         let (zo, zi) = zoom_rects(f.w as i32);
         for (r, ch) in [(zo, '−'), (zi, '+')] {
-            let hot = r.contains(self.hover.0, self.hover.1);
+            let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
             let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
             f.put_g(r.x, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
             f.put_g(r.x + 1, r.y, Glyph::new(ch, if hot { pal::UI_TITLE } else { Rgb::hex(0xbfe4ff) * 0.9 }).bg(bg).lit(0.0));
@@ -1018,20 +1031,20 @@ impl Settings {
         }
         // the re-centre button: back to the villager
         let r = centre_rect(f.w as i32);
-        let hot = r.contains(self.hover.0, self.hover.1);
+        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
         f.put_g(r.x + 1, r.y, Glyph::new('⌖', Rgb::hex(0x9be08a) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
         f.text(r.x + 2, r.y, " centre", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         // and the controls button beside it
         let r = help_rect(f.w as i32);
-        let hot = r.contains(self.hover.0, self.hover.1) || self.help;
+        let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.help;
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
         f.put_g(r.x + 1, r.y, Glyph::new('?', Rgb::hex(0x8ad0ff) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
         f.text(r.x + 2, r.y, " controls", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         let r = gear_rect(f.w as i32);
-        let hot = r.contains(self.hover.0, self.hover.1) || self.open;
+        let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.open;
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         let (gc, tc) = if hot { (Rgb::hex(0xffd36b) * (1.1 + 0.1 * (t * 5.0).sin()), pal::UI_TITLE) } else { (Rgb::hex(0xffd36b) * 0.8, pal::UI_TEXT * 0.85) };
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
@@ -1043,7 +1056,7 @@ impl Settings {
     /// online; how many friends are about; something waiting).
     pub fn draw_online(&self, f: &mut Frame, state: u8, about: usize, waiting: bool, t: f32) {
         let r = online_rect(f.w as i32);
-        let hot = r.contains(self.hover.0, self.hover.1);
+        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
         let pulse = if waiting { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
@@ -1448,8 +1461,7 @@ impl Settings {
         self.arrow(f, e + 1, yy, '▸', Act::Look(9, 1));
         f.text(e + 4, yy, "(shelves: Shelves tab)", pal::UI_DIM, BG, 0.0);
         yy += 1;
-        self.ui_size_row(f, cfg, lx, vx, yy);
-        yy += 2;
+        yy += self.ui_size_rows(f, cfg, lx, vx, yy, true) + 1;
         self.section(f, lx, yy, "WEATHER");
         yy += 1;
         f.text(lx, yy, "City", pal::UI_TEXT, BG, 0.0);
@@ -1472,11 +1484,20 @@ impl Settings {
         self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
     }
 
-    /// The size of everything over the village: menus, windows, dialogs,
-    /// the buttons up top, the widgets.
-    fn ui_size_row(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, yy: i32) {
-        let size = if self.ui_layer_ok { format!("{:.0}%  (menus, windows, dialogs, buttons, widgets)", cfg.ui.scale * 100.0) } else { format!("{:.0}% (not in a terminal)", cfg.ui.scale * 100.0) };
-        self.stepper(f, lx, vx, yy, "UI size", F::UiScale, &size);
+    /// The sizes of what's over the village, each its own: the windows,
+    /// menus and dialogs; the widgets; the buttons up top. Returns the
+    /// rows used.
+    fn ui_size_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, yy: i32, widgets_only: bool) -> i32 {
+        let ok = self.ui_layer_ok;
+        let pct = |k: f32| if ok { format!("{:.0}%", k * 100.0) } else { format!("{:.0}% (not in a terminal)", k * 100.0) };
+        if widgets_only {
+            self.stepper(f, lx, vx, yy, "Widgets size", F::WidgetsScale, &pct(cfg.ui.widgets_k()));
+            return 1;
+        }
+        self.stepper(f, lx, vx, yy, "Windows size", F::UiScale, &format!("{}  (menus, dialogs, games)", pct(cfg.ui.scale)));
+        self.stepper(f, lx, vx, yy + 1, "Widgets size", F::WidgetsScale, &pct(cfg.ui.widgets_k()));
+        self.stepper(f, lx, vx, yy + 2, "Buttons size", F::ButtonsScale, &format!("{}  (up top)", pct(cfg.ui.buttons_k())));
+        3
     }
 
     /// Resolution, zoom, frame rate, and playing it in a window.
@@ -1497,8 +1518,7 @@ impl Settings {
         };
         self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
         yy += 1;
-        self.ui_size_row(f, cfg, lx, vx, yy);
-        yy += 1;
+        yy += self.ui_size_rows(f, cfg, lx, vx, yy, false);
         // play it like a game: in a window of its own, or full screen
         if !self.standalone {
             let bx = vx;

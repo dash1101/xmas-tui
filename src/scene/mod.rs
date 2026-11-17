@@ -146,6 +146,8 @@ pub struct Scene {
     balloon: Option<balloon::Balloon>,
     balloon_next: f32,
     balloon_star: bool,
+    /// The villager's row last frame (falling onto the balloon: aboard).
+    balloon_py: f32,
     /// The UI's own layer (its size in its cells, and how much bigger they
     /// are than the village's), when the front-end draws one: the scene's
     /// panels go there (see `draw_ui`), not over the village.
@@ -699,6 +701,7 @@ impl Scene {
             balloon: None,
             balloon_next: 900.0,
             balloon_star: false,
+            balloon_py: 0.0,
             ui_wh: None,
             ui_k: 1.0,
             santa_clicks: vec![],
@@ -5827,6 +5830,47 @@ mod tests {
 
     /// Santa, clicked out of his sleigh, can't be caught however hard
     /// he's chased, and runs clean off the screen.
+    /// Up in the sky over the balloon, coming down onto it: aboard.
+    #[test]
+    fn falling_onto_the_balloon_climbs_aboard() {
+        let mut s = scene();
+        let (px, py) = s.player.as_ref().map(|p| (p.centre(), p.y)).unwrap();
+        let k = sprite_k(s.h);
+        // a balloon hovering high over the villager
+        let (bx, by) = (px, py - 30.0);
+        let mut b = balloon::Balloon::coming(bx, by, bx, by, 0.0, 3);
+        for _ in 0..40 {
+            b.update(0.1, 1.0, (0.0, 0.0), by, -80.0, s.ww as f32);
+        }
+        let by = b.y;
+        s.balloon = Some(b);
+        // the villager over it, dropping
+        if let Some(p) = &mut s.player {
+            p.ride(bx - 1.0, by - 14.0 * k);
+            p.lose_footing();
+        }
+        let mut aboard = false;
+        for _ in 0..120 {
+            s.update(DT, 0.0);
+            if s.balloon.as_ref().is_some_and(|b| b.aboard) {
+                aboard = true;
+                break;
+            }
+        }
+        assert!(aboard, "fell past it");
+        // a jump up past one isn't a landing
+        let mut s = scene();
+        let (px, py) = s.player.as_ref().map(|p| (p.centre(), p.y)).unwrap();
+        let mut b = balloon::Balloon::coming(px, py - 4.0, px, py - 4.0, 0.0, 3);
+        for _ in 0..40 {
+            b.update(0.1, 1.0, (0.0, 0.0), py - 4.0, -80.0, s.ww as f32);
+        }
+        s.balloon = Some(b);
+        s.balloon_py = py;
+        run(&mut s, 0.1);
+        assert!(!s.balloon.as_ref().unwrap().aboard, "standing under it isn't boarding");
+    }
+
     #[test]
     fn santa_slips_on_the_ice_and_is_caught() {
         let mut s = walker_scene();

@@ -1041,6 +1041,9 @@ impl Game {
     /// drawn again next frame.
     fn draw_ui(&mut self) {
         let Some(u) = &mut self.ui else { return };
+        // (what's under its panels and writing cut away from its pictures:
+        // a game's board under its names and lines)
+        u.frame.cut_hidden();
         let stride = self.pw;
         let (cols, rows) = (self.cols, self.rows);
         let (scw, sch) = (self.raster.cw, self.raster.ch);
@@ -1050,15 +1053,18 @@ impl Game {
             let Some(g) = g else { continue };
             let (ux, uy) = (i % fw, i / fw);
             let (px, py) = (self.off.0 + ux * u.cw, self.off.1 + uy * u.ch);
-            let (bg, bg_a) = match g.bg {
-                crate::frame::Bg::Scene => (crate::color::Rgb::BLACK, 0.0),
-                crate::frame::Bg::Solid(c) => (c, 1.0),
-                crate::frame::Bg::Mix(c, a) => (c, a),
-            };
-            u.raster.draw_cell_over(&mut self.fb, stride, px, py, g.ch, g.fg.tonemap(), bg.tonemap(), bg_a, g.alpha.clamp(0.0, 1.0));
             // the village's cells under it
-            let (x0, x1) = ((px - self.off.0) / scw, ((px - self.off.0 + u.cw).div_ceil(scw)).min(cols));
-            let (y0, y1) = ((py - self.off.1) / sch, ((py - self.off.1 + u.ch).div_ceil(sch)).min(rows));
+            let (x0, x1) = (((px - self.off.0) / scw).min(cols), ((px - self.off.0 + u.cw).div_ceil(scw)).min(cols));
+            let (y0, y1) = (((py - self.off.1) / sch).min(rows), ((py - self.off.1 + u.ch).div_ceil(sch)).min(rows));
+            let (bg, bg_a) = match g.bg {
+                crate::frame::Bg::Scene => ([0, 0, 0], 0.0),
+                crate::frame::Bg::Solid(c) => (c.tonemap(), 1.0),
+                // (see-through: solid, the village behind it averaged, as
+                // the frosted look is at the village's own size)
+                crate::frame::Bg::Mix(c, a) if self.frame.out.len() == cols * rows => (crate::frame::frost(&self.frame.out, cols, (x0, x1, y0, y1), c.tonemap(), (a.clamp(0.0, 1.0) * 255.0) as u8), 1.0),
+                crate::frame::Bg::Mix(c, a) => (c.tonemap(), a),
+            };
+            u.raster.draw_cell_over(&mut self.fb, stride, px, py, g.ch, g.fg.tonemap(), bg, bg_a, g.alpha.clamp(0.0, 1.0));
             for y in y0..y1 {
                 for x in x0..x1 {
                     covered.push(y * cols + x);

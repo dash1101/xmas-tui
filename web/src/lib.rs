@@ -321,6 +321,13 @@ pub extern "C" fn set_villagers(w: *mut Web, len: usize) {
     unsafe { &mut *w }.game.set_villagers(names);
 }
 
+/// The relay's open but going nowhere (no answer to the hello in a good
+/// while, or it turned us down): the page drops it for the next one.
+#[no_mangle]
+pub extern "C" fn net_stuck(w: *mut Web) -> u32 {
+    unsafe { &*w }.game.scene.online.link_stuck() as u32
+}
+
 /// The page's WebSocket to the relay: 1 open, 0 closed.
 #[no_mangle]
 pub extern "C" fn net_link(w: *mut Web, up: u32) {

@@ -64,9 +64,10 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 - **Play it like a game**: pop the village out into its own window, or take the wallpaper itself full screen and
   back (nothing restarts); zoom in on the villager with Ctrl +/-.
 - **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
-  animals keep their size on a finer grid. Zoomed in, the village's letters stay letters (drawn big), and **UI size**
-  makes the menus, windows, dialogs, buttons and writing bigger on their own (the window, the Windows wallpaper, a
-  phone, the web; on a phone and the web the buttons have a size of their own too).
+  animals keep their size on a finer grid. Zoomed in, the village's letters stay letters (drawn big), and the
+  **windows & dialogs**, the **widgets** and the **buttons** up top each have a size of their own, the village
+  staying its own size (Settings → Desktop; the window and the Windows wallpaper. On a phone and the web: the menus
+  and windows, and the buttons).
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
 - **Day and night**: follows the real sunrise and sunset at the weather city, or stays at a chosen time.

@@ -925,6 +925,22 @@ impl Scene {
         if b.update(dt, t, mv, ground, sky, ww) {
             self.director.sound(Sfx::Puff, b.x, 0.5);
         }
+        // up in the sky, coming down onto it (the envelope or the basket):
+        // into the basket, aboard
+        if !b.aboard && self.inside.is_none() && self.trip.is_none() {
+            if let Some(p) = &mut self.player {
+                let (px, py) = (p.centre(), p.y);
+                let falling = p.in_air() && py > self.balloon_py + 0.01;
+                let (top, half) = (b.y - 12.5 * k, (6.5 * k).max(3.0));
+                if falling && (px - b.x).abs() < half && py >= top && py <= b.y + 0.5 {
+                    b.board();
+                    p.ride(b.x - 1.0, b.y - 0.8);
+                    self.director.say(b.x.round() as i32, (b.y - 6.0 * k) as i32, "a soft landing! ← → drift · ↑ burner · ↓ down · E on the snow: off", t, 4.5, 8);
+                    self.director.sound(Sfx::Magic, b.x, 0.7);
+                }
+            }
+        }
+        self.balloon_py = self.player.as_ref().map(|p| p.y).unwrap_or(0.0);
         if b.aboard {
             if let Some(p) = &mut self.player {
                 p.active_at = t;

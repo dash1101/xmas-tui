@@ -40,6 +40,16 @@ pub fn pictures_ok() -> bool {
     PICTURES_OK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static ZOOM_LETTERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Zoomed in, the scene's letters drawn big as pictures (where pictures
+/// are cheap: drawn into our own pixels). A terminal sends each picture as
+/// an image of its own, and hundreds of them, placed afresh every frame,
+/// would bog it down: there they're drawn as pixels.
+pub fn set_zoom_letters(on: bool) {
+    ZOOM_LETTERS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A letter as a picture (the font's own shape, in its colour), to draw
 /// the scene's text bigger when zoomed in. Kept for reuse (colours are
 /// rounded a little so a twinkling light doesn't make a new one each frame).
@@ -68,6 +78,32 @@ pub fn glyph_picture(ch: char, fg: Rgb, alpha: f32) -> std::sync::Arc<Picture> {
     let p = Arc::new(Picture::new(m.w, m.h, rgba));
     c.insert(key, p.clone());
     p
+}
+
+/// A see-through panel's cell made solid: the panel's colour over the
+/// village behind it, averaged (the frosted look, at any size: blended over
+/// what's on screen instead, the village's every flake and letter would
+/// show through, and a cell drawn over itself again would darken).
+pub fn frost(cells: &[Cell], cols: usize, (x0, x1, y0, y1): (usize, usize, usize, usize), panel: [u8; 3], a: u8) -> [u8; 3] {
+    let (mut sum, mut n) = ([0u32; 3], 0u32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let c = &cells[y * cols + x];
+            for k in 0..3 {
+                sum[k] += match c.ch {
+                    ' ' => c.bg[k] as u32,
+                    '▀' | '▄' => (c.fg[k] as u32 + c.bg[k] as u32) / 2,
+                    _ => (c.bg[k] as u32 * 4 + c.fg[k] as u32) / 5,
+                };
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return panel;
+    }
+    let a = a as u32;
+    [0, 1, 2].map(|k| ((sum[k] / n * (255 - a) + panel[k] as u32 * a) / 255) as u8)
 }
 
 /// An image (RGBA, straight alpha), shared and identified for caching.
@@ -941,7 +977,7 @@ impl Frame {
         // the scene's glyphs, bigger (with their backgrounds): as the font's
         // own letters drawn big (pictures), where the front-end shows them;
         // else as pixels
-        let letters = pictures_ok();
+        let letters = pictures_ok() && ZOOM_LETTERS.load(std::sync::atomic::Ordering::Relaxed);
         self.zoom_glyphs.clear();
         self.zoom_text.clear();
         for cy in cy0.max(0)..cy1.min(chh) {
@@ -955,13 +991,17 @@ impl Frame {
                 }
                 if letters && g.ch != ' ' && g.alpha > 0.0 {
                     // (filling the big cell exactly: a line or a block runs
-                    // on into the next one, as it does at 1×)
+                    // on into the next one, as it does at 1×; on the same
+                    // whole pixels its background was filled on, so no
+                    // sliver of sky shows between them at 1.1× or 3.5×)
                     let pic = glyph_picture(g.ch, g.fg, g.alpha);
-                    let (fx, fy) = (px, py / 2.0);
+                    let (gx0, gx1) = (px.round(), (px + z).round());
+                    let (gy0, gy1) = (py.round(), (py + 2.0 * z).round());
+                    let (fx, fy, fw, fh) = (gx0, gy0 / 2.0, gx1 - gx0, (gy1 - gy0) / 2.0);
                     let (x, y) = (fx.floor() as i32, fy.floor() as i32);
-                    let (cols, rws) = ((fx + z).ceil() as i32 - x, (fy + z).ceil() as i32 - y);
-                    if x + cols >= 0 && y + rws >= 0 && x < self.w as i32 && y < self.h as i32 {
-                        self.zoom_glyphs.push(Placed { x, y, cols, rows: rws, pic, sprite: None, fit: Some([fx, fy, z, z]), hidden: vec![] });
+                    let (cols, rws) = ((fx + fw).ceil() as i32 - x, (fy + fh).ceil() as i32 - y);
+                    if fw > 0.0 && fh > 0.0 && x + cols >= 0 && y + rws >= 0 && x < self.w as i32 && y < self.h as i32 {
+                        self.zoom_glyphs.push(Placed { x, y, cols, rows: rws, pic, sprite: None, fit: Some([fx, fy, fw, fh]), hidden: vec![] });
                     }
                 } else {
                     self.big_glyph(px, py, z, 2.0 * z, g.ch, g.fg, g.alpha);
@@ -1155,8 +1195,10 @@ impl Frame {
         }
     }
 
-    pub fn compose(&mut self) {
-        // pictures partly under panels: those parts cut away
+    /// Pictures partly under panels (or under writing put over them):
+    /// those parts cut away. `compose` does it; a UI layer, which isn't
+    /// composed, has it done on its own.
+    pub fn cut_hidden(&mut self) {
         if self.pictures.iter().any(|p| !p.hidden.is_empty()) {
             let aspect = self.cell_aspect;
             let all = std::mem::take(&mut self.pictures);
@@ -1173,6 +1215,10 @@ impl Frame {
                 })
                 .collect();
         }
+    }
+
+    pub fn compose(&mut self) {
+        self.cut_hidden();
         self.bloom();
         let (pw, ph) = (self.pw, self.ph);
         if self.pre_on && self.pre.len() == pw * ph {

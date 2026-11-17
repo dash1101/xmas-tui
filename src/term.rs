@@ -113,6 +113,8 @@ impl Term {
     pub fn new() -> Self {
         let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some() || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
         crate::frame::set_pictures_ok(kitty);
+        // (but not a picture per zoomed-in letter: far too many images)
+        crate::frame::set_zoom_letters(false);
         Term { prev: vec![], w: 0, h: 0, buf: Vec::with_capacity(1 << 20), force: true, tolerance: 2, bytes_last: 0, pictures: vec![], kitty, sent: Default::default(), placed: vec![], used: Default::default(), frames: 0, cell_px: (9, 19), screen_px: (0.0, 0.0) }
     }
 

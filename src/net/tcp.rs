@@ -23,14 +23,15 @@ pub struct Tcp {
 }
 
 impl Tcp {
-    pub fn start() -> Option<Tcp> {
+    /// The link, trying the relays in turn from the `first`.
+    pub fn start(first: usize) -> Option<Tcp> {
         let (tx, out_rx) = channel::<Vec<u8>>();
         let (up_tx, rx) = channel::<Up>();
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
         std::thread::Builder::new()
             .name("xmas-online".into())
-            .spawn(move || run(out_rx, up_tx, st))
+            .spawn(move || run(out_rx, up_tx, st, first))
             .ok()?;
         Some(Tcp { tx, rx, stop })
     }
@@ -70,9 +71,9 @@ impl Drop for Tcp {
     }
 }
 
-fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>) {
+fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usize) {
     let mut wait = Duration::from_secs(2);
-    let mut which = 0usize;
+    let mut which = first;
     while !stop.load(Ordering::Relaxed) {
         let (host, port, _) = RELAYS[which % RELAYS.len()];
         which += 1;
@@ -159,8 +160,15 @@ pub fn pump(online: &mut Online, link: &mut Option<Tcp>) {
             l.close(online.take_out());
         }
     }
+    // a relay that took the connection but goes nowhere (no answer to the
+    // hello, or it turned us down): on to the next
+    if link.is_some() && online.link_stuck() {
+        link.take();
+        online.disconnected();
+        online.skip_relay();
+    }
     if link.is_none() {
-        *link = Tcp::start();
+        *link = Tcp::start(online.relay_skip());
     }
     let Some(l) = link else { return };
     for u in l.poll() {

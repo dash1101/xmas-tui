@@ -448,6 +448,12 @@ pub struct Online {
     reader: mqtt::Reader,
     out: Vec<u8>,
     link: Link,
+    /// When the link last came up (said hello to the relay), and whether
+    /// the relay turned the hello down: a relay that never answers, or
+    /// won't have us, is left for the next one.
+    link_since: f32,
+    refused: bool,
+    relay_skip: usize,
     sub: u16,
     t: f32,
     next_ping: f32,
@@ -501,6 +507,9 @@ impl Online {
             reader: mqtt::Reader::default(),
             out: vec![],
             link: Link::Off,
+            link_since: 0.0,
+            refused: false,
+            relay_skip: 0,
             sub: 1,
             t: 0.0,
             next_ping: 0.0,
@@ -653,6 +662,13 @@ impl Online {
         self.link
     }
 
+    /// The relay's connection is open but going nowhere: no answer to the
+    /// hello in a good while, or it was turned down. (The front end drops
+    /// it and tries the next relay.)
+    pub fn link_stuck(&self) -> bool {
+        self.refused || (self.link == Link::Connecting && self.t - self.link_since > 10.0)
+    }
+
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
@@ -699,6 +715,7 @@ impl Online {
     pub fn connected(&mut self) {
         self.reader.clear();
         self.link = Link::Connecting;
+        (self.link_since, self.refused) = (self.t, false);
         let will = self.me.seal(&serde_json::to_vec(&self.here_msg(false)).unwrap_or_default());
         let client = format!("xt{:08x}{:04x}", self.id, seal::random() as u16);
         self.out.extend(mqtt::connect(&client, 45, Some((&self.my_here.clone(), &will))));
@@ -731,6 +748,18 @@ impl Online {
         if self.link != Link::Off {
             self.link = Link::Off;
         }
+        self.refused = false;
+    }
+
+    /// A relay that went nowhere was dropped: the next one's tried first
+    /// (how many have been passed over so far).
+    pub fn skip_relay(&mut self) -> usize {
+        self.relay_skip += 1;
+        self.relay_skip
+    }
+
+    pub fn relay_skip(&self) -> usize {
+        self.relay_skip
     }
 
     /// Bytes from the relay.
@@ -739,7 +768,10 @@ impl Online {
         while let Some(p) = self.reader.next() {
             match p {
                 mqtt::Packet::ConnAck(0) => self.on_connack(),
-                mqtt::Packet::ConnAck(_) => self.link = Link::Off,
+                mqtt::Packet::ConnAck(_) => {
+                    self.link = Link::Off;
+                    self.refused = true;
+                }
                 mqtt::Packet::Publish { topic, payload } => self.got(&topic, &payload),
                 _ => {}
             }
@@ -1790,6 +1822,33 @@ pub(crate) mod tests {
     /// Pings, messages (made harmless), a group, whispers, the host's
     /// village settings asked about and an admin's, a guest who can't close
     /// the village, and a knock nobody answers.
+    /// A relay that takes the connection but never answers the hello, or
+    /// turns it down: left for the next one (and not before it's had a
+    /// fair while).
+    #[test]
+    fn a_relay_that_goes_nowhere_is_left() {
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Robin");
+        a.tick(1.0, None, 1);
+        a.connected();
+        a.tick(8.0, None, 1);
+        assert!(!a.link_stuck(), "still waiting for an answer");
+        a.tick(12.0, None, 1);
+        assert!(a.link_stuck(), "no answer in ten seconds");
+        a.disconnected();
+        assert!(!a.link_stuck());
+        assert_eq!(a.skip_relay(), 1);
+        // an answer: fine
+        a.connected();
+        a.feed(&[0x20, 2, 0, 0]);
+        a.tick(30.0, None, 1);
+        assert!(a.link() == Link::On && !a.link_stuck());
+        // turned down: left at once
+        a.disconnected();
+        a.connected();
+        a.feed(&[0x20, 2, 0, 5]);
+        assert!(a.link_stuck());
+    }
+
     #[test]
     fn talking_groups_pings_and_the_hosts_settings() {
         let mut relay = Relay::default();

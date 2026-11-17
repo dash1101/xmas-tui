@@ -243,6 +243,11 @@ function netPump(now) {
     if (ws) { flushNet(); ws.onclose = null; ws.close(); ws = null; }
     return;
   }
+  // a relay that took the connection but goes nowhere: on to the next
+  if (ws && ws.readyState === 1 && wasm.net_stuck && wasm.net_stuck(game)) {
+    ws.onclose = null; ws.close(); ws = null; wasm.net_link(game, 0);
+    wsTry++; wsWait = now + 500;
+  }
   if (!ws && now > wsWait) {
     const list = relays || RELAYS;
     const url = list[wsTry % list.length];

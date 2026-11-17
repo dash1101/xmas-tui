@@ -109,15 +109,34 @@ impl KeysCfg {
 pub struct UiCfg {
     /// "classic", "frosted", "wood" or "gift".
     pub look: String,
-    /// The menus, panels and text over the village drawn this much bigger
-    /// (1: the village's own size), the village itself as it is. (Where
-    /// the front-end draws its own letters: the window, a phone, the web.)
+    /// The windows, menus, dialogs and text over the village drawn this
+    /// much bigger (1: the village's own size), the village itself as it
+    /// is. (Where the front-end draws its own letters: the window, a
+    /// phone, the web.)
     pub scale: f32,
+    /// The widgets' own size (unset: the same as `scale`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widgets: Option<f32>,
+    /// The buttons up top (unset: the same as `scale`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buttons: Option<f32>,
 }
 
 impl Default for UiCfg {
     fn default() -> Self {
-        UiCfg { look: "classic".into(), scale: 1.0 }
+        UiCfg { look: "classic".into(), scale: 1.0, widgets: None, buttons: None }
+    }
+}
+
+impl UiCfg {
+    /// The widgets' size (their own, or the windows').
+    pub fn widgets_k(&self) -> f32 {
+        self.widgets.unwrap_or(self.scale)
+    }
+
+    /// The buttons' size (their own, or the windows').
+    pub fn buttons_k(&self) -> f32 {
+        self.buttons.unwrap_or(self.scale)
     }
 }
 

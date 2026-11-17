@@ -72,6 +72,18 @@ pub enum KeyIn {
     Right,
 }
 
+/// A layer of the UI drawn at a size of its own over the village.
+struct UiPart {
+    frame: Frame,
+    k: f32,
+}
+
+/// The parts of the UI, bottom to top: the widgets, the buttons up top,
+/// the windows (menus, panels, dialogs, games).
+const WIDGETS: usize = 0;
+const BUTTONS: usize = 1;
+const WINDOWS: usize = 2;
+
 pub struct App {
     pub cfg: Config,
     /// The config the scene / widgets / overlay were last updated to;
@@ -134,11 +146,23 @@ pub struct App {
     /// The village's own grid.
     sw: usize,
     sh: usize,
-    /// The UI's own layer (when it's bigger than the village's cells), how
-    /// much bigger, and whether the front-end can show one.
-    ui_frame: Frame,
+    /// The UI's own layers over the village, bottom to top, each at its
+    /// own size (none: all of it at the village's size, in its frame).
+    layers: Vec<UiPart>,
+    /// Which layer each part of the UI goes on (None: the village's frame)
+    /// and its size: the widgets, the buttons up top, the windows.
+    part_layer: [Option<usize>; 3],
+    part_k: [f32; 3],
+    /// The widgets' grid and the buttons' (each part has its own).
+    wid_wh: (usize, usize),
+    btn_wh: (usize, usize),
+    /// The windows' size (how much bigger than the village's cells), and
+    /// whether the front-end can show a UI of its own sizes.
     ui_k: f32,
     ui_ok: bool,
+    /// The pointer, in the village's cells (fractions): each part of the UI
+    /// works out its own cell from it.
+    ptr: (f32, f32),
     /// Running as a wallpaper: keys never quit.
     wallpaper: bool,
     /// Whether typed keys can reach us (false behind the Windows desktop icons).
@@ -228,6 +252,11 @@ pub struct App {
     /// where it centres (eased), and a scratch frame for it.
     zoom_xf: (f32, f32, f32),
     zoom_focus: Option<(f32, f32)>,
+    /// A pinch's (or the wheel's) zoom so far, before rounding, and the
+    /// zoom it last set: a touchpad's many tiny steps add up instead of
+    /// each being rounded away.
+    zoom_raw: f32,
+    zoom_set: f32,
     /// The zoom as shown (easing toward the setting).
     zoom_now: f32,
     spare: Frame,
@@ -345,9 +374,14 @@ impl App {
             h,
             sw: w,
             sh: h,
-            ui_frame: Frame::new(1, 1),
+            layers: vec![],
+            part_layer: [None; 3],
+            part_k: [1.0; 3],
+            wid_wh: (w, h),
+            btn_wh: (w, h),
             ui_k: 1.0,
             ui_ok: false,
+            ptr: (0.0, 0.0),
             wallpaper,
             keyboard,
             quit: false,
@@ -398,6 +432,8 @@ impl App {
             zoom_xf: (1.0, 0.0, 0.0),
             zoom_focus: None,
             zoom_now: 1.0,
+            zoom_raw: 1.0,
+            zoom_set: -1.0,
             spare: Frame::new(1, 1),
             wall_full: false,
             wall_full_req: None,
@@ -409,6 +445,7 @@ impl App {
     /// zoomed in, or indoors on a tall screen).
     /// A UI cell to the village's cell under it (the same, without a UI
     /// layer of its own).
+    #[cfg(test)]
     fn scene_pt(&self, x: i32, y: i32) -> (i32, i32) {
         if self.ui_k <= 1.0 {
             return (x, y);
@@ -421,9 +458,44 @@ impl App {
         (self.sw, self.sh)
     }
 
-    /// The UI's own layer, if it has one (and how much bigger its cells).
-    pub fn ui_layer(&self) -> Option<(&Frame, f32)> {
-        (self.ui_k > 1.0).then_some((&self.ui_frame, self.ui_k))
+    /// The UI's own layers, bottom to top (and how much bigger each one's
+    /// cells): none when it's all the village's size.
+    pub fn ui_layers(&self) -> Vec<(&Frame, f32)> {
+        self.layers.iter().map(|l| (&l.frame, l.k)).collect()
+    }
+
+    /// Where the pointer is in part `p`'s own cells.
+    fn part_pt(&self, p: usize) -> (i32, i32) {
+        let k = self.part_k[p].max(1.0);
+        ((self.ptr.0 / k).floor() as i32, (self.ptr.1 / k).floor() as i32)
+    }
+
+    /// The village's cell under the pointer, through the zoom.
+    fn world_here(&self) -> (i32, i32) {
+        self.world_of(self.ptr.0, self.ptr.1)
+    }
+
+    /// The village's cell under (fx, fy) on the screen (its cells), through the zoom.
+    fn world_of(&self, x: f32, y: f32) -> (i32, i32) {
+        let (z, x0, y0) = self.zoom_xf;
+        if z <= 1.001 {
+            return (x.floor() as i32, y.floor() as i32);
+        }
+        ((x0 + x / z).floor() as i32, (y0 + y / z).floor() as i32)
+    }
+
+    /// Draw from here on into part `p`'s frame (its layer's, swapped in as
+    /// `self.frame`, or the village's own); `part_out` puts it back.
+    fn part_in(&mut self, p: usize) -> Option<usize> {
+        let i = self.part_layer[p]?;
+        std::mem::swap(&mut self.frame, &mut self.layers[i].frame);
+        Some(i)
+    }
+
+    fn part_out(&mut self, i: Option<usize>) {
+        if let Some(i) = i {
+            std::mem::swap(&mut self.frame, &mut self.layers[i].frame);
+        }
     }
 
     /// The front-end draws its own letters (a UI layer of bigger ones can
@@ -435,6 +507,7 @@ impl App {
         self.regrid(w, h, true);
     }
 
+    #[cfg(test)]
     fn world_pt(&self, x: i32, y: i32) -> (i32, i32) {
         let (x, y) = self.scene_pt(x, y);
         let (z, x0, y0) = self.zoom_xf;
@@ -926,11 +999,11 @@ impl App {
 
     /// Zoom in (k > 1) or out, centred on the villager; eased into on screen.
     pub fn zoom_by(&mut self, k: f32) {
-        let mut z = (self.cfg.zoom * k).clamp(1.0, 4.0);
-        if z < 1.02 {
-            z = 1.0;
-        }
-        self.cfg.zoom = (z * 100.0).round() / 100.0;
+        let base = if (self.cfg.zoom - self.zoom_set).abs() < 1e-4 { self.zoom_raw } else { self.cfg.zoom };
+        let raw = (base * k).clamp(1.0, 4.0);
+        self.zoom_raw = raw;
+        self.cfg.zoom = if raw < 1.01 { 1.0 } else { (raw * 100.0).round() / 100.0 };
+        self.zoom_set = self.cfg.zoom;
         self.zoom_toast();
     }
 
@@ -1019,16 +1092,38 @@ impl App {
     /// if it's set bigger and the front-end draws its own letters); the
     /// village made again for it (`remake`), where it stands.
     fn regrid(&mut self, w: usize, h: usize, remake: bool) {
-        let k = if self.ui_ok { self.cfg.ui.scale.clamp(1.0, 2.5) } else { 1.0 };
-        let k = if k < 1.05 { 1.0 } else { k };
-        let (uw, uh) = (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12));
-        let changed = (w, h) != (self.sw, self.sh);
-        (self.sw, self.sh, self.ui_k) = (w, h, k);
-        (self.w, self.h) = if k > 1.0 { (uw, uh) } else { (w, h) };
-        self.frame.resize(w, h);
-        if k > 1.0 {
-            self.ui_frame.resize(uw, uh);
+        let ok = self.ui_ok;
+        let fix = |k: f32| {
+            let k = if ok && k.is_finite() { k.clamp(1.0, 2.5) } else { 1.0 };
+            if k < 1.05 {
+                1.0
+            } else {
+                (k * 20.0).round() / 20.0
+            }
+        };
+        let ks = [fix(self.cfg.ui.widgets_k()), fix(self.cfg.ui.buttons_k()), fix(self.cfg.ui.scale)];
+        let grid = |k: f32| if k > 1.0 { (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12)) } else { (w, h) };
+        // the layers, bottom to top (the widgets, the buttons, the windows):
+        // parts next to each other at one size share one; the village's
+        // own frame takes those at its size from the bottom
+        let mut layers: Vec<UiPart> = vec![];
+        let mut part_layer = [None; 3];
+        let (mut cur, mut cur_k) = (None, 1.0f32);
+        for (p, &k) in ks.iter().enumerate() {
+            if (k - cur_k).abs() > 1e-3 {
+                let (gw, gh) = grid(k);
+                layers.push(UiPart { frame: Frame::new(gw, gh), k });
+                (cur, cur_k) = (Some(layers.len() - 1), k);
+            }
+            part_layer[p] = cur;
         }
+        let changed = (w, h) != (self.sw, self.sh);
+        (self.sw, self.sh, self.ui_k) = (w, h, ks[WINDOWS]);
+        (self.w, self.h) = grid(ks[WINDOWS]);
+        self.wid_wh = grid(ks[WIDGETS]);
+        self.btn_wh = grid(ks[BUTTONS]);
+        (self.layers, self.part_layer, self.part_k) = (layers, part_layer, ks);
+        self.frame.resize(w, h);
         self.menu = None;
         if remake && changed {
             // (still online, still in a friend's village, where the villager was)
@@ -1041,21 +1136,38 @@ impl App {
         self.settings.commit(&mut self.cfg);
     }
 
+    /// The pointer at a cell of the windows' grid (a terminal, tests: all
+    /// one size there).
     pub fn mouse(&mut self, ev: MouseIn, x: i32, y: i32) {
+        let k = self.ui_k.max(1.0);
+        self.mouse_at(ev, (x as f32 + 0.5) * k, (y as f32 + 0.5) * k);
+    }
+
+    /// The pointer at (fx, fy) in the village's cells (fractions): each
+    /// part of the UI takes it in its own cells (x, y: the windows'; gx,
+    /// gy: the widgets'; bx, by: the buttons').
+    pub fn mouse_at(&mut self, ev: MouseIn, fx: f32, fy: f32) {
+        self.ptr = (fx, fy);
+        let (x, y) = self.part_pt(WINDOWS);
+        let (gx, gy) = self.part_pt(WIDGETS);
+        let (bx, by) = self.part_pt(BUTTONS);
+        let (gw, gh) = (self.wid_wh.0 as i32, self.wid_wh.1 as i32);
+        let bw = self.btn_wh.0 as i32;
         let t = self.t();
         self.settings.hover = (x, y);
+        self.settings.btn_hover = (bx, by);
         match ev {
             MouseIn::Move => {
                 if let Some(m) = &mut self.menu {
                     m.hover = m.hit(x, y);
                 }
-                let (wx, wy) = self.world_pt(x, y);
+                let (wx, wy) = self.world_here();
                 self.scene.set_cursor(Some((wx, wy)));
                 self.scene.convo_hover(x, y);
-                self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(x, y) };
-                self.widgets.friends_hover = if self.settings.open { None } else { self.widgets.friends_hit(x, y) };
+                self.widgets.hover = if self.settings.open { None } else { self.widgets.hit(gx, gy) };
+                self.widgets.friends_hover = if self.settings.open { None } else { self.widgets.friends_hit(gx, gy) };
                 if !self.settings.open {
-                    self.widgets.shelf_hover(x, y);
+                    self.widgets.shelf_hover(gx, gy);
                 }
             }
             // picked up by its title bar: moved, not closed
@@ -1104,17 +1216,17 @@ impl App {
                     if !self.settings.help_click(x, y, w, h, &self.cfg.keys) {
                         self.settings.help = false;
                     }
-                } else if settings::zoom_rects(self.w as i32).0.contains(x, y) {
+                } else if settings::zoom_rects(bw).0.contains(bx, by) {
                     self.zoom_step(-1);
-                } else if settings::zoom_rects(self.w as i32).1.contains(x, y) {
+                } else if settings::zoom_rects(bw).1.contains(bx, by) {
                     self.zoom_step(1);
-                } else if settings::centre_rect(self.w as i32).contains(x, y) {
+                } else if settings::centre_rect(bw).contains(bx, by) {
                     self.scene.recenter();
-                } else if settings::help_rect(self.w as i32).contains(x, y) {
+                } else if settings::help_rect(bw).contains(bx, by) {
                     self.settings.help = true;
-                } else if settings::online_rect(self.w as i32).contains(x, y) {
+                } else if settings::online_rect(bw).contains(bx, by) {
                     self.open_online();
-                } else if settings::gear_rect(self.w as i32).contains(x, y) {
+                } else if settings::gear_rect(bw).contains(bx, by) {
                     // (the buttons up there always answer: a game, a
                     // conversation or a card open doesn't take them)
                     self.settings.open = true;
@@ -1130,26 +1242,26 @@ impl App {
                 } else if self.scene.convo_click(x, y) {
                     // answered in the dialogue box (by hand: autopilot stands down)
                     self.scene.woke();
-                } else if let Some(i) = self.widgets.on_grip(x, y).filter(|_| !self.cfg.layout.locked) {
+                } else if let Some(i) = self.widgets.on_grip(gx, gy).filter(|_| !self.cfg.layout.locked) {
                     self.resizing = Some((i, crate::widgets::shelf::EDGE_R | crate::widgets::shelf::EDGE_B));
                     self.widgets.dragging = Some(i);
-                } else if let Some((s, hit)) = self.widgets.shelf_hit(x, y) {
-                    self.shelf_down(s, hit, x, y);
-                } else if let Some(h) = self.widgets.friends_hit(x, y) {
+                } else if let Some((s, hit)) = self.widgets.shelf_hit(gx, gy) {
+                    self.shelf_down(s, hit, gx, gy);
+                } else if let Some(h) = self.widgets.friends_hit(gx, gy) {
                     self.friends_click(h, x, y);
-                } else if let (true, Some(wx)) = (self.cfg.layout.locked, self.widgets.map_world_x(x, y)) {
+                } else if let (true, Some(wx)) = (self.cfg.layout.locked, self.widgets.map_world_x(gx, gy)) {
                     self.scene.look_at(wx);
-                } else if let (false, Some(i)) = (self.cfg.layout.locked, self.widgets.hit(x, y)) {
+                } else if let (false, Some(i)) = (self.cfg.layout.locked, self.widgets.hit(gx, gy)) {
                     let r = self.widgets.rects[i].unwrap();
-                    self.drag = Some((i, x - r.x, y - r.y));
-                    self.press_at = (x, y);
+                    self.drag = Some((i, gx - r.x, gy - r.y));
+                    self.press_at = (gx, gy);
                     self.widgets.dragging = Some(i);
                 } else if self.scene.at_table() {
                     // (sat at a game, a click off the table leaves the
                     // village alone)
                 } else {
                     self.press = Some((x, y, self.t()));
-                    let (wx, wy) = self.world_pt(x, y);
+                    let (wx, wy) = self.world_here();
                     if self.scene.grab(wx, wy) {
                         self.scene.woke();
                     } else {
@@ -1186,30 +1298,30 @@ impl App {
                     return;
                 }
                 if self.scene.holding() {
-                    let (wx, wy) = self.world_pt(x, y);
+                    let (wx, wy) = self.world_here();
                     self.scene.drag(wx, wy);
                     return;
                 }
                 if let Some(ShelfPress::Item(s, k)) = self.shelf_press {
                     // an item pulled off its slot: carried to wherever it's let go
-                    if self.widgets.lift.is_some() || (x - self.press_at.0).abs() > 1 || (y - self.press_at.1).abs() > 1 {
+                    if self.widgets.lift.is_some() || (gx - self.press_at.0).abs() > 1 || (gy - self.press_at.1).abs() > 1 {
                         self.widgets.lift = Some((s, k));
-                        self.widgets.lift_at = (x, y);
+                        self.widgets.lift_at = (gx, gy);
                     }
                     return;
                 }
-                let (wx, wy) = self.world_pt(x, y);
+                let (wx, wy) = self.world_here();
                 self.scene.set_cursor(Some((wx, wy)));
                 if let Some(s) = self.bar_drag {
-                    self.shelf_bar(s, y);
+                    self.shelf_bar(s, gy);
                     return;
                 }
                 if let Some((i, e)) = self.resizing {
-                    self.widgets.resize(i, e, x, y, self.w as i32, self.h as i32);
+                    self.widgets.resize(i, e, gx, gy, gw, gh);
                     return;
                 }
                 if let Some((i, ox, oy)) = self.drag {
-                    self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
+                    self.widgets.move_to(i, gx - ox, gy - oy, gw, gh);
                 }
             }
             MouseIn::Up(Btn::Left) if self.press.take().is_some() && self.menu.is_some() => {
@@ -1228,7 +1340,7 @@ impl App {
                 match p {
                     ShelfPress::Item(s, k) => {
                         if let Some(lift) = self.widgets.lift.take() {
-                            self.shelf_drop(lift, x, y);
+                            self.shelf_drop(lift, gx, gy);
                         } else {
                             // a click selects; a second one soon after opens
                             let now = self.t();
@@ -1243,7 +1355,7 @@ impl App {
                         }
                     }
                     ShelfPress::Title(s) => {
-                        if (x, y) == self.press_at {
+                        if (gx, gy) == self.press_at {
                             // a click on the title rolls it up (or down again)
                             if let Some(c) = self.cfg.shelves.get_mut(s) {
                                 c.rolled = !c.rolled;
@@ -1252,7 +1364,7 @@ impl App {
                                 self.widgets.dragging = None;
                             }
                         } else if let Some((i, ox, oy)) = self.drag.take() {
-                            self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
+                            self.widgets.move_to(i, gx - ox, gy - oy, gw, gh);
                             self.widgets.dragging = None;
                             crate::widgets::set_pos(&mut self.cfg, i, crate::widgets::pos_of(&self.widgets.cfg, i));
                         }
@@ -1270,7 +1382,7 @@ impl App {
                 self.scene.convo_drop();
             }
             MouseIn::Up(Btn::Left) if self.scene.holding() => {
-                let (wx, wy) = self.world_pt(x, y);
+                let (wx, wy) = self.world_here();
                 self.scene.drag(wx, wy);
                 self.scene.release();
             }
@@ -1279,7 +1391,7 @@ impl App {
             }
             MouseIn::Up(Btn::Left) if self.resizing.is_some() => {
                 let (i, e) = self.resizing.take().unwrap();
-                self.widgets.resize(i, e, x, y, self.w as i32, self.h as i32);
+                self.widgets.resize(i, e, gx, gy, gw, gh);
                 self.widgets.dragging = None;
                 if i == 4 {
                     self.cfg.layout.map_size = self.widgets.cfg.layout.map_size;
@@ -1294,11 +1406,11 @@ impl App {
             }
             MouseIn::Up(Btn::Left) if self.settings.slider_drag.take().is_some() => {}
             MouseIn::Up(Btn::Left) => {
-                if let Some((4, ..)) = self.drag.filter(|_| (x, y) == self.press_at) {
+                if let Some((4, ..)) = self.drag.filter(|_| (gx, gy) == self.press_at) {
                     // a click on the map (no drag): look over there
                     self.drag = None;
                     self.widgets.dragging = None;
-                    if let Some(wx) = self.widgets.map_world_x(x, y) {
+                    if let Some(wx) = self.widgets.map_world_x(gx, gy) {
                         self.scene.look_at(wx);
                     }
                     return;
@@ -1308,7 +1420,7 @@ impl App {
                     // Drag event at this spot), and commit only the dragged
                     // widget's slot: the others may have changed in the file
                     // meanwhile and must not be reverted
-                    self.widgets.move_to(i, x - ox, y - oy, self.w as i32, self.h as i32);
+                    self.widgets.move_to(i, gx - ox, gy - oy, gw, gh);
                     self.widgets.dragging = None;
                     crate::widgets::set_pos(&mut self.cfg, i, crate::widgets::pos_of(&self.widgets.cfg, i));
                 }
@@ -1328,7 +1440,7 @@ impl App {
                     if let Some(a) = self.settings.scroll(x, y, up) {
                         self.acts.push(a);
                     }
-                } else if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
+                } else if let Some((s, _)) = self.widgets.shelf_hit(gx, gy) {
                     self.widgets.shelf_scroll(s, if up { -1 } else { 1 });
                 } else if self.trackpad {
                     // a trackpad: up and down look up into the sky and back
@@ -1358,7 +1470,7 @@ impl App {
                         }
                         self.pad_acc = 0.0;
                     }
-                } else if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
+                } else if let Some((s, _)) = self.widgets.shelf_hit(gx, gy) {
                     self.pad_acc += dy;
                     if self.pad_acc.abs() >= 1.0 {
                         self.widgets.shelf_scroll(s, if self.pad_acc > 0.0 { -1 } else { 1 });
@@ -1652,7 +1764,11 @@ impl App {
                 Some(_) => "pointer",
                 None => "default",
             }
-        } else if settings::online_rect(self.w as i32).contains(hx, hy) || self.scene.post_click(hx, hy) || settings::gear_rect(self.w as i32).contains(hx, hy) || settings::help_rect(self.w as i32).contains(hx, hy) || settings::centre_rect(self.w as i32).contains(hx, hy) || settings::zoom_rects(self.w as i32).0.contains(hx, hy) || settings::zoom_rects(self.w as i32).1.contains(hx, hy) {
+        } else if {
+            let ((bx, by), bw) = (self.settings.btn_hover, self.btn_wh.0 as i32);
+            settings::online_rect(bw).contains(bx, by) || settings::gear_rect(bw).contains(bx, by) || settings::help_rect(bw).contains(bx, by) || settings::centre_rect(bw).contains(bx, by) || settings::zoom_rects(bw).0.contains(bx, by) || settings::zoom_rects(bw).1.contains(bx, by)
+        } || self.scene.post_click(hx, hy)
+        {
             "pointer"
         } else if !self.settings.open && !self.cfg.layout.locked && self.widgets.hover.is_some() {
             "grab"
@@ -1660,9 +1776,9 @@ impl App {
             "grabbing"
         } else if !self.settings.open && self.scene.convo_grip(hx, hy) {
             "grab"
-        } else if !self.settings.open && self.scene.grabbable(self.world_pt(hx, hy).0, self.world_pt(hx, hy).1) {
+        } else if !self.settings.open && self.scene.grabbable(self.world_here().0, self.world_here().1) {
             "grab"
-        } else if !self.settings.open && self.scene.clickable(self.world_pt(hx, hy).0, self.world_pt(hx, hy).1) {
+        } else if !self.settings.open && self.scene.clickable(self.world_here().0, self.world_here().1) {
             "pointer"
         } else {
             "default"
@@ -1800,7 +1916,9 @@ impl App {
         use crate::widgets::shelf::{Hit, MenuAct as S};
         self.commit_city();
         let (w, h) = (self.w as i32, self.ui_h() as i32);
-        if let Some((s, hit)) = self.widgets.shelf_hit(x, y) {
+        // (the widgets and shelves: in their own cells)
+        let (gx, gy) = self.part_pt(WIDGETS);
+        if let Some((s, hit)) = self.widgets.shelf_hit(gx, gy) {
             let c = &self.cfg.shelves[s];
             let mut items: Vec<(String, MenuAct)> = vec![];
             let mut title = c.name.clone();
@@ -1831,7 +1949,7 @@ impl App {
             return;
         }
         // a widget: its look, hiding it, its settings
-        if let Some(i) = self.widgets.hit(x, y).filter(|&i| i < crate::widgets::BUILTIN) {
+        if let Some(i) = self.widgets.hit(gx, gy).filter(|&i| i < crate::widgets::BUILTIN) {
             let names = ["the clock", "system", "now playing", "weather", "map", "visualizer", "friends & messages"];
             let mut items: Vec<(String, MenuAct)> = vec![];
             if let Some(look) = self.cfg.widgets.looks.get(i) {
@@ -1853,12 +1971,12 @@ impl App {
             self.menu = Some(CtxMenu::with(x, y, names[i].to_string(), items, w, h));
             return;
         }
-        let (wx, wy) = self.world_pt(x, y);
+        let (wx, wy) = self.world_here();
         let (title, items) = self.scene.menu_at(wx, wy);
         let mut items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
-        if self.widgets.hit(x, y).is_none() {
-            items.push(("new shelf here".into(), MenuAct::Shelf(S::New(x, y))));
-            items.push(("new shelf from a folder…".into(), MenuAct::Shelf(S::NewFrom(x, y))));
+        if self.widgets.hit(gx, gy).is_none() {
+            items.push(("new shelf here".into(), MenuAct::Shelf(S::New(gx, gy))));
+            items.push(("new shelf from a folder…".into(), MenuAct::Shelf(S::NewFrom(gx, gy))));
         }
         if cfg!(windows) && !self.keyboard {
             items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
@@ -1870,12 +1988,14 @@ impl App {
     /// there, or a panel open that it closes)? Windows desktop: worked out
     /// as the pointer moves, so the mouse hook knows at once.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn right_click_ours(&self, x: i32, y: i32) -> bool {
+    pub fn right_click_ours(&self, fx: f32, fy: f32) -> bool {
         if self.settings.open || self.menu.is_some() {
             return true;
         }
-        self.widgets.hit(x, y).is_some_and(|i| i != 0) || settings::gear_rect(self.w as i32).contains(x, y) || {
-            let (wx, wy) = self.world_pt(x, y);
+        let pt = |k: f32| ((fx / k.max(1.0)).floor() as i32, (fy / k.max(1.0)).floor() as i32);
+        let ((gx, gy), (bx, by)) = (pt(self.part_k[WIDGETS]), pt(self.part_k[BUTTONS]));
+        self.widgets.hit(gx, gy).is_some_and(|i| i != 0) || settings::gear_rect(self.btn_wh.0 as i32).contains(bx, by) || {
+            let (wx, wy) = self.world_of(fx, fy);
             let (title, items) = self.scene.menu_at(wx, wy);
             !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village") || items.iter().any(|(_, d)| matches!(d, crate::scene::Do::DropOn(..)))
         }
@@ -1886,7 +2006,9 @@ impl App {
     /// house, a widget, a shelf) and returns true; false lets Windows'
     /// desktop menu show.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn right_click(&mut self, x: i32, y: i32) -> bool {
+    pub fn right_click(&mut self, fx: f32, fy: f32) -> bool {
+        self.ptr = (fx, fy);
+        let (x, y) = self.part_pt(WINDOWS);
         if self.settings.open {
             self.commit_city();
             self.settings.open = false;
@@ -1896,11 +2018,7 @@ impl App {
             return true;
         }
         // (the clock is mostly see-through: right-clicks there are the desktop's)
-        let ours = self.widgets.hit(x, y).is_some_and(|i| i != 0) || settings::gear_rect(self.w as i32).contains(x, y) || {
-            let (wx, wy) = self.world_pt(x, y);
-            let (title, items) = self.scene.menu_at(wx, wy);
-            !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village") || items.iter().any(|(_, d)| matches!(d, crate::scene::Do::DropOn(..)))
-        };
+        let ours = self.right_click_ours(fx, fy);
         if ours {
             self.open_menu(x, y);
         }
@@ -1910,14 +2028,17 @@ impl App {
     /// Windows desktop: a desktop icon is being dragged (at this cell), or
     /// not any more. A shelf under it lights up.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn icon_drag(&mut self, at: Option<(i32, i32)>) {
-        self.widgets.ext_drag = at;
+    pub fn icon_drag(&mut self, at: Option<(f32, f32)>) {
+        let k = self.part_k[WIDGETS].max(1.0);
+        self.widgets.ext_drag = at.map(|(fx, fy)| ((fx / k).floor() as i32, (fy / k).floor() as i32));
     }
 
     /// Windows desktop: desktop icons were let go at (x, y): onto a shelf,
     /// they go in its folder.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn desktop_drop(&mut self, x: i32, y: i32) {
+    pub fn desktop_drop(&mut self, fx: f32, fy: f32) {
+        let k = self.part_k[WIDGETS].max(1.0);
+        let (x, y) = ((fx / k).floor() as i32, (fy / k).floor() as i32);
         #[cfg(windows)]
         if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
             if let Some(to) = self.widgets.shelf_folder(s) {
@@ -2050,7 +2171,9 @@ impl App {
             // onto another widget: nothing
             None if self.widgets.hit(x, y).is_some() => {}
             None => {
-                let place = self.px_map.map(|(ox, oy, cw, ch)| (ox + x * cw - 36, oy + y * ch - 24));
+                // (a shelf's cells: the widgets' size, over the village's)
+                let k = self.part_k[WIDGETS].max(1.0);
+                let place = self.px_map.map(|(ox, oy, cw, ch)| (ox + (x as f32 * k * cw as f32) as i32 - 36, oy + (y as f32 * k * ch as f32) as i32 - 24));
                 self.widgets.send(Cmd::Move { paths: vec![path], to: crate::widgets::shelf::desktop_dir(), place });
             }
         }
@@ -2117,6 +2240,14 @@ impl App {
 
     pub fn step(&mut self) -> &[Cell] {
         let t = self.t();
+        // testing: a preview set up once things have settled
+        // (XMAS_TEST_PREVIEW=netcards: a card game at a table, say)
+        if self.test_dropped < 100 && t > 3.0 {
+            if let Ok(what) = std::env::var("XMAS_TEST_PREVIEW") {
+                self.scene.preview_perch(&what);
+            }
+            self.test_dropped += 100;
+        }
         // a press held still for a moment: the right-click menu
         if let Some((px, py, at)) = self.press {
             if t - at > 0.6 && self.menu.is_none() && !self.settings.open {
@@ -2370,7 +2501,7 @@ impl App {
             } else {
                 self.widgets.apply(&self.cfg);
             }
-            if (self.cfg.ui.scale - old.ui.scale).abs() > 1e-3 {
+            if (self.cfg.ui.scale - old.ui.scale).abs() > 1e-3 || (self.cfg.ui.widgets_k() - old.ui.widgets_k()).abs() > 1e-3 || (self.cfg.ui.buttons_k() - old.ui.buttons_k()).abs() > 1e-3 {
                 let (w, h) = (self.sw, self.sh);
                 self.regrid(w, h, false);
             }
@@ -2463,7 +2594,7 @@ impl App {
             }
         }
         self.frame.clear();
-        self.frame.safe_bottom = if self.ui_k > 1.0 { 0 } else { self.safe_bottom() };
+        self.frame.safe_bottom = self.safe_bottom();
         // the zoomed view eases after the villager
         let want = self.scene.zoom_focus();
         let f = match self.zoom_focus {
@@ -2479,32 +2610,50 @@ impl App {
         let want = settings::zoom_settled(self.cfg.zoom);
         let dz = want - self.zoom_now;
         self.zoom_now = if dz.abs() < 0.01 { want } else { self.zoom_now + dz * (1.0 - (-dt * 9.0).exp()) };
-        // (the scene's own panels go on the UI's layer, when it has one)
-        self.scene.ui_wh = (self.ui_k > 1.0).then_some((self.w as i32, self.h as i32));
+        // (the scene's own panels go on the windows' layer, when they have one)
+        let windows_apart = self.part_layer[WINDOWS].is_some();
+        self.scene.ui_wh = windows_apart.then_some((self.w as i32, self.h as i32));
         self.scene.ui_k = self.ui_k;
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
-        // the UI from here: on its own layer of bigger cells, if it has one
-        let layered = self.ui_k > 1.0;
-        if layered {
-            let k = self.ui_k;
-            self.ui_frame.clear();
-            self.ui_frame.cell_aspect = self.frame.cell_aspect;
-            self.ui_frame.safe_bottom = (self.safe_bottom() as f32 / k).ceil() as usize;
-            std::mem::swap(&mut self.frame, &mut self.ui_frame);
+        // the UI from here: each part on its own layer at its own size, if
+        // it has one (bottom to top: the widgets, the buttons, the windows)
+        let (aspect, safe) = (self.frame.cell_aspect, self.safe_bottom());
+        for l in &mut self.layers {
+            l.frame.clear();
+            l.frame.cell_aspect = aspect;
+            l.frame.safe_bottom = (safe as f32 / l.k).ceil() as usize;
         }
+        let i = self.part_in(WIDGETS);
         self.widgets.map = Some(self.scene.minimap());
         self.widgets.friends = self.scene.friends_view();
         self.widgets.draw(&mut self.frame, t);
-        // the UI from here on keeps above the taskbar
+        self.part_out(i);
+        // the buttons up top
+        let i = self.part_in(BUTTONS);
+        self.settings.draw_gear(&mut self.frame, t);
+        {
+            let o = &self.scene.online;
+            let about = o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count();
+            let state = match (o.wanted(), o.link()) {
+                (false, _) => 0,
+                (true, crate::net::Link::On) => 2,
+                _ => 1,
+            };
+            let asked = self.scene.asked_now() || !o.book.asking.is_empty();
+            self.settings.draw_online(&mut self.frame, state, about, asked, t);
+        }
+        self.part_out(i);
+        // the windows: the UI from here on keeps above the taskbar
+        let windows_layer = self.part_in(WINDOWS);
         let full_h = self.frame.ui_in();
-        if layered {
+        if windows_apart {
             self.scene.draw_ui(&mut self.frame);
         }
         // (the post, questions asked, cards and games with friends: over the widgets)
         self.scene.draw_top(&mut self.frame);
         // the widgets' tops are something to climb up onto (next frame)
-        // (in the village's cells: the UI's are bigger, on a layer of its own)
-        let k = self.ui_k;
+        // (in the village's cells: the widgets' may be bigger, on a layer of their own)
+        let k = self.part_k[WIDGETS];
         let sc = |v: i32| (v as f32 * k).round() as i32;
         self.scene.set_widget_ledges(self.widgets.rects.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, sc(r.x), sc(r.y), sc(r.w), sc(r.h)))).collect());
         // and the open windows' tops (the window-snow overlay sees them)
@@ -2524,18 +2673,6 @@ impl App {
                 }
             }
             self.scene.set_window_ledges(cells);
-        }
-        self.settings.draw_gear(&mut self.frame, t);
-        {
-            let o = &self.scene.online;
-            let about = o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count();
-            let state = match (o.wanted(), o.link()) {
-                (false, _) => 0,
-                (true, crate::net::Link::On) => 2,
-                _ => 1,
-            };
-            let asked = self.scene.asked_now() || !o.book.asking.is_empty();
-            self.settings.draw_online(&mut self.frame, state, about, asked, t);
         }
         self.settings.meters = self.audio.as_ref().filter(|_| self.settings.open).and_then(|a| a.meters.lock().ok().map(|m| *m));
         // a popped-out window tells the wallpaper it's open
@@ -2572,8 +2709,10 @@ impl App {
         }
         self.draw_typing();
         self.frame.ui_out(full_h);
-        if layered {
-            std::mem::swap(&mut self.frame, &mut self.ui_frame);
+        self.part_out(windows_layer);
+        // (the layers aren't composed: what's under their panels cut away here)
+        for l in &mut self.layers {
+            l.frame.cut_hidden();
         }
         self.frame.compose();
         &self.frame.out
@@ -2620,7 +2759,7 @@ mod tests {
         let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
         app.step();
         let r = app.widgets.rects[1].expect("the system widget");
-        assert!(app.right_click(r.x + 3, r.y + 2));
+        assert!(app.right_click((r.x + 3) as f32 + 0.5, (r.y + 2) as f32 + 0.5));
         let m = app.menu.as_ref().expect("a menu");
         assert_eq!(m.title, "system");
         assert!(m.items[0].0.starts_with("look: classic"), "{:?}", m.items.iter().map(|i| &i.0).collect::<Vec<_>>());
@@ -2630,7 +2769,7 @@ mod tests {
         app.step();
         assert_eq!(app.cfg.widgets.looks.system, "frosted");
         // its "settings…" opens on the Widgets tab
-        assert!(app.right_click(r.x + 3, r.y + 2));
+        assert!(app.right_click((r.x + 3) as f32 + 0.5, (r.y + 2) as f32 + 0.5));
         let m = app.menu.as_ref().unwrap();
         let (mx, my) = (m.x + 2, m.y + m.items.len() as i32);
         assert_eq!(m.items.last().unwrap().0, "settings…");
@@ -2927,6 +3066,46 @@ mod tests {
     /// pointer; Ctrl Shift + steps the resolution by 0.05; Esc opens the
     /// settings when nothing else is open, and the controls card comes and
     /// goes with "?".
+    /// The widgets, the buttons up top and the windows each at a size of
+    /// their own: each on its own layer (the village's own frame for
+    /// those at its size), and a click finds each at its own size.
+    #[test]
+    fn each_part_of_the_ui_has_a_size_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-parts-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.ui.scale = 1.5;
+        cfg.ui.widgets = Some(1.0);
+        cfg.ui.buttons = Some(2.0);
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.set_ui_layer_ok(true);
+        app.step();
+        assert_eq!(app.part_layer, [None, Some(0), Some(1)], "widgets on the village's frame, buttons and windows on layers");
+        {
+            let ls = app.ui_layers();
+            assert_eq!((ls.len(), ls[0].0.w, ls[0].1, ls[1].0.w, ls[1].1), (2, 150, 2.0, 200, 1.5));
+            // the buttons drawn on theirs
+            let f = ls[0].0;
+            let g = settings::gear_rect(150);
+            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '⚙'));
+        }
+        // the settings button, where it is at the buttons' size
+        let g = settings::gear_rect(150);
+        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 3) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
+        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 3) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
+        assert!(app.settings.open);
+        app.step();
+        // and the panel on the windows' layer, within its grid
+        let r = app.settings.rect.expect("the panel's drawn");
+        assert!(r.x + r.w <= 200 && r.y + r.h <= 40, "{r:?}");
+        // the same size all round: no layers at all
+        app.cfg.ui = crate::config::UiCfg::default();
+        app.regrid(300, 60, false);
+        assert!(app.ui_layers().is_empty() && app.part_layer == [None; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Sat at a game (autopilot's chess with a neighbour, say), the
     /// buttons up top still answer.
     #[test]
@@ -2972,6 +3151,15 @@ mod tests {
         let (wx, wy) = app.world_pt(150, 30);
         assert_eq!((wx, wy), ((x0 + 150.5 / z) as i32, (y0 + 30.5 / z) as i32));
         app.ctrl_key('0', false);
+        assert_eq!(app.cfg.zoom, 1.0);
+        // a touchpad's pinch: many tiny steps, adding up (none rounded away)
+        for _ in 0..30 {
+            app.mouse(MouseIn::Zoom(1.004), 150, 30);
+        }
+        assert!(app.cfg.zoom > 1.1 && app.cfg.zoom < 1.15, "{}", app.cfg.zoom);
+        for _ in 0..30 {
+            app.mouse(MouseIn::Zoom(1.0 / 1.004), 150, 30);
+        }
         assert_eq!(app.cfg.zoom, 1.0);
         // resolution: 0.05 steps (as 1 / scale)
         app.ctrl_key('+', true);
