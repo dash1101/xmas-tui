@@ -644,6 +644,15 @@ impl Frame {
         }
     }
 
+    /// A picture over `cols`×`rows` cells at (x, y) on a panel (over its
+    /// text: a line under a row, say), wherever it is.
+    pub fn picture_on_panel(&mut self, x: i32, y: i32, cols: i32, rows: i32, pic: std::sync::Arc<Picture>) {
+        let (x, y) = (x - self.ox, y + self.oy);
+        if x >= 0 && y >= 0 && x + cols <= self.w as i32 && y + rows <= self.h as i32 {
+            self.pictures.push(Placed { x, y, cols, rows, pic, sprite: None, fit: None, hidden: vec![] });
+        }
+    }
+
     // ---------------- pixel layer ----------------
 
     #[inline]

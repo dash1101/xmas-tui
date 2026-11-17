@@ -1,6 +1,6 @@
 //! Windows tray icon: Shell_NotifyIconW, owned by a hidden window on its
 //! own thread. Left click opens the settings window; right click pops up
-//! Settings…, Window snow, Sound, Start with Windows, Quit wallpaper.
+//! Menu…, Window snow, Sound, Start with Windows, Quit wallpaper.
 //!
 //! The owner is a never-shown top-level tool window rather than a
 //! message-only one: only top-level windows get Explorer's "TaskbarCreated"
@@ -128,7 +128,7 @@ fn show_menu(hwnd: HWND) {
     let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     unsafe {
         let m = CreatePopupMenu();
-        AppendMenuW(m, MF_STRING, ID_SETTINGS, wide("Settings…").as_ptr());
+        AppendMenuW(m, MF_STRING, ID_SETTINGS, wide("Menu…").as_ptr());
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(m, MF_STRING | check(flag(config, WINDOW_SNOW)), ID_SNOW, wide("Window snow").as_ptr());
         AppendMenuW(m, MF_STRING | check(flag(config, SOUND)), ID_SOUND, wide("Sound").as_ptr());

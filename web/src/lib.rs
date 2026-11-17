@@ -27,6 +27,11 @@ pub mod save;
 pub mod net;
 #[path = "../../src/sync.rs"]
 pub mod sync;
+#[path = "../../src/settings.rs"]
+pub mod settings;
+#[path = "../../android/native/src/stubs.rs"]
+mod stubs;
+pub use stubs::{platform, update};
 #[path = "../../android/native/src/widgets.rs"]
 pub mod widgets;
 #[path = "../../android/native/src/game.rs"]
@@ -399,4 +404,55 @@ pub extern "C" fn you_json(w: *mut Web, len: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn text_ptr(w: *mut Web) -> *const u8 {
     unsafe { &*w }.text.as_ptr()
+}
+
+/// The menu (home page and settings): open, or shut if it's open.
+#[no_mangle]
+pub extern "C" fn open_panel(w: *mut Web) {
+    unsafe { &mut *w }.game.open_panel();
+}
+
+/// The mouse wheel at (x, y): whether the menu took it (it scrolls, or
+/// steps the value under the pointer).
+#[no_mangle]
+pub extern "C" fn panel_wheel(w: *mut Web, x: f32, y: f32, up: u32) -> u32 {
+    unsafe { &mut *w }.game.panel_wheel(x, y, up != 0) as u32
+}
+
+/// Whether the sound's on.
+#[no_mangle]
+pub extern "C" fn sound_on(w: *mut Web) -> u32 {
+    unsafe { &*w }.game.sound_on() as u32
+}
+
+/// Sound on or off (and kept: a "config:" ask follows).
+#[no_mangle]
+pub extern "C" fn toggle_sound(w: *mut Web) {
+    unsafe { &mut *w }.game.toggle_sound();
+}
+
+/// How big the page's own buttons should be (the settings' buttons size).
+#[no_mangle]
+pub extern "C" fn buttons_k(w: *mut Web) -> f32 {
+    unsafe { &*w }.game.buttons_k()
+}
+
+/// What weather to fetch ("city|f" or "city|c"; empty: none): its length.
+#[no_mangle]
+pub extern "C" fn weather_want(w: *mut Web) -> usize {
+    let w = unsafe { &mut *w };
+    let s = w.game.weather_want();
+    put_str(w, &s)
+}
+
+/// The weather the page fetched: "place\u{0}json" in the scratch buffer.
+#[no_mangle]
+pub extern "C" fn weather_in(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let (place, json) = text.split_once('\u{0}').unwrap_or(("", &text));
+    unsafe { &mut *w }.game.set_weather(json, place);
 }

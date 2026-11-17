@@ -38,7 +38,7 @@ impl UiLayer {
     /// For a village of `cols` × `rows` cells of `cw` × `ch` px, its letters
     /// `scale` times bigger (none: the same size, no layer of its own).
     fn new(cw: usize, ch: usize, cols: usize, rows: usize, scale: f32) -> Option<UiLayer> {
-        let scale = if scale.is_finite() { scale.clamp(1.0, 2.5) } else { 1.0 };
+        let scale = if scale.is_finite() { scale.clamp(1.0, 6.0) } else { 1.0 };
         if scale < 1.05 {
             return None;
         }
@@ -85,6 +85,8 @@ pub struct Game {
     /// when it was last written.
     save: Option<std::path::PathBuf>,
     saved_at: f32,
+    /// When this side was last offered to the linked devices.
+    synced_at: f32,
     /// The joystick's last up/down (a push, not a hold, steps through a
     /// conversation's answers).
     stick_y: f32,
@@ -117,6 +119,25 @@ pub struct Game {
     linked: Option<crate::sync::Linked>,
     /// The table's being moved by its title bar.
     table_lift: bool,
+    /// The menu (the home page and the settings: the desktop's own), where
+    /// a finger went down on it (and how far it was scrolled then), the
+    /// cells' size it was made at, and the settings changed (for the app
+    /// to keep).
+    panel: crate::settings::Settings,
+    panel_press: Option<(i32, i32, i32)>,
+    size: f32,
+    cfg_dirty: bool,
+    /// A field of the menu's being typed in (by the app's own box).
+    editing: Option<crate::settings::Field>,
+    /// The widgets the web page shows (the clock, the weather, the
+    /// friends): whether they're shown here, the weather as the page last
+    /// fetched it, today's sunrise and sunset from it, where the friends
+    /// widget is, and what's under the pointer there.
+    widgets: bool,
+    weather: crate::widgets::face::Weather,
+    sun: Option<(f32, f32)>,
+    friends_at: Option<crate::widgets::Rect>,
+    friends_hover: Option<crate::widgets::face::FriendsHit>,
 }
 
 /// What a choice in a menu does.
@@ -132,6 +153,8 @@ enum Act {
     Ask(&'static str),
     /// Friends & online.
     Online,
+    /// The menu.
+    Panel,
 }
 
 /// Rows a choice takes (room for a finger).
@@ -332,10 +355,24 @@ const HELP: &[&str] = &[
     "menus and cards move by their title bars",
 ];
 
+/// The UI's size against the village's cells: the setting (Menu → Screen →
+/// windows size), on top of letters about 18 px tall at `size` (the screen's
+/// pixels to a point: the village has at least 75 rows, often smaller than
+/// that, and its menus and talk mustn't shrink with it).
+fn ui_k(setting: f32, size: f32, ch: usize) -> f32 {
+    setting.clamp(1.0, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0)
+}
+
 /// Cells for a screen: rows from the short side (about 18 px a row at
-/// "size" 100), the width to match.
-fn grid(pw: usize, ph: usize, size: f32) -> (usize, usize, usize, usize) {
-    let rows = ((ph.min(pw) as f32 / (18.0 * size.clamp(0.5, 2.0))).round() as usize).clamp(34, 110);
+/// "size" 100), the width to match. Never fewer than the 75 the village is
+/// drawn for: its houses are made to the screen's height and its people to
+/// those 75 rows, so fewer would make everyone as tall as the houses (the
+/// menus and talk have a layer of their own, as big as wanted).
+/// `view`: the menu's zoom when it's below 1× (more of the village: more
+/// rows than that, smaller).
+fn grid(pw: usize, ph: usize, size: f32, view: f32) -> (usize, usize, usize, usize) {
+    let base = (ph.min(pw) as f32 / (18.0 * size.clamp(0.5, 4.0))).max(75.0);
+    let rows = ((base / view.clamp(0.5, 1.0)).round() as usize).clamp(75, 150);
     let ch = (ph / rows).max(6);
     let cw = ((ch as f32 * 0.474).round() as usize).max(3);
     (cw, ch, pw / cw, ph / ch)
@@ -355,7 +392,7 @@ impl Game {
         if let Some(you) = saved.as_ref().and_then(|s| s.you.as_ref()) {
             you.fill(&mut cfg);
         }
-        let (cw, ch, cols, rows) = grid(pw, ph, size);
+        let (cw, ch, cols, rows) = grid(pw, ph, size, cfg.scale);
         // the same village each time (and the same in the game and on the
         // wallpaper): the save's
         let seed = if cfg.seed != 0 { cfg.seed as u32 } else { saved.as_ref().map(|s| s.seed).unwrap_or_else(crate::app::random_seed) };
@@ -382,7 +419,7 @@ impl Game {
         frame.cell_aspect = ch as f32 / cw as f32;
         let audio = if cfg.sound.enabled && !cfg!(target_arch = "wasm32") { Audio::start(&cfg.sound) } else { None };
         let pull = cfg!(target_arch = "wasm32").then(|| audio::Pull::new(&cfg.sound));
-        let ui = UiLayer::new(cw, ch, cols, rows, cfg.ui.scale);
+        let ui = UiLayer::new(cw, ch, cols, rows, ui_k(cfg.ui.scale, size, ch));
         Game {
             scene,
             ui,
@@ -409,6 +446,7 @@ impl Game {
             choices: vec![],
             save,
             saved_at: 0.0,
+            synced_at: 0.0,
             stick_y: 0.0,
             menu: None,
             card: None,
@@ -425,6 +463,23 @@ impl Game {
             help_keys: false,
             linked,
             table_lift: false,
+            panel: {
+                let mut p = crate::settings::Settings::default();
+                p.kind = if cfg!(target_arch = "wasm32") { crate::settings::Kind::Web } else { crate::settings::Kind::Phone };
+                p.keyboard = cfg!(target_arch = "wasm32");
+                p.ui_layer_ok = true;
+                p.widgets_ok = cfg!(target_arch = "wasm32");
+                p
+            },
+            panel_press: None,
+            size,
+            cfg_dirty: false,
+            editing: None,
+            widgets: cfg!(target_arch = "wasm32"),
+            weather: crate::widgets::face::Weather { status: "the weather: set its city in the menu (Widgets)".into(), ..Default::default() },
+            sun: None,
+            friends_at: None,
+            friends_hover: None,
             cfg,
         }
     }
@@ -435,6 +490,7 @@ impl Game {
     /// village is built from: the village, in place). `size`: the cells'
     /// size (as at the start).
     pub fn configure(&mut self, cfg: Config, size: f32) {
+        self.size = size;
         let old = std::mem::replace(&mut self.cfg, cfg);
         self.regrid(old, size);
     }
@@ -442,6 +498,7 @@ impl Game {
     /// A new screen size (a window resized, a phone turned): the grid made
     /// again for it, the village where it stands.
     pub fn resize(&mut self, pw: usize, ph: usize, size: f32) {
+        self.size = size;
         if (pw, ph) == (self.pw, self.ph) {
             return;
         }
@@ -454,7 +511,7 @@ impl Game {
     }
 
     fn regrid(&mut self, old: Config, size: f32) {
-        let (cw, ch, cols, rows) = grid(self.pw, self.ph, size);
+        let (cw, ch, cols, rows) = grid(self.pw, self.ph, size, self.cfg.scale);
         let regrid = (cw, ch, cols, rows) != (self.raster.cw, self.raster.ch, self.cols, self.rows);
         if regrid {
             self.cols = cols;
@@ -470,8 +527,9 @@ impl Game {
         }
         // the UI's own layer, at its own size
         let ui_scale = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw as f32).unwrap_or(1.0);
-        if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != (self.cfg.ui.scale >= 1.05)) || (ui_scale - self.cfg.ui.scale).abs() > 0.2 {
-            self.ui = UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, self.cfg.ui.scale);
+        let want = ui_k(self.cfg.ui.scale, size, self.raster.ch);
+        if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != (want >= 1.05)) || (ui_scale - want).abs() > 0.2 {
+            self.ui = UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, want);
             self.menu = None;
             self.card = None;
             self.prev.clear();
@@ -479,7 +537,8 @@ impl Game {
         self.frame.glow_near = self.cfg.scene.glow;
         self.frame.glow_far = self.cfg.scene.glow;
         // a guest's change to the village's own settings: asked of the host
-        if self.scene.village_rules().is_some() {
+        // (a public square's own settings aren't asked of anyone: they're its keeper's)
+        if matches!(self.scene.rules_now(&old.scene).map(|r| r.1), Some(crate::scene::online::Lock::Host | crate::scene::online::Lock::Admin)) {
             use crate::scene::online::Rules;
             for (k, v) in Rules::of(&old.scene).changes(&Rules::of(&self.cfg.scene)) {
                 self.scene.ask_rule(&k, &v);
@@ -496,6 +555,7 @@ impl Game {
             self.scene.set_autopilot(c.scene.autopilot);
             self.scene.set_live(c.scene.walk_speed, false, c.scene.most_at_once);
             self.scene.set_pet(&c.scene.pet);
+            self.scene.set_more_pets(&c.scene.pets);
             self.scene.set_name(&c.scene.name);
             self.scene.set_friends(&c.scene.friends);
             self.scene.set_only_friends(c.scene.only_friends);
@@ -549,6 +609,7 @@ impl Game {
             match f {
                 Front::Motto(m) => {
                     self.cfg.scene.motto = m;
+                    self.cfg_dirty = true;
                     let j = self.you_json();
                     self.asks.push(format!("you:{j}"));
                 }
@@ -559,6 +620,7 @@ impl Game {
                     let mut r = crate::scene::online::Rules::of(&self.cfg.scene);
                     if r.set(&k, &v) {
                         r.apply(&mut self.cfg.scene);
+                        self.cfg_dirty = true;
                         self.asks.push(format!("rules:{}", r.json()));
                         let seed = self.scene.seed();
                         self.rebuild(seed);
@@ -641,8 +703,10 @@ impl Game {
             }
             if let Some(y) = &a.you {
                 y.apply(&mut self.cfg);
+                self.cfg_dirty = true;
                 self.scene.set_name(&self.cfg.scene.name);
                 self.scene.set_pet(&self.cfg.scene.pet);
+        self.scene.set_more_pets(&self.cfg.scene.pets);
                 self.scene.set_friends(&self.cfg.scene.friends);
                 self.scene.set_only_friends(self.cfg.scene.only_friends);
                 self.scene.set_wear(&self.cfg.scene.wear, &self.cfg.scene.motto);
@@ -723,6 +787,7 @@ impl Game {
                 let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
                 self.open(m.x, m.y, title, Self::scene_items(items));
             }
+            Act::Panel => self.open_panel(),
         }
     }
 
@@ -739,7 +804,7 @@ impl Game {
             items.push(("set as the live wallpaper".to_string(), Act::Ask("wallpaper")));
         }
         items.push(("✉ friends & online".to_string(), Act::Online));
-        items.push(("settings".to_string(), Act::Ask("settings")));
+        items.push(("❄ the menu".to_string(), Act::Panel));
         items.push(("the controls".to_string(), Act::Help));
         let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
         self.open((self.uw() - w) / 2, self.uh() / 6, "☰ more".into(), items);
@@ -777,7 +842,20 @@ impl Game {
     /// The pointer over the village (not pressed): over a menu, the choice
     /// under it is picked out.
     pub fn hover(&mut self, x: f32, y: f32) {
+        // the friends widget's row under the pointer, picked out
+        if self.friends_at.is_some() {
+            let vc = self.cell(x, y);
+            self.friends_touch(1, vc);
+        }
         let c = self.ui_cell(x, y);
+        if self.panel.open {
+            self.panel.hover = c;
+            if self.panel.slider_drag.is_some() {
+                if let Some(a) = self.panel.drag_slider(c.0, c.1) {
+                    self.panel_act(a);
+                }
+            }
+        }
         if let Some(m) = &mut self.menu {
             if let Some(i) = m.row_at(c.0, c.1) {
                 m.hover = i;
@@ -787,7 +865,312 @@ impl Game {
 
     /// Whether a menu or card is open.
     pub fn menu_open(&self) -> bool {
-        self.menu.is_some() || self.card.is_some()
+        self.menu.is_some() || self.card.is_some() || self.panel.open
+    }
+
+    /// The menu: open on its home page (or shut, if it's open).
+    pub fn open_panel(&mut self) {
+        if self.panel.open {
+            self.close_panel();
+            return;
+        }
+        self.menu = None;
+        self.card = None;
+        self.panel.open = true;
+        self.panel.set_tab(crate::settings::TAB_HOME);
+        self.panel.pos = None;
+    }
+
+    fn close_panel(&mut self) {
+        self.panel.open = false;
+        self.panel.confirm = None;
+        self.panel.cancel_edit();
+        self.editing = None;
+    }
+
+    /// The settings as the menu shows them (a guest's: the village's own
+    /// are the host's, or a public square's).
+    fn shown_cfg(&self) -> Config {
+        let mut c = self.cfg.clone();
+        if let Some(r) = &self.rules_on {
+            r.apply(&mut c.scene);
+        }
+        c
+    }
+
+    /// New settings from the menu: taken in, and kept (the app writes them
+    /// out when asked: "config:").
+    fn set_cfg(&mut self, c: Config) {
+        let size = self.size;
+        self.configure(c, size);
+        self.cfg_dirty = true;
+    }
+
+    /// What weather the page should fetch: the city, and whether in °F
+    /// (empty: none set).
+    pub fn weather_want(&self) -> String {
+        if !self.widgets || !self.cfg.widgets.weather {
+            return String::new();
+        }
+        let f = self.cfg.weather.units.to_lowercase().starts_with('f');
+        format!("{}|{}", self.cfg.weather.city.trim(), if f { "f" } else { "c" })
+    }
+
+    /// The weather the page fetched (Open-Meteo's forecast, JSON), for
+    /// `place` (or why there's none).
+    pub fn set_weather(&mut self, json: &str, place: &str) {
+        let f = self.cfg.weather.units.to_lowercase().starts_with('f');
+        match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(v) => {
+                let (w, sun) = crate::widgets::face::weather_from(&v, place, f);
+                self.weather = w;
+                if sun.is_some() {
+                    self.sun = sun;
+                }
+            }
+            Err(_) => self.weather = crate::widgets::face::Weather { status: json.chars().take(120).collect(), ..Default::default() },
+        }
+    }
+
+    /// The sound's on.
+    pub fn sound_on(&self) -> bool {
+        self.cfg.sound.enabled
+    }
+
+    /// Sound on or off (the page's ♪ button).
+    pub fn toggle_sound(&mut self) {
+        let mut c = self.cfg.clone();
+        c.sound.enabled = !c.sound.enabled;
+        self.set_cfg(c);
+    }
+
+    /// How big the buttons up top are (the page's own bar follows it).
+    pub fn buttons_k(&self) -> f32 {
+        self.cfg.ui.buttons_k()
+    }
+
+    /// The settings as they stand, for the app to keep (TOML).
+    pub fn config_text(&self) -> String {
+        toml::to_string_pretty(&self.cfg).unwrap_or_default()
+    }
+
+    /// What the menu's Online tab shows, as things stand.
+    fn fill_net(&mut self) {
+        use crate::net::Link;
+        let o = &self.scene.online;
+        let state = match (o.wanted(), o.link()) {
+            (false, _) | (_, Link::Off) => 0,
+            (_, Link::Connecting) => 1,
+            (_, Link::On) => 2,
+        };
+        let friends = o.friends();
+        #[cfg(not(target_arch = "wasm32"))]
+        let via = self.link.as_ref().map(|l| l.via()).unwrap_or_default();
+        #[cfg(target_arch = "wasm32")]
+        let via = String::new();
+        self.panel.net = crate::settings::NetInfo {
+            state,
+            via,
+            code: crate::net::seal::pretty(&o.code()),
+            friends: friends.len(),
+            about: friends.iter().filter(|(_, h)| h.is_some()).count(),
+            listed: o.book.listed,
+            open: o.village().filter(|(_, host)| *host && o.square().is_none()).map(|(c, _)| c),
+            devices: self.linked.as_ref().map(|l| l.others.len()).unwrap_or(0),
+        };
+        self.panel.locked = self.scene.rules_now(&self.cfg.scene).is_some_and(|r| r.1 == crate::scene::online::Lock::Keeper);
+    }
+
+    /// A touch on the menu (UI cell `c`): whether it took it. A tap does
+    /// what's under it; a drag along a slider sets it; elsewhere a drag
+    /// scrolls a tab taller than the screen; a tap outside closes it.
+    fn panel_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
+        if !self.panel.open {
+            return false;
+        }
+        use crate::settings::Act as S;
+        self.panel.hover = c;
+        let inside = self.panel.rect.is_some_and(|r| r.contains(c.0, c.1));
+        match action {
+            0 => {
+                if !inside {
+                    self.close_panel();
+                    return true;
+                }
+                self.panel_press = Some((c.0, c.1, self.panel.scroll));
+                if let Some(a @ S::Set(f, _)) = self.panel.click(c.0, c.1) {
+                    self.panel.slider_drag = Some(f);
+                    self.panel_act(a);
+                }
+            }
+            1 => {
+                if self.panel.slider_drag.is_some() {
+                    if let Some(a) = self.panel.drag_slider(c.0, c.1) {
+                        self.panel_act(a);
+                    }
+                } else if let Some((_, py, s0)) = self.panel_press {
+                    if self.panel.scrolls() {
+                        let want = s0 + (py - c.1);
+                        self.panel.scroll_by(want - self.panel.scroll);
+                    }
+                }
+            }
+            2 => {
+                let was_slider = self.panel.slider_drag.take().is_some();
+                if let (false, Some((px, py, s0))) = (was_slider, self.panel_press.take()) {
+                    // a tap (not a scroll): what's under it
+                    if (c.1 - py).abs() <= 1 && (c.0 - px).abs() <= 2 && self.panel.scroll == s0 {
+                        if let Some(a) = self.panel.click(px, py) {
+                            self.panel_act(a);
+                        }
+                    }
+                }
+                self.panel.hover = (-1, -1);
+            }
+            _ => {
+                self.panel.slider_drag = None;
+                self.panel_press = None;
+            }
+        }
+        true
+    }
+
+    /// The mouse wheel over the menu (the web page): scroll it, or step
+    /// the value under the pointer.
+    pub fn panel_wheel(&mut self, x: f32, y: f32, up: bool) -> bool {
+        if !self.panel.open {
+            return false;
+        }
+        let c = self.ui_cell(x, y);
+        if let Some(a) = self.panel.wheel(c.0, c.1, up) {
+            self.panel_act(a);
+        }
+        true
+    }
+
+    /// A touch on the friends widget (the web page): a friend's menu, the
+    /// messages, talking, adding a friend, going online, public villages.
+    fn friends_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
+        use crate::scene::online::{NetDo, MORE_FRIEND, MORE_MESSAGES, MORE_PUBLIC};
+        use crate::widgets::face::{friends_rows, FriendsHit};
+        let Some(r) = self.friends_at.filter(|r| r.contains(c.0, c.1)) else {
+            self.friends_hover = None;
+            return false;
+        };
+        let Some(v) = self.scene.friends_view() else { return false };
+        let hit = friends_rows(r, &v).into_iter().find(|(y, _)| *y == c.1).map(|(_, h)| h);
+        self.friends_hover = hit;
+        if action != 2 {
+            return true;
+        }
+        let more = match hit {
+            Some(FriendsHit::GoOnline) => return { self.scene.act(Do::Net(NetDo::On)); true },
+            Some(FriendsHit::Talk) => return { self.chat(); true },
+            Some(FriendsHit::Add) => return { self.scene.act(Do::Net(NetDo::Add)); true },
+            Some(FriendsHit::Public) => MORE_PUBLIC,
+            Some(FriendsHit::Friend(i)) => MORE_FRIEND + i.min(31) as u8,
+            Some(FriendsHit::Messages) => {
+                self.scene.messages_read();
+                MORE_MESSAGES
+            }
+            None => return true,
+        };
+        let (title, items) = self.scene.more_menu(more);
+        self.open((r.x - 20).max(0), r.y, title, Self::scene_items(items));
+        true
+    }
+
+    /// What the menu asked for.
+    fn panel_act(&mut self, a: crate::settings::Act) {
+        use crate::settings::{self as st, Act as S};
+        match a {
+            S::Close => self.close_panel(),
+            S::Tab(i) => self.panel.set_tab(i as usize),
+            S::Edit(f) => {
+                // (the app's own box: a phone's keyboard, the page's)
+                let mut c = self.cfg.clone();
+                self.panel.begin_edit(&mut c, f);
+                if !crate::config::same(&c, &self.cfg) {
+                    self.set_cfg(c);
+                }
+                let now = self.panel.editing.clone().unwrap_or_default();
+                let what = match f {
+                    st::Field::Name => "your name",
+                    st::Field::Motto => "the line on your profile card",
+                    st::Field::City => "the weather's city",
+                    st::Field::PetName(_) => "the pet's name",
+                    st::Field::Friend(_) => "their name (empty: off the list)",
+                    st::Field::NewFriend => "a friend or family member's name",
+                    st::Field::Shelf(_) => "the shelf's name",
+                };
+                self.editing = Some(f);
+                self.asks.push(format!("edit:{what}\u{1}{now}"));
+            }
+            S::Net(n) => self.net_act(n),
+            S::Restart => self.asks.push("restart".into()),
+            S::Help => {
+                self.close_panel();
+                self.help(self.help_keys);
+            }
+            S::ExportSave => self.asks.push("export".into()),
+            S::ImportSave => self.asks.push("import".into()),
+            S::Shuffle => self.asks.push("fresh".into()),
+            S::Uninstall | S::ResetSettings => self.panel.confirm = Some(a),
+            S::NotNow => self.panel.confirm = None,
+            S::UninstallNow => {
+                self.panel.confirm = None;
+                self.asks.push("uninstall".into());
+            }
+            S::ResetNow => {
+                self.panel.confirm = None;
+                let c = self.cfg.reset_keeping_own();
+                self.set_cfg(c);
+                self.scene.note("⟲ settings reset");
+            }
+            S::SetWallpaper => self.asks.push("wallpaper".into()),
+            S::FriendSel(i) => self.panel.friend_sel = if self.panel.friend_sel == Some(i) { None } else { Some(i) },
+            S::Locked | S::PopOut | S::FullScreen | S::BackToWallpaper | S::RestartNow | S::RestartLater | S::Quit | S::Autostart | S::OpenConfig | S::OpenLog | S::CheckUpdate | S::InstallUpdate | S::DismissUpdate | S::ShelfOpen(_) | S::ShelfFolder(_) | S::ShelfNewFrom | S::DismissWallOffer | S::LockScreen | S::LockRedraw | S::InstallFfmpeg => {}
+            a => {
+                // a guest: the village's own settings are the host's (asked
+                // of them in regrid); in a square, not to be changed at all
+                let mut c = self.cfg.clone();
+                if st::apply(&mut c, a) {
+                    self.set_cfg(c);
+                }
+            }
+        }
+    }
+
+    /// Something online, from the menu.
+    fn net_act(&mut self, n: u8) {
+        use crate::scene::online::{NetDo, MORE_DEVICES, MORE_PUBLIC};
+        use crate::settings as st;
+        let on = self.scene.online.wanted();
+        let more = match n {
+            st::NET_ONLINE => return self.scene.act(Do::Net(if on { NetDo::Off } else { NetDo::On })),
+            st::NET_COPY => return self.scene.act(Do::Net(NetDo::Code)),
+            st::NET_LIST => return self.scene.act(Do::Net(NetDo::ListMine(!self.scene.online.book.listed))),
+            st::NET_OPEN => return self.scene.act(Do::Net(NetDo::Host)),
+            st::NET_FRIENDS => {
+                self.close_panel();
+                return self.online_menu();
+            }
+            st::NET_ADD => {
+                self.close_panel();
+                return self.scene.act(Do::Net(NetDo::Add));
+            }
+            st::NET_CARD => {
+                self.close_panel();
+                return self.scene.act(Do::Net(NetDo::MyCard));
+            }
+            st::NET_PUBLIC => MORE_PUBLIC,
+            st::NET_DEVICES => MORE_DEVICES,
+            _ => return,
+        };
+        self.close_panel();
+        let (title, items) = self.scene.more_menu(more);
+        let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
+        self.open((self.uw() - w) / 2, self.uh() / 8, title, Self::scene_items(items));
     }
 
     /// Something for the app itself to do, if anything's asked.
@@ -797,6 +1180,20 @@ impl Game {
 
     /// The line typed for what was asked (empty: never mind).
     pub fn give_text(&mut self, text: &str) {
+        // a field of the menu's (empty: left as it was)
+        if let Some(f) = self.editing.take() {
+            if self.panel.edit == Some(f) {
+                let mut c = self.cfg.clone();
+                if text.trim().is_empty() && !matches!(f, crate::settings::Field::Friend(_)) {
+                    self.panel.cancel_edit();
+                } else {
+                    self.panel.editing = Some(text.to_string());
+                    self.panel.commit(&mut c);
+                    self.set_cfg(c);
+                }
+            }
+            return;
+        }
         if let Some(what) = self.text_for.take() {
             self.scene.woke();
             self.scene.give_text(what, text);
@@ -828,14 +1225,14 @@ impl Game {
         }
         if let Some(to) = self.scene.take_village() {
             let seed = to.unwrap_or(self.own_seed);
-            self.rules_on = self.scene.village_rules().filter(|_| to.is_some()).map(|r| r.0.clone());
+            self.rules_on = self.scene.rules_now(&self.cfg.scene).filter(|_| to.is_some()).map(|r| r.0);
             self.rebuild(seed);
             self.scene.arrive_by_host();
         }
         // hosting: the village's settings, for the guests; a guest: the
         // host's (the village made again when they change)
         self.scene.set_rules(&crate::scene::online::Rules::of(&self.cfg.scene));
-        let rules = self.scene.village_rules().map(|r| r.0.clone());
+        let rules = self.scene.rules_now(&self.cfg.scene).map(|r| r.0);
         if rules != self.rules_on {
             self.rules_on = rules;
             let seed = self.scene.seed();
@@ -884,6 +1281,7 @@ impl Game {
         scene.set_autopilot(cfg.scene.autopilot);
         scene.set_live(cfg.scene.walk_speed, false, cfg.scene.most_at_once);
         scene.set_pet(&cfg.scene.pet);
+        scene.set_more_pets(&cfg.scene.pets);
         scene.set_name(&cfg.scene.name);
         scene.set_friends(&cfg.scene.friends);
         scene.set_only_friends(cfg.scene.only_friends);
@@ -896,6 +1294,13 @@ impl Game {
     /// Back: close the menu, the card, or what's open in the village;
     /// whether anything was.
     pub fn back(&mut self) -> bool {
+        // the menu: a confirmation first, then the menu itself
+        if self.panel.open {
+            if self.panel.confirm.take().is_none() {
+                self.close_panel();
+            }
+            return true;
+        }
         if self.menu.take().is_some() || self.card.take().is_some() || self.scene.close_card() {
             return true;
         }
@@ -908,7 +1313,7 @@ impl Game {
 
     /// What's showing: 1 the pockets, 2 a menu or card.
     pub fn state(&self) -> i32 {
-        (self.scene.pockets_shown() as i32) | (((self.menu.is_some() || self.card.is_some()) as i32) << 1)
+        (self.scene.pockets_shown() as i32) | (((self.menu.is_some() || self.card.is_some()) as i32) << 1) | ((self.panel.open as i32) << 2)
     }
 
     /// Write the save file (every minute, when paused, and at the end).
@@ -956,7 +1361,11 @@ impl Game {
             use chrono::Timelike;
             let now = crate::clock::now();
             let mins = now.hour() as f32 * 60.0 + now.minute() as f32 + now.second() as f32 / 60.0;
-            self.scene.set_daylight(daylight::compute(&self.cfg.scene.time, mins, 450.0, 1020.0));
+            // a guest: the host's clock (the same sky for everyone there)
+            let (rise, set) = self.sun.unwrap_or((450.0, 1020.0));
+            self.scene.online.set_clock(mins, rise, set);
+            let (mins, rise, set) = self.scene.online.village_clock().unwrap_or((mins, rise, set));
+            self.scene.set_daylight(daylight::compute(&self.cfg.scene.time, mins, rise, set));
         }
         self.scene.update(dt, t);
         // the pet named (or recoloured) in the village: kept, and saved
@@ -965,6 +1374,12 @@ impl Game {
             self.saved_at = -1e9;
         }
         self.update_online();
+        // linked devices: a change here reaches the others in a moment
+        // (an unchanged side isn't sent again)
+        if self.linked.is_some() && t - self.synced_at > 2.0 {
+            self.synced_at = t;
+            self.send_sync();
+        }
         if t - self.saved_at > 60.0 {
             self.save();
         }
@@ -988,7 +1403,47 @@ impl Game {
         self.scene.ui_wh = self.ui.as_ref().map(|u| (u.frame.w as i32, u.frame.h as i32));
         self.scene.ui_k = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw.max(1) as f32).unwrap_or(1.0);
         self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+        // the widgets (the web page), on the village's own grid as on the
+        // desktop: down the right-hand side, under the
+        // page's own buttons, where there's room for them
+        self.friends_at = None;
+        if self.widgets && self.frame.w >= 110 && !self.panel.open {
+            use crate::widgets::{face, Rect};
+            let x = self.frame.w as i32 - 64;
+            let mut y = 5;
+            if self.cfg.clock.enabled {
+                y = face::draw_clock(&mut self.frame, x + 2, y, &self.cfg.clock, t) + 1;
+            }
+            if self.cfg.widgets.weather {
+                let r = Rect { x, y, w: 60, h: 8 };
+                face::draw_weather(&mut self.frame, r, &self.weather, t);
+                crate::widgets::looks::apply(&mut self.frame, r, &self.cfg.widgets.looks.weather, face::PANEL, 4);
+                y += 9;
+            }
+            if self.cfg.widgets.friends {
+                if let Some(v) = self.scene.friends_view() {
+                    let r = Rect { x: x + 20, y, w: 40, h: 10 };
+                    if r.y + r.h <= self.frame.h as i32 {
+                        face::draw_friends(&mut self.frame, r, &v, self.friends_hover, t);
+                        crate::widgets::looks::apply(&mut self.frame, r, &self.cfg.widgets.looks.friends, face::PANEL, 4);
+                        self.friends_at = Some(r);
+                    }
+                }
+            }
+        }
+
         let look = self.cfg.ui.look.clone();
+        if self.panel.open {
+            self.fill_net();
+        }
+        let shown = self.panel.open.then(|| self.shown_cfg());
+        // the settings changed: for the app to keep (now and then, not
+        // while a slider's being dragged)
+        if self.cfg_dirty && self.panel.slider_drag.is_none() {
+            self.cfg_dirty = false;
+            let text = self.config_text();
+            self.asks.push(format!("config:{text}"));
+        }
         // the post, questions, the table, menus and cards: over the village
         // (in a layer of their own, bigger, if the UI's set bigger)
         let layered = self.ui.is_some();
@@ -1010,6 +1465,9 @@ impl Game {
         }
         if let Some(c) = &self.card {
             c.draw(uf, &look);
+        }
+        if let Some(c) = &shown {
+            self.panel.draw(uf, c, t);
         }
         self.frame.compose();
         self.draw();
@@ -1249,8 +1707,15 @@ impl Game {
         let uc = self.ui_cell(x, y);
         let w = self.world(c);
         let t = self.t;
-        // the menu or card takes its own touches
+        // the menu (home page and settings) takes its own touches, then a
+        // menu or card
+        if self.panel_touch(action, uc) {
+            return;
+        }
         if self.menu_touch(action, uc) {
+            return;
+        }
+        if self.friends_touch(action, c) {
             return;
         }
         match action {

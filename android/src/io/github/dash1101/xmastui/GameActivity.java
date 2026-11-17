@@ -108,7 +108,9 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
 
     /** The "Size" setting (bigger: bigger village, fewer rows on the screen). */
     private float size() {
-        return Math.max(40, Math.min(250, Prefs.get(this).getInt("size", 100))) / 100f;
+        // the menus' and talk's letters about 13 points tall (the screen's
+        // own density); the menu's sizes go on top
+        return Math.max(0.5f, Math.min(4f, getResources().getDisplayMetrics().density * 0.62f));
     }
 
     // ------------------------------------------------------------ surface
@@ -313,16 +315,71 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     /** A line for the village to have (a friend's code, a message): typed, then handed over. */
-    private void typeLine(String question) {
+    static String typingCode(String v, boolean more) {
+        int sp = more ? v.indexOf(' ') : -1;
+        String code = sp >= 0 ? v.substring(0, sp) : v, rest = sp >= 0 ? v.substring(sp) : "";
+        StringBuilder n = new StringBuilder();
+        for (char c : code.toCharArray()) {
+            if (n.length() < 14 && Character.isLetterOrDigit(c) && c < 128) {
+                if (n.length() == 4 || n.length() == 9) n.append('-');
+                n.append(Character.toUpperCase(c));
+            }
+        }
+        return n + rest;
+    }
+
+    private void typeLine(String question, String value) {
+        // (reassigned below: a chat's title and its lines)
+        // a chat: its title, then what's been said so far (a line each)
+        String said = null;
+        int nl = question.indexOf('\n');
+        if (nl >= 0) {
+            said = question.substring(nl + 1);
+            question = question.substring(0, nl);
+        }
         final android.widget.EditText e = new android.widget.EditText(this);
         e.setSingleLine(true);
         e.setHint(question);
+        if (value != null && !value.isEmpty()) {
+            e.setText(value);
+            e.setSelection(value.length());
+        }
+        // a code asked for: capitals and a dash between each four, as it's
+        // typed (a group's: then a name after a space, kept as it is)
+        if (question.contains("XXXX-XXXX-XXXX")) {
+            final boolean more = question.contains("name");
+            e.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            e.addTextChangedListener(new android.text.TextWatcher() {
+                boolean busy;
+
+                @Override
+                public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+
+                @Override
+                public void onTextChanged(CharSequence s, int a, int b, int c) {}
+
+                @Override
+                public void afterTextChanged(android.text.Editable s) {
+                    if (busy) return;
+                    String v = typingCode(s.toString(), more);
+                    if (!v.equals(s.toString())) {
+                        busy = true;
+                        s.replace(0, s.length(), v);
+                        busy = false;
+                    }
+                }
+            });
+        }
         e.setTextColor(Color.WHITE);
         int pad = Math.round(16 * getResources().getDisplayMetrics().density);
         FrameLayout box = new FrameLayout(this);
         box.setPadding(pad, pad / 2, pad, 0);
         box.addView(e);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        AlertDialog.Builder ask = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert);
+        if (said != null) {
+            ask.setMessage(said);
+        }
+        ask
                 .setTitle(question)
                 .setView(box)
                 .setPositiveButton("OK", (d, w) -> {
@@ -341,13 +398,20 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     /** What the village asks of the app (from its menus), and what's showing. */
     private void poll(final long g) {
         final String ask = Native.ask(g);
-        final boolean pockets = (Native.state(g) & 1) != 0;
-        if (ask == null && pockets == controls.pockets) {
+        final int st = Native.state(g);
+        final boolean pockets = (st & 1) != 0;
+        // the menu open: the joystick and buttons out of its way
+        final boolean menu = (st & 4) != 0;
+        if (ask == null && pockets == controls.pockets && menu == controls.menu) {
             return;
         }
         ui.post(new Runnable() {
             @Override
             public void run() {
+                if (controls.menu != menu) {
+                    controls.menu = menu;
+                    controls.invalidate();
+                }
                 if (controls.pockets != pockets) {
                     controls.pockets = pockets;
                     controls.invalidate();
@@ -355,9 +419,39 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 if ("wallpaper".equals(ask)) {
                     setWallpaper();
                 } else if ("settings".equals(ask)) {
-                    openSettings();
+                    if (game != 0) Native.openPanel(game);
+                } else if (ask != null && ask.startsWith("config:")) {
+                    // the menu changed the settings: kept (the wallpaper reads them too)
+                    String text = ask.substring(7);
+                    Prefs.putConfig(GameActivity.this, text);
+                    cfgUsed = text;
+                } else if (ask != null && ask.startsWith("edit:")) {
+                    String q = ask.substring(5);
+                    int k = q.indexOf('\u0001');
+                    typeLine(k >= 0 ? q.substring(0, k) : q, k >= 0 ? q.substring(k + 1) : "");
+                } else if ("restart".equals(ask)) {
+                    if (game != 0) Native.save(game);
+                    recreate();
+                } else if ("export".equals(ask) || "import".equals(ask)) {
+                    if (game != 0) Native.save(game);
+                    SettingsPanel.pickSave(GameActivity.this, "export".equals(ask));
+                } else if ("fresh".equals(ask)) {
+                    new AlertDialog.Builder(GameActivity.this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                            .setMessage("A new village? This one's pockets and scorecard go with it.")
+                            .setPositiveButton("New village", (d, w) -> {
+                                new java.io.File(getFilesDir(), "save.toml").delete();
+                                restartGame();
+                            })
+                            .setNegativeButton("Keep this one", null)
+                            .show();
+                } else if ("uninstall".equals(ask)) {
+                    Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + getPackageName()));
+                    try {
+                        startActivity(i);
+                    } catch (Exception ignored) {
+                    }
                 } else if (ask != null && ask.startsWith("text:")) {
-                    typeLine(ask.substring(5));
+                    typeLine(ask.substring(5), "");
                 } else if (ask != null && ask.startsWith("rules:")) {
                     // the village's settings, a guest's change said yes to: kept
                     try {
@@ -609,6 +703,8 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     final class Controls extends View {
         int gw, gh;
         boolean pockets;
+        /** The game's menu is open (the controls hide, its touches are the menu's). */
+        boolean menu;
         private final Paint fill = new Paint();
         /** A dp, times the buttons' size (Settings → Village). */
         private float d = getResources().getDisplayMetrics().density;
@@ -775,7 +871,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         @Override
         protected void onDraw(Canvas c) {
             float k = alpha();
-            if (k <= 0f) {
+            if (k <= 0f || menu) {
                 return;
             }
             // the joystick: a frosty ring, the thumb a pale disc
@@ -851,7 +947,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 case 1: Native.button(game, Native.JUMP); break;
                 case 2: Native.button(game, Native.SNOWBALL); break;
                 case 3: more(); break;
-                case 4: openSettings(); break;
+                case 4: if (game != 0) Native.openPanel(game); break;
                 case 5: Native.button(game, Native.CENTRE); break;
                 case 6: todo(); break;
                 case 7: Native.online(game); break;
@@ -885,6 +981,14 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
             int idx = e.getActionIndex();
             int id = e.getPointerId(idx);
             float x = e.getX(idx), y = e.getY(idx);
+            // the menu open: every touch is the menu's (taps, slides, scrolling)
+            if (menu) {
+                if (idx == 0 || act == MotionEvent.ACTION_MOVE) {
+                    int a = act == MotionEvent.ACTION_DOWN ? 0 : act == MotionEvent.ACTION_MOVE ? 1 : act == MotionEvent.ACTION_UP ? 2 : 3;
+                    Native.touch(game, a, e.getX(0), e.getY(0));
+                }
+                return true;
+            }
             switch (act) {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN: {

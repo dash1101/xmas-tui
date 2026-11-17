@@ -488,6 +488,8 @@ pub struct SceneCfg {
     pub chattiness: f32,
     /// The villager's own pet.
     pub pet: PetCfg,
+    /// More pets, of any kinds, coming along too (up to `MORE_PETS`).
+    pub pets: Vec<PetCfg>,
     /// The villager's name (empty: people call them "neighbour").
     pub name: String,
     /// Friends and family: some of the folk who come to the village take
@@ -499,7 +501,20 @@ pub struct SceneCfg {
     pub motto: String,
 }
 
+/// The most pets beside the first.
+pub const MORE_PETS: usize = 5;
+
 impl SceneCfg {
+    /// Pet `i`: 0 the first, then the others.
+    pub fn pet_at(&self, i: u8) -> Option<&PetCfg> {
+        if i == 0 { Some(&self.pet) } else { self.pets.get(i as usize - 1) }
+    }
+
+    pub fn pet_at_mut(&mut self, i: u8) -> Option<&mut PetCfg> {
+        if i == 0 { Some(&mut self.pet) } else { self.pets.get_mut(i as usize - 1) }
+    }
+
+
     /// What the village is built from: a change to any of this makes it
     /// anew (the rest applies as it is: names, looks, walking speed,
     /// talk, the time of day, traffic…).
@@ -512,6 +527,7 @@ impl SceneCfg {
         c.talk_time = 0.0;
         c.chattiness = 0.0;
         c.pet = Default::default();
+        c.pets.clear();
         c.name.clear();
         c.autopilot = false;
         c.only_friends = false;
@@ -640,7 +656,7 @@ impl FriendCfg {
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct PetCfg {
-    /// "dog", "cat", "bunny" or "none".
+    /// "dog", "cat", "bunny", "reindeer", "fox", "bird" or "none".
     pub kind: String,
     pub coat: String,
     pub name: String,
@@ -763,7 +779,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, village_limit: 8, clean_words: true, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
+        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, village_limit: 8, clean_words: true, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), pets: vec![], name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
     }
 }
 
@@ -897,6 +913,7 @@ impl Config {
         c.scene.wear = self.scene.wear.clone();
         c.scene.motto = self.scene.motto.clone();
         c.scene.pet = self.scene.pet.clone();
+        c.scene.pets = self.scene.pets.clone();
         c.scene.friends = self.scene.friends.clone();
         c.shelves = self.shelves.clone();
         c.weather.city = self.weather.city.clone();
@@ -915,8 +932,11 @@ impl Config {
         let d = Config::default();
         self.fps = clean_fps(self.fps);
         fix(&mut self.scale, 0.5, 2.0, d.scale);
-        fix(&mut self.zoom, 1.0, 3.0, d.zoom);
+        fix(&mut self.zoom, 1.0, 4.0, d.zoom);
         let (s, ds) = (&mut self.scene, &d.scene);
+        // more pets: real kinds only, and not too many
+        s.pets.retain(|p| crate::scene::pets::PetKind::from_str(&p.kind).is_some());
+        s.pets.truncate(MORE_PETS);
         fix(&mut s.snow, 0.0, 3.0, ds.snow);
         fix(&mut s.wind, 0.0, 3.0, ds.wind);
         fix(&mut s.glow, 0.0, 2.0, ds.glow);

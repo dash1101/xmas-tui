@@ -7,7 +7,14 @@
 "use strict";
 
 const BTN = { E: 0, JUMP: 1, SNOWBALL: 2, POCKETS: 3, INVITE: 4, HELD: 5, BACK: 6, CENTRE: 7, JUMP_UP: 8, REST: 9, NUM: 10 };
-const KEY = "xmas-tui-save", OPTS = "xmas-tui-opts", PLACE = "xmas-tui-opts-at", FOLK = "xmas-tui-villagers";
+const KEY = "xmas-tui-save", OPTS = "xmas-tui-opts", PLACE = "xmas-tui-opts-at", FOLK = "xmas-tui-villagers", CFG = "xmas-tui-config";
+// the settings (the menu's, the same as the desktop app's): kept as the
+// config text the game itself writes; the first time, made from the page's
+// old settings
+function cfgText() {
+  try { const c = localStorage.getItem(CFG); if (c) return c; } catch (e) {}
+  return config(opts());
+}
 const canvas = document.getElementById("village");
 const ctx = canvas.getContext("2d", { alpha: false });
 const pad = document.getElementById("pad");
@@ -26,7 +33,7 @@ const DEFAULTS = {
   time: "auto", snow: 100, wind: 100, aurora: true, glow: 100, size: 100, zoom: 100,
   critters: 100, most: 24, bushes: true, events: 100, sleigh: 4, chattiness: 100, talk_time: 100,
   sound: true, master: 50, music: 60, sfx: 70, ambience: 50, track: "shuffle",
-  look: "classic", uiscale: touchy ? 140 : 100, btnscale: 100,
+  look: "classic", uiscale: 100, btnscale: 100,
   autoafter: "20", autoarea: "anywhere", autoreach: "1", vlimit: "8", cleanwords: true,
 };
 function opts() {
@@ -78,6 +85,13 @@ function size() {
   return [Math.max(64, Math.floor(w / k)), Math.max(64, Math.floor(h / k)), k, dpr];
 }
 
+// the size of the menus' and talk's letters, against 18 of the canvas's
+// pixels: the screen's own density (about 18 css px a row on a computer,
+// 13 on a phone, where room's short); the settings' sizes go on top
+function cellSize(dpr) {
+  return Math.max(0.5, Math.min(4, (dpr || 1) * (touchy ? 0.72 : 1) / K));
+}
+
 function build() {
   if (game) { save(); netBye(); wasm.destroy(game); game = 0; }
   let dpr;
@@ -86,11 +100,11 @@ function build() {
   canvas.style.width = (W * K / dpr) + "px";
   canvas.style.height = (H * K / dpr) + "px";
   pad.width = innerWidth; pad.height = innerHeight;
-  const o = opts();
-  const n = putText(config(o) + "\u0000" + (localStorage.getItem(KEY) || ""));
-  game = wasm.create(W, H, o.size / 100, (Math.random() * 4294967295) >>> 0, localMs(), n);
+  const n = putText(cfgText() + "\u0000" + (localStorage.getItem(KEY) || ""));
+  game = wasm.create(W, H, cellSize(dpr), (Math.random() * 4294967295) >>> 0, localMs(), n);
   img = null;
   sound();
+  sizeButtons();
   // the other villagers kept in this browser (for the menu)
   wasm.set_villagers(game, putText(JSON.stringify(folk().map((v) => v.name || "a villager (no name)"))));
 }
@@ -101,9 +115,9 @@ function folk() {
 }
 function park() {
   save();
-  const o = opts();
   const all = folk();
-  all.push({ name: o.name, save: localStorage.getItem(KEY) || "", opts: o });
+  const name = (cfgText().match(/^name = "(.*)"$/m) || [])[1] || "";
+  all.push({ name, save: localStorage.getItem(KEY) || "", cfg: cfgText() });
   try { localStorage.setItem(FOLK, JSON.stringify(all)); } catch (e) { toast("no room to keep another villager"); return false; }
   return true;
 }
@@ -116,7 +130,8 @@ function switchTo(i) {
   localStorage.setItem(FOLK, JSON.stringify(now));
   if (game) { netBye(); wasm.destroy(game); game = 0; }
   if (v.save) localStorage.setItem(KEY, v.save); else localStorage.removeItem(KEY);
-  if (v.opts) setOpts(Object.assign(opts(), v.opts));
+  if (v.cfg) localStorage.setItem(CFG, v.cfg);
+  else if (v.opts) localStorage.setItem(CFG, config(Object.assign(opts(), v.opts)));
   build();
   toast("☺ " + (v.name || "another villager"));
 }
@@ -124,9 +139,8 @@ function newVillager(name) {
   if (!park()) return;
   if (game) { netBye(); wasm.destroy(game); game = 0; }
   localStorage.removeItem(KEY);
-  const o = opts();
-  Object.assign(o, { name, pet: "cat", petcoat: "", petname: "", friends: [], only_friends: false, motto: "", wcoat: "", what: "", whair: "", wskin: "", wscarf: true });
-  setOpts(o);
+  // a villager of their own: the settings as they first are, their name
+  localStorage.setItem(CFG, config(Object.assign({}, DEFAULTS, { name, friends: [] })));
   build();
   toast("☺ " + name + ", in a village of their own");
 }
@@ -173,6 +187,28 @@ setInterval(() => {
   asked(getText(wasm.ask(game)));
   netPump(performance.now());
 }, 1000);
+// the weather widget's: fetched here (Open-Meteo answers a page), for the
+// city in the settings, every half hour or when the city changes
+let wxWant = "", wxAt = 0;
+async function weather() {
+  if (!game) return;
+  const want = getText(wasm.weather_want(game));
+  if (!want || (want === wxWant && Date.now() - wxAt < 30 * 60 * 1000)) return;
+  wxWant = want; wxAt = Date.now();
+  const [city, unit] = want.split("|");
+  const give = (place, json) => game && wasm.weather_in(game, putText(place + "\u0000" + json));
+  if (!city) { give("", "the weather: set its city in the menu (Widgets)"); return; }
+  try {
+    const g = await (await fetch("https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + encodeURIComponent(city))).json();
+    const r = g.results && g.results[0];
+    if (!r) { give("", "city not found: " + city); return; }
+    const f = unit === "f" ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "";
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${r.latitude.toFixed(3)}&longitude=${r.longitude.toFixed(3)}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=4&timezone=auto${f}`;
+    const text = await (await fetch(url)).text();
+    give(r.name || city, text);
+  } catch (e) { wxAt = Date.now() - 25 * 60 * 1000; give("", "the weather couldn't be fetched"); }
+}
+setInterval(weather, 5000);
 // the page's title: the village, and where in it
 setInterval(() => {
   if (!game) return;
@@ -185,11 +221,26 @@ setInterval(() => {
 // friend's code, a message), a code onto the clipboard
 function asked(a) {
   if (!a) return;
-  if (a === "settings") openOpts(true);
+  if (a === "settings") wasm.open_panel(game);
+  else if (a.startsWith("config:")) {
+    // the settings changed in the menu: kept
+    try { localStorage.setItem(CFG, a.slice(7)); } catch (e) {}
+    sizeButtons();
+    sound();
+  } else if (a.startsWith("edit:")) {
+    // one of the menu's fields: its own box (a phone's keyboard comes up)
+    held.clear(); steer();
+    const [q, v] = a.slice(5).split("\u0001");
+    askFor(q, v || "");
+  } else if (a === "restart") { save(); location.reload(); }
+  else if (a === "export") exportSave();
+  else if (a === "import") document.getElementById("o-file").click();
+  else if (a === "fresh") fresh();
+  else if (a === "uninstall") forget(true);
   else if (a.startsWith("text:")) {
     held.clear(); steer();
     askFor(a.slice(5));
-  } else if (a.startsWith("rules:")) {
+  } else if (a.startsWith("rules:") && false) {
     // the village's settings, changed by a guest (said yes to): kept
     try {
       const r = JSON.parse(a.slice(6)), o = opts();
@@ -198,7 +249,7 @@ function asked(a) {
       setOpts(o);
       if (box.classList.contains("open")) show(tab);
     } catch (e) {}
-  } else if (a.startsWith("you:")) {
+  } else if (a.startsWith("you:") && false) {
     try { const o = opts(); takeYou(JSON.parse(a.slice(4)), o); setOpts(o); if (box.classList.contains("open")) show(tab); } catch (e) {}
   } else if (a.startsWith("villager:")) {
     setTimeout(() => switchTo(+a.slice(9)), 0);
@@ -214,9 +265,25 @@ function asked(a) {
 // a line to type (a friend's code, a message): a box in the page, not the
 // browser's own prompt
 const askBox = document.getElementById("ask"), askIn = document.getElementById("ask-in");
-function askFor(q) {
+// a code asked for: capitals and a dash between each four, as it's typed
+// (a group's: then a name after a space, kept as it is)
+let askCode = null;
+function typingCode(v, more) {
+  const sp = more ? v.indexOf(" ") : -1;
+  const code = sp >= 0 ? v.slice(0, sp) : v, rest = sp >= 0 ? v.slice(sp) : "";
+  const n = code.replace(/[^0-9a-z]/gi, "").toUpperCase().slice(0, 12);
+  return n.replace(/(.{4})(?=.)/g, "$1-") + rest;
+}
+askIn.addEventListener("input", () => {
+  if (askCode === null) return;
+  const v = typingCode(askIn.value, askCode);
+  if (v !== askIn.value) { askIn.value = v; askIn.setSelectionRange(v.length, v.length); }
+});
+function askFor(q, value) {
   document.getElementById("ask-q").textContent = q;
-  askIn.value = "";
+  askCode = q.includes("XXXX-XXXX-XXXX") ? q.includes("name") : null;
+  askIn.autocapitalize = askCode === null ? "sentences" : "characters";
+  askIn.value = value || "";
   askBox.classList.add("open");
   setTimeout(() => askIn.focus(), 0);
 }
@@ -325,7 +392,7 @@ class PollSocket {
     if (this.onclose) this.onclose({});
   }
 }
-let ws = null, wsTry = 0, wsWait = 0, relays = null;
+let ws = null, wsTry = 0, wsWait = 0, wsOpenAt = 0, relays = null;
 fetch("relays.json").then((r) => r.json()).then((j) => { if (Array.isArray(j.ws) && j.ws.length) relays = j.ws; }).catch(() => {});
 function netPump(now) {
   const want = wasm.net_want(game);
@@ -346,7 +413,7 @@ function netPump(now) {
     wsTry++;
     try { ws = /^https?:/.test(url) ? new PollSocket(url) : new WebSocket(url, "mqtt"); } catch (e) { ws = null; wsWait = now + 3000; return; }
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => { wsTry--; if (game) wasm.net_link(game, 1); };
+    ws.onopen = () => { wsTry--; wsOpenAt = performance.now(); if (game) wasm.net_link(game, 1); };
     ws.onmessage = (e) => {
       if (!game) return;
       const b = new Uint8Array(e.data);
@@ -354,7 +421,9 @@ function netPump(now) {
       new Uint8Array(wasm.memory.buffer, p, b.length).set(b);
       wasm.net_in(game, b.length);
     };
-    ws.onclose = () => { if (game) wasm.net_link(game, 0); ws = null; wsWait = performance.now() + 4000; };
+    // (a link that had been up a while: straight back, it was a blip;
+    // one that wasn't: a few seconds first)
+    ws.onclose = () => { if (game) wasm.net_link(game, 0); ws = null; const now = performance.now(); wsWait = now + (wsOpenAt && now - wsOpenAt > 15000 ? 150 : 4000); wsOpenAt = 0; };
     ws.onerror = () => {};
   }
   flushNet();
@@ -378,18 +447,16 @@ let ac = null, until = 0;
 const AHEAD = 0.14, CHUNK = 2048;
 function sound() {
   if (!game) return;
-  const o = opts();
-  wasm.sound(game, o.sound ? 1 : 0, o.master / 100, o.music / 100, o.sfx / 100, o.ambience / 100);
-  document.getElementById("b-sound").style.opacity = o.sound ? 1 : 0.4;
+  document.getElementById("b-sound").style.opacity = wasm.sound_on(game) ? 1 : 0.4;
 }
 // (a browser lets sound start only after a key or a tap)
 function wake() {
   if (ac) { if (ac.state === "suspended") ac.resume(); return; }
-  if (!opts().sound) return;
+  if (!game || !wasm.sound_on(game)) return;
   try { ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 }); } catch (e) { ac = null; }
 }
 function feedAudio() {
-  if (!ac || ac.state !== "running" || !opts().sound) return;
+  if (!ac || ac.state !== "running" || !wasm.sound_on(game)) return;
   if (until < ac.currentTime) until = ac.currentTime + 0.03;
   while (until - ac.currentTime < AHEAD) {
     const p = wasm.audio(game, CHUNK);
@@ -433,7 +500,7 @@ addEventListener("keydown", (e) => {
     case "KeyO": if (menu) wasm.back(game); else wasm.online(game); break;
     case "Slash": wasm.chat(game); break;
     case "KeyY": case "KeyN": wasm.answer(game, e.code === "KeyY" ? 1 : 0); break;
-    case "Escape": if (box.classList.contains("open")) openOpts(false); else wasm.back(game); break;
+    case "Escape": wasm.back(game); break;
     default:
       if (/^Digit[1-9]$/.test(e.code)) wasm.button(game, BTN.NUM + +e.code.slice(5));
       else if (e.key === "?") wasm.help(game, 1);
@@ -494,6 +561,9 @@ canvas.addEventListener("contextmenu", (e) => {
 canvas.addEventListener("wheel", (e) => {
   if (!game) return;
   e.preventDefault();
+  // over the menu: it scrolls (or steps the value under the pointer)
+  const [x, y] = at(e);
+  if (e.deltaY && wasm.panel_wheel(game, x, y, e.deltaY < 0 ? 1 : 0)) return;
   wasm.pan(game, -(e.deltaX || e.deltaY) * W / canvas.getBoundingClientRect().width);
 }, { passive: false });
 
@@ -644,7 +714,7 @@ function pickWords(label, k, values, words) {
   row(label, s);
 }
 // the buttons' size (the bar up top, the joystick and buttons on a touch screen)
-function btnScale() { return Math.max(60, Math.min(250, +opts().btnscale || 100)) / 100; }
+function btnScale() { return game ? Math.max(0.6, Math.min(2.5, wasm.buttons_k(game))) : 1; }
 function sizeButtons() {
   document.documentElement.style.setProperty("--btn", btnScale());
   if (touchy) drawPad();
@@ -836,8 +906,8 @@ function resetOpts() {
   toast("settings reset");
 }
 // everything xmas-tui kept in this browser, gone
-function forget() {
-  if (!confirm("Forget this browser's village? The village, the villager and the settings go (an exported save brings them back).")) return;
+function forget(asked) {
+  if (!asked && !confirm("Forget this browser's village? The village, the villager and the settings go (an exported save brings them back).")) return;
   if (game) { wasm.destroy(game); game = 0; }
   try {
     for (const k of Object.keys(localStorage)) if (k.startsWith("xmas-tui")) localStorage.removeItem(k);
@@ -860,15 +930,13 @@ document.getElementById("b-centre").onclick = () => game && wasm.button(game, BT
 document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.online(game); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
 sizeButtons();
-document.getElementById("b-opts").onclick = () => openOpts();
+document.getElementById("b-opts").onclick = () => game && wasm.open_panel(game);
 document.getElementById("b-sound").onclick = () => {
-  const o = opts();
-  o.sound = !o.sound;
-  setOpts(o);
+  if (!game) return;
+  wasm.toggle_sound(game);
   wake();
   sound();
-  toast(o.sound ? "♪ sound on" : "sound off");
-  if (box.classList.contains("open") && tab === 3) show(3);
+  toast(wasm.sound_on(game) ? "♪ sound on" : "sound off");
 };
 
 // ------------------------------------------------------------ start
@@ -882,7 +950,7 @@ function resized() {
   canvas.style.width = (W * K / dpr) + "px";
   canvas.style.height = (H * K / dpr) + "px";
   pad.width = innerWidth; pad.height = innerHeight;
-  wasm.resize(game, W, H, opts().size / 100);
+  wasm.resize(game, W, H, cellSize(dpr));
   img = null;
 }
 addEventListener("resize", () => { clearTimeout(window._rs); window._rs = setTimeout(resized, 250); });

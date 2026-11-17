@@ -51,21 +51,7 @@ pub struct Music {
     pub present: bool,
 }
 
-#[derive(Default, Clone)]
-pub struct Weather {
-    pub place: String,
-    pub temp: f64,
-    pub feels: f64,
-    pub code: i64,
-    pub wind: f64,
-    pub humidity: f64,
-    pub is_day: bool,
-    pub daily: Vec<(String, i64, f64, f64)>,
-    pub unit: String,
-    pub wind_unit: String,
-    pub status: String,
-    pub ok: bool,
-}
+pub use super::face::Weather;
 
 #[cfg(not(windows))]
 fn read(p: impl AsRef<Path>) -> Option<String> {
@@ -426,45 +412,13 @@ fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> W
         }
     }
     let Some((la, lo, name)) = coords.clone() else { return w };
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={la:.3}&longitude={lo:.3}\
-         &current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day\
-         &daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=4&timezone=auto{}",
-        if f { "&temperature_unit=fahrenheit&wind_speed_unit=mph" } else { "" }
-    );
-    match http_json(&url) {
+    match http_json(&super::face::forecast_url(la, lo, f)) {
         Ok(v) => {
-            let c = &v["current"];
-            w.place = name;
-            w.temp = c["temperature_2m"].as_f64().unwrap_or(0.0);
-            w.feels = c["apparent_temperature"].as_f64().unwrap_or(0.0);
-            w.code = c["weather_code"].as_i64().unwrap_or(0);
-            w.wind = c["wind_speed_10m"].as_f64().unwrap_or(0.0);
-            w.humidity = c["relative_humidity_2m"].as_f64().unwrap_or(0.0);
-            w.is_day = c["is_day"].as_i64().unwrap_or(0) == 1;
-            let d = &v["daily"];
-            // today's sunrise / sunset (local "YYYY-MM-DDTHH:MM"), for the
-            // scene's time of day
-            let mins = |s: &serde_json::Value| -> Option<f32> {
-                let t = s.as_str()?.split('T').nth(1)?;
-                let (h, m) = t.split_once(':')?;
-                Some(h.parse::<f32>().ok()? * 60.0 + m.get(..2)?.parse::<f32>().ok()?)
-            };
-            if let (Some(r), Some(s)) = (mins(&d["sunrise"][0]), mins(&d["sunset"][0])) {
+            let (got, sun) = super::face::weather_from(&v, &name, f);
+            if let Some((r, s)) = sun {
                 set_sun(r, s);
             }
-            if let (Some(days), Some(codes), Some(mx), Some(mn)) = (
-                d["time"].as_array(),
-                d["weather_code"].as_array(),
-                d["temperature_2m_max"].as_array(),
-                d["temperature_2m_min"].as_array(),
-            ) {
-                for i in 0..days.len().min(4) {
-                    let day = days[i].as_str().unwrap_or("").to_string();
-                    w.daily.push((day, codes[i].as_i64().unwrap_or(0), mx[i].as_f64().unwrap_or(0.0), mn[i].as_f64().unwrap_or(0.0)));
-                }
-            }
-            w.ok = true;
+            w = got;
         }
         Err(e) => w.status = format!("weather failed: {e}"),
     }

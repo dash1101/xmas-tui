@@ -235,6 +235,12 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_more(_: JNIEnv, _:
     with_game(h, "more", (), |g| g.more(true));
 }
 
+/// The menu (home page and settings): open, or shut.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_openPanel(_: JNIEnv, _: JClass, h: jlong) {
+    with_game(h, "openPanel", (), |g| g.open_panel());
+}
+
 /// The controls card, in the village.
 #[no_mangle]
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_help(_: JNIEnv, _: JClass, h: jlong) {

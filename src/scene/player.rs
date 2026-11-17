@@ -366,6 +366,21 @@ impl Player {
         self.depth = None;
     }
 
+    /// Out of the balloon's basket with a little hop, then down to
+    /// whatever's under it.
+    pub fn leap_out(&mut self, t: f32) {
+        self.ride(self.x, self.y);
+        self.fall = Some((-JUMP * self.k.sqrt() * 0.55, self.y));
+        self.ledge_fall = true;
+        self.jump_held = false;
+        self.boost = 0.0;
+        self.aim = None;
+        self.glide = None;
+        self.hop = false;
+        self.dropped = false;
+        self.active_at = t;
+    }
+
     /// What was underfoot has gone (a window closed or moved off): down.
     pub fn lose_footing(&mut self) {
         self.perch = None;

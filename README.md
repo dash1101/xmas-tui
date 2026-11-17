@@ -10,7 +10,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 
 [![Latest release](https://img.shields.io/github/v/release/dash1101/xmas-tui?color=c8202a&label=release)](https://github.com/dash1101/xmas-tui/releases/latest)
 [![CI](https://github.com/dash1101/xmas-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/dash1101/xmas-tui/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-2f9a52)](LICENSE)
+[![License: source-available](https://img.shields.io/badge/license-source--available-c8202a)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-3a5ad8)
 
 ![The village at night: a giant decorated tree, snow-covered houses, a church, a snowman, Santa's sleigh crossing the aurora, the clock and a weather widget](docs/hero.png)
@@ -45,7 +45,8 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   villages**: squares anyone can walk into, always there, and villages their hosts list for anyone, each with a limit
   (8 by default, up to 48; a square takes 16).
 - **Play in a browser**: the same village on the web at **[xmas.novalabs.app](https://xmas.novalabs.app/)**,
-  with sound, the same menus and settings, and touch controls on a phone.
+  with sound, the very same menu as the desktop's, the clock, weather and friends widgets, and touch controls on a
+  phone.
 - **A villager to walk around**: say hello, pet and feed animals, pick berries, throw snowballs, bring friends
   along, step inside houses, and spend "cheer" at the cocoa cabin (a log cabin with a fire, tables, shelves of gifts
   and the shopkeeper behind the counter).
@@ -61,14 +62,15 @@ villager can wander the streets, chat with the neighbours and feed the deer.
   windows that look out on the real village.
 - **A home and a pet of the villager's own**: a house with a parlour, a kitchen, a bedroom upstairs and an attic with
   a telescope (walk up the stairs and the view follows), a sofa to sit on, a bed to sleep in and an oven that bakes
-  gingerbread for the pockets; and a dog, cat or bunny (named, coloured, and remembered) that follows everywhere,
-  fetches, does tricks, eats from its bowl, gets cuddled and brushed, naps, and plays with other animals.
+  gingerbread for the pockets, and a television with a few channels; and pets (a dog, a cat, a bunny, a young
+  reindeer, a fox or a little bird: up to six, of any kinds, named, coloured and remembered) that follow everywhere,
+  fetch, do tricks, eat from their bowl, get cuddled and brushed, nap, and play with other animals.
 - **Play it like a game**: pop the village out into its own window, or take the wallpaper itself full screen and
   back (nothing restarts); zoom in on the villager with Ctrl +/-.
 - **Sharp at any size**: Resolution (Ctrl Shift +/-) adds detail without shrinking anyone. Rooms, people and
   animals keep their size on a finer grid. Zoomed in, the village's letters stay letters (drawn big), and the
   **windows & dialogs**, the **widgets** and the **buttons** up top each have a size of their own, the village
-  staying its own size (Settings → Desktop; the window and the Windows wallpaper. On a phone and the web: the menus
+  staying its own size (Menu → Desktop; the window and the Windows wallpaper. On a phone and the web: the menus
   and windows, and the buttons).
 - **Christmas Eve and New Year's Eve**: the village goes to bed while Santa does his rounds roof by roof, leaving
   presents under the tree; on New Year's Eve there's a ball drop, a big countdown and a midnight party.
@@ -119,7 +121,7 @@ villager can wander the streets, chat with the neighbours and feed the deer.
 | **Windows** 10/11 | `xmas-tui-setup-x86_64.exe` | Per-user install (no admin needed), Start menu entries, optional run at startup, uninstaller. |
 | | `xmas-tui-windows.zip` | Portable: unzip anywhere and run `xmas-tui.exe`. |
 | **Linux** (no sudo) | `xmas-tui-linux-installer.sh` | Installs to `~/.local/share/xmas-tui` with a systemd user service; updates itself. |
-| **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Settings → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
+| **Debian / Ubuntu** | `xmas-tui_*_amd64.deb` | System-wide (dpkg always needs sudo). Then open **xmas-tui** from the app menu and click *set it up* on its banner (or Menu → Desktop → *set as the desktop wallpaper*). Updated through the package manager. |
 | **Android** 7+ | `xmas-tui-android.apk` | The whole village to play in (joystick and buttons, or a game controller); the live wallpaper is the same village on autopilot. See [Android](#-android-the-live-wallpaper-and-the-village-to-play-in). |
 | **Web** | [xmas.novalabs.app](https://xmas.novalabs.app/) | Nothing to install: the village in the browser (keyboard and mouse, or touch controls on a phone), with sound. Saves in the browser, and imports a desktop or phone save (the villager's name, pet and friends too). |
 
@@ -136,12 +138,12 @@ The Linux one-liner also puts the `xmas-tui` command in `~/.local/bin`, and offe
 when it's missing and ffmpeg for the moving lock screen (that one through the system's package manager, with sudo).
 Linux needs [kitty](https://sw.kovidgoyal.net/kitty/) (0.34 or newer on Wayland, 0.42 or newer on X11; Debian 13's
 0.41 works) and a layer-shell compositor such as KDE Plasma 6, Sway or Hyprland (GNOME isn't supported). Without a
-suitable kitty, *set as the desktop wallpaper* (Settings → Desktop, or `xmas-tui --set-wallpaper` in a terminal)
+suitable kitty, *set as the desktop wallpaper* (Menu → Desktop, or `xmas-tui --set-wallpaper` in a terminal)
 fetches the official build into `~/.local/kitty.app` (checked against the checksum GitHub lists for it), no sudo
 needed. Settings live in `~/.config/xmas-tui/config.toml` (Linux) or `%APPDATA%\xmas-tui\config.toml` (Windows).
 Remove the Linux install with the same command plus `-s -- --remove`.
 
-**Lock screen (KDE Plasma 6):** Settings → Desktop → *The village on the lock screen* renders a seamless looping
+**Lock screen (KDE Plasma 6):** Menu → Desktop → *The village on the lock screen* renders a seamless looping
 video of the village (a still image when ffmpeg isn't installed: *install ffmpeg* there fetches it through the
 system's password prompt) and makes it the lock screen's wallpaper through a
 small Plasma wallpaper plugin. Unticking it puts the previous lock screen wallpaper back; `xmas-tui --lock-screen
@@ -149,12 +151,12 @@ on|off` does the same from a terminal.
 
 **The save file:** the village (the seed it's laid out from, so the houses, and home, stay put from one start to the
 next) and the villager's pockets, stats and scorecard, kept in `~/.local/share/xmas-tui/save.toml`
-(`%APPDATA%\xmas-tui\save.toml` on Windows), written every minute and on the way out. Settings → Village → *export
+(`%APPDATA%\xmas-tui\save.toml` on Windows), written every minute and on the way out. Menu → Upkeep → *export
 save* puts a copy in Documents; *import save* loads one (from another computer, say). A `seed` set in the config
 still wins.
 
 **Updates:** when a new version is out, a small banner asks whether to install it. **Install automatically** under
-Settings → Desktop → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
+Menu → Upkeep → Updates skips the question. Downloads are checked against the release's `SHA256SUMS` before
 anything is replaced, and `xmas-tui --update` does the same from a terminal. **Run at startup** sits in the same tab.
 
 ## 🎮 Controls
@@ -317,7 +319,12 @@ always be found in Explorer or Dolphin.
     to the attic with a round window and a telescope. E at the stairs walks the villager up them while the view
     pans up into the room above (and back down the same way). E on the sofa sits down on it; E on the bed tucks the
     villager in (the room dims, the pet curls up at the foot of the bed) until a direction key gets them up. Each
-    window looks out from its own height — the attic's up into the stars;
+    window looks out from its own height — the attic's up into the stars. The parlour has a **television**: E (or a
+    tap) turns it on, and again goes through its channels: the **North Pole Cam** (Santa's workshop under the
+    aurora, elves bustling about), the **Santa Tracker** (getting ready at the Pole until Christmas Eve, then out
+    round the world that night, with the gifts delivered), the **Train Cam**, the **Board Game Championship** (two
+    players at their desks, a real game playing out move by move), the **Ski Championship** (a racer down through the
+    gates, the times) and a **Yule Log**. A step away turns it off;
   - **the pet:** the villager has a dog, cat or bunny that follows them everywhere, indoors too. Turn to face it
     and press E (it comes before anything else in reach), or click it, for its box. The first time it asks for a
     name. After that it can be fussed over; cuddled (scooped up into the villager's arms, hearts and all, until they
@@ -418,9 +425,9 @@ speaks StatusNotifierItem; the notification area on Windows).
   works here, so the weather city can be set without Notepad. The wallpaper picks up every change within
   about a second, through its normal config live-reload. Only one settings window opens at a time.
 - **Right click** gives quick toggles:
-  - **Linux:** Settings…, Window snow, Sound, Pause effects, Quit wallpaper.
+  - **Linux:** Menu…, Window snow, Sound, Pause effects, Quit wallpaper.
     **Pause effects** freezes the animation and hides window snow and lights until it's unticked. It isn't saved.
-  - **Windows:** Settings…, Window snow, Sound, Run at startup, Quit wallpaper.
+  - **Windows:** Menu…, Window snow, Sound, Run at startup, Quit wallpaper.
 - **Quit wallpaper:** under the systemd service, this runs `systemctl --user stop xmas-tui` (a plain exit would
   just be restarted). Otherwise it exits cleanly.
 - The settings window also runs on its own: `xmas-tui --settings-window [--config PATH]`.
@@ -435,7 +442,7 @@ web) shows what's happening online; a click on it opens friends & online.
   online menu) and say yes, and from then on each sees whether the other is online.
 - **Friends** have a menu of their own (*★ friends*): each one's menu (*write to…*, *ping* — a little tone at their
   end —, *ask into this village*, *into …'s village*, their profile card), adding one, the friend code. The
-  **friends widget** (Settings → Widgets → Friends) shows who's about (● online, ⌂ a village open), the last few
+  **friends widget** (Menu → Widgets → Friends) shows who's about (● online, ⌂ a village open), the last few
   messages, a line to talk and *⌂ public villages*. A click on a friend opens their menu. Offline, it offers
   *● go online*. Messages show in the post, and all of them in *✉ messages*.
 - **Public villages** (*⌂ public villages*, in friends & online and on the friends widget; one click, online or not):
@@ -443,17 +450,29 @@ web) shows what's happening online; a click on it opens friends & online.
     the same village whoever's in it, with how many are about.
     - The first one in hosts it, and when they go, whoever's next takes over: nobody's sent home.
     - A square takes 16. A full one opens another copy of itself (#2, #3…), and joining finds the first with room.
+    - Each square's own settings (its time of day, how many folk and animals come by, the surprises, the sleigh)
+      are set by the relay's keeper in its console, the same for everyone there; each villager's snow, wind, glow
+      and aurora stay their own.
   - **Villagers' villages**: a host can list their open village there for anyone (*list my village here for
     anyone*), showing how many are in it of how many it takes.
-  - **A village's limit**: Settings → You → *Most visitors* (8 by default, 2 to 48). Past it, a newcomer is told
+  - **A village's limit**: Menu → Online → *Most visitors* (8 by default, 2 to 48). Past it, a newcomer is told
     it's full.
+- **One sky**: in a shared village everyone has the host's time of day (their clock, sunrise and sunset), wherever
+  they are; and linked devices share the time-of-day setting and the pets.
+- **Staying connected**: the online side keeps real time even while the village rests (behind a maximized window, a
+  browser tab out of sight), so it isn't dropped; a link that does drop comes straight back, keeping the village and
+  everyone in it. A linked device's changes reach the others within a couple of seconds, and the relay keeps each
+  device's side (for a month or so) for one that was off, through its own restarts too.
 - **What strangers write**:
   - Links are hidden ("🔗link"), with *show the link* in ✉ messages (it's copied too).
-  - Strong language is starred out unless *star out strong language* is turned off (Settings → You).
+  - Strong language is starred out unless *star out strong language* is turned off (Menu → Online).
   - Names are tidied the same way.
 - **Talking**: **/** (or *✎ talk*). Plain text is said aloud to everyone in the shared village. *@Sam hello* goes to
   Sam only: a friend anywhere (sealed to them), or someone here who isn't a friend (just to them). *@carols …* goes to
   a group.
+- **Chats**: *✉ chat with Sam* in a friend's menu opens a chat with them: the last few lines between the two of
+  you, and a line to write the next one, no @ needed. It stays open for the next line until Esc, and what's said is
+  kept (the last 60 lines with each friend).
 - **Groups** (*# groups*): chat rooms anyone with the group's code can be in, like a little server: *a new group*
   makes one (its code copied, to hand round), *into a group by its code* joins one, and each group shows who's been
   about in it lately.
@@ -515,7 +534,7 @@ thanks, or a click), and is asked again now and then until it's answered.
 
 ### The profile card, and the villager's own look
 
-Settings → You → **your look** dresses the villager (coat, hat, hair, skin, a scarf; left as *classic*, the green hat
+Menu → You → **your look** dresses the villager (coat, hat, hair, skin, a scarf; left as *classic*, the green hat
 and gold coat), and **card's line** is a line about them. Friends see the villager that way, and see their **profile
 card** (*★ my profile card*; a friend's from their name, or a right-click on them in a shared village): the look, the
 line, the pet, games and fights won, runs down the mountain and the best score, cheer, friends.
@@ -552,7 +571,7 @@ Every sound is synthesized live in code. There are no audio files and nothing co
   new arrangements of public-domain carols (Silent Night, Jingle Bells, Deck the Halls, O Christmas Tree,
   We Wish You a Merry Christmas, Good King Wenceslas, Joy to the World).
 
-**Settings → SOUND** has an on/off switch, master, music, effects and ambience volumes, the music style
+**Menu → Sound** has an on/off switch, master, music, effects and ambience volumes, the music style
 ("shuffle" or one style) and the cursor sparkle. These are also under `[sound]` in the config.
 
 **What's playing:** the Sound tab shows live level meters for the music, the ambience and whichever effects are
@@ -587,7 +606,7 @@ Snow also falls in front of open windows. It settles on the top edge of each win
   left alone a while, one melts away.
 - **Lights:** twinkling bulbs hang on a wire around the six topmost windows, and droop along the top edge.
 
-**Settings → Windows** tunes it all: pile height, snowfall, settling speed, how fast the flakes fall, the wind,
+**Menu → Windows** tunes it all: pile height, snowfall, settling speed, how fast the flakes fall, the wind,
 how easily shaking a window throws its snow off (or never), slow melting, and whether the cursor sweeps piles away.
 The **taskbar** has its own on/off and pile height.
 
@@ -657,23 +676,12 @@ game, so each carries on from the other.
   lights, the sky gets a shooting star, and a tap on the dock knocks its snow off.
 - **Day and night** follow the phone's clock (or stay at a chosen time), and the village pans gently as the home
   screens are swiped.
-**Settings** (⚙ in the game, or the gear in the wallpaper picker): the desktop's panel, made for a phone. It opens
-over the village (a tap outside, the ✕ or Back puts it away) in the same dark-and-gold look, a tab at a time, with
-◂ ▸ to step a setting, candy-cane bars to slide one and [✓] boxes, every row a finger's height; each change shows in
-the village at once.
-- **Village:** time of day, snowfall, wind, the lights' glow, surprises, Santa's sleigh, the northern lights, berry
-  bushes, size (50% to 200%; the village keeps its size whichever way the screen is turned) and zoom (1× to 4×); how
-  many animals and people come by and the most at once, chattiness and how long speech bubbles stay up.
-- **You:** the villager's name, card's line, look and walking speed; autopilot (when it takes over, and where it
-  keeps to); the pet, its coat and name; friends & family, each with a name, a kid or not, and their coat, hat, hair
-  and skin; *only them*.
-- **Sound:** sound on or off, the volumes, the music.
-- **Looks:** the size of the menus, windows and dialogs (this panel too), and of the buttons; the panels' and menus'
-  look (classic, frosted, wood or gift).
-- **Phone:** hiding the controls, the frame rate; the wallpaper (classic or the village, folk, its frame rate) and the
-  dock.
-- **Save:** export a copy, import one (from the desktop or the web too: the village, the pockets, and the villager's
-  name, pet and friends), or start a new village.
+**The menu** (⚙ in the game): the desktop's own, the same tabs and home page, over the village, with the joystick and
+buttons out of its way. A tap does what's under it, a finger slides along a bar, a drag scrolls it, and Back or the ✕
+closes it; a name or a city is typed in the phone's own box. Its letters are the screen's own size (about 11 points
+a row), and *Screen → Menus size* makes them bigger. The village is always drawn at least 75 rows tall, the height
+it's made for, so the villagers keep in proportion with the houses whatever the zoom. The gear in the wallpaper
+picker keeps the wallpaper's own settings (classic or the village, its folk and frame rate, the dock).
 
 **Install:** on the phone, download `xmas-tui-android.apk` from the newest
 [release](https://github.com/dash1101/xmas-tui/releases) that has one, open it (allowing installs from the browser or
@@ -771,21 +779,35 @@ a bush rustles it, and sometimes a cardinal flies out or a rabbit pops out.
 The Village tab sets how many visitors come by ("Animals & people"), the most out at once, and turns the bushes on
 or off.
 
-## ⚙️ Settings
-<img src="docs/settings.png" align="right" width="360" alt="The settings panel, You tab: the villager, autopilot, the pet, and friends &amp; family, with one friend's look being chosen">
+## ⚙️ The menu
+<img src="docs/settings.png" align="right" width="360" alt="The menu's You tab: the villager, autopilot and friends &amp; family, with one friend's look being chosen">
 
-The settings panel (the **⚙ settings** button, the bottom of any right-click menu, or the tray icon's standalone
-window, which shows the live sound levels too) can be dragged anywhere by its title bar. Pointing at any setting
-shows what it does along the bottom of the panel. Sliders can be clicked or dragged anywhere along their bar, as
-well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
+The menu (the **❄ menu** button top right, the bottom of any right-click menu, Esc, or the tray icon's standalone
+window, which shows the live sound levels too) is the same on the desktop, the web page and the phone app. It opens
+on a **home page**:
+- a greeting and the days until Christmas;
+- a tile for each part of it, and for what's done most: back to the village, friends & online, the public villages,
+  restart;
+- quick switches for autopilot, the sound and the zoom;
+- how it stands online.
+
+It can be dragged by its title bar, and too tall for the screen it scrolls (the wheel, or a finger). Pointing at any
+setting shows what it does along the bottom; sliders can be clicked or dragged along their bar, or stepped with ◂ ▸
+or the wheel. Its tabs, in two rows:
+- **Home:** as above.
 - **Village:** snow, wind, glow, surprises, Santa's sleigh, **time of day** (auto from the real sunrise and sunset,
   or night, dawn, morning, noon, afternoon, dusk), which side of the road traffic keeps to, aurora and berry bushes;
-  how many visitors come by and the **most out at once**; and *a new village* (laid out afresh).
-- **You:** the villager (on or off, **their name**, walk speed), **speech bubbles** (how long they stay up; longer
-  lines always stay longer) and **chattiness** (how often people stop to talk and remark on things), the
-  villager's **pet** (dog, cat, bunny or none, its colour and its name), **autopilot**, and **friends & family**
-  (each one's name, grown-up or kid, and how they look); **your look** (the villager's own coat, hat, hair, skin and
-  scarf) and **card's line** (on their profile card, for friends online).
+  how many visitors come by and the **most out at once**.
+- **You:** the villager (on or off, **their name**, walk speed), **speech bubbles** and **chattiness**,
+  **autopilot**, and **friends & family** (each one's name, grown-up or kid, and how they look, a thin line between
+  each); **your look** and **card's line**.
+- **Pets:** the first pet and up to five more, each of any kind (a dog, a cat, a bunny, a young **reindeer**, a
+  **fox** or a little **bird**), its colour (Rudolph's coat comes with the nose) and name. They all come along
+  wherever the villager goes, each a step further behind; a click on one gets a happy fuss.
+- **Online:** going on and off (through which relay, and how), the friend code to copy, friends & messages, the
+  public villages, adding a friend, the profile card, linked devices; **your village** (*Most visitors*, opening it
+  to friends, listing it in Public villages); **what others write** (strong language starred out; links always
+  hidden).
 - **Widgets:** the clock, each widget on or off and its **look**, the visualizer's kHz labels, the weather city and
   units, and the widget layout.
 - **Shelves:** each shelf's name (its folder is renamed along with it), look and icons, a button to open its folder,
@@ -807,13 +829,18 @@ well as stepped with ◂ ▸ or the mouse wheel. It has eight tabs:
   keyboard, and **back to wallpaper** returns it; F11 does both), the KDE lock screen, and updates. In the kitty
   wallpaper a new resolution applies live; if kitty can't change its font, a banner asks before restarting. A
   window also works from the command line: `xmas-tui --windowed` and `xmas-tui --fullscreen`.
-- **Upkeep** (the Desktop tab): **reset settings** (every setting as it first was, keeping the villager, their look,
-  the pet, friends & family, the village, the shelves' folders and where the weather's for), **the settings file**
-  in a text editor, **the log**, and **uninstall…** (it asks first). On Windows it opens the installer's own
-  uninstaller; on Linux it takes away what the installer put in (the service, the program and its link), and a
-  package from apt or a distro is removed the usual way. The settings and the save are kept, should it come back. A
-  phone's Phone tab has *reset settings* and *uninstall…* (the phone's own page for the app); the web's Save tab has
-  *reset settings* and *forget this browser's village*.
+- **Upkeep:** the save (*a new village*, export a copy, import one); **restart**, **reset settings** (every setting
+  as it first was, keeping the villager, their look, the pets, friends & family, the village, the shelves' folders
+  and where the weather's for), **the settings file** in a text editor, **the log**, and **uninstall…** (it asks
+  first). On Windows it opens the installer's own uninstaller; on Linux it takes away what the installer put in (the
+  service, the program and its link), and a package from apt or a distro is removed the usual way. The settings and
+  the save are kept, should it come back. On a phone, *uninstall…* opens the phone's own page for the app; on the
+  web, it's *forget this browser's village*. And updates (on the desktop).
+
+On the web page and the phone, **Screen** stands in for Desktop: one **Zoom** (0.5× to 4×: below 1× the village is
+drawn smaller, with more of it on screen; above, it's magnified on the villager), the frame rate, and the menus'
+size. In a **public square** the village's own settings (the time, who comes by, the surprises, the sleigh) are the
+square's, greyed out in the menu; snow, wind, glow and the aurora stay each villager's.
 
 **Widget looks.** Like the shelves, every widget panel can have a look of its own: the **classic** panel, **frosted**
 (icy edges with snow piled along the top), a **wooden** frame (a snowy board for the title, a plank along the
@@ -900,5 +927,9 @@ Measured on a 5120×1440 screen (the size it was designed for; it adapts to any 
 | Memory | xmas-tui 17 MB, kitty 174 MB |
 
 ## 📜 License
-MIT, see [LICENSE](LICENSE). Bundled fonts: DejaVu (Bitstream Vera license) and Noto Sans Symbols 2 (SIL OFL);
-their licenses are in `assets/fonts/`. The carol arrangements are of public-domain tunes.
+Source-available, all rights reserved: see [LICENSE](LICENSE). The code is here to read and learn from, and the
+official releases are free to use for personal, non-commercial use. Copying, redistributing, publishing modified
+versions or passing it off as someone else's work is not allowed without written permission. Releases before 1.23.0
+were MIT-licensed, and copies of those already obtained stay under the MIT License. Bundled fonts: DejaVu (Bitstream
+Vera license) and Noto Sans Symbols 2 (SIL OFL); their licenses are in `assets/fonts/`. The carol arrangements are of
+public-domain tunes.

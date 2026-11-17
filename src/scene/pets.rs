@@ -1,4 +1,5 @@
-//! Pets: dogs, cats and bunnies. Villagers walk theirs (the dog on a lead),
+//! Pets: dogs, cats and bunnies (and, for the villager, a young reindeer, a
+//! fox or a little bird too). Villagers walk theirs (the dog on a lead),
 //! house cats and dogs potter about indoors, and the villager has one of
 //! their own — named, coloured, and following them everywhere, indoors too.
 //!
@@ -13,7 +14,15 @@ pub enum PetKind {
     Dog,
     Cat,
     Bunny,
+    /// A young reindeer (Rudolph's coat has the nose).
+    Reindeer,
+    Fox,
+    /// A little bird: hops along, and flutters to keep up.
+    Bird,
 }
+
+/// Every kind the villager can have, in the order the menu steps through.
+pub const KINDS: [PetKind; 6] = [PetKind::Dog, PetKind::Cat, PetKind::Bunny, PetKind::Reindeer, PetKind::Fox, PetKind::Bird];
 
 impl PetKind {
     pub fn from_str(s: &str) -> Option<PetKind> {
@@ -21,6 +30,9 @@ impl PetKind {
             "dog" | "puppy" => Some(PetKind::Dog),
             "cat" | "kitten" => Some(PetKind::Cat),
             "bunny" | "rabbit" => Some(PetKind::Bunny),
+            "reindeer" | "deer" => Some(PetKind::Reindeer),
+            "fox" => Some(PetKind::Fox),
+            "bird" | "robin" => Some(PetKind::Bird),
             _ => None,
         }
     }
@@ -30,6 +42,9 @@ impl PetKind {
             PetKind::Dog => "dog",
             PetKind::Cat => "cat",
             PetKind::Bunny => "bunny",
+            PetKind::Reindeer => "reindeer",
+            PetKind::Fox => "fox",
+            PetKind::Bird => "bird",
         }
     }
 
@@ -60,6 +75,29 @@ impl PetKind {
                 ("grey", 0x9a9aa0, 0x6a6a72),
                 ("black", 0x2a2a30, 0x141418),
                 ("cream", 0xe8d8b8, 0xb8a080),
+            ],
+            // (a reindeer's markings: its nose)
+            PetKind::Reindeer => &[
+                ("brown", 0x8a5a32, 0x1a1414),
+                ("rudolph", 0x8a5a32, 0xff2a2a),
+                ("snowy", 0xe8e2d6, 0x3a2a24),
+                ("dark", 0x5a3a22, 0x1a1414),
+                ("caramel", 0xb07a48, 0x1a1414),
+            ],
+            // (a fox's markings: its ears and socks)
+            PetKind::Fox => &[
+                ("red", 0xd8682a, 0x2a1a14),
+                ("arctic", 0xf2f0ea, 0x8a8a92),
+                ("silver", 0x6a6a74, 0x1a1a1e),
+                ("golden", 0xe0a040, 0x5a3418),
+            ],
+            // (a bird's markings: its breast)
+            PetKind::Bird => &[
+                ("robin", 0x8a6a4a, 0xe0482a),
+                ("bluebird", 0x3a6ad8, 0xe89a5a),
+                ("cardinal", 0xc8202a, 0xe0483a),
+                ("goldfinch", 0xf0c838, 0x2a2a2a),
+                ("snow bunting", 0xf2f0ea, 0x8a6a4a),
             ],
         }
     }
@@ -113,18 +151,43 @@ const BUNNY: [&[&str]; 4] = [
     &["      ", "      ", "   mm ", " bbbbd", "wbbbbb"],
 ];
 
+const REINDEER: [&[&str]; 4] = [
+    &["    m m ", "     bbd", "m   bbb ", "bbbbbb  ", "b b b b "],
+    &["    m m ", "     bbd", "m   bbb ", "bbbbbb  ", " b b  b "],
+    &["    m m ", "     bbd", "    bbb ", "mbbbbb  ", " bb bb  "],
+    &["        ", "   m m  ", "    bbd ", "mbbbbb  ", "bbbbbbb "],
+];
+const FOX: [&[&str]; 4] = [
+    &["     m m", "     bbd", "w   bbb ", "bbbbbb  ", " m  m   "],
+    &["     m m", "     bbd", " w  bbb ", "bbbbbb  ", "  m  m  "],
+    &["    m m ", "    bbd ", "    bbw ", "wbbbbb  ", "bb m m  "],
+    &["        ", "        ", "    m m ", "wbbbbbbd", "bbbbbbb "],
+];
+const BIRD: [&[&str]; 4] = [
+    &["  bb ", " bbbd", "bmmb ", " bb  ", "  d  "],
+    &["  bb ", " bbbd", "bmmb ", " bb  ", " d d "],
+    &["  bb ", " bbbd", " mmb ", "bbb  ", "  d  "],
+    &["     ", "     ", " bbb ", "bmmbb", " bbb "],
+];
+
 /// Draw a pet with its feet on pixel row `feet`, centred on column `x`,
 /// facing `dir`; `scale` 1 in the village, 2 indoors. `t` animates the walk
 /// and the tail.
 #[allow(clippy::too_many_arguments)]
-pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i32, dir: f32, pose: Pose, t: f32, scale: i32, collar: Option<Rgb>) {
+pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i32, dir: f32, pose: Pose, t: f32, k: f32, collar: Option<Rgb>) {
+    // (the detailed picture is drawn at exactly `k`; the pixel art, at a
+    // whole number of pixels)
+    let scale = (k.round() as i32).max(1);
     // the detailed sprite, where the front-end can show pictures
     if crate::frame::pictures_ok() {
         use super::sprites::{self, PetKind as K, PetPose as P};
-        let k = match kind {
+        let sk = match kind {
             PetKind::Dog => K::Dog,
             PetKind::Cat => K::Cat,
             PetKind::Bunny => K::Bunny,
+            PetKind::Reindeer => K::Reindeer,
+            PetKind::Fox => K::Fox,
+            PetKind::Bird => K::Bird,
         };
         let p = match pose {
             Pose::Walk => P::Walk(((t * 7.0) as i32 % 2) as u8),
@@ -135,11 +198,15 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
         };
         let wag = pose != Pose::Sleep && (t * if pose == Pose::Up { 7.0 } else { 3.0 }) as i32 % 2 == 0;
         let light = 0.9 + 0.25 * f.day.max(0.0);
-        let pic = sprites::pet(k, body, marks, collar, p, wag, dir, light);
-        let rows = sprites::rows_of(&pic, scale as f32);
+        // a bird on the move flutters along, a little off the ground
+        let flying = kind == PetKind::Bird && pose == Pose::Walk;
+        let p = if flying { P::Walk(((t * 12.0) as i32 % 2) as u8) } else { p };
+        let pic = sprites::pet(sk, body, marks, collar, p, wag, dir, light);
+        let rows = sprites::rows_of(&pic, k * size_of(kind));
         // a little hop when excited
-        let hop = if pose == Pose::Up && (t * 6.0).sin() > 0.0 { 0.25 * scale as f32 } else { 0.0 };
-        f.sprite(x, (feet + 1) as f32 / 2.0 - hop, rows, pic);
+        let hop = if pose == Pose::Up && (t * 6.0).sin() > 0.0 { 0.25 * k } else { 0.0 };
+        let fly = if flying { (0.9 + 0.25 * (t * 5.0).sin()) * k } else { 0.0 };
+        f.sprite(x, (feet + 1) as f32 / 2.0 - hop - fly, rows, pic);
         return;
     }
     let pose = if pose == Pose::Eat { if (t * 5.0) as i32 % 2 == 0 { Pose::Walk } else { Pose::Sit } } else { pose };
@@ -147,6 +214,9 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
         PetKind::Dog => &DOG,
         PetKind::Cat => &CAT,
         PetKind::Bunny => &BUNNY,
+        PetKind::Reindeer => &REINDEER,
+        PetKind::Fox => &FOX,
+        PetKind::Bird => &BIRD,
     };
     let frame = match pose {
         Pose::Walk => ((t * 7.0) as i32 % 2) as usize,
@@ -170,7 +240,7 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
                 'b' => body,
                 'm' => {
                     // the tail (the leftmost markings) wags
-                    if i == 0 && kind != PetKind::Bunny && pose != Pose::Sleep && wag {
+                    if i == 0 && matches!(kind, PetKind::Dog | PetKind::Cat) && pose != Pose::Sleep && wag {
                         continue;
                     }
                     marks
@@ -191,7 +261,7 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
         }
     }
     // a wagging tail on the alternate frame (dogs and cats)
-    if kind != PetKind::Bunny && pose != Pose::Sleep && !wag {
+    if matches!(kind, PetKind::Dog | PetKind::Cat) && pose != Pose::Sleep && !wag {
         let ty = top + scale;
         let tx = if dir >= 0.0 { x0 - scale } else { x0 + w * scale };
         for sy in 0..scale {
@@ -205,7 +275,11 @@ pub fn draw(f: &mut Frame, kind: PetKind, body: Rgb, marks: Rgb, x: f32, feet: i
 /// A food bowl with its feet on pixel row `feet`: red, with `left` (0..1)
 /// of the food still in it (kibble, or greens for a bunny).
 fn draw_bowl(f: &mut Frame, kind: PetKind, x: f32, feet: i32, scale: i32, left: f32) {
-    let food = if kind == PetKind::Bunny { Rgb::hex(0x6abf4a) } else { Rgb::hex(0xb07a40) };
+    let food = match kind {
+        PetKind::Bunny | PetKind::Reindeer => Rgb::hex(0x6abf4a),
+        PetKind::Bird => Rgb::hex(0xe8c878),
+        _ => Rgb::hex(0xb07a40),
+    };
     let (red, dark) = (Rgb::hex(0xd8343c), Rgb::hex(0x8a1c24));
     // a little bowl: a narrow foot, a wider rim, the food heaped on top
     let x0 = x.round() as i32 - 2 * scale;
@@ -231,7 +305,21 @@ fn draw_bowl(f: &mut Frame, kind: PetKind, x: f32, feet: i32, scale: i32, left: 
 pub fn half_width(kind: PetKind) -> f32 {
     match kind {
         PetKind::Bunny => 3.0,
+        PetKind::Bird => 2.0,
+        PetKind::Reindeer => 5.0,
+        PetKind::Fox => 4.0,
         _ => 3.5,
+    }
+}
+
+/// How big a kind's drawn, against its picture (a reindeer's picture is
+/// the grown deer's, drawn smaller: a young one).
+pub fn size_of(kind: PetKind) -> f32 {
+    match kind {
+        PetKind::Reindeer => 0.62,
+        PetKind::Fox => 0.78,
+        PetKind::Bird => 0.72,
+        _ => 1.0,
     }
 }
 
@@ -333,6 +421,27 @@ pub fn words(kind: PetKind, v: Voice, pick: u32) -> &'static str {
         (PetKind::Bunny, Voice::Eat) => one(&["*munch munch*", "*crunch*"]),
         (PetKind::Bunny, Voice::Yawn) => one(&["*tiny yawn*", "*flop*"]),
         (PetKind::Bunny, Voice::Snore) => one(&["*ear twitch*", "zz…"]),
+        (PetKind::Reindeer, Voice::Hello) => one(&["*snort*", "*jingle jingle*", "hmmf?"]),
+        (PetKind::Reindeer, Voice::Purr) => one(&["*happy grunt*", "*nuzzle*", "*soft snort* ♥"]),
+        (PetKind::Reindeer, Voice::Excited) => one(&["*prance prance*", "*JINGLE!*", "*hooves clatter*"]),
+        (PetKind::Reindeer, Voice::Growl) => one(&["*antler shake*", "*stamp stamp*", "HMMF!"]),
+        (PetKind::Reindeer, Voice::Eat) => one(&["*munch munch*", "*crunch* (lichen!)"]),
+        (PetKind::Reindeer, Voice::Yawn) => one(&["*big reindeer yawn*", "*sleepy snort*"]),
+        (PetKind::Reindeer, Voice::Snore) => one(&["*snort… zz*", "*dreams of flying*"]),
+        (PetKind::Fox, Voice::Hello) => one(&["*yip!*", "*ack ack*", "hrrm?"]),
+        (PetKind::Fox, Voice::Purr) => one(&["*happy chitter*", "*tail swish* ♥", "*soft whine*"]),
+        (PetKind::Fox, Voice::Excited) => one(&["YIP YIP!", "*pounce!*", "*ack-ack-ack*"]),
+        (PetKind::Fox, Voice::Growl) => one(&["*gekker!*", "grrr…", "*SCREAM*"]),
+        (PetKind::Fox, Voice::Eat) => one(&["*chomp*", "nom nom"]),
+        (PetKind::Fox, Voice::Yawn) => one(&["*squeaky yawn*", "*curls tail round*"]),
+        (PetKind::Fox, Voice::Snore) => one(&["*tiny snore*", "*twitch*"]),
+        (PetKind::Bird, Voice::Hello) => one(&["tweet!", "*chirp chirp*", "pip?"]),
+        (PetKind::Bird, Voice::Purr) => one(&["*happy trill*", "*fluffs up* ♥", "tweedle-dee"]),
+        (PetKind::Bird, Voice::Excited) => one(&["TWEET!", "*flutter flutter*", "chirrup!"]),
+        (PetKind::Bird, Voice::Growl) => one(&["*angry chirp*", "tsk tsk tsk!", "*ruffles*"]),
+        (PetKind::Bird, Voice::Eat) => one(&["*peck peck*", "*nibble*"]),
+        (PetKind::Bird, Voice::Yawn) => one(&["*tucks head under wing*", "*sleepy peep*"]),
+        (PetKind::Bird, Voice::Snore) => one(&["peep… zz", "*fluffed up*"]),
     }
 }
 
@@ -480,6 +589,9 @@ impl MyPet {
             PetKind::Dog => crate::audio::Sfx::Bark,
             PetKind::Cat => crate::audio::Sfx::Meow,
             PetKind::Bunny => crate::audio::Sfx::Pet,
+            PetKind::Reindeer => crate::audio::Sfx::Deer,
+            PetKind::Fox => crate::audio::Sfx::Fox,
+            PetKind::Bird => crate::audio::Sfx::Bird,
         }
     }
 
@@ -543,6 +655,18 @@ impl MyPet {
             (PetKind::Bunny, 1) => format!("{n} stands up tall, ears straight up, very proud"),
             (PetKind::Bunny, 2) => format!("{n} boops your boot with their nose"),
             (PetKind::Bunny, _) => format!("{n} does a little flop onto their side. so relaxed"),
+            (PetKind::Reindeer, 0) => format!("{n} prances on the spot, bells jingling ✦"),
+            (PetKind::Reindeer, 1) => format!("{n} takes a run-up… and very nearly flies"),
+            (PetKind::Reindeer, 2) => format!("{n} bows, antlers and all, very grand"),
+            (PetKind::Reindeer, _) => format!("{n} nudges your pocket for a carrot. smart reindeer"),
+            (PetKind::Fox, 0) => format!("{n} does a mouse-pounce, nose first into the snow!"),
+            (PetKind::Fox, 1) => format!("{n} chases their own tail, round and round"),
+            (PetKind::Fox, 2) => format!("{n} sits up, tail curled neatly round their paws"),
+            (PetKind::Fox, _) => format!("{n} rolls in the snow and comes up with a white nose"),
+            (PetKind::Bird, 0) => format!("{n} sings a little carol, all on their own ♪"),
+            (PetKind::Bird, 1) => format!("{n} lands on your mitten, light as a snowflake"),
+            (PetKind::Bird, 2) => format!("{n} does a loop-the-loop over your head!"),
+            (PetKind::Bird, _) => format!("{n} fluffs up into a perfect round ball"),
         }
     }
 
@@ -589,6 +713,9 @@ impl MyPet {
             PetKind::Dog => [format!("dinner! {n} hoovers it up, tail going the whole time"), format!("{n} sits, waits, waits… and dives in")][pick].clone(),
             PetKind::Cat => [format!("{n} eats very daintily… then looks at you for seconds"), format!("{n} picks out the best bits first, naturally")][pick].clone(),
             PetKind::Bunny => [format!("fresh greens! {n} munches, nose going a mile a minute"), format!("{n} nibbles a carrot top, ears twitching happily")][pick].clone(),
+            PetKind::Reindeer => [format!("lichen and carrots! {n} crunches away, ears flicking"), format!("{n} eats like they've a sleigh to pull tonight")][pick].clone(),
+            PetKind::Fox => [format!("{n} snaps it up, then checks the snow for more"), format!("{n} buries half of it for later. very foxy")][pick].clone(),
+            PetKind::Bird => [format!("seeds! {n} pecks happily, one at a time"), format!("{n} picks out the sunflower seeds first, naturally")][pick].clone(),
         }
     }
 
@@ -606,6 +733,9 @@ impl MyPet {
             PetKind::Dog => [format!("you scoop {n} up — a warm armful of happy, licking your chin"), format!("{n} snuggles in and lets out a big contented sigh")][pick].clone(),
             PetKind::Cat => [format!("{n} purrs against your scarf, kneading your coat"), format!("{n} puts up with the cuddle for a moment… then melts")][pick].clone(),
             PetKind::Bunny => [format!("{n} tucks into the crook of your arm, soft as new snow"), format!("{n} goes all floppy in your arms, perfectly content")][pick].clone(),
+            PetKind::Reindeer => [format!("you hug {n} round the neck — warm, fuzzy, smells of pine"), format!("{n} rests their chin on your shoulder, antlers and all")][pick].clone(),
+            PetKind::Fox => [format!("{n} curls round your neck like a warm scarf"), format!("{n} chitters happily and tucks their nose under your chin")][pick].clone(),
+            PetKind::Bird => [format!("{n} snuggles into your cupped mittens, a tiny warm ball"), format!("{n} sits on your shoulder and fluffs up against your cheek")][pick].clone(),
         }
     }
 
@@ -621,6 +751,9 @@ impl MyPet {
             PetKind::Dog => format!("{n} turns round three times and flops down. sweet dreams"),
             PetKind::Cat => format!("{n} curls up into a perfect little loaf and closes their eyes"),
             PetKind::Bunny => format!("{n} does a sleepy flop onto their side. out like a light"),
+            PetKind::Reindeer => format!("{n} folds their legs under and settles in the snow. dreaming of flying"),
+            PetKind::Fox => format!("{n} curls up, tail over nose, a little orange swirl"),
+            PetKind::Bird => format!("{n} tucks their head under a wing and fluffs right up"),
         }
     }
 
@@ -638,6 +771,9 @@ impl MyPet {
             PetKind::Dog => format!("you brush {n} till their coat shines like a bauble ✦"),
             PetKind::Cat => format!("{n} leans into every stroke of the brush, purring loudly ✦"),
             PetKind::Bunny => format!("a gentle brush, and {n} is the fluffiest bunny in the village ✦"),
+            PetKind::Reindeer => format!("you brush {n} till their coat gleams. sleigh-ready ✦"),
+            PetKind::Fox => format!("a brush, and {n}'s tail is the fluffiest thing in the village ✦"),
+            PetKind::Bird => format!("you smooth {n}'s feathers with a fingertip. they shine ✦"),
         }
     }
 
@@ -1004,7 +1140,7 @@ impl MyPet {
                     toy.rest_at = t;
                 }
             }
-            PetKind::Bunny => {
+            PetKind::Bunny | PetKind::Reindeer | PetKind::Fox | PetKind::Bird => {
                 if step < 1 && how != 2 {
                     toy.vx = self.dir * 6.0 * k;
                     self.happy_until = t + 0.6;
@@ -1029,7 +1165,9 @@ impl MyPet {
     }
 
     /// Drawn `scale` times bigger, where it is or through a zoomed `view`.
-    pub fn draw(&self, f: &mut Frame, t: f32, scale: i32, view: Option<super::View>) {
+    /// Drawn at size `k` (the village's sprite size; 2 indoors).
+    pub fn draw(&self, f: &mut Frame, t: f32, k: f32, view: Option<super::View>) {
+        let scale = super::critters::pet_scale(k);
         let (sx, sy) = match view {
             Some(v) => (v.x(self.x), v.y(self.y + 1.0) - 1.0),
             None => (self.x, self.y),
@@ -1089,7 +1227,7 @@ impl MyPet {
         };
         // (one brightness while it shines: each shade is a sprite of its own)
         let shine = if t < self.shine_until { 1.3 } else { 1.0 };
-        draw(f, self.kind, self.body * shine, self.marks * shine, sx, feet, dir, pose, t, scale, Some(Rgb::hex(0x2fae5c)));
+        draw(f, self.kind, self.body * shine, self.marks * shine, sx, feet, dir, pose, t, k, Some(Rgb::hex(0x2fae5c)));
         if t < self.shine_until && (t * 2.3).fract() < 0.35 {
             let k = (t * 7.0) as i32;
             f.put_g(sx.round() as i32 + (k % 5 - 2) * scale, (feet - 4 * scale) / 2, crate::frame::Glyph::new('✦', Rgb::hex(0xfff1a0)).lit(0.0));

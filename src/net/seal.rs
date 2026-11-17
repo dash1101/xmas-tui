@@ -94,6 +94,32 @@ pub fn new_code() -> String {
     s
 }
 
+/// What's being typed where a code goes, tidied as it's typed: capitals,
+/// and a dash between each four (put in once the next one's typed, so
+/// backspacing over one works). With `then_more` (a group's code, then its
+/// name), whatever comes after a space is kept as it is.
+pub fn typing_code(s: &str, then_more: bool) -> String {
+    let (code, more) = match s.find(' ') {
+        Some(i) if then_more => (&s[..i], &s[i..]),
+        _ => (s, ""),
+    };
+    let n: Vec<char> = norm(code).chars().take(12).collect();
+    let mut out = String::new();
+    for (i, c) in n.iter().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push('-');
+        }
+        out.push(*c);
+    }
+    out + more
+}
+
+/// A code asked for (the question shows "XXXX-XXXX-XXXX"): typing is
+/// tidied with `typing_code`; Some(true) when a name may follow it.
+pub fn asks_code(question: &str) -> Option<bool> {
+    question.contains("XXXX-XXXX-XXXX").then(|| question.contains("name"))
+}
+
 /// A code shown as typed ("XXXX-XXXX-XXXX").
 pub fn pretty(code: &str) -> String {
     let n = norm(code);
@@ -133,6 +159,18 @@ impl Seal {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codes_tidy_themselves_as_typed() {
+        assert_eq!(typing_code("abcd", false), "ABCD");
+        assert_eq!(typing_code("abcde", false), "ABCD-E");
+        assert_eq!(typing_code("ABCD-", false), "ABCD");
+        assert_eq!(typing_code("ab cd ef gh jk lm np", false), "ABCD-EFGH-JKLM");
+        assert_eq!(typing_code("abcdefghjklm carol singers", true), "ABCD-EFGH-JKLM carol singers");
+        assert_eq!(asks_code("a friend's code (XXXX-XXXX-XXXX)"), Some(false));
+        assert_eq!(asks_code("the group's code (XXXX-XXXX-XXXX), then its name if you like"), Some(true));
+        assert_eq!(asks_code("something to say"), None);
+    }
+
     use super::*;
 
     #[test]

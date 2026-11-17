@@ -48,6 +48,11 @@ pub struct You {
     pub wear: Option<crate::config::FriendCfg>,
     /// The line on their profile card.
     pub motto: String,
+    /// The other pets (None: from a version without them; left as they are).
+    pub pets: Option<Vec<crate::config::PetCfg>>,
+    /// The village's time of day ("auto", "night"…): the same on every
+    /// device (empty: from a version without it; left as it is).
+    pub time: String,
 }
 
 impl You {
@@ -61,6 +66,8 @@ impl You {
             keys: Some(cfg.keys.clone()),
             wear: Some(cfg.scene.wear.clone()),
             motto: cfg.scene.motto.clone(),
+            pets: Some(cfg.scene.pets.clone()),
+            time: cfg.scene.time.clone(),
         }
     }
 
@@ -80,6 +87,12 @@ impl You {
             cfg.scene.wear = w.clone();
         }
         cfg.scene.motto = self.motto.clone();
+        if let Some(p) = &self.pets {
+            cfg.scene.pets = p.clone();
+        }
+        if crate::scene::daylight::MODES.contains(&self.time.as_str()) {
+            cfg.scene.time = self.time.clone();
+        }
     }
 
     /// Whatever a config leaves unset, from here (the villager's name, the

@@ -612,6 +612,9 @@ impl Scene {
                     pets::PetKind::Dog => &[PetAct::Throw(1), PetAct::Throw(2), PetAct::Trick, PetAct::Zoomies, PetAct::Cuddle, PetAct::Brush][..],
                     pets::PetKind::Cat => &[PetAct::Throw(0), PetAct::Tease, PetAct::Trick, PetAct::Zoomies, PetAct::Cuddle, PetAct::Brush][..],
                     pets::PetKind::Bunny => &[PetAct::Throw(3), PetAct::Trick, PetAct::Cuddle, PetAct::Brush][..],
+                    pets::PetKind::Reindeer => &[PetAct::Throw(3), PetAct::Trick, PetAct::Zoomies, PetAct::Cuddle, PetAct::Brush][..],
+                    pets::PetKind::Fox => &[PetAct::Throw(1), PetAct::Tease, PetAct::Trick, PetAct::Zoomies, PetAct::Cuddle][..],
+                    pets::PetKind::Bird => &[PetAct::Trick, PetAct::Zoomies, PetAct::Cuddle][..],
                 });
                 if (x - px).abs() > 6.0 || (y - py).abs() > 3.0 {
                     self.auto_goal(Do::WalkTo(x, y.max(lo(self, x))));

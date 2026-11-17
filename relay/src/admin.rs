@@ -24,6 +24,7 @@ pub fn router(app: App) -> Router {
         .route("/api/ban", post(ban))
         .route("/api/unban", post(unban))
         .route("/api/clear", post(clear))
+        .route("/api/squares", get(squares).post(set_squares))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
@@ -118,6 +119,35 @@ async fn clear(State(app): State<App>, Json(Prefix { prefix }): Json<Prefix>) ->
     Json(json!({ "cleared": n }))
 }
 
+/// The public squares, by name, as the game has them.
+pub const SQUARES: [&str; 4] = ["North Pole Square", "Candy Cane Lane", "Frosty Hollow", "Pine Peak Lodge"];
+
+async fn squares(State(app): State<App>) -> Json<serde_json::Value> {
+    let b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+    Json(json!({ "names": SQUARES, "squares": b.kept.squares }))
+}
+
+/// Each square's settings (only the squares', only settings the game
+/// knows): kept, and out to everyone in them at once.
+async fn set_squares(State(app): State<App>, Json(v): Json<std::collections::BTreeMap<String, serde_json::Value>>) -> Response {
+    const KEYS: [&str; 8] = ["time", "critters", "most_at_once", "events", "sleigh_minutes", "chattiness", "bushes", "traffic"];
+    let mut clean = std::collections::BTreeMap::new();
+    for (name, rules) in v {
+        let Some(obj) = rules.as_object().filter(|_| SQUARES.contains(&name.as_str())) else { continue };
+        let kept: serde_json::Map<String, serde_json::Value> = obj.iter().filter(|(k, _)| KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        if !kept.is_empty() {
+            clean.insert(name, serde_json::Value::Object(kept));
+        }
+    }
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.kept.squares = clean;
+        b.say_squares();
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
 const PAGE: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Village relay</title>
@@ -156,6 +186,11 @@ const PAGE: &str = r##"<!doctype html>
     <div class="grid" id="limits"></div>
     <p><button id="save">save limits</button> <span id="msg"></span></p>
     <p class="note">Limits take hold at once (new connections, and each message from now on). "closed" turns new connections away.</p>
+  </section>
+  <section><h2>PUBLIC SQUARES</h2>
+    <p class="note">Each square's own settings: everyone in it has these (their snow, wind and glow stay their own). Left blank: the game's usual. Saved settings reach everyone in a square at once.</p>
+    <div class="wrap"><table><thead><tr><th>square</th><th>time of day</th><th>folk &amp; animals</th><th>most at once</th><th>surprises</th><th>sleigh every (min)</th><th>chattiness</th><th>berry bushes</th></tr></thead><tbody id="squares"></tbody></table></div>
+    <p><button id="savesq">save squares</button> <span id="sqmsg"></span></p>
   </section>
   <section><h2>BANS</h2>
     <p><input id="banip" placeholder="address" style="width:220px"> <button id="ban" class="bad">ban</button></p>
@@ -210,5 +245,29 @@ document.addEventListener("click", async (e) => {
   else if (t.dataset.ban && confirm("Ban " + t.dataset.ban + "?")) { await call("api/ban", { ip: t.dataset.ban }); refresh(); }
   else if (t.dataset.unban) { await call("api/unban", { ip: t.dataset.unban }); refresh(); }
 });
+const TIMES = ["", "auto", "night", "dawn", "morning", "noon", "afternoon", "dusk"];
+async function loadSquares() {
+  const r = await (await fetch("api/squares")).json();
+  $("squares").innerHTML = r.names.map((n) => {
+    const s = r.squares[n] || {};
+    const num = (k, step) => `<input data-sq="${esc(n)}" data-k="${k}" type="number" step="${step}" min="0" value="${s[k] ?? ""}" style="width:80px">`;
+    const time = `<select data-sq="${esc(n)}" data-k="time">${TIMES.map((t) => `<option ${s.time === t ? "selected" : ""} value="${t}">${t || "(usual)"}</option>`).join("")}</select>`;
+    const bush = `<select data-sq="${esc(n)}" data-k="bushes"><option value="">(usual)</option><option ${s.bushes === true ? "selected" : ""} value="true">yes</option><option ${s.bushes === false ? "selected" : ""} value="false">no</option></select>`;
+    return `<tr><td>${esc(n)}</td><td>${time}</td><td>${num("critters", 0.25)}</td><td>${num("most_at_once", 1)}</td><td>${num("events", 0.25)}</td><td>${num("sleigh_minutes", 1)}</td><td>${num("chattiness", 0.25)}</td><td>${bush}</td></tr>`;
+  }).join("");
+}
+$("savesq").onclick = async () => {
+  const out = {};
+  document.querySelectorAll("#squares [data-sq]").forEach((i) => {
+    const v = i.value.trim();
+    if (v === "") return;
+    const o = out[i.dataset.sq] = out[i.dataset.sq] || {};
+    o[i.dataset.k] = i.dataset.k === "time" ? v : i.dataset.k === "bushes" ? v === "true" : Number(v);
+  });
+  const r = await call("api/squares", out);
+  $("sqmsg").textContent = r.ok ? "saved: everyone in the squares has them now" : "couldn't save (" + r.status + ")";
+  loadSquares();
+};
+loadSquares();
 refresh(); setInterval(refresh, 3000);
 </script></body></html>"##;

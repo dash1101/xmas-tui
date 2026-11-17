@@ -1,9 +1,9 @@
 [package]
 name = "xmas-relay"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "The xmas-tui village's own relay: just enough MQTT over WebSocket for online play, with an admin console"
-license = "MIT"
+license = "LicenseRef-xmas-tui-source-available"
 repository = "https://github.com/dash1101/xmas-tui"
 
 [dependencies]

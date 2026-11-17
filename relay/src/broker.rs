@@ -63,6 +63,10 @@ pub struct Kept {
     pub limits: Limits,
     /// Addresses not let in.
     pub bans: Vec<String>,
+    /// Each public square's own settings (its name: the village's settings,
+    /// as the game has them: time, critters, most_at_once, events,
+    /// sleigh_minutes, chattiness, bushes, traffic).
+    pub squares: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 pub struct Conn {
@@ -81,8 +85,19 @@ pub struct Conn {
 
 struct Kept1 {
     payload: Vec<u8>,
-    at: Instant,
+    /// When it was kept (seconds since 1970: it outlasts a restart).
+    at: u64,
 }
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Where the relay itself says things (the squares' settings): read by
+/// everyone, written only by the relay.
+pub const ADMIN: &str = "xmas-tui/1/admin/";
+/// The public squares' settings, from the console.
+pub const ADMIN_SQUARES: &str = "xmas-tui/1/admin/squares";
 
 /// Counts for the admin console.
 #[derive(Serialize, Default, Clone, Debug)]
@@ -214,6 +229,9 @@ impl Broker {
         let now = Instant::now();
         c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
         c.tokens_at = now;
+        if topic.starts_with(ADMIN) {
+            return Ok(());
+        }
         if c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
             c.dropped += 1;
             self.stats.dropped += 1;
@@ -278,7 +296,7 @@ impl Broker {
             return;
         }
         self.retained_bytes += payload.len();
-        self.retained.insert(topic.to_string(), Kept1 { payload: payload.to_vec(), at: Instant::now() });
+        self.retained.insert(topic.to_string(), Kept1 { payload: payload.to_vec(), at: now_secs() });
         self.order.push_back(topic.to_string());
         // the oldest let go when there's too much
         while self.retained.len() > l.max_retained || self.retained_bytes > l.max_retained_bytes {
@@ -426,10 +444,80 @@ impl Broker {
         gone.len()
     }
 
+    /// The relay's own message (the squares' settings): kept, and on to
+    /// whoever listens.
+    pub fn say(&mut self, topic: &str, payload: &[u8]) {
+        self.keep(topic, payload);
+        self.route(topic, payload, true);
+    }
+
+    /// The squares' settings, as they are now, for everyone.
+    pub fn say_squares(&mut self) {
+        let json = serde_json::to_vec(&self.kept.squares).unwrap_or_default();
+        self.say(ADMIN_SQUARES, &json);
+    }
+
+    /// What's kept, to write out (so a restart or an update loses
+    /// nothing): each topic, when, and its bytes.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut out = b"xmas-relay kept 1\n".to_vec();
+        for (t, k) in &self.retained {
+            out.extend_from_slice(&(t.len() as u16).to_le_bytes());
+            out.extend_from_slice(t.as_bytes());
+            out.extend_from_slice(&k.at.to_le_bytes());
+            out.extend_from_slice(&(k.payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(&k.payload);
+        }
+        out
+    }
+
+    /// Kept messages back from a snapshot (anything malformed: skipped
+    /// from there on). Returns how many.
+    pub fn restore(&mut self, b: &[u8]) -> usize {
+        let head = b"xmas-relay kept 1\n";
+        let Some(mut r) = b.strip_prefix(head.as_slice()) else { return 0 };
+        let mut n = 0;
+        let take = |r: &mut &[u8], k: usize| -> Option<Vec<u8>> {
+            if r.len() < k {
+                return None;
+            }
+            let (a, rest) = r.split_at(k);
+            *r = rest;
+            Some(a.to_vec())
+        };
+        while !r.is_empty() {
+            let Some(tl) = take(&mut r, 2).map(|v| u16::from_le_bytes([v[0], v[1]]) as usize) else { break };
+            let Some(topic) = take(&mut r, tl).and_then(|v| String::from_utf8(v).ok()) else { break };
+            let Some(at) = take(&mut r, 8).map(|v| u64::from_le_bytes(v.try_into().unwrap_or([0; 8]))) else { break };
+            let Some(pl) = take(&mut r, 4).map(|v| u32::from_le_bytes(v.try_into().unwrap_or([0; 4])) as usize) else { break };
+            let Some(payload) = take(&mut r, pl) else { break };
+            if !ok_topic(&topic) {
+                continue;
+            }
+            self.keep(&topic, &payload);
+            if let Some(k) = self.retained.get_mut(&topic) {
+                k.at = at;
+            }
+            n += 1;
+        }
+        n
+    }
+
     /// Kept messages older than `secs` forgotten (a cleanup now and then:
     /// nothing the village keeps is meant to last for ever).
+    /// (A linked device's side lasts longer: a phone left in a drawer for a
+    /// month still catches up; the relay's own are kept for ever.)
     pub fn expire(&mut self, secs: u64) {
-        let old: Vec<String> = self.retained.iter().filter(|(_, k)| k.at.elapsed().as_secs() > secs).map(|(t, _)| t.clone()).collect();
+        let now = now_secs();
+        let old: Vec<String> = self
+            .retained
+            .iter()
+            .filter(|(t, k)| {
+                let keep = if t.starts_with(ADMIN) { u64::MAX } else if t.split('/').nth(2) == Some("sync") { secs.saturating_mul(9) } else { secs };
+                now.saturating_sub(k.at) > keep
+            })
+            .map(|(t, _)| t.clone())
+            .collect();
         for t in old {
             if let Some(k) = self.retained.remove(&t) {
                 self.retained_bytes -= k.payload.len();
@@ -472,6 +560,41 @@ mod tests {
             v.push(b);
         }
         v
+    }
+
+    /// What's kept outlasts a restart; nobody but the relay speaks on its
+    /// own topics; a linked device's side is kept longer than the rest.
+    #[test]
+    fn kept_messages_outlast_a_restart_and_only_the_relay_speaks_as_itself() {
+        let mut b = Broker::new(Kept::default());
+        let (ta, _ra) = channel(64);
+        let (a, _) = b.join(ip(1), "a".into(), None, ta);
+        b.publish(a, "xmas-tui/1/sync/abc/dev1", b"my side", true).unwrap();
+        b.publish(a, "xmas-tui/1/here/abc", b"on", true).unwrap();
+        // pretending to be the relay: not kept, not passed on
+        b.publish(a, ADMIN_SQUARES, b"{\"North Pole Square\":{\"time\":\"noon\"}}", true).unwrap();
+        b.kept.squares.insert("Frosty Hollow".into(), serde_json::json!({ "time": "night" }));
+        b.say_squares();
+        let snap = b.snapshot();
+        // a new relay, from the snapshot
+        let mut c = Broker::new(Kept::default());
+        assert_eq!(c.restore(&snap), 3);
+        assert_eq!(c.restore(b"not a snapshot"), 0);
+        let (tb, mut rb) = channel(64);
+        let (bb, _) = c.join(ip(2), "b".into(), None, tb);
+        c.subscribe(bb, &["xmas-tui/1/#".into()]);
+        let got = drain(&mut rb);
+        let has = |t: &str| got.iter().any(|m| m.windows(t.len()).any(|w| w == t.as_bytes()));
+        assert!(has("xmas-tui/1/sync/abc/dev1") && has("xmas-tui/1/here/abc"));
+        assert!(has("Frosty Hollow") && !has("North Pole Square"), "the relay's squares, not the pretender's");
+        // nine days on: the "here" is forgotten, the device's side isn't
+        for k in c.retained.values_mut() {
+            k.at -= 9 * 24 * 3600;
+        }
+        c.expire(7 * 24 * 3600);
+        assert!(c.retained.contains_key("xmas-tui/1/sync/abc/dev1"));
+        assert!(!c.retained.contains_key("xmas-tui/1/here/abc"));
+        assert!(c.retained.contains_key(ADMIN_SQUARES));
     }
 
     #[test]

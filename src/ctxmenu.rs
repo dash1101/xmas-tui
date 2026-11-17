@@ -35,7 +35,7 @@ impl CtxMenu {
 
     /// A menu of any actions (the settings are added at the bottom).
     pub fn with(x: i32, y: i32, title: String, mut items: Vec<(String, MenuAct)>, w: i32, h: i32) -> Self {
-        items.push(("settings…".into(), MenuAct::Settings));
+        items.push(("menu…".into(), MenuAct::Settings));
         let mut m = CtxMenu { x, y, title, items, hover: None };
         let (mw, mh) = m.size();
         m.x = x.min(w - mw - 1).max(0);

@@ -167,7 +167,7 @@ impl Panel {
                 None => self.commit_city(),
             },
             MouseIn::Scroll(up) => {
-                if let Some(a) = self.settings.scroll(x, y, up) {
+                if let Some(a) = self.settings.wheel(x, y, up) {
                     self.acts.push(a);
                 }
             }
@@ -284,7 +284,10 @@ impl Panel {
                     crate::tray::request_wallpaper_quit();
                     self.close = true;
                 }
-                Act::Tab(i) => self.settings.tab = i as usize,
+                Act::Tab(i) => self.settings.set_tab(i as usize),
+                // the wallpaper (another process) is asked to start again
+                Act::Restart => crate::update::request("restart"),
+                Act::Help | Act::Net(_) => {}
                 Act::Uninstall | Act::ResetSettings => self.settings.confirm = Some(a),
                 Act::NotNow => self.settings.confirm = None,
                 Act::UninstallNow => {
@@ -314,7 +317,7 @@ impl Panel {
                 Act::InstallUpdate => crate::update::request("install"),
                 Act::DismissUpdate => crate::update::request("dismiss"),
                 Act::SetWallpaper => {
-                    self.settings.tab = crate::settings::TAB_DESKTOP;
+                    self.settings.set_tab(crate::settings::TAB_DESKTOP);
                     #[cfg(target_os = "linux")]
                     crate::linwall::start_wallpaper();
                 }
@@ -837,6 +840,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut p = Panel::new(Config::default(), &path);
         p.step(0.0, 0.03);
+        // (it opens on the home page: the Village tab first)
+        let (x, y) = find(&p, "Village");
+        p.mouse(MouseIn::Down(Btn::Left), x, y);
+        p.step(0.05, 0.03);
         // Snowfall ▸ (the arrow after the bar on the Snowfall row)
         let (_, y) = find(&p, "Snowfall");
         let x = (0..p.w as i32).rev().find(|&x| p.frame.get_g(x, y).map(|g| g.ch) == Some('▸')).unwrap();

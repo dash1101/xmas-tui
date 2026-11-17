@@ -170,6 +170,8 @@ pub struct App {
     pub quit: bool,
     /// Quit at this app time (after uninstalling: once it's been said).
     quit_at: Option<f32>,
+    /// When this side was last offered to the linked devices.
+    synced_at: f32,
     /// Direction keys (left, right, up, down): held until this app time.
     held: [f32; 4],
     /// The front-end reports key releases (otherwise a press holds a key
@@ -214,6 +216,8 @@ pub struct App {
     /// In someone else's village: their settings, over this villager's own
     /// (see `crate::scene::online::Rules`).
     rules_on: Option<crate::scene::online::Rules>,
+    /// Whose those are.
+    rules_lock: Option<crate::scene::online::Lock>,
     /// Linked devices open at once share one village, unless it's been
     /// closed (or left) by hand; when that's next looked at.
     apart: bool,
@@ -388,6 +392,7 @@ impl App {
             keyboard,
             quit: false,
             quit_at: None,
+            synced_at: 0.0,
             resizing: None,
             bar_drag: None,
             picking: None,
@@ -420,6 +425,7 @@ impl App {
             can_focus: false,
             safe_front: 0,
             rules_on: None,
+            rules_lock: None,
             apart: false,
             together_at: 0.0,
             trackpad: false,
@@ -578,8 +584,11 @@ impl App {
     pub fn ctrl_key(&mut self, c: char, shift: bool) {
         let t = self.t();
         // Ctrl+V while typing: the clipboard (a friend's code)
-        if let (Some((_, _, text)), 'v' | 'V') = (self.typing.as_mut(), c) {
+        if let (Some((_, ask, text)), 'v' | 'V') = (self.typing.as_mut(), c) {
             text.push_str(crate::net::paste_text().trim());
+            if let Some(more) = crate::net::seal::asks_code(ask) {
+                *text = crate::net::seal::typing_code(text, more);
+            }
             return;
         }
         let (up, down) = (matches!(c, '=' | '+'), matches!(c, '-' | '_'));
@@ -876,6 +885,10 @@ impl App {
             self.menu = None;
             self.want_keys = true;
         }
+        // a chat open: what's come in since, as it comes
+        if let Some((crate::scene::online::TextFor::Mail(i), ask, _)) = &mut self.typing {
+            *ask = self.scene.chat_prompt(*i as usize);
+        }
         if let Some(text) = self.scene.take_copy() {
             crate::net::copy_text(&text);
         }
@@ -931,16 +944,24 @@ impl App {
     /// The line being typed, over the bottom of the village.
     fn draw_typing(&mut self) {
         let blink = (self.t() * 2.0) as i32 % 2 == 0;
-        let Some((_, ask, text)) = &self.typing else { return };
+        let Some((what, ask, text)) = &self.typing else { return };
         use crate::color::pal;
         use crate::frame::{Bg, Glyph};
+        // a chat: what's been said so far, under its title
+        let mut lines = ask.lines();
+        let title = lines.next().unwrap_or("").to_string();
+        let said: Vec<String> = lines.map(|l| l.to_string()).collect();
+        let chat = matches!(what, crate::scene::online::TextFor::Mail(_));
         let f = &mut self.frame;
-        let w = (ask.chars().count().max(text.chars().count() + 2) as i32 + 6).clamp(30, f.w as i32 - 4);
-        let (x0, y0) = ((f.w as i32 - w) / 2, f.h as i32 - 8);
+        let widest = said.iter().map(|l| l.chars().count()).chain([title.chars().count(), text.chars().count() + 2]).max().unwrap_or(0);
+        let w = (widest as i32 + 6).clamp(30, f.w as i32 - 4);
+        let n = said.len() as i32;
+        let h = 4 + n;
+        let (x0, y0) = ((f.w as i32 - w) / 2, (f.h as i32 - 8 - n).max(0));
         let bg = Bg::Mix(pal::UI_PANEL, 0.95);
-        for y in y0..y0 + 4 {
+        for y in y0..y0 + h {
             for x in x0..x0 + w {
-                let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + 3) {
+                let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
                     (true, _, true, _) => '╭',
                     (_, true, true, _) => '╮',
                     (true, _, _, true) => '╰',
@@ -952,11 +973,17 @@ impl App {
                 f.put_g(x, y, Glyph::new(ch, crate::color::Rgb::hex(0xffd36b) * 0.8).bg(bg).lit(0.0));
             }
         }
-        f.text(x0 + 2, y0, &format!(" {ask} "), pal::UI_TITLE, bg, 0.0);
+        f.text(x0 + 2, y0, &format!(" {title} "), pal::UI_TITLE, bg, 0.0);
+        for (k, l) in said.iter().enumerate() {
+            let mine = l.trim_start().starts_with("you:");
+            let l: String = l.chars().take((w - 4) as usize).collect();
+            f.text(x0 + 2, y0 + 1 + k as i32, &l, if mine { pal::UI_DIM * 1.3 } else { pal::UI_TEXT }, bg, 0.0);
+        }
         let shown: String = text.chars().rev().take((w - 6) as usize).collect::<Vec<_>>().into_iter().rev().collect();
-        f.text(x0 + 2, y0 + 1, &format!("{shown}{}", if blink { "▏" } else { " " }), pal::UI_TEXT, bg, 0.0);
-        f.text(x0 + 2, y0 + 2, "Enter: send · Esc: never mind · Ctrl+V: paste", pal::UI_DIM, bg, 0.0);
-        crate::widgets::looks::apply(f, crate::widgets::Rect { x: x0, y: y0, w, h: 4 }, &self.cfg.ui.look, bg, 3);
+        f.text(x0 + 2, y0 + 1 + n, &format!("{shown}{}", if blink { "▏" } else { " " }), pal::UI_TEXT, bg, 0.0);
+        let help = if chat { "Enter: send · Esc: close the chat · Ctrl+V: paste" } else { "Enter: send · Esc: never mind · Ctrl+V: paste" };
+        f.text(x0 + 2, y0 + 2 + n, help, pal::UI_DIM, bg, 0.0);
+        crate::widgets::looks::apply(f, crate::widgets::Rect { x: x0, y: y0, w, h }, &self.cfg.ui.look, bg, 3);
     }
 
     /// A click on the friends widget: a friend's menu, the messages, the
@@ -990,6 +1017,66 @@ impl App {
         let (w, h) = (self.w as i32, self.ui_h() as i32);
         self.menu = Some(CtxMenu::plain(x + 2, y, title, items, w, h));
         self.ui_sounds.push(SoundEvent { sfx: Sfx::Click, pan: 0.5, gain: 0.6 });
+    }
+
+    /// Something online, from the menu (its Online tab, its home page).
+    fn net_act(&mut self, n: u8) {
+        use crate::ctxmenu::{CtxMenu, MenuAct};
+        use crate::scene::online::{NetDo, MORE_DEVICES, MORE_PUBLIC};
+        use crate::scene::Do;
+        let on = self.scene.online.wanted();
+        let more = match n {
+            settings::NET_ONLINE => return self.scene.act(Do::Net(if on { NetDo::Off } else { NetDo::On })),
+            settings::NET_COPY => return self.scene.act(Do::Net(NetDo::Code)),
+            settings::NET_LIST => return self.scene.act(Do::Net(NetDo::ListMine(!self.scene.online.book.listed))),
+            settings::NET_OPEN => return self.scene.act(Do::Net(NetDo::Host)),
+            settings::NET_FRIENDS => {
+                self.settings.open = false;
+                return self.open_online();
+            }
+            settings::NET_ADD => {
+                self.settings.open = false;
+                return self.scene.act(Do::Net(NetDo::Add));
+            }
+            settings::NET_CARD => {
+                self.settings.open = false;
+                return self.scene.act(Do::Net(NetDo::MyCard));
+            }
+            settings::NET_PUBLIC => MORE_PUBLIC,
+            settings::NET_DEVICES => MORE_DEVICES,
+            _ => return,
+        };
+        // a menu of its own, in place of the panel
+        self.settings.open = false;
+        let (title, items) = self.scene.more_menu(more);
+        let items: Vec<(String, MenuAct)> = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+        let (x, y) = self.scene.zoom_focus();
+        let (x, y) = (x / self.ui_k, y / self.ui_k);
+        let (w, h) = (self.w as i32, self.ui_h() as i32);
+        self.menu = Some(CtxMenu::plain(x as i32 + 4, y as i32 - 10, title, items, w, h));
+        self.ui_sounds.push(SoundEvent { sfx: Sfx::Click, pan: 0.5, gain: 0.6 });
+    }
+
+    /// What the menu's Online tab shows, as things stand.
+    fn fill_net(&mut self) {
+        use crate::net::Link;
+        let o = &self.scene.online;
+        let state = match (o.wanted(), o.link()) {
+            (false, _) | (_, Link::Off) => 0,
+            (_, Link::Connecting) => 1,
+            (_, Link::On) => 2,
+        };
+        let friends = o.friends();
+        self.settings.net = settings::NetInfo {
+            state,
+            via: self.link.as_ref().map(|l| l.via()).unwrap_or_default(),
+            code: crate::net::seal::pretty(&o.code()),
+            friends: friends.len(),
+            about: friends.iter().filter(|(_, h)| h.is_some()).count(),
+            listed: o.book.listed,
+            open: o.village().filter(|(_, host)| *host && o.square().is_none()).map(|(c, _)| c),
+            devices: self.linked.as_ref().map(|l| l.others.len()).unwrap_or(0),
+        };
     }
 
     /// O: friends & online.
@@ -1445,7 +1532,7 @@ impl App {
             }
             MouseIn::Scroll(up) => {
                 if self.settings.open {
-                    if let Some(a) = self.settings.scroll(x, y, up) {
+                    if let Some(a) = self.settings.wheel(x, y, up) {
                         self.acts.push(a);
                     }
                 } else if let Some((s, _)) = self.widgets.shelf_hit(gx, gy) {
@@ -1473,7 +1560,7 @@ impl App {
                 if self.settings.open {
                     self.pad_acc += dy;
                     if self.pad_acc.abs() >= 1.0 {
-                        if let Some(a) = self.settings.scroll(x, y, self.pad_acc > 0.0) {
+                        if let Some(a) = self.settings.wheel(x, y, self.pad_acc > 0.0) {
                             self.acts.push(a);
                         }
                         self.pad_acc = 0.0;
@@ -1579,11 +1666,21 @@ impl App {
 
     pub fn key(&mut self, k: KeyIn) {
         // a line being typed (a friend's code, a message)
-        if let Some((what, _, text)) = self.typing.as_mut() {
+        if let Some((what, ask, text)) = self.typing.as_mut() {
+            let code = crate::net::seal::asks_code(ask);
             match k {
-                KeyIn::Char(c) if !c.is_control() && text.chars().count() < 200 => text.push(c),
+                KeyIn::Char(c) if !c.is_control() && text.chars().count() < 200 => {
+                    text.push(c);
+                    // a code: capitals and dashes, as it's typed
+                    if let Some(more) = code {
+                        *text = crate::net::seal::typing_code(text, more);
+                    }
+                }
                 KeyIn::Backspace => {
                     text.pop();
+                    if let Some(more) = code {
+                        *text = crate::net::seal::typing_code(text, more);
+                    }
                 }
                 KeyIn::Enter => {
                     let (what, text) = (*what, std::mem::take(text));
@@ -1949,7 +2046,7 @@ impl App {
             items.push((format!("icons: {} ▸", if c.icons == "real" { "real" } else { "pixel art" }), MenuAct::Shelf(S::Icons(s))));
             items.push((if c.rolled { "unroll" } else { "roll up" }.into(), MenuAct::Shelf(S::Roll(s))));
             items.push(("remove the shelf (its files stay)".into(), MenuAct::Shelf(S::Remove(s))));
-            self.settings.tab = settings::TAB_SHELVES;
+            self.settings.set_tab(settings::TAB_SHELVES);
             if cfg!(windows) && !self.keyboard {
                 items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
             }
@@ -1971,8 +2068,8 @@ impl App {
             }
             items.push(("hide it".into(), MenuAct::Hide(i as u8)));
             items.push((if self.cfg.layout.locked { "unlock the widgets" } else { "lock the widgets in place" }.into(), MenuAct::LockWidgets));
-            // ("settings…", at the bottom, opens on the Widgets tab)
-            self.settings.tab = settings::TAB_WIDGETS;
+            // ("menu…", at the bottom, opens on the Widgets tab)
+            self.settings.set_tab(settings::TAB_WIDGETS);
             if cfg!(windows) && !self.keyboard {
                 items.push(("Windows desktop menu…".into(), MenuAct::Desktop));
             }
@@ -2276,6 +2373,9 @@ impl App {
                 Err(_) => {}
             }
         }
+        if self.settings.open {
+            self.fill_net();
+        }
         let old = self.applied.clone();
         let mut reseed = false;
         if self.quit_at.is_some_and(|q| self.t() >= q) {
@@ -2375,7 +2475,18 @@ impl App {
                     RESTART_FOR_SCALE.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Act::RestartLater => self.settings.restart_ask = false,
-                Act::Tab(i) => self.settings.tab = i as usize,
+                Act::Tab(i) => self.settings.set_tab(i as usize),
+                Act::Restart => {
+                    self.commit_city();
+                    self.sync.save_now(&self.cfg);
+                    self.write_save();
+                    crate::update::restart_now();
+                }
+                Act::Help => {
+                    self.settings.open = false;
+                    self.settings.help = true;
+                }
+                Act::Net(n) => self.net_act(n),
                 Act::FriendSel(i) => self.settings.friend_sel = if self.settings.friend_sel == Some(i) { None } else { Some(i) },
                 Act::CheckUpdate => crate::update::check_now(),
                 Act::InstallUpdate => crate::update::install_now(),
@@ -2384,7 +2495,7 @@ impl App {
                     // show how it's going (in the Desktop tab)
                     self.settings.wall_offer = false;
                     self.settings.open = true;
-                    self.settings.tab = settings::TAB_DESKTOP;
+                    self.settings.set_tab(settings::TAB_DESKTOP);
                     #[cfg(target_os = "linux")]
                     crate::linwall::start_wallpaper();
                 }
@@ -2421,14 +2532,17 @@ impl App {
                     }
                     // a guest: the village's own settings are the host's;
                     // a change is asked of them (made, by an admin)
-                    let asked = match &self.rules_on {
-                        Some(r) => {
+                    let asked = match (&self.rules_on, self.rules_lock) {
+                        // (a square's own settings can't be changed here; the
+                        // rest are this villager's)
+                        (Some(_), Some(crate::scene::online::Lock::Keeper)) => vec![],
+                        (Some(r), _) => {
                             let mut probe = self.cfg.clone();
                             r.apply(&mut probe.scene);
                             settings::apply(&mut probe, a);
                             r.changes(&crate::scene::online::Rules::of(&probe.scene))
                         }
-                        None => vec![],
+                        (None, _) => vec![],
                     };
                     if asked.is_empty() {
                         settings::apply(&mut self.cfg, a);
@@ -2501,6 +2615,12 @@ impl App {
         }
         self.update_online();
         // saved now and then (and on the way out)
+        // linked devices: a change here reaches the others in a moment
+        // (an unchanged side isn't sent again)
+        if self.linked.is_some() && self.t() - self.synced_at > 2.0 {
+            self.synced_at = self.t();
+            self.send_sync();
+        }
         if self.saves && self.t() - self.saved_at > 60.0 {
             self.write_save();
         }
@@ -2573,6 +2693,7 @@ impl App {
         self.scene.set_live(self.cfg.scene.walk_speed, left, self.cfg.scene.most_at_once);
         crate::scene::events::set_talk(self.cfg.scene.talk_time, self.cfg.scene.chattiness);
         self.scene.set_pet(&self.cfg.scene.pet);
+        self.scene.set_more_pets(&self.cfg.scene.pets);
         self.scene.set_name(&self.cfg.scene.name);
         self.scene.set_friends(&self.cfg.scene.friends);
         self.scene.set_wear(&self.cfg.scene.wear, &self.cfg.scene.motto);
@@ -2581,7 +2702,11 @@ impl App {
         // hosting: the village's settings, for the guests; a guest: the
         // host's, the village made again when they change
         self.scene.set_rules(&crate::scene::online::Rules::of(&self.cfg.scene));
-        let rules = self.scene.village_rules().map(|r| r.0.clone());
+        let whose = self.scene.rules_now(&self.cfg.scene);
+        self.rules_lock = whose.as_ref().map(|r| r.1);
+        // (a public square: its own settings greyed out in the menu)
+        self.settings.locked = self.rules_lock == Some(crate::scene::online::Lock::Keeper);
+        let rules = whose.map(|r| r.0);
         if rules != self.rules_on {
             self.rules_on = rules;
             self.new_scene();
@@ -2600,6 +2725,9 @@ impl App {
             let now = crate::clock::now();
             let mins = now.hour() as f32 * 60.0 + now.minute() as f32 + now.second() as f32 / 60.0;
             let (rise, set) = crate::widgets::data::sun_times().unwrap_or((450.0, 1020.0));
+            // a guest: the host's clock (the same sky for everyone there)
+            self.scene.online.set_clock(mins, rise, set);
+            let (mins, rise, set) = self.scene.online.village_clock().unwrap_or((mins, rise, set));
             self.scene.set_daylight(crate::scene::daylight::compute(&self.cfg.scene.time, mins, rise, set));
         }
         self.scene.update(dt, t);
@@ -2808,11 +2936,11 @@ mod tests {
         app.mouse(MouseIn::Up(Btn::Left), mx, my);
         app.step();
         assert_eq!(app.cfg.widgets.looks.system, "frosted");
-        // its "settings…" opens on the Widgets tab
+        // its "menu…" opens on the Widgets tab
         assert!(app.right_click((r.x + 3) as f32 + 0.5, (r.y + 2) as f32 + 0.5));
         let m = app.menu.as_ref().unwrap();
         let (mx, my) = (m.x + 2, m.y + m.items.len() as i32);
-        assert_eq!(m.items.last().unwrap().0, "settings…");
+        assert_eq!(m.items.last().unwrap().0, "menu…");
         app.mouse(MouseIn::Down(Btn::Left), mx, my);
         app.mouse(MouseIn::Up(Btn::Left), mx, my);
         assert!(app.settings.open && app.settings.tab == settings::TAB_WIDGETS);
@@ -3128,7 +3256,7 @@ mod tests {
             // the buttons drawn on theirs
             let f = ls[0].0;
             let g = settings::gear_rect(150);
-            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '⚙'));
+            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '❄'));
         }
         // the settings button, where it is at the buttons' size
         let g = settings::gear_rect(150);

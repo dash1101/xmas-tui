@@ -927,7 +927,7 @@ impl Scene {
         }
         // up in the sky, coming down onto it (the envelope or the basket):
         // into the basket, aboard
-        if !b.aboard && self.inside.is_none() && self.trip.is_none() {
+        if !b.aboard && self.inside.is_none() && self.trip.is_none() && t > self.balloon_out_until {
             if let Some(p) = &mut self.player {
                 let (px, py) = (p.centre(), p.y);
                 let falling = p.in_air() && py > self.balloon_py + 0.01;
@@ -935,7 +935,7 @@ impl Scene {
                 if falling && (px - b.x).abs() < half && py >= top && py <= b.y + 0.5 {
                     b.board();
                     p.ride(b.x - 1.0, b.y - 0.8);
-                    self.director.say(b.x.round() as i32, (b.y - 6.0 * k) as i32, "a soft landing! ← → drift · ↑ burner · ↓ down · E on the snow: off", t, 4.5, 8);
+                    self.director.say(b.x.round() as i32, (b.y - 6.0 * k) as i32, "a soft landing! ← → drift · ↑ burner · ↓ down · Space: jump out", t, 4.5, 8);
                     self.director.sound(Sfx::Magic, b.x, 0.7);
                 }
             }
@@ -964,14 +964,14 @@ impl Scene {
                 self.director.say(p.centre().round() as i32, p.y as i32 - 4, "what a view! thanks, balloon", t, 2.4, 8);
                 self.pockets.balloon += 1;
             } else {
-                self.director.say(p.centre().round() as i32, p.y as i32 - 4, "too high to hop off — ↓ to come down", t, 2.0, 8);
+                self.director.say(p.centre().round() as i32, p.y as i32 - 4, "too high to step off — ↓ to come down, or Space to jump", t, 2.0, 8);
             }
             return true;
         }
         if b.reachable(p.centre(), p.y) {
             b.board();
             p.ride(b.x - 1.0, b.y - 0.8);
-            self.director.say(p.centre().round() as i32, p.y as i32 - 6, "up, up and away! ← → drift · ↑ burner · ↓ down · E on the snow: off", t, 4.5, 8);
+            self.director.say(p.centre().round() as i32, p.y as i32 - 6, "up, up and away! ← → drift · ↑ burner · ↓ down · Space: jump out", t, 4.5, 8);
             self.director.sound(Sfx::Magic, b.x, 0.7);
             return true;
         }

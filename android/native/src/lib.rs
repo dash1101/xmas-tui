@@ -29,6 +29,11 @@ pub mod save;
 pub mod net;
 #[path = "../../../src/sync.rs"]
 pub mod sync;
+#[path = "../../../src/settings.rs"]
+pub mod settings;
+#[path = "stubs.rs"]
+mod stubs;
+pub use stubs::{platform, update};
 
 /// The widgets' looks (the scene's panels are drawn in them too).
 pub mod widgets;

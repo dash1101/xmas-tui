@@ -162,7 +162,32 @@ impl Default for Rules {
     }
 }
 
+/// Whose a village's settings are, when they aren't this villager's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lock {
+    /// A friend's village: a change is asked of the host.
+    Host,
+    /// A friend's village, and the host lets this villager change them.
+    Admin,
+    /// A public square: the village's own settings are its keeper's (from
+    /// the relay's console), the same for everyone in it; the rest (snow,
+    /// wind, glow, the aurora) stay this villager's.
+    Keeper,
+}
+
 impl Rules {
+    /// The keeper's settings onto these.
+    pub fn take_owned(&mut self, k: &Rules) {
+        self.time = k.time.clone();
+        self.critters = k.critters;
+        self.most_at_once = k.most_at_once;
+        self.events = k.events;
+        self.sleigh_minutes = k.sleigh_minutes;
+        self.chattiness = k.chattiness;
+        self.bushes = k.bushes;
+        self.traffic = k.traffic.clone();
+    }
+
     pub fn of(c: &crate::config::SceneCfg) -> Rules {
         Rules {
             snow: c.snow,
@@ -365,6 +390,12 @@ pub struct NetFight {
 /// being looked at, what the front end's been asked to do.
 #[derive(Default)]
 pub struct Social {
+    /// The online side's own clock: real seconds since it started (the
+    /// village's clock is held back while it's out of sight or resting;
+    /// pings and who's been heard from mustn't be), from the wall clock at
+    /// the start, and the last reading (it never goes back).
+    #[cfg_attr(test, allow(dead_code))]
+    pub clock: Option<(i64, f32)>,
     /// Public villages looked at (or about to be): listen for how they are.
     pub want_public: std::cell::Cell<bool>,
     pub wear: crate::config::FriendCfg,
@@ -668,7 +699,18 @@ impl Scene {
             Some((_, false)) if self.online.guest_seed() == Some(self.seed) => self.avatar(),
             _ => None,
         };
-        self.online.tick(t, me, self.seed);
+        // (tests run the village's clock fast: the online side keeps to it)
+        #[cfg(test)]
+        let real = t;
+        #[cfg(not(test))]
+        let real = {
+            let ms = crate::clock::now().timestamp_millis();
+            let (start, last) = self.social.clock.get_or_insert((ms, 0.0));
+            let now = (((ms - *start) as f64) / 1000.0).max(*last as f64) as f32;
+            *last = now;
+            now
+        };
+        self.online.tick(real, me, self.seed);
         self.online.ease(dt);
         // (back home: the village's own settings again)
         if self.online.guest_seed().is_none() {
@@ -812,6 +854,19 @@ impl Scene {
     /// and whether this villager may change them.
     pub fn village_rules(&self) -> Option<&(Rules, bool)> {
         self.social.rules_in.as_ref().filter(|_| self.online.guest_seed().is_some())
+    }
+
+    /// The village's settings when they aren't this villager's own: a
+    /// friend's village, the host's; a public square, its keeper's for the
+    /// village's own settings and this villager's for the rest.
+    pub fn rules_now(&self, own: &crate::config::SceneCfg) -> Option<(Rules, Lock)> {
+        if let Some(json) = self.online.square_rules() {
+            let keeper: Rules = serde_json::from_str(&json).unwrap_or_default();
+            let mut r = Rules::of(own);
+            r.take_owned(&keeper);
+            return Some((r.clamped(), Lock::Keeper));
+        }
+        self.village_rules().map(|(r, admin)| (r.clone(), if *admin { Lock::Admin } else { Lock::Host }))
     }
 
     /// A guest changing one of the village's settings: asked of the host
@@ -1990,12 +2045,29 @@ impl Scene {
     }
 
     /// One friend's menu.
+    /// A chat with friend `i`: its title, then the last few lines (each
+    /// on a line of its own), for the box it's typed in.
+    pub fn chat_prompt(&self, i: usize) -> String {
+        let name = self.online.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
+        let lines = self.online.chat(i);
+        let mut s = format!("✉ chat with {name}");
+        if lines.is_empty() {
+            s.push_str("\n  (nothing yet: say hello!)");
+        }
+        for l in lines.iter().rev().take(8).rev() {
+            let who = if l.mine { "you".to_string() } else { name.clone() };
+            let text: String = l.text.chars().take(72).collect();
+            s.push_str(&format!("\n  {who}: {text}"));
+        }
+        s
+    }
+
     pub fn friend_menu(&self, i: usize) -> (String, Vec<(String, Do)>) {
         let fr = self.online.friends();
         let Some((p, here)) = fr.get(i) else { return ("friends".into(), vec![]) };
         let mut v = vec![];
         if !p.waiting {
-            v.push((format!("✉ write to {}…", p.name), Do::Net(NetDo::Mail(i as u8))));
+            v.push((format!("✉ chat with {}", p.name), Do::Net(NetDo::Mail(i as u8))));
             v.push((format!("♪ ping {} (a little tone)", p.name), Do::Net(NetDo::Ping(i as u8))));
         }
         if here.as_ref().is_some_and(|h| h.village.is_some()) {
@@ -2153,10 +2225,7 @@ impl Scene {
                 }
             }
             NetDo::Add => self.text_ask = Some((TextFor::Add, "a friend's code (XXXX-XXXX-XXXX)".into())),
-            NetDo::Mail(i) => {
-                let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
-                self.text_ask = Some((TextFor::Mail(i), format!("a message to {name}")));
-            }
+            NetDo::Mail(i) => self.text_ask = Some((TextFor::Mail(i), self.chat_prompt(i as usize))),
             NetDo::Join(i) => {
                 let code = self.online.friends().get(i as usize).and_then(|(_, h)| h.as_ref().and_then(|h| h.village.clone()));
                 if let Some(code) = code {
@@ -2279,7 +2348,7 @@ impl Scene {
                 }
                 self.social.front.push(Front::LinkShow);
             }
-            NetDo::LinkUse => self.text_ask = Some((TextFor::Link, "the link code from your other device (this one becomes that villager)".into())),
+            NetDo::LinkUse => self.text_ask = Some((TextFor::Link, "the link code from your other device (XXXX-XXXX-XXXX; this one becomes that villager)".into())),
             NetDo::Unlink => self.social.front.push(Front::Unlink),
             NetDo::Villager(i) => self.social.front.push(Front::Villager(i as usize)),
             NetDo::NewVillager => self.text_ask = Some((TextFor::NewVillager, "the new villager's name".into())),
@@ -2374,10 +2443,15 @@ impl Scene {
                 Err(e) => self.post(e),
             },
             TextFor::Mail(i) => {
+                // (nothing written: the chat's closed)
+                if text.trim().is_empty() {
+                    return;
+                }
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
                 if self.online.mail(i as usize, text) {
                     self.log_line(format!("✉ to {name}: {text}"), false);
-                    self.post(format!("✉ to {name}: {text}"));
+                    // the chat stays open for the next line
+                    self.text_ask = Some((TextFor::Mail(i), self.chat_prompt(i as usize)));
                 } else {
                     self.post("✉ not sent (not online yet)");
                 }

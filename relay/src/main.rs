@@ -44,6 +44,15 @@ pub struct App {
 }
 
 impl App {
+    /// What's kept, written out (every minute, and on the way out).
+    pub fn save_kept(&self) {
+        let snap = self.broker.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+        let tmp = self.data.join("kept.bin.tmp");
+        if std::fs::write(&tmp, snap).is_ok() {
+            let _ = std::fs::rename(&tmp, self.data.join("kept.bin"));
+        }
+    }
+
     /// The limits and bans, written out (after a change in the console).
     pub fn save(&self) {
         let kept = self.broker.lock().unwrap_or_else(|e| e.into_inner()).kept.clone();
@@ -72,13 +81,29 @@ async fn main() {
         trust_cf: env("TRUST_CF", "1") != "0",
         polls: poll::Polls::default(),
     };
-    // now and then: kept messages more than a week old forgotten
+    // what was kept before a restart (linked devices' sides, listings…),
+    // and the squares' settings, out again
     {
-        let b = app.broker.clone();
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(bytes) = std::fs::read(app.data.join("kept.bin")) {
+            let n = b.restore(&bytes);
+            eprintln!("xmas-relay: {n} kept messages back from before");
+        }
+        b.say_squares();
+    }
+    // now and then: kept messages more than a week old forgotten (a linked
+    // device's side: longer), and what's kept written out
+    {
+        let a = app.clone();
         tokio::spawn(async move {
+            let mut k = 0u32;
             loop {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                b.lock().unwrap_or_else(|e| e.into_inner()).expire(7 * 24 * 3600);
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                k += 1;
+                if k % 10 == 0 {
+                    a.broker.lock().unwrap_or_else(|e| e.into_inner()).expire(7 * 24 * 3600);
+                }
+                a.save_kept();
             }
         });
     }
@@ -108,10 +133,22 @@ async fn main() {
         eprintln!("xmas-relay: ADMIN_EMAIL isn't set: the console takes anyone Cloudflare Access lets through");
     }
     let a = tokio::spawn(async move { axum::serve(al, admin.into_make_service_with_connect_info::<SocketAddr>()).await });
-    let p = axum::serve(pl, public.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    });
-    let _ = p.await;
+    let p = tokio::spawn(async move { axum::serve(pl, public.into_make_service_with_connect_info::<SocketAddr>()).await });
+    // Ctrl-C, or `docker stop` (SIGTERM): what's kept written out, then
+    // gone at once (open WebSockets aren't waited on)
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    app.save_kept();
+    eprintln!("xmas-relay: stopping (what's kept is written out)");
+    p.abort();
     a.abort();
 }
 

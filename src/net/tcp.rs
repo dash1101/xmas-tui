@@ -20,6 +20,8 @@ pub struct Tcp {
     tx: Sender<Vec<u8>>,
     rx: Receiver<Up>,
     stop: Arc<AtomicBool>,
+    /// Which relay it's through, and how (once connected).
+    via: Arc<std::sync::Mutex<String>>,
 }
 
 impl Tcp {
@@ -29,11 +31,19 @@ impl Tcp {
         let (up_tx, rx) = channel::<Up>();
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
+        let via = Arc::new(std::sync::Mutex::new(String::new()));
+        let v = via.clone();
         std::thread::Builder::new()
             .name("xmas-online".into())
-            .spawn(move || run(out_rx, up_tx, st, first))
+            .spawn(move || run(out_rx, up_tx, st, first, v))
             .ok()?;
-        Some(Tcp { tx, rx, stop })
+        Some(Tcp { tx, rx, stop, via })
+    }
+
+    /// Which relay it's through, and how ("xmas-relay.novalabs.app ·
+    /// WebSocket"); empty while connecting.
+    pub fn via(&self) -> String {
+        self.via.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     pub fn send(&self, b: Vec<u8>) {
@@ -155,7 +165,19 @@ fn open(relay: &Relay) -> Option<Pipe> {
     }
 }
 
-fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usize) {
+impl Relay {
+    /// Where it is and how it's reached, in a few words.
+    pub fn describe(&self) -> String {
+        let host = |u: &str| super::ws::parse(u).map(|u| u.host).unwrap_or_else(|| u.to_string());
+        match self {
+            Relay::Ws(u) => format!("{} · WebSocket", host(u)),
+            Relay::Poll(u) => format!("{} · HTTPS", host(u)),
+            Relay::Tcp(h, p) => format!("{h} · TCP {p}"),
+        }
+    }
+}
+
+fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usize, via: Arc<std::sync::Mutex<String>>) {
     let mut wait = Duration::from_secs(2);
     let list = relays();
     let mut which = first;
@@ -171,11 +193,15 @@ fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usi
         };
         // (anything queued for an earlier connection is stale)
         while out.try_recv().is_ok() {}
+        if let Ok(mut v) = via.lock() {
+            *v = relay.describe();
+        }
         if up.send(Up::Connected).is_err() {
             return;
         }
         which -= 1;
         wait = Duration::from_secs(2);
+        let up_since = std::time::Instant::now();
         let mut buf = vec![0u8; 16384];
         let closing = 'conn: loop {
             if stop.load(Ordering::Relaxed) {
@@ -185,7 +211,8 @@ fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usi
                 match out.try_recv() {
                     Ok(b) if b.is_empty() => break 'conn true,
                     Ok(b) => {
-                        if s.write_all(&b).is_err() {
+                        if let Err(e) = s.write_all(&b) {
+                            note(&format!("{}: writing: {e}", relay.describe()));
                             break 'conn false;
                         }
                     }
@@ -194,21 +221,43 @@ fn run(out: Receiver<Vec<u8>>, up: Sender<Up>, stop: Arc<AtomicBool>, first: usi
                 }
             }
             match s.read(&mut buf) {
-                Ok(0) => break false,
+                Ok(0) => {
+                    note(&format!("{}: closed by the other end", relay.describe()));
+                    break false;
+                }
                 Ok(n) => {
                     if up.send(Up::Bytes(buf[..n].to_vec())).is_err() {
                         return;
                     }
                 }
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
-                Err(_) => break false,
+                Err(e) => {
+                    note(&format!("{}: {e} ({:?})", relay.describe(), e.kind()));
+                    break false;
+                }
             }
         };
         s.close();
+        if let Ok(mut v) = via.lock() {
+            v.clear();
+        }
         if closing || up.send(Up::Closed).is_err() {
             return;
         }
-        sleep_watching(&stop, wait);
+        // a link that had been up a while: straight back (a blip on the
+        // way, most likely); one that wasn't: a moment first
+        if up_since.elapsed() < Duration::from_secs(15) {
+            sleep_watching(&stop, wait);
+        } else {
+            sleep_watching(&stop, Duration::from_millis(150));
+        }
+    }
+}
+
+/// Why a link ended, for the log (and XMAS_NET_DEBUG on stderr).
+fn note(why: &str) {
+    if std::env::var_os("XMAS_NET_DEBUG").is_some() {
+        eprintln!("xmas-online: {why}");
     }
 }
 
@@ -248,7 +297,11 @@ pub fn pump(online: &mut Online, link: &mut Option<Tcp>) {
     let Some(l) = link else { return };
     for u in l.poll() {
         match u {
-            Up::Connected => online.connected(),
+            Up::Connected => {
+                // (the village's own relay is believed when it speaks as itself)
+                online.set_trusted(l.via().contains("xmas-relay.novalabs.app") || std::env::var_os("XMAS_RELAY").is_some());
+                online.connected();
+            }
             Up::Bytes(b) => online.feed(&b),
             Up::Closed => online.disconnected(),
         }

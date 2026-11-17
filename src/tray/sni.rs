@@ -4,7 +4,7 @@
 //! connection on its own thread.
 //!
 //! Left click opens the settings window; right click shows the menu
-//! (Settings…, Window snow, Sound, Pause effects, Quit wallpaper). Hosts
+//! (Menu…, Window snow, Sound, Pause effects, Quit wallpaper). Hosts
 //! that can't show a dbusmenu call ContextMenu instead, which also opens
 //! the settings window. We re-register whenever the watcher (plasmashell)
 //! restarts, and release our bus name on shutdown so the icon disappears
@@ -151,7 +151,7 @@ const ID_QUIT: i32 = 7;
 /// (id, label, checkbox state); label "-" = separator.
 fn entries(config: &std::path::Path) -> Vec<(i32, &'static str, Option<bool>)> {
     vec![
-        (ID_SETTINGS, "Settings…", None),
+        (ID_SETTINGS, "Menu…", None),
         (2, "-", None),
         (ID_SNOW, "Window snow", Some(flag(config, WINDOW_SNOW))),
         (ID_SOUND, "Sound", Some(flag(config, SOUND))),

@@ -20,6 +20,9 @@ final class Native {
     /** A village for a w x h screen; size scales it (1 = about 18 px a row); cfg is TOML. */
     static native long create(int w, int h, float size, String cfg);
 
+    /** The menu (its home page and the settings), open or shut. */
+    static native void openPanel(long game);
+
     static native void destroy(long game);
 
     static native void attach(long game, Surface surface);

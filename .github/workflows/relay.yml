@@ -41,4 +41,4 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=The xmas-tui village's own relay for online play
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=LicenseRef-xmas-tui-source-available

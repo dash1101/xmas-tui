@@ -1,8 +1,10 @@
-//! In-wallpaper settings panel (and the tray's settings window, which draws
-//! the same one). Opened by the ⚙ button (top-right corner) or from a
+//! The menu: a home page and the settings, in the wallpaper (and the tray's
+//! settings window, which draws the same one), the web page and the phone
+//! app alike. Opened by the ❄ menu button (top-right corner) or from a
 //! right-click menu. Mouse-driven: click or drag along a slider, click ◂ ▸
 //! or scroll on a row to step it, click checkboxes to toggle; the text
-//! fields take the keyboard. Hovering over a setting says what it does.
+//! fields take the keyboard. Hovering over a setting says what it does. Too
+//! tall for the screen, it scrolls.
 
 use crate::color::{pal, Rgb};
 use crate::config::Config;
@@ -15,8 +17,12 @@ const BG: Bg = Bg::Mix(pal::UI_PANEL, 0.90);
 pub enum F {
     TalkTime,
     Chatty,
-    PetKind,
-    PetCoat,
+    /// Pet i's kind and colour (0 the first; then the others).
+    PetKind(u8),
+    PetCoat(u8),
+    /// The view, as one setting (the web page and the phone): out to 0.5×
+    /// (smaller, more of the village), in to 4× (magnified).
+    View,
     Snow,
     Wind,
     Glow,
@@ -162,6 +168,60 @@ pub enum Act {
     FriendSel(u8),
     FriendLook(u8, u8, i8),
     FriendScarf(u8),
+    /// Another pet; pet i (not the first) off the list.
+    PetAdd,
+    PetRemove(u8),
+    /// Something online (one of the `NET_` things), done by the front end.
+    Net(u8),
+    /// Start the app again.
+    Restart,
+    /// The controls card.
+    Help,
+    /// A setting that's a public square's own (pointed at: says so).
+    Locked,
+}
+
+/// Online things the menu asks the front end to do (`Act::Net`).
+pub const NET_ONLINE: u8 = 0;
+pub const NET_COPY: u8 = 1;
+pub const NET_FRIENDS: u8 = 2;
+pub const NET_PUBLIC: u8 = 3;
+pub const NET_ADD: u8 = 4;
+pub const NET_CARD: u8 = 5;
+pub const NET_LIST: u8 = 6;
+pub const NET_OPEN: u8 = 7;
+pub const NET_DEVICES: u8 = 8;
+
+/// Where the menu is. (The web page and the phone app use the others.)
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[allow(dead_code)]
+pub enum Kind {
+    /// The desktop: the wallpaper, its window, the tray's settings window.
+    #[default]
+    Desktop,
+    /// The web page.
+    Web,
+    /// The phone app.
+    Phone,
+}
+
+/// What the Online tab shows: filled in by the front end.
+#[derive(Clone, Debug, Default)]
+pub struct NetInfo {
+    /// 0 offline, 1 connecting, 2 online.
+    pub state: u8,
+    /// Which relay, and how ("xmas-relay.novalabs.app · WebSocket").
+    pub via: String,
+    /// The villager's friend code.
+    pub code: String,
+    /// Friends on the list, and how many are about.
+    pub friends: usize,
+    pub about: usize,
+    /// Their own village listed in Public villages; open (its code).
+    pub listed: bool,
+    pub open: Option<String>,
+    /// Other devices linked to this villager.
+    pub devices: usize,
 }
 
 /// The text fields.
@@ -169,11 +229,12 @@ pub enum Act {
 pub enum Field {
     City,
     Name,
-    PetName,
     Shelf(u8),
     Friend(u8),
     /// A new name for the friends & family list.
     NewFriend,
+    /// Pet i's name.
+    PetName(u8),
     /// The line on the villager's profile card.
     Motto,
 }
@@ -247,17 +308,41 @@ pub struct Settings {
     pub wall_offer: bool,
     /// The controls card is showing.
     pub help: bool,
+    /// Where the menu is (which tabs and rows it has).
+    pub kind: Kind,
+    /// The widgets can be shown here (the Widgets tab).
+    pub widgets_ok: bool,
+    /// What the Online tab shows.
+    pub net: NetInfo,
+    /// Scrolled down this many rows (a tab taller than the screen), and
+    /// the most it can be.
+    pub scroll: i32,
+    scroll_max: i32,
+    /// In a public square: the village's own settings are its keeper's
+    /// (greyed out here).
+    pub locked: bool,
 }
 
-pub const TABS: [&str; 8] = ["Village", "You", "Widgets", "Shelves", "Sound", "Effects", "Windows", "Desktop"];
-pub const TAB_VILLAGE: usize = 0;
-pub const TAB_YOU: usize = 1;
-pub const TAB_WIDGETS: usize = 2;
-pub const TAB_SHELVES: usize = 3;
-pub const TAB_SOUND: usize = 4;
-pub const TAB_EFFECTS: usize = 5;
-pub const TAB_WINDOWS: usize = 6;
-pub const TAB_DESKTOP: usize = 7;
+/// The settings a public square's keeper decides.
+fn keepers(f: F) -> bool {
+    matches!(f, F::TimeOfDay | F::Critters | F::MostAtOnce | F::Events | F::Sleigh | F::Bushes | F::Traffic | F::Chatty)
+}
+
+/// The menu's tabs, in two rows (the second from `TAB_WIDGETS`): the
+/// village and the villager first, the desktop's own after.
+pub const TABS: [&str; 12] = ["Home", "Village", "You", "Pets", "Online", "Sound", "Effects", "Widgets", "Shelves", "Windows", "Desktop", "Upkeep"];
+pub const TAB_HOME: usize = 0;
+pub const TAB_VILLAGE: usize = 1;
+pub const TAB_YOU: usize = 2;
+pub const TAB_PETS: usize = 3;
+pub const TAB_ONLINE: usize = 4;
+pub const TAB_SOUND: usize = 5;
+pub const TAB_EFFECTS: usize = 6;
+pub const TAB_WIDGETS: usize = 7;
+pub const TAB_SHELVES: usize = 8;
+pub const TAB_WINDOWS: usize = 9;
+pub const TAB_DESKTOP: usize = 10;
+pub const TAB_UPKEEP: usize = 11;
 const LIGHT_COUNTS: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const AMB_ROWS: [&str; 5] = ["Wind", "Snowfall hiss", "Fireplace", "Wind chimes", "Aurora shimmer"];
 const PANEL_W: i32 = 76;
@@ -333,6 +418,24 @@ pub fn resolution(scale: f32) -> f32 {
     ((1.0 / scale.max(0.1)) * 20.0).round() / 20.0
 }
 
+/// The view as one setting (the web page and the phone): below 1×, the
+/// village drawn smaller (finer cells, more of it on screen); above, zoomed
+/// in on the villager.
+pub const VIEW_STEPS: [f32; 18] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0];
+
+pub fn view_of(cfg: &Config) -> f32 {
+    if cfg.scale < 0.999 { cfg.scale } else { cfg.zoom }
+}
+
+pub fn set_view(cfg: &mut Config, v: f32) {
+    let v = v.clamp(0.5, 4.0);
+    if v < 1.0 {
+        (cfg.scale, cfg.zoom) = (v, 1.0);
+    } else {
+        (cfg.scale, cfg.zoom) = (1.0, v);
+    }
+}
+
 /// Apply an action to the config. Returns true if anything changed.
 pub fn apply(cfg: &mut Config, act: Act) -> bool {
     let step = |v: &mut f32, d: f32, lo: f32, hi: f32| {
@@ -370,24 +473,31 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::WalkSpeed => step(&mut cfg.scene.walk_speed, 0.25 * dir, 0.25, 6.0),
                 F::TalkTime => step(&mut cfg.scene.talk_time, 0.25 * dir, 0.5, 3.0),
                 F::Chatty => step(&mut cfg.scene.chattiness, 0.25 * dir, 0.0, 2.0),
-                F::PetKind => {
-                    let opts = ["dog", "cat", "bunny", "none"];
-                    let i = opts.iter().position(|o| *o == cfg.scene.pet.kind).unwrap_or(0) as i32;
-                    cfg.scene.pet.kind = opts[(i + dir as i32).rem_euclid(4) as usize].to_string();
+                F::PetKind(n) => {
+                    // the first can be none at all; the others are pets
+                    let mut opts: Vec<&str> = crate::scene::pets::KINDS.iter().map(|k| k.name()).collect();
+                    if n == 0 {
+                        opts.push("none");
+                    }
+                    let Some(pet) = cfg.scene.pet_at_mut(n) else { return false };
+                    let i = opts.iter().position(|o| *o == pet.kind).unwrap_or(0) as i32;
+                    pet.kind = opts[(i + dir as i32).rem_euclid(opts.len() as i32) as usize].to_string();
                     // a colour this kind comes in
-                    if let Some(k) = crate::scene::pets::PetKind::from_str(&cfg.scene.pet.kind) {
-                        if !k.coats().iter().any(|c| c.0 == cfg.scene.pet.coat) {
-                            cfg.scene.pet.coat = k.coats()[0].0.to_string();
+                    if let Some(k) = crate::scene::pets::PetKind::from_str(&pet.kind) {
+                        if !k.coats().iter().any(|c| c.0 == pet.coat) {
+                            pet.coat = k.coats()[0].0.to_string();
                         }
                     }
                 }
-                F::PetCoat => {
-                    if let Some(k) = crate::scene::pets::PetKind::from_str(&cfg.scene.pet.kind) {
+                F::PetCoat(n) => {
+                    let Some(pet) = cfg.scene.pet_at_mut(n) else { return false };
+                    if let Some(k) = crate::scene::pets::PetKind::from_str(&pet.kind) {
                         let c = k.coats();
-                        let i = c.iter().position(|o| o.0 == cfg.scene.pet.coat).unwrap_or(0) as i32;
-                        cfg.scene.pet.coat = c[(i + dir as i32).rem_euclid(c.len() as i32) as usize].0.to_string();
+                        let i = c.iter().position(|o| o.0 == pet.coat).unwrap_or(0) as i32;
+                        pet.coat = c[(i + dir as i32).rem_euclid(c.len() as i32) as usize].0.to_string();
                     }
                 }
+                F::View => set_view(cfg, step_list(&VIEW_STEPS, view_of(cfg), dir as i32)),
                 F::Scale => {
                     // shown as resolution (1 / scale), in 0.05 steps
                     let res = (resolution(cfg.scale) + 0.05 * dir).clamp(0.5, 2.0);
@@ -568,6 +678,26 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             crate::widgets::shelf::add(cfg, None);
             true
         }
+        Act::PetAdd => {
+            if cfg.scene.pets.len() >= crate::config::MORE_PETS {
+                return false;
+            }
+            // a different kind from the ones already about, if there is one
+            let have: Vec<&str> = std::iter::once(cfg.scene.pet.kind.as_str()).chain(cfg.scene.pets.iter().map(|p| p.kind.as_str())).collect();
+            let kind = crate::scene::pets::KINDS.iter().find(|k| !have.contains(&k.name())).copied().unwrap_or(crate::scene::pets::PetKind::Cat);
+            cfg.scene.pets.push(crate::config::PetCfg { kind: kind.name().into(), coat: kind.coats()[0].0.into(), name: String::new() });
+            true
+        }
+        Act::PetRemove(n) => {
+            let i = n as usize;
+            if i >= 1 && i <= cfg.scene.pets.len() {
+                cfg.scene.pets.remove(i - 1);
+                true
+            } else {
+                false
+            }
+        }
+        Act::Net(_) | Act::Restart | Act::Help | Act::Locked => false,
         Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
 }
@@ -623,7 +753,23 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Inc(f) | Act::Dec(f) | Act::Toggle(f) | Act::Set(f, _) => f,
         Act::Edit(Field::City) => return Some("The weather widget's city (and the real sunrise, sunset and side of the road)."),
         Act::Edit(Field::Name) => return Some("What the village calls the villager. Word gets round once it's set."),
-        Act::Edit(Field::PetName) => return Some("The pet's name. People mention it, and it answers to it."),
+        Act::Edit(Field::PetName(_)) => return Some("The pet's name. People mention it, and it answers to it."),
+        Act::PetAdd => return Some("Another pet, to come along too: a dog, a cat, a bunny, a young reindeer, a fox or a little bird."),
+        Act::PetRemove(_) => return Some("This pet stays home for good (off the list)."),
+        Act::Restart => return Some("Start xmas-tui again (the settings and the village are kept)."),
+        Act::Locked => return Some("In a public square this one's the square's own (set by its keeper), the same for everyone there. Snow, wind, glow and the aurora stay yours."),
+        Act::Help => return Some("The controls: the keys, and what clicking and dragging do."),
+        Act::Net(NET_ONLINE) => return Some("Online: friends, messages, villages to visit and share. Everything's sealed end to end."),
+        Act::Net(NET_COPY) => return Some("Copy your friend code, to give to a friend (they add it, you say yes)."),
+        Act::Net(NET_FRIENDS) => return Some("Friends & online: who's about, messages, visiting, groups."),
+        Act::Net(NET_PUBLIC) => return Some("The public villages: squares anyone can walk into, and villages their hosts have listed."),
+        Act::Net(NET_ADD) => return Some("Add a friend by their friend code."),
+        Act::Net(NET_CARD) => return Some("Your profile card, as friends see it."),
+        Act::Net(NET_LIST) => return Some("While your village is open, list it in Public villages for anyone to drop in."),
+        Act::Net(NET_OPEN) => return Some("Open your village to friends (a code they can join with)."),
+        Act::Net(NET_DEVICES) => return Some("One villager on all your devices: link another phone, computer or browser."),
+        Act::Net(_) => return None,
+        Act::Tab(_) => return None,
         Act::Edit(Field::Shelf(_)) => return Some("The shelf's name (its folder is renamed with it)."),
         Act::Edit(Field::Friend(_)) => return Some("Their name in the village. Clear it to take them off the list."),
         Act::Edit(Field::Motto) => return Some("A line about you, on your profile card (friends online see it)."),
@@ -688,8 +834,9 @@ fn tip(a: Act) -> Option<&'static str> {
         F::WalkSpeed => "How fast the villager walks (Shift runs).",
         F::TalkTime => "How long speech bubbles stay up.",
         F::Chatty => "How often people stop to chat and remark on things.",
-        F::PetKind => "The villager's pet: a dog, a cat, a bunny, or none.",
-        F::PetCoat => "The pet's colour.",
+        F::PetKind(_) => "The pet: a dog, a cat, a bunny, a young reindeer, a fox or a little bird (the first can be none).",
+        F::PetCoat(_) => "The pet's colour (Rudolph's coat comes with the nose).",
+        F::View => "Zoom: in on the villager (up to 4×), or out to see more of the village (down to 0.5×).",
         F::Clock => "The big clock.",
         F::Hour24 => "A 24-hour clock.",
         F::Seconds => "Seconds on the clock.",
@@ -758,29 +905,29 @@ pub fn zoom_settled(z: f32) -> f32 {
     ((z * 20.0).round() / 20.0).clamp(1.0, 4.0)
 }
 
-/// The settings button: always there, top right.
+/// The menu button: always there, top right.
 pub fn gear_rect(w: i32) -> Rect {
-    Rect { x: w - 14, y: 0, w: 13, h: 1 }
+    Rect { x: w - 10, y: 0, w: 9, h: 1 }
 }
 
 /// The controls button, just left of it.
 pub fn help_rect(w: i32) -> Rect {
-    Rect { x: w - 26, y: 0, w: 11, h: 1 }
+    Rect { x: w - 22, y: 0, w: 11, h: 1 }
 }
 
 /// The re-centre button (back to the villager), left of the controls one.
 pub fn centre_rect(w: i32) -> Rect {
-    Rect { x: w - 36, y: 0, w: 9, h: 1 }
+    Rect { x: w - 32, y: 0, w: 9, h: 1 }
 }
 
 /// The friends & online button, left of the zoom ones.
 pub fn online_rect(w: i32) -> Rect {
-    Rect { x: w - 57, y: 0, w: 13, h: 1 }
+    Rect { x: w - 53, y: 0, w: 13, h: 1 }
 }
 
 /// The zoom buttons (out, in), left of the re-centre one.
 pub fn zoom_rects(w: i32) -> (Rect, Rect) {
-    (Rect { x: w - 43, y: 0, w: 3, h: 1 }, Rect { x: w - 40, y: 0, w: 3, h: 1 })
+    (Rect { x: w - 39, y: 0, w: 3, h: 1 }, Rect { x: w - 36, y: 0, w: 3, h: 1 })
 }
 
 /// The controls card: (keys, what they do, which of the villager's keys
@@ -833,7 +980,7 @@ impl Settings {
         let text = match which {
             Field::City => cfg.weather.city.clone(),
             Field::Name => cfg.scene.name.clone(),
-            Field::PetName => cfg.scene.pet.name.clone(),
+            Field::PetName(i) => cfg.scene.pet_at(i).map(|p| p.name.clone()).unwrap_or_default(),
             Field::Shelf(i) => cfg.shelves.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
             Field::Friend(i) => cfg.scene.friends.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
             Field::NewFriend => String::new(),
@@ -858,9 +1005,11 @@ impl Settings {
                 }
             }
             Field::Name => cfg.scene.name = short(),
-            Field::PetName => {
+            Field::PetName(i) => {
                 if !text.is_empty() {
-                    cfg.scene.pet.name = short();
+                    if let Some(p) = cfg.scene.pet_at_mut(i) {
+                        p.name = short();
+                    }
                 }
             }
             Field::Shelf(i) => crate::widgets::shelf::rename(cfg, i as usize, text),
@@ -929,6 +1078,16 @@ impl Settings {
 
     pub fn click(&self, x: i32, y: i32) -> Option<Act> {
         self.regions.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
+    }
+
+    /// The wheel over the panel: a panel taller than the screen scrolls;
+    /// else, over a value row, it's stepped.
+    pub fn wheel(&mut self, x: i32, y: i32, up: bool) -> Option<Act> {
+        if self.scroll_max > 0 && self.rect.is_some_and(|r| r.contains(x, y)) {
+            self.scroll_by(if up { -3 } else { 3 });
+            return None;
+        }
+        self.scroll(x, y, up)
     }
 
     /// Scroll over a value row → step it.
@@ -1071,8 +1230,8 @@ impl Settings {
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         let (gc, tc) = if hot { (Rgb::hex(0xffd36b) * (1.1 + 0.1 * (t * 5.0).sin()), pal::UI_TITLE) } else { (Rgb::hex(0xffd36b) * 0.8, pal::UI_TEXT * 0.85) };
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        f.put_g(r.x + 1, r.y, Glyph::new('⚙', gc).bg(bg).lit(0.0));
-        f.text(r.x + 2, r.y, " settings ", tc, bg, 0.0);
+        f.put_g(r.x + 1, r.y, Glyph::new('❄', gc).bg(bg).lit(0.0));
+        f.text(r.x + 2, r.y, " menu ", tc, bg, 0.0);
     }
 
     /// The friends & online button (`state`: 0 offline, 1 connecting, 2
@@ -1112,9 +1271,16 @@ impl Settings {
         if !self.open {
             return;
         }
+        if !self.tab_shown(self.tab) {
+            self.tab = TAB_HOME;
+        }
         // as tall as the tab needs (a look being chosen, autopilot's rows…),
-        // at least the usual, as much as there's room for
-        let (w, h) = (PANEL_W, self.tab_height(cfg, t).max(PANEL_H).min((f.h as i32).max(PANEL_H)));
+        // at least the usual; taller than the screen, it scrolls
+        let full = self.tab_height(cfg, t).max(PANEL_H);
+        let room = (f.h as i32).max(14);
+        let (w, h) = (PANEL_W, full.min(room));
+        self.scroll_max = (full - h).max(0);
+        self.scroll = self.scroll.clamp(0, self.scroll_max);
         // centred, unless it's been dragged somewhere (kept on screen)
         let (x, y) = match self.pos {
             Some((px, py)) => (px.clamp(0, (f.w as i32 - w).max(0)), py.clamp(0, (f.h as i32 - h).max(0))),
@@ -1125,23 +1291,50 @@ impl Settings {
         }
         let rect = Rect { x, y, w, h };
         self.rect = Some(rect);
-        // frame
+        // the frame (on these rows, or all of them)
         let b = pal::UI_BORDER;
-        for yy in y..y + h {
-            for xx in x..x + w {
-                let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + h - 1) {
-                    (true, _, true, _) => '╭',
-                    (_, true, true, _) => '╮',
-                    (true, _, _, true) => '╰',
-                    (_, true, _, true) => '╯',
-                    (_, _, true, _) | (_, _, _, true) => '─',
-                    (true, _, _, _) | (_, true, _, _) => '│',
-                    _ => ' ',
-                };
-                f.put_g(xx, yy, Glyph::new(ch, b).bg(BG).lit(0.0));
+        let frame_rows = |f: &mut Frame, rows: &mut dyn Iterator<Item = i32>| {
+            for yy in rows {
+                for xx in x..x + w {
+                    let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + h - 1) {
+                        (true, _, true, _) => '╭',
+                        (_, true, true, _) => '╮',
+                        (true, _, _, true) => '╰',
+                        (_, true, _, true) => '╯',
+                        (_, _, true, _) | (_, _, _, true) => '─',
+                        (true, _, _, _) | (_, true, _, _) => '│',
+                        _ => ' ',
+                    };
+                    f.put_g(xx, yy, Glyph::new(ch, b).bg(BG).lit(0.0));
+                }
+            }
+        };
+        frame_rows(f, &mut (y..y + h));
+        // the tab's own rows (scrolled up by `scroll`), between the tabs
+        // and the footer
+        let (top, bottom) = (y + 4, y + h - 3);
+        let pics = f.pictures.len();
+        self.tab_body(f, cfg, x, y - self.scroll, w, t);
+        if self.scroll_max > 0 {
+            // what's scrolled out of sight: not there, not clickable
+            self.regions.retain(|(r, _)| r.y >= top && r.y < bottom);
+            self.hints.retain(|(r, _)| r.y >= top && r.y < bottom);
+            let mut k = 0;
+            f.pictures.retain(|p| {
+                k += 1;
+                k <= pics || (p.y >= top && p.y + p.rows <= bottom)
+            });
+            frame_rows(f, &mut (y..top).chain(bottom..y + h));
+            // where it's scrolled to, on the right-hand border
+            let track = bottom - top;
+            let thumb = (track * h / full).clamp(1, track);
+            let at = top + (track - thumb) * self.scroll / self.scroll_max.max(1);
+            for yy in top..bottom {
+                let on = yy >= at && yy < at + thumb;
+                f.put_g(x + w - 1, yy, Glyph::new(if on { '┃' } else { '│' }, if on { Rgb::hex(0xffd36b) } else { b }).bg(BG).lit(0.0));
             }
         }
-        f.text(x + 2, y, " ⚙ settings ", pal::UI_TITLE, BG, 0.0);
+        f.text(x + 2, y, " ❄ menu ", pal::UI_TITLE, BG, 0.0);
         if !self.extras {
             // a grip: drag the title bar to move the panel
             f.text(x + w - 9, y, " ⠿ ", pal::UI_DIM, BG, 0.0);
@@ -1151,39 +1344,72 @@ impl Settings {
         f.text(close.x, y, " ✕ ", if hot { pal::CANDY_RED * 1.3 } else { pal::UI_TEXT }, BG, 0.0);
         self.regions.push((close, Act::Close));
 
-        // tab bar
-        let tabs: Vec<usize> = (0..TABS.len()).filter(|&i| i != TAB_WINDOWS || self.window_fx).collect();
-        if !tabs.contains(&self.tab) {
-            self.tab = TAB_VILLAGE;
-        }
-        let mut tx = x + 3;
-        // a gap between the tabs, while they fit with one
-        let need: i32 = tabs.iter().map(|&i| TABS[i].chars().count() as i32 + 3).sum();
-        let gap = (need - 1 <= w - 5) as i32;
-        for &i in &tabs {
-            let label = format!(" {} ", TABS[i]);
-            let r = Rect { x: tx, y: y + 1, w: label.chars().count() as i32, h: 1 };
-            let on = i == self.tab;
-            let hot = r.contains(self.hover.0, self.hover.1);
-            let (fg, bg) = if on {
-                (Rgb::hex(0xffd36b) * 1.2, Bg::Solid(Rgb::hex(0x3a2a14)))
-            } else if hot {
-                (pal::UI_TITLE, Bg::Mix(Rgb::hex(0x2a2440), 0.95))
-            } else {
-                (pal::UI_DIM * 1.2, BG)
-            };
-            f.text(tx, y + 1, &label, fg, bg, 0.0);
-            self.regions.push((r, Act::Tab(i as u8)));
-            tx += r.w + gap;
+        // the tabs, in two rows: the village's and the villager's, then the
+        // desktop's own and the upkeep
+        for (row, range) in [(0, 0..TAB_WIDGETS), (1, TAB_WIDGETS..TABS.len())] {
+            let tabs: Vec<usize> = range.filter(|&i| self.tab_shown(i)).collect();
+            let mut tx = x + 3;
+            for &i in &tabs {
+                let label = format!(" {} ", self.tab_label(i));
+                let r = Rect { x: tx, y: y + 1 + row, w: label.chars().count() as i32, h: 1 };
+                let on = i == self.tab;
+                let hot = r.contains(self.hover.0, self.hover.1);
+                let (fg, bg) = if on {
+                    (Rgb::hex(0xffd36b) * 1.2, Bg::Solid(Rgb::hex(0x3a2a14)))
+                } else if hot {
+                    (pal::UI_TITLE, Bg::Mix(Rgb::hex(0x2a2440), 0.95))
+                } else {
+                    (pal::UI_DIM * 1.2, BG)
+                };
+                f.text(tx, y + 1 + row, &label, fg, bg, 0.0);
+                self.regions.push((r, Act::Tab(i as u8)));
+                tx += r.w + 1;
+            }
         }
         for xx in x + 1..x + w - 1 {
-            f.put_g(xx, y + 2, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
+            f.put_g(xx, y + 3, Glyph::new('┄', pal::UI_BORDER * 0.45).bg(BG).lit(0.0));
         }
-
-        self.tab_body(f, cfg, x, y, w, t);
         // what the setting under the pointer does, in place of the tips
         let (hx, hy) = self.hover;
         self.footer(f, x, y, w, h, hx, hy);
+    }
+
+    /// Which tabs there are here.
+    pub fn tab_shown(&self, i: usize) -> bool {
+        match i {
+            TAB_SHELVES => self.kind == Kind::Desktop,
+            TAB_WINDOWS => self.kind == Kind::Desktop && self.window_fx,
+            TAB_WIDGETS => self.kind == Kind::Desktop || self.widgets_ok,
+            _ => i < TABS.len(),
+        }
+    }
+
+    fn tab_label(&self, i: usize) -> &'static str {
+        if i == TAB_DESKTOP && self.kind != Kind::Desktop {
+            "Screen"
+        } else {
+            TABS[i]
+        }
+    }
+
+    /// Show tab `i` (from its top).
+    pub fn set_tab(&mut self, i: usize) {
+        if self.tab != i {
+            self.scroll = 0;
+            self.confirm = None;
+        }
+        self.tab = i;
+    }
+
+    /// Scroll the panel (a tab taller than the screen) by `rows`.
+    pub fn scroll_by(&mut self, rows: i32) {
+        self.scroll = (self.scroll + rows).clamp(0, self.scroll_max);
+    }
+
+    /// The panel scrolls (its tab is taller than the screen).
+    #[allow(dead_code)]
+    pub fn scrolls(&self) -> bool {
+        self.scroll_max > 0
     }
 
     /// The panel's height for the tab as it stands: drawn once out of sight
@@ -1192,6 +1418,7 @@ impl Settings {
         let (regions, hints, rect) = (self.regions.len(), self.hints.len(), self.rect);
         self.rect = Some(Rect { x: 0, y: 0, w: PANEL_W, h: 200 });
         let mut probe = Frame::new(PANEL_W as usize + 2, 200);
+        probe.cell_aspect = 2.1;
         self.tab_body(&mut probe, cfg, 0, 0, PANEL_W, t);
         let last_glyph = (0..probe.h).rev().find(|&yy| (0..probe.w).any(|xx| probe.get_g(xx as i32, yy as i32).is_some())).map(|y| y as i32).unwrap_or(0);
         let last_pic = probe.pictures.iter().map(|p| p.y + p.rows - 1).max().unwrap_or(0);
@@ -1205,8 +1432,12 @@ impl Settings {
     fn tab_body(&mut self, f: &mut Frame, cfg: &Config, x: i32, y: i32, w: i32, t: f32) {
         let lx = x + 3;
         let vx = x + 20;
-        let yy = y + 4;
+        let yy = y + 5;
         match self.tab {
+            TAB_HOME => self.tab_home(f, cfg, lx, yy, x + w - 1, t),
+            TAB_PETS => self.tab_pets(f, cfg, lx, yy, x + w - 1, t),
+            TAB_ONLINE => self.tab_online(f, cfg, lx, vx, yy, x + w - 1, t),
+            TAB_UPKEEP => self.tab_upkeep(f, cfg, lx, yy, x + w - 1, t),
             TAB_YOU => self.tab_you(f, cfg, lx, vx, yy, x + w - 1, t),
             TAB_WIDGETS => self.tab_widgets(f, cfg, lx, vx, yy, t),
             TAB_SHELVES => self.tab_shelves(f, cfg, lx, yy, x + w - 1, t),
@@ -1251,7 +1482,10 @@ impl Settings {
             return;
         }
 
-        let tips = [
+        let tips = match self.kind {
+            Kind::Phone => ["tap a setting to change it  ·  slide along a bar", "drag up and down to scroll  ·  ✕ or back closes the menu"],
+            Kind::Web => ["point at a setting to see what it does  ·  click or drag along a slider", "the wheel (or a finger) scrolls  ·  ✕ or Esc closes the menu"],
+            Kind::Desktop => [
             "point at a setting to see what it does  ·  click or drag along a slider",
             if self.standalone {
                 "changes reach the wallpaper straight away  ·  Esc closes this window"
@@ -1261,7 +1495,8 @@ impl Settings {
                 // (≤ 72 cells: the inner width from lx to the right border)
                 "drag widgets to move them  ·  drag the title bar to move this panel"
             },
-        ];
+            ],
+        };
         for (k, tip) in tips.iter().enumerate() {
             // clipped so a longer tip can never run over the border
             let tip: String = tip.chars().take((x + w - 1 - lx) as usize).collect();
@@ -1275,6 +1510,10 @@ impl Settings {
 
     fn tab_village(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {
         let pct = |v: f32, hi: f32| v / hi;
+        if self.locked {
+            f.text(lx, yy, "⌂ In a public square: the greyed ones are the square's own.", Rgb::hex(0xffd36b), BG, 0.0);
+            yy += 2;
+        }
         self.section(f, lx, yy, "THE VILLAGE");
         yy += 1;
         self.slider(f, lx, vx, yy, "Snowfall", F::Snow, pct(cfg.scene.snow, 3.0), &format!("{:.2}×", cfg.scene.snow), t);
@@ -1309,11 +1548,6 @@ impl Settings {
         self.stepper(f, lx, vx, yy, "Most at once", F::MostAtOnce, &format!("{most} {}", if most == 1 { "visitor" } else { "visitors" }));
         yy += 1;
         f.text(lx, yy, "(friends & family, who visit too, are in the You tab)", pal::UI_DIM, BG, 0.0);
-        yy += 2;
-        self.button(f, lx, yy, "↻ a new village", Act::Shuffle);
-        self.button(f, lx + 19, yy, "⇩ export save", Act::ExportSave);
-        self.button(f, lx + 36, yy, "⇧ import save", Act::ImportSave);
-        f.text(lx + 53, yy, "(saves itself)", pal::UI_DIM, BG, 0.0);
     }
 
     fn tab_you(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, t: f32) {
@@ -1368,26 +1602,7 @@ impl Settings {
         let chat = if cfg.scene.chattiness <= 0.0 { "quiet".to_string() } else { format!("{:.2}×", cfg.scene.chattiness) };
         self.slider(f, lx, vx, yy, "Chattiness", F::Chatty, pct(cfg.scene.chattiness, 2.0), &chat, t);
         yy += 1;
-        let most = cfg.scene.village_limit.clamp(2, 48);
-        self.stepper(f, lx, vx, yy, "Most visitors", F::VillageLimit, &format!("{most} at once, when my village is open"));
-        self.check(f, vx + 42, yy, "star out strong language", Act::Toggle(F::CleanWords), cfg.scene.clean_words);
-        yy += 2;
-        self.section(f, lx, yy, "THE PET");
         yy += 1;
-        self.stepper(f, lx, vx, yy, "Pet", F::PetKind, &cfg.scene.pet.kind);
-        if cfg.scene.pet.kind != "none" {
-            let cx = vx + 13;
-            f.text(cx, yy, "colour", pal::UI_TEXT, BG, 0.0);
-            self.arrow(f, cx + 7, yy, '◂', Act::Dec(F::PetCoat));
-            let c = f.text(cx + 9, yy, &cfg.scene.pet.coat, pal::UI_TITLE, BG, 0.0);
-            self.arrow(f, c + 1, yy, '▸', Act::Inc(F::PetCoat));
-            yy += 1;
-            f.text(lx, yy, "Pet's name", pal::UI_TEXT, BG, 0.0);
-            let editing = self.edit == Some(Field::PetName) && self.editing.is_some();
-            let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.scene.pet.name.is_empty() { "(not named yet)".into() } else { cfg.scene.pet.name.clone() };
-            self.field(f, Rect { x: vx, y: yy, w: 18, h: 1 }, &txt, editing, Act::Edit(Field::PetName), t);
-        }
-        yy += 2;
         self.section(f, lx, yy, "FRIENDS & FAMILY");
         yy += 1;
         f.text(lx, yy, "Each comes by as a villager of their own.", pal::UI_DIM, BG, 0.0);
@@ -1414,6 +1629,19 @@ impl Settings {
             let age = if fr.kid { "kid     " } else { "grown-up" };
             self.button(f, x + 16, y, age, Act::FriendKid(k8));
             self.button(f, x + 27, y, "✕", Act::FriendRemove(k8));
+            // a thin line under each, so it's clear where one ends and the
+            // next begins (as text: every other one a shade lighter)
+            if crate::frame::pictures_ok() {
+                f.picture_on_panel(x, y, colw - 1, 1, divider(colw - 1, f.cell_aspect));
+            } else if k % 2 == 1 {
+                for xx in x + 2..x + 15 {
+                    if let Some(g) = f.get_g(xx, y) {
+                        let mut g = g;
+                        g.bg = Bg::Solid(Rgb::hex(0x2a2a44));
+                        f.put_g(xx, y, g);
+                    }
+                }
+            }
         }
         if n < MAX_FRIENDS {
             let (x, y) = slot(n);
@@ -1482,7 +1710,10 @@ impl Settings {
         self.section(f, lx, yy, "WIDGETS");
         yy += 1;
         let w = &cfg.widgets;
-        for (i, label, field, on) in [(1u8, "System", F::System, w.system), (2, "Music", F::Music, w.music), (3, "Weather", F::Weather, w.weather), (4, "Map", F::Map, w.map), (5, "Visualizer", F::Viz, w.visualizer), (6, "Friends", F::FriendsW, w.friends)] {
+        let all = [(1u8, "System", F::System, w.system), (2, "Music", F::Music, w.music), (3, "Weather", F::Weather, w.weather), (4, "Map", F::Map, w.map), (5, "Visualizer", F::Viz, w.visualizer), (6, "Friends", F::FriendsW, w.friends)];
+        // (the web page has the weather and the friends, beside the clock)
+        let desk = self.kind == Kind::Desktop;
+        for (i, label, field, on) in all.into_iter().filter(|r| desk || matches!(r.0, 3 | 6)) {
             self.check(f, lx, yy, label, Act::Toggle(field), on);
             let look = w.looks.get(i as usize).unwrap_or("classic");
             let name = match look {
@@ -1534,11 +1765,13 @@ impl Settings {
         yy += 1;
         let units = if cfg.weather.units.to_lowercase().starts_with('f') { "°F  ·  mph" } else { "°C  ·  km/h" };
         self.stepper(f, lx, vx, yy, "Units", F::Units, units);
-        yy += 2;
-        self.section(f, lx, yy, "LAYOUT");
-        yy += 1;
-        let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
-        self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
+        if desk {
+            yy += 2;
+            self.section(f, lx, yy, "LAYOUT");
+            yy += 1;
+            let cx = self.check(f, lx, yy, "Lock widget positions", Act::Toggle(F::Locked), cfg.layout.locked) + 4;
+            self.button(f, cx, yy, "⟲ reset positions", Act::ResetLayout);
+        }
     }
 
     /// The sizes of what's over the village, each its own: the windows,
@@ -1559,6 +1792,21 @@ impl Settings {
 
     /// Resolution, zoom, frame rate, and playing it in a window.
     fn display_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32) -> i32 {
+        if self.kind != Kind::Desktop {
+            let v = view_of(cfg);
+            let how = if v < 0.99 { "  (smaller: more of the village)" } else if v > 1.01 { "  (closer to the villager)" } else { "" };
+            self.stepper(f, lx, vx, yy, "Zoom", F::View, &format!("{v:.2}×{how}"));
+            yy += 1;
+            self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &format!("{:.0} fps", cfg.fps));
+            yy += 1;
+            if self.kind == Kind::Phone {
+                // (a phone has no widgets, and its buttons are its own)
+                self.stepper(f, lx, vx, yy, "Menus size", F::UiScale, &format!("{:.0}%  (menus, dialogs, games)", cfg.ui.scale * 100.0));
+                return yy + 1;
+            }
+            yy += self.ui_size_rows(f, cfg, lx, vx, yy, false);
+            return yy;
+        }
         let res = format!("{:.2}× detail", resolution(cfg.scale));
         self.stepper(f, lx, vx, yy, "Resolution", F::Scale, &res);
         let zx = vx + 22;
@@ -1598,6 +1846,11 @@ impl Settings {
     /// starting with the computer, updates.
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn tab_desktop(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, right: i32, t: f32) {
+        if self.kind != Kind::Desktop {
+            self.section(f, lx, yy, "SCREEN");
+            self.display_rows(f, cfg, lx, lx + 17, yy + 1);
+            return;
+        }
         let width = (right - lx - 1).max(10) as usize;
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let clip = |s: &str| -> String { s.chars().take(width).collect() };
@@ -1655,35 +1908,10 @@ impl Settings {
         yy += 1;
         self.section(f, lx, yy, "DISPLAY");
         yy += 1;
-        yy = self.display_rows(f, cfg, lx, lx + 17, yy);
-        yy += 1;
-        self.section(f, lx, yy, "UPKEEP");
-        yy += 1;
-        match self.confirm {
-            Some(Act::Uninstall) => {
-                f.text(lx, yy, "Take xmas-tui off this computer? Your village and settings are kept.", Rgb::hex(0xffd36b), BG, 0.0);
-                yy += 1;
-                let x = self.button(f, lx, yy, "⌫ yes, uninstall", Act::UninstallNow);
-                self.button(f, x + 2, yy, "no", Act::NotNow);
-            }
-            Some(Act::ResetSettings) => {
-                f.text(lx, yy, "Reset every setting? Your villager, friends and village stay.", Rgb::hex(0xffd36b), BG, 0.0);
-                yy += 1;
-                let x = self.button(f, lx, yy, "⟲ yes, reset them", Act::ResetNow);
-                self.button(f, x + 2, yy, "no", Act::NotNow);
-            }
-            _ => {
-                let mut x = self.button(f, lx, yy, "⟲ reset settings", Act::ResetSettings) + 2;
-                x = self.button(f, x, yy, "✎ the settings file", Act::OpenConfig) + 2;
-                if crate::platform::log_path().is_some() {
-                    x = self.button(f, x, yy, "≡ the log", Act::OpenLog) + 2;
-                }
-                if !self.standalone || cfg!(windows) {
-                    self.button(f, x, yy, "⌫ uninstall…", Act::Uninstall);
-                }
-            }
+        #[cfg_attr(not(target_os = "linux"), allow(unused_assignments))]
+        {
+            yy = self.display_rows(f, cfg, lx, lx + 17, yy) + 1;
         }
-        yy += 1;
         #[cfg(target_os = "linux")]
         {
             use crate::linwall::Job;
@@ -1721,11 +1949,290 @@ impl Settings {
                 yy += 1;
                 if !info.ffmpeg {
                     self.button(f, lx, yy, "⇩ install ffmpeg (asks for your password)", Act::InstallFfmpeg);
-                    yy += 1;
                 }
             }
         }
+    }
+
+    /// The home page: a greeting, the days to Christmas, a tile for each
+    /// part of the menu (and the things done most), a couple of quick
+    /// switches, and how it stands online.
+    fn tab_home(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, right: i32, t: f32) {
+        use chrono::Datelike;
+        let today = crate::clock::now().date_naive();
+        let name = cfg.scene.name.trim();
+        let hello = if name.is_empty() { "Merry Christmas!".to_string() } else { format!("Merry Christmas, {name}!") };
+        let year = if (today.month(), today.day()) > (12, 25) { today.year() + 1 } else { today.year() };
+        let days = chrono::NaiveDate::from_ymd_opt(year, 12, 25).map(|c| (c - today).num_days()).unwrap_or(0);
+        let when = match days {
+            0 => "it's Christmas Day! ✦".to_string(),
+            1 => "Christmas Eve: Santa's on his way".to_string(),
+            n => format!("{n} days until Christmas"),
+        };
+        let tw = 0.9 + 0.1 * (t * 2.0).sin();
+        f.text(lx, yy, &format!("❄ {hello}"), Rgb::hex(0xffd36b) * tw, BG, 0.0);
+        let wn = when.chars().count() as i32;
+        f.text((right - 1 - wn).max(lx + 30), yy, &when, pal::UI_TEXT, BG, 0.0);
+        yy += 2;
+        let you = if self.kind == Kind::Desktop { "Desktop" } else { "Screen" };
+        let ninth = if self.kind == Kind::Desktop || self.widgets_ok { ('▦', Rgb::hex(0x8ad0ff), "Widgets", Act::Tab(TAB_WIDGETS as u8)) } else { ('⌨', Rgb::hex(0x8ad0ff), "Controls", Act::Help) };
+        let tiles: [(char, Rgb, &str, Act); 12] = [
+            ('▶', Rgb::hex(0x9be08a), "Back to village", Act::Close),
+            ('✉', Rgb::hex(0xffd36b), "Friends & online", Act::Net(NET_FRIENDS)),
+            ('⌂', Rgb::hex(0xff9a6b), "Public villages", Act::Net(NET_PUBLIC)),
+            ('☃', Rgb::hex(0xf2f6ff), "You & your look", Act::Tab(TAB_YOU as u8)),
+            ('♥', Rgb::hex(0xff6b8a), "Pets", Act::Tab(TAB_PETS as u8)),
+            ('❄', Rgb::hex(0xbfe4ff), "The village", Act::Tab(TAB_VILLAGE as u8)),
+            ('◉', Rgb::hex(0x9be08a), "Online settings", Act::Tab(TAB_ONLINE as u8)),
+            ('♪', Rgb::hex(0xffd36b), "Sound", Act::Tab(TAB_SOUND as u8)),
+            ninth,
+            ('▣', Rgb::hex(0xbfe4ff), you, Act::Tab(TAB_DESKTOP as u8)),
+            ('⇩', Rgb::hex(0xff9a6b), "Save & upkeep", Act::Tab(TAB_UPKEEP as u8)),
+            ('↻', Rgb::hex(0x9be08a), "Restart", Act::Restart),
+        ];
+        let tw = ((right - lx - 4) / 3).clamp(18, 24);
+        for (k, (icon, col, label, act)) in tiles.into_iter().enumerate() {
+            let (x, y) = (lx + (k % 3) as i32 * (tw + 2), yy + (k / 3) as i32 * 3);
+            self.tile(f, x, y, tw, icon, col, label, act, t);
+        }
+        yy += 13;
+        let mut x = self.check(f, lx, yy, "Autopilot", Act::Toggle(F::Autopilot), cfg.scene.autopilot) + 3;
+        x = self.check(f, x, yy, "Sound", Act::Toggle(F::Sound), cfg.sound.enabled) + 3;
+        let (zf, z) = if self.kind == Kind::Desktop { (F::Zoom, cfg.zoom) } else { (F::View, view_of(cfg)) };
+        let r = Rect { x, y: yy, w: 4, h: 1 };
+        f.text(x, yy, "Zoom", pal::UI_TEXT, BG, 0.0);
+        self.hints.push((r, Act::Inc(zf)));
+        self.arrow(f, x + 5, yy, '◂', Act::Dec(zf));
+        let c = f.text(x + 7, yy, &format!("{z:.2}×"), pal::UI_TITLE, BG, 0.0);
+        self.arrow(f, c + 1, yy, '▸', Act::Inc(zf));
+        if self.kind == Kind::Desktop && !self.standalone && !self.windowed && !self.wall_full {
+            self.button(f, c + 5, yy, "▸ pop out to play", Act::PopOut);
+        }
         yy += 1;
+        let n = &self.net;
+        let (dot, col, line) = match n.state {
+            2 if n.about > 0 => ('●', Rgb::hex(0x9be08a), format!("online · {} friend{} about", n.about, if n.about == 1 { "" } else { "s" })),
+            2 => ('●', Rgb::hex(0x9be08a), "online".to_string()),
+            1 => ('◌', pal::UI_DIM, "going online…".to_string()),
+            _ => ('○', pal::UI_DIM, "offline · Friends & online to go on".to_string()),
+        };
+        f.put_g(lx, yy, Glyph::new(dot, col).bg(BG).lit(0.0));
+        f.text(lx + 2, yy, &line, pal::UI_DIM, BG, 0.0);
+    }
+
+    /// One of the home page's tiles: a box `w` wide, 3 tall, its icon and
+    /// what it's for (a candy-cane stripe along the top of the one under
+    /// the pointer).
+    #[allow(clippy::too_many_arguments)]
+    fn tile(&mut self, f: &mut Frame, x: i32, y: i32, w: i32, icon: char, icol: Rgb, label: &str, act: Act, t: f32) {
+        let r = Rect { x, y, w, h: 3 };
+        let hot = r.contains(self.hover.0, self.hover.1);
+        let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { Bg::Mix(Rgb::hex(0x1c1a2c), 0.95) };
+        let edge = if hot { Rgb::hex(0xffd36b) } else { pal::UI_BORDER * 0.8 };
+        let shift = (t * 6.0) as i32;
+        for yy in y..y + 3 {
+            for xx in x..x + w {
+                let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + 2) {
+                    (true, _, true, _) => '╭',
+                    (_, true, true, _) => '╮',
+                    (true, _, _, true) => '╰',
+                    (_, true, _, true) => '╯',
+                    (_, _, true, _) | (_, _, _, true) => '─',
+                    (true, _, _, _) | (_, true, _, _) => '│',
+                    _ => ' ',
+                };
+                let c = if hot && yy == y && xx > x && xx < x + w - 1 {
+                    if ((xx + shift) / 2).rem_euclid(2) == 0 { pal::CANDY_RED } else { pal::CANDY_WHITE }
+                } else {
+                    edge
+                };
+                f.put_g(xx, yy, Glyph::new(ch, c).bg(bg).lit(0.0));
+            }
+        }
+        f.put_g(x + 2, y + 1, Glyph::new(icon, icol * if hot { 1.25 } else { 1.0 }).bg(bg).lit(0.0));
+        let label: String = label.chars().take((w - 6).max(1) as usize).collect();
+        f.text(x + 4, y + 1, &label, if hot { pal::UI_TITLE } else { pal::UI_TEXT }, bg, 0.0);
+        self.regions.push((r, act));
+    }
+
+    /// The pets: each one's kind, colour and name (the first can be none;
+    /// more can come along).
+    fn tab_pets(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, right: i32, t: f32) {
+        use crate::scene::pets::PetKind;
+        self.section(f, lx, yy, "THE PETS");
+        yy += 1;
+        f.text(lx, yy, "Each comes along wherever you go. Click one in the village to play.", pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        let n = 1 + cfg.scene.pets.len();
+        for i in 0..n {
+            let Some(pet) = cfg.scene.pet_at(i as u8) else { break };
+            let k8 = i as u8;
+            let kind = PetKind::from_str(&pet.kind);
+            match kind {
+                Some(k) => {
+                    let (b, m) = k.coat(&pet.coat);
+                    f.put_g(lx, yy, Glyph::new('▀', m).bg(Bg::Solid(b)).lit(0.0));
+                }
+                None => {
+                    f.put_g(lx, yy, Glyph::new('·', pal::UI_DIM).bg(BG).lit(0.0));
+                }
+            }
+            self.hints.push((Rect { x: lx, y: yy, w: 2, h: 1 }, Act::Inc(F::PetKind(k8))));
+            self.arrow(f, lx + 2, yy, '◂', Act::Dec(F::PetKind(k8)));
+            f.text(lx + 4, yy, &format!("{:<8}", if kind.is_some() { pet.kind.as_str() } else { "no pet" }), pal::UI_TITLE, BG, 0.0);
+            self.arrow(f, lx + 13, yy, '▸', Act::Inc(F::PetKind(k8)));
+            if kind.is_some() {
+                f.text(lx + 16, yy, "colour", pal::UI_TEXT, BG, 0.0);
+                self.hints.push((Rect { x: lx + 16, y: yy, w: 6, h: 1 }, Act::Inc(F::PetCoat(k8))));
+                self.arrow(f, lx + 23, yy, '◂', Act::Dec(F::PetCoat(k8)));
+                // (none chosen yet: the kind's first)
+                let coat = match kind {
+                    Some(k) if !k.coats().iter().any(|c| c.0 == pet.coat) => k.coats()[0].0,
+                    _ => pet.coat.as_str(),
+                };
+                f.text(lx + 25, yy, &format!("{coat:<12}"), pal::UI_TITLE, BG, 0.0);
+                self.arrow(f, lx + 38, yy, '▸', Act::Inc(F::PetCoat(k8)));
+                let editing = self.edit == Some(Field::PetName(k8)) && self.editing.is_some();
+                let txt = if editing { self.editing.clone().unwrap_or_default() } else if pet.name.is_empty() { "(a name?)".into() } else { pet.name.clone() };
+                self.field(f, Rect { x: lx + 41, y: yy, w: 16, h: 1 }, &txt, editing, Act::Edit(Field::PetName(k8)), t);
+                if i > 0 {
+                    self.button(f, lx + 59, yy, "✕", Act::PetRemove(k8));
+                }
+            }
+            if crate::frame::pictures_ok() {
+                f.picture_on_panel(lx, yy, (right - lx - 1).min(64), 1, divider((right - lx - 1).min(64), f.cell_aspect));
+            }
+            yy += 1;
+        }
+        if cfg.scene.pet.kind != "none" && cfg.scene.pets.len() < crate::config::MORE_PETS {
+            yy += 1;
+            let x = self.button(f, lx, yy, "+ another pet", Act::PetAdd);
+            f.text(x + 2, yy, &format!("(up to {})", 1 + crate::config::MORE_PETS), pal::UI_DIM, BG, 0.0);
+            yy += 1;
+        }
+        yy += 1;
+        f.text(lx, yy, "Dogs fetch, cats pounce, bunnies binky, reindeer prance, foxes", pal::UI_DIM, BG, 0.0);
+        f.text(lx, yy + 1, "dive into the snow and birds sing. Every one of them loves a cuddle.", pal::UI_DIM, BG, 0.0);
+    }
+
+    /// Online: going on, the friend code, friends and the public villages,
+    /// one's own village, what others write, devices.
+    #[allow(clippy::too_many_arguments)]
+    fn tab_online(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, _t: f32) {
+        let n = self.net.clone();
+        let clip = |s: &str, w: i32| -> String { s.chars().take(w.max(4) as usize).collect() };
+        self.section(f, lx, yy, "ONLINE");
+        yy += 1;
+        let (dot, col, what) = match n.state {
+            2 => ('●', Rgb::hex(0x9be08a), if n.via.is_empty() { "online".to_string() } else { format!("online · {}", n.via) }),
+            1 => ('◌', pal::UI_DIM, "going online…".to_string()),
+            _ => ('○', pal::UI_DIM, "offline".to_string()),
+        };
+        f.put_g(lx, yy, Glyph::new(dot, col).bg(BG).lit(0.0));
+        f.text(lx + 2, yy, &clip(&what, right - lx - 22), pal::UI_TEXT, BG, 0.0);
+        self.button(f, right - 17, yy, if n.state == 0 { "● go online " } else { "○ go offline" }, Act::Net(NET_ONLINE));
+        yy += 1;
+        if !n.code.is_empty() {
+            f.text(lx, yy, "Your friend code", pal::UI_TEXT, BG, 0.0);
+            let c = f.text(vx, yy, &n.code, Rgb::hex(0xffd36b), BG, 0.0);
+            self.button(f, c + 2, yy, "copy", Act::Net(NET_COPY));
+            yy += 1;
+        }
+        let who = match (n.friends, n.about) {
+            (0, _) => "no friends added yet: give them your code, or add theirs".to_string(),
+            (k, 0) => format!("{k} friend{} · none about right now", if k == 1 { "" } else { "s" }),
+            (k, a) => format!("{k} friend{} · {a} about now", if k == 1 { "" } else { "s" }),
+        };
+        f.text(lx, yy, &clip(&who, right - lx - 1), pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        let mut x = self.button(f, lx, yy, "✉ friends & messages", Act::Net(NET_FRIENDS)) + 2;
+        x = self.button(f, x, yy, "⌂ public villages", Act::Net(NET_PUBLIC)) + 2;
+        self.button(f, x, yy, "+ add a friend", Act::Net(NET_ADD));
+        yy += 1;
+        let x = self.button(f, lx, yy, "★ my profile card", Act::Net(NET_CARD)) + 2;
+        let x = self.button(f, x, yy, "⇄ my devices", Act::Net(NET_DEVICES)) + 2;
+        if n.devices > 0 {
+            f.text(x, yy, &format!("({} linked)", n.devices), pal::UI_DIM, BG, 0.0);
+        }
+        yy += 2;
+        self.section(f, lx, yy, "YOUR VILLAGE");
+        yy += 1;
+        let most = cfg.scene.village_limit.clamp(2, 48);
+        self.stepper(f, lx, vx, yy, "Most visitors", F::VillageLimit, &format!("{most} at once"));
+        yy += 1;
+        match &n.open {
+            Some(code) => {
+                f.text(lx, yy, "Open to friends", pal::UI_TEXT, BG, 0.0);
+                f.text(vx, yy, code, Rgb::hex(0xffd36b), BG, 0.0);
+            }
+            None => {
+                self.button(f, lx, yy, "⌂ open my village to friends", Act::Net(NET_OPEN));
+            }
+        }
+        yy += 1;
+        self.check(f, lx, yy, "List it in Public villages, for anyone to drop in", Act::Net(NET_LIST), n.listed);
+        yy += 2;
+        self.section(f, lx, yy, "WHAT OTHERS WRITE");
+        yy += 1;
+        self.check(f, lx, yy, "Star out strong language", Act::Toggle(F::CleanWords), cfg.scene.clean_words);
+        yy += 1;
+        f.text(lx, yy, "Links are always hidden, with a button to show each one.", pal::UI_DIM, BG, 0.0);
+    }
+
+    /// Looking after things: the save, a restart, settings back as they
+    /// were, the settings file and the log, uninstalling; updates.
+    fn tab_upkeep(&mut self, f: &mut Frame, cfg: &Config, lx: i32, mut yy: i32, _right: i32, _t: f32) {
+        self.section(f, lx, yy, "THE SAVE");
+        yy += 1;
+        let mut x = self.button(f, lx, yy, "↻ a new village", Act::Shuffle) + 2;
+        x = self.button(f, x, yy, "⇩ export save", Act::ExportSave) + 2;
+        x = self.button(f, x, yy, "⇧ import save", Act::ImportSave) + 2;
+        f.text(x, yy, "(it saves itself)", pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        self.section(f, lx, yy, "UPKEEP");
+        yy += 1;
+        let desk = self.kind == Kind::Desktop;
+        match self.confirm {
+            Some(Act::Uninstall) => {
+                let (q, yes) = match self.kind {
+                    Kind::Web => ("Forget this browser's village? The village, villager and settings go.", "⌫ yes, forget it"),
+                    Kind::Phone => ("Open the phone's page for the app, to uninstall it?", "⌫ yes, open it"),
+                    Kind::Desktop => ("Take xmas-tui off this computer? Your village and settings are kept.", "⌫ yes, uninstall"),
+                };
+                f.text(lx, yy, q, Rgb::hex(0xffd36b), BG, 0.0);
+                yy += 1;
+                let x = self.button(f, lx, yy, yes, Act::UninstallNow);
+                self.button(f, x + 2, yy, "no", Act::NotNow);
+            }
+            Some(Act::ResetSettings) => {
+                f.text(lx, yy, "Reset every setting? Your villager, friends, pets and village stay.", Rgb::hex(0xffd36b), BG, 0.0);
+                yy += 1;
+                let x = self.button(f, lx, yy, "⟲ yes, reset them", Act::ResetNow);
+                self.button(f, x + 2, yy, "no", Act::NotNow);
+            }
+            _ => {
+                let mut x = self.button(f, lx, yy, "↻ restart", Act::Restart) + 2;
+                x = self.button(f, x, yy, "⟲ reset settings", Act::ResetSettings) + 2;
+                if desk {
+                    x = self.button(f, x, yy, "✎ the settings file", Act::OpenConfig) + 2;
+                    if crate::platform::log_path().is_some() {
+                        self.button(f, x, yy, "≡ the log", Act::OpenLog);
+                    }
+                }
+                let un = match self.kind {
+                    Kind::Web => Some("⌫ forget this browser's village…"),
+                    Kind::Phone => Some("⌫ uninstall…"),
+                    Kind::Desktop if !self.standalone || cfg!(windows) => Some("⌫ uninstall…"),
+                    _ => None,
+                };
+                if let Some(un) = un {
+                    yy += 1;
+                    self.button(f, lx, yy, un, Act::Uninstall);
+                }
+            }
+        }
+        if desk {
+            yy += 2;
         self.section(f, lx, yy, "UPDATES");
         yy += 1;
         let cx = self.check(f, lx, yy, "Check for updates", Act::Toggle(F::UpdCheck), cfg.updates.check) + 3;
@@ -1753,6 +2260,7 @@ impl Settings {
         let cx = f.text(lx, yy, &msg, pal::UI_DIM, BG, 0.0);
         if let Some((label, a)) = act {
             self.button(f, cx + 2, yy, label, a);
+        }
         }
     }
 
@@ -1960,6 +2468,9 @@ impl Settings {
 
     #[allow(clippy::too_many_arguments)]
     fn slider(&mut self, f: &mut Frame, lx: i32, vx: i32, y: i32, label: &str, field: F, frac: f32, val: &str, t: f32) {
+        if self.locked && keepers(field) {
+            return self.stepper(f, lx, vx, y, label, field, val);
+        }
         f.text(lx, y, label, pal::UI_TEXT, BG, 0.0);
         self.hints.push((Rect { x: lx, y, w: (vx - lx - 1).max(1), h: 1 }, Act::Inc(field)));
         self.arrow(f, vx, y, '◂', Act::Dec(field));
@@ -1983,6 +2494,13 @@ impl Settings {
     }
 
     fn stepper(&mut self, f: &mut Frame, lx: i32, vx: i32, y: i32, label: &str, field: F, val: &str) {
+        if self.locked && keepers(field) {
+            f.text(lx, y, label, pal::UI_DIM * 0.8, BG, 0.0);
+            let e = f.text(vx + 2, y, val, pal::UI_DIM, BG, 0.0);
+            f.text(e + 2, y, "⌂ the square's", pal::UI_DIM * 0.8, BG, 0.0);
+            self.hints.push((Rect { x: lx, y, w: (e - lx + 16).max(1), h: 1 }, Act::Locked));
+            return;
+        }
         f.text(lx, y, label, pal::UI_TEXT, BG, 0.0);
         self.hints.push((Rect { x: lx, y, w: (vx - lx - 1).max(1), h: 1 }, Act::Inc(field)));
         self.arrow(f, vx, y, '◂', Act::Dec(field));
@@ -1993,6 +2511,14 @@ impl Settings {
     /// Returns the x after the label.
     fn check(&mut self, f: &mut Frame, x: i32, y: i32, label: &str, act: Act, on: bool) -> i32 {
         let len = 4 + label.chars().count() as i32;
+        if let (true, Act::Toggle(field)) = (self.locked, act) {
+            if keepers(field) {
+                f.text(x, y, if on { "[✓]" } else { "[ ]" }, pal::UI_DIM * 0.8, BG, 0.0);
+                let end = f.text(x + 4, y, label, pal::UI_DIM * 0.8, BG, 0.0);
+                self.hints.push((Rect { x, y, w: len, h: 1 }, Act::Locked));
+                return end;
+            }
+        }
         let r = Rect { x, y, w: len, h: 1 };
         let hot = r.contains(self.hover.0, self.hover.1);
         let box_c = if hot { Rgb::hex(0xffd36b) * 1.2 } else { pal::UI_BORDER };
@@ -2016,6 +2542,33 @@ impl Settings {
     }
 }
 
+/// A thin line along the bottom of a row `cols` wide (between friends in
+/// the list): a picture shaped like the row (pictures keep their shape),
+/// kept while the row's size stays the same.
+fn divider(cols: i32, aspect: f32) -> std::sync::Arc<crate::frame::Picture> {
+    type Kept = Option<((i32, i32), std::sync::Arc<crate::frame::Picture>)>;
+    static D: std::sync::Mutex<Kept> = std::sync::Mutex::new(None);
+    let key = (cols, (aspect * 100.0) as i32);
+    let mut d = D.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, p)) = d.as_ref() {
+        if *k == key {
+            return p.clone();
+        }
+    }
+    let h = 24usize;
+    let w = ((h as f32 * cols as f32 / aspect.max(0.1)).round() as usize).clamp(1, 4096);
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in h - 3..h - 1 {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            rgba[i..i + 4].copy_from_slice(&[0x4a, 0x56, 0x86, 0xe0]);
+        }
+    }
+    let p = std::sync::Arc::new(crate::frame::Picture::new(w, h, rgba));
+    *d = Some((key, p.clone()));
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2028,7 +2581,7 @@ mod tests {
     #[test]
     fn pointing_at_a_setting_says_what_it_does_and_its_bar_can_be_clicked() {
         let mut cfg = Config::default();
-        let mut s = Settings { open: true, ..Default::default() };
+        let mut s = Settings { open: true, tab: TAB_VILLAGE, ..Default::default() };
         let mut f = Frame::new(200, 50);
         s.draw(&mut f, &cfg, 0.0);
         let r = s.rect.unwrap();
@@ -2134,7 +2687,7 @@ mod tests {
                 line.find(needle).map(|i| (r.x + line[..i].chars().count() as i32, y))
             })
         };
-        let mut s = Settings { open: true, tab: TAB_DESKTOP, ..Default::default() };
+        let mut s = Settings { open: true, tab: TAB_UPKEEP, ..Default::default() };
         let mut f = Frame::new(200, 80);
         s.draw(&mut f, &cfg, 0.0);
         let r = s.rect.expect("drawn");
@@ -2144,7 +2697,7 @@ mod tests {
             assert_eq!(s.click(x, y), Some(act), "{label}");
         }
         for (ask, yes, act) in [(Act::Uninstall, "yes, uninstall", Act::UninstallNow), (Act::ResetSettings, "yes, reset them", Act::ResetNow)] {
-            let mut s = Settings { open: true, tab: TAB_DESKTOP, confirm: Some(ask), ..Default::default() };
+            let mut s = Settings { open: true, tab: TAB_UPKEEP, confirm: Some(ask), ..Default::default() };
             let mut f = Frame::new(200, 80);
             s.draw(&mut f, &cfg, 0.0);
             let r = s.rect.unwrap();
@@ -2168,6 +2721,23 @@ mod tests {
         assert_eq!((r.seed, r.scene.name.as_str(), r.scene.motto.as_str(), r.scene.friends.len(), r.weather.city.as_str()), (42, "Holly", "ho ho", 1, "Oslo"));
         let d = Config::default();
         assert_eq!((r.fps, r.scene.snow, r.ui.look.as_str()), (d.fps, d.scene.snow, d.ui.look.as_str()));
+    }
+
+    /// In a public square: the square's own settings are greyed out and
+    /// can't be clicked; the rest (snow, glow…) still can.
+    #[test]
+    fn a_squares_own_settings_are_greyed_out() {
+        let cfg = Config::default();
+        let mut s = Settings { open: true, tab: TAB_VILLAGE, locked: true, ..Default::default() };
+        let mut f = Frame::new(200, 80);
+        s.draw(&mut f, &cfg, 0.0);
+        let rows: Vec<String> = (0..f.h as i32).map(|y| row(&f, y)).collect();
+        let tod = rows.iter().position(|r| r.contains("Time of day")).expect("the time row") as i32;
+        assert!(rows[tod as usize].contains("the square's"), "{}", rows[tod as usize]);
+        assert!(!s.regions.iter().any(|(r, a)| r.y == tod && matches!(a, Act::Inc(_) | Act::Dec(_))), "no arrows on it");
+        let snow = rows.iter().position(|r| r.contains("Snowfall")).unwrap() as i32;
+        assert!(s.regions.iter().any(|(r, a)| r.y == snow && matches!(a, Act::Set(F::Snow, _))), "snow's still this villager's");
+        assert!(rows.iter().any(|r| r.contains("In a public square")));
     }
 
     #[test]

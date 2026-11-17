@@ -172,6 +172,9 @@ impl Aware {
                     super::pets::PetKind::Dog => ["he'd follow me to the North Pole", "she's never met a puddle she didn't like", "he's three, but he thinks he's a reindeer"][pick % 3],
                     super::pets::PetKind::Cat => ["she only came because it's sunny somewhere", "he walks me, really", "she's judging your boots. affectionately"][pick % 3],
                     super::pets::PetKind::Bunny => ["she does a little jump when she's happy", "he's braver than he looks", "she's had four carrots today. it's a holiday"][pick % 3],
+                    super::pets::PetKind::Reindeer => ["she's in training for the sleigh", "he thinks every bell is for him", "she's had six carrots today. it's a holiday"][pick % 3],
+                    super::pets::PetKind::Fox => ["he found me, really", "she buries my gloves in the snow", "he's sweeter than he looks"][pick % 3],
+                    super::pets::PetKind::Bird => ["she sings every morning at the window", "he rides on my hat", "she knows three carols"][pick % 3],
                 };
                 (
                     None,
@@ -817,6 +820,9 @@ impl Convo {
                     super::pets::PetKind::Dog => format!("that's {n}! he greets everyone like they've been at sea for a year"),
                     super::pets::PetKind::Cat => format!("that's {n}. she owns the house; we just keep it warm for her"),
                     super::pets::PetKind::Bunny => format!("that's {n}! she does a little twirl when she's happy"),
+                    super::pets::PetKind::Reindeer => format!("that's {n}! one day, the sleigh. for now, carrots"),
+                    super::pets::PetKind::Fox => format!("that's {n}. came for the scraps, stayed for the fire"),
+                    super::pets::PetKind::Bird => format!("that's {n}! she sings along to the radio"),
                 },
                 None => "just us, I'm afraid".into(),
             },

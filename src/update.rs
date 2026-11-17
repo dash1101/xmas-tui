@@ -130,6 +130,12 @@ pub fn install_now() {
     with(|s| s.install_now = true);
 }
 
+/// Start again (the menu's restart): the front-end shuts down cleanly and
+/// calls [`relaunch`], as after an update.
+pub fn restart_now() {
+    RESTART.store(true, Ordering::SeqCst);
+}
+
 /// The new version is in place: the front-end should shut down cleanly and
 /// call [`relaunch`].
 pub fn restart_requested() -> bool {
@@ -169,15 +175,21 @@ fn decode(line: &str) -> Option<Status> {
 /// The wallpaper side (call about once a second): share the status with a
 /// settings window in another process (the tray's), and do what it asks.
 pub fn serve() {
+    let req = crate::platform::update_request_path();
+    // (a restart's asked for whether the checker runs here or not)
     if !running() {
+        if std::fs::read_to_string(&req).is_ok_and(|w| w.trim() == "restart") {
+            let _ = std::fs::remove_file(&req);
+            restart_now();
+        }
         return;
     }
     let path = crate::platform::update_status_path();
     let _ = std::fs::write(&path, encode(&status()));
-    let req = crate::platform::update_request_path();
     if let Ok(what) = std::fs::read_to_string(&req) {
         let _ = std::fs::remove_file(&req);
         match what.trim() {
+            "restart" => restart_now(),
             "check" => check_now(),
             "install" => install_now(),
             "dismiss" => dismiss(),

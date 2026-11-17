@@ -115,7 +115,24 @@ pub struct Book {
     /// This villager's own village, when open, listed for anyone to find
     /// (in Public villages).
     pub listed: bool,
+    /// What's been written to and from each friend (by their code), the
+    /// latest last: a chat's history.
+    pub chats: std::collections::BTreeMap<String, Vec<ChatLine>>,
 }
+
+/// One line of a chat with a friend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct ChatLine {
+    /// When (seconds since 1970).
+    pub at: i64,
+    /// Written by this villager (else by the friend).
+    pub mine: bool,
+    pub text: String,
+}
+
+/// The most lines kept of a chat with one friend.
+pub const CHAT_KEPT: usize = 60;
 
 /// A group: a chat room anyone with its code can be in.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -388,6 +405,10 @@ enum Msg {
         /// The most it takes (0: as many as there's room for).
         #[serde(default)]
         limit: u16,
+        /// The host's clock: minutes into the day, and sunrise and sunset
+        /// (minutes), so everyone in the village has the same sky.
+        #[serde(default)]
+        clock: Option<[f32; 3]>,
     },
     /// In a village: gone (`host`: the village closes; a square's next
     /// villager takes over).
@@ -513,9 +534,23 @@ struct Shared {
     square: Option<(usize, u32)>,
     /// The most it takes.
     limit: usize,
+    /// The host's clock as last heard (a guest), and when it was heard.
+    clock: Option<([f32; 3], f32)>,
 }
 
+/// Where the village's own relay says things (the public squares'
+/// settings, from its console): plain JSON, believed only from that relay.
+pub const ADMIN_SQUARES: &str = "xmas-tui/1/admin/squares";
+
 pub struct Online {
+    /// Connected to the village's own relay (what it says as itself is
+    /// believed), and each public square's settings as it last said them
+    /// (JSON, by the square's name).
+    trusted: bool,
+    square_rules: HashMap<String, String>,
+    /// This side's clock (minutes into the day, sunrise, sunset), sent to
+    /// the guests while hosting (see `set_clock`).
+    my_clock: [f32; 3],
     pub book: Book,
     /// The book's changed (worth saving soon).
     pub dirty: bool,
@@ -591,6 +626,9 @@ impl Online {
         let mut o = Online {
             name: name.to_string(),
             id: seal::random() as u32 | 1,
+            trusted: false,
+            square_rules: HashMap::new(),
+            my_clock: [720.0, 450.0, 1020.0],
             me: Seal::new(&code),
             my_mail: seal::topic("mail", &code),
             my_here: seal::topic("here", &code),
@@ -821,6 +859,13 @@ impl Online {
 
     fn on_connack(&mut self) {
         self.link = Link::On;
+        if self.trusted {
+            self.subscribe(vec![ADMIN_SQUARES.to_string()]);
+        }
+        // back (perhaps after a blip): where this villager is, at once
+        self.next_me = 0.0;
+        self.last_me = None;
+        self.next_village = 0.0;
         let mut topics = vec![self.my_mail.clone()];
         topics.extend(self.live.iter().map(|l| l.here_topic.clone()));
         if let Some(v) = &self.village {
@@ -882,6 +927,15 @@ impl Online {
     }
 
     fn got(&mut self, topic: &str, payload: &[u8]) {
+        // the public squares' settings, from the village's own relay
+        if topic == ADMIN_SQUARES {
+            if self.trusted && payload.len() <= 16 * 1024 {
+                if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    self.square_rules = m.into_iter().filter(|(k, v)| SQUARES.contains(&k.as_str()) && v.is_object()).map(|(k, v)| (k, v.to_string())).collect();
+                }
+            }
+            return;
+        }
         let parse = |seal: &Seal| seal.open(payload).and_then(|p| serde_json::from_slice::<Msg>(&p).ok());
         // a public village's state (a square's copy, or one listed)
         if topic.starts_with("xmas-tui/1/public/") || topic.starts_with("xmas-tui/1/listed/") {
@@ -905,6 +959,7 @@ impl Online {
                     // only from friends
                     if self.is_friend(&from) && self.not_flooded(0, 8) {
                         let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
+                        self.keep_chat(&from, false, &text);
                         self.events.push(Event::Mail { from: clean(&name, 32), text, links });
                     }
                 }
@@ -1075,9 +1130,12 @@ impl Online {
             Msg::Village { host, .. } if host != me && v.square.is_some() && (v.host || v.host_id.is_some_and(|h| h < host)) => {}
             // (the first host heard is the host: nobody else takes over)
             Msg::Village { host, .. } if host != me && v.square.is_none() && v.host_id.is_some_and(|h| h != host) => {}
-            Msg::Village { host, name, seed, rules, admins, limit } if host != me => {
+            Msg::Village { host, name, seed, rules, admins, limit, clock } if host != me => {
                 v.host_seen = t;
                 v.host_id = Some(host);
+                if let Some(c) = clock.filter(|c| c.iter().all(|x| x.is_finite() && (0.0..=1440.0).contains(x))) {
+                    v.clock = Some((c, t));
+                }
                 if limit > 0 {
                     v.limit = (limit as usize).clamp(2, MAX_LIMIT);
                 }
@@ -1226,8 +1284,8 @@ impl Online {
         if host && t >= self.next_village {
             self.next_village = t + 2.0;
             let m = match square {
-                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16 },
-                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16 },
+                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16, clock: Some(self.my_clock) },
+                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16, clock: Some(self.my_clock) },
             };
             self.send(&topic, &seal, &m, false);
         }
@@ -1316,7 +1374,7 @@ impl Online {
         self.book.on = true;
         self.link = Link::On;
         let code = seal::new_code();
-        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT };
+        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT, clock: None };
         for (id, name, av, card) in others {
             v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0) });
         }
@@ -1338,6 +1396,36 @@ impl Online {
     /// This villager's id in the shared village.
     pub fn my_id(&self) -> u32 {
         self.id
+    }
+
+    /// Connected to the village's own relay: what it says as itself (the
+    /// squares' settings) is believed.
+    pub fn set_trusted(&mut self, on: bool) {
+        self.trusted = on;
+        if !on {
+            self.square_rules.clear();
+        }
+    }
+
+    /// In a public square: its settings from the relay's console (JSON;
+    /// "{}" when it's said none), or None outside the squares.
+    pub fn square_rules(&self) -> Option<String> {
+        let i = self.village.as_ref()?.square?.0;
+        Some(self.square_rules.get(SQUARES[i]).cloned().unwrap_or_else(|| "{}".into()))
+    }
+
+    /// This side's clock (minutes into the day, sunrise, sunset): what the
+    /// guests get while hosting.
+    pub fn set_clock(&mut self, mins: f32, rise: f32, set: f32) {
+        self.my_clock = [mins, rise, set];
+    }
+
+    /// A guest: the host's clock as it is now (minutes into the day,
+    /// sunrise, sunset), so the sky's the same for everyone in the village.
+    pub fn village_clock(&self) -> Option<(f32, f32, f32)> {
+        let v = self.village.as_ref().filter(|v| !v.host)?;
+        let ([m, r, s], at) = v.clock?;
+        Some(((m + (self.t - at) / 60.0).rem_euclid(1440.0), r, s))
     }
 
     pub fn other(&self, id: u32) -> Option<&Other> {
@@ -1471,9 +1559,29 @@ impl Online {
             return false;
         }
         let code = p.code.clone();
-        let m = Msg::Mail { from: self.book.code.clone(), name: self.name.clone(), text: text.chars().take(280).collect() };
+        let text: String = text.chars().take(280).collect();
+        let m = Msg::Mail { from: self.book.code.clone(), name: self.name.clone(), text: text.clone() };
         self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
+        self.keep_chat(&code, true, &text);
         true
+    }
+
+    /// A line of a chat with the friend whose code that is, kept.
+    fn keep_chat(&mut self, code: &str, mine: bool, text: &str) {
+        let key = seal::norm(code);
+        let at = crate::clock::now().timestamp();
+        let lines = self.book.chats.entry(key).or_default();
+        lines.push(ChatLine { at, mine, text: text.to_string() });
+        if lines.len() > CHAT_KEPT {
+            let extra = lines.len() - CHAT_KEPT;
+            lines.drain(..extra);
+        }
+        self.dirty = true;
+    }
+
+    /// The chat with friend `i` so far (the latest last).
+    pub fn chat(&self, i: usize) -> &[ChatLine] {
+        self.book.friends.get(i).and_then(|p| self.book.chats.get(&seal::norm(&p.code))).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     fn enter(&mut self, code: String, host: bool) {
@@ -1482,7 +1590,7 @@ impl Online {
         }
         let topic = seal::topic("village", &code);
         let limit = if host { self.limit.clamp(2, MAX_LIMIT) } else { MAX_LIMIT };
-        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None, square: None, limit });
+        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None, square: None, limit, clock: None });
         self.subscribe(vec![topic]);
         self.next_here = 0.0;
         self.next_village = 0.0;
@@ -1947,6 +2055,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// A public square's own settings come from the village's own relay
+    /// (believed only from it), and the host's clock reaches the guests.
+    #[test]
+    fn a_square_keeps_its_keepers_settings_and_the_hosts_clock() {
+        let mut relay = Relay::default();
+        let mk = |n: &str| {
+            let mut o = Online::new(Book { on: true, ..Default::default() }, n);
+            o.connected();
+            o
+        };
+        let (mut a, mut b) = (mk("Ann"), mk("Bo"));
+        let mut t = 1.0;
+        run(&mut relay, &mut [&mut a, &mut b], &mut t, 0.5);
+        a.join_square(0);
+        run(&mut relay, &mut [&mut a, &mut b], &mut t, 6.0);
+        b.join_square(0);
+        a.set_clock(1300.0, 480.0, 960.0);
+        run(&mut relay, &mut [&mut a, &mut b], &mut t, 3.0);
+        assert_eq!(b.square(), Some(("North Pole Square".to_string(), false)));
+        // the host's clock, moved on by the time since it was heard
+        let (m, r, s) = b.village_clock().expect("the host's clock");
+        assert!((1300.0..1301.0).contains(&m) && (r, s) == (480.0, 960.0), "{m} {r} {s}");
+        assert!(a.village_clock().is_none(), "the host keeps its own");
+        // the relay's console speaks: believed from the village's own relay…
+        let said = br#"{"North Pole Square":{"time":"night","critters":0.5},"Nowhere":{"time":"noon"}}"#;
+        let pkt = super::mqtt::publish(ADMIN_SQUARES, said, true);
+        b.set_trusted(true);
+        b.feed(&pkt);
+        assert_eq!(b.square_rules().as_deref(), Some(r#"{"critters":0.5,"time":"night"}"#));
+        // …not from any other
+        a.set_trusted(false);
+        a.feed(&pkt);
+        assert_eq!(a.square_rules().as_deref(), Some("{}"));
+        // outside a square: none
+        b.leave_village();
+        assert_eq!(b.square_rules(), None);
+    }
+
     /// The public squares: the first in hosts; the next is a guest; the
     /// host going, the guest takes over. A village full turns newcomers
     /// away; a listed one shows in Public villages, with how many are in it.
@@ -2004,6 +2150,77 @@ pub(crate) mod tests {
         e.watch_public();
         run(&mut relay, &mut [&mut a, &mut b, &mut c, &mut d, &mut e], &mut t, 1.0);
         assert!(e.listings().is_empty(), "{:?}", e.listings());
+    }
+
+    /// Two villagers in one village through a real relay for a while
+    /// (XMAS_SOAK seconds, 120 by default; XMAS_RELAY picks the relay):
+    /// how often the link drops, how long each goes unseen by the other,
+    /// how much each sends. Prints what it found; fails on a drop or on
+    /// either going unseen for more than a few seconds.
+    #[test]
+    #[ignore]
+    fn a_village_holds_together_through_the_real_relay() {
+        let secs: f32 = std::env::var("XMAS_SOAK").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Soak A");
+        let mut b = Online::new(Book { on: true, ..Default::default() }, "Soak B");
+        let (mut la, mut lb) = (None, None);
+        let mut t = 0.0f32;
+        let start = std::time::Instant::now();
+        let run = |a: &mut Online, b: &mut Online, la: &mut Option<tcp::Tcp>, lb: &mut Option<tcp::Tcp>, t: f32| {
+            tcp::pump(a, la);
+            tcp::pump(b, lb);
+            let av = |p: f32| Some(Avatar { x: 0.5 + 0.3 * (t * 0.4 + p).sin(), y: 0.8, dir: 1.0, moving: true, ..Default::default() });
+            a.tick(t, av(0.0), 1);
+            b.tick(t, av(1.5), 1);
+            a.ease(0.05);
+            b.ease(0.05);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        while (a.link() != Link::On || b.link() != Link::On) && start.elapsed().as_secs() < 30 {
+            run(&mut a, &mut b, &mut la, &mut lb, t);
+            t += 0.05;
+        }
+        assert_eq!((a.link(), b.link()), (Link::On, Link::On), "couldn't reach a relay");
+        let via = la.as_ref().map(|l| l.via()).unwrap_or_default();
+        let code = a.host();
+        b.join(&code).unwrap();
+        // in together
+        let t0 = t;
+        while t - t0 < 20.0 && !(a.others().len() == 1 && b.others().len() == 1) {
+            run(&mut a, &mut b, &mut la, &mut lb, t);
+            t += 0.05;
+        }
+        let met = t - t0;
+        assert!(a.others().len() == 1 && b.others().len() == 1, "they never met");
+        // and then a while together
+        let (mut drops, mut was) = (0, (true, true));
+        let (mut worst_a, mut worst_b) = (0.0f32, 0.0f32);
+        let (mut unseen_a, mut unseen_b) = (0.0f32, 0.0f32);
+        let t1 = t;
+        while t - t1 < secs {
+            run(&mut a, &mut b, &mut la, &mut lb, t);
+            t += 0.05;
+            let now = (a.link() == Link::On, b.link() == Link::On);
+            if (was.0 && !now.0) || (was.1 && !now.1) {
+                drops += 1;
+                eprintln!("  a link dropped at {:.0}s (A {:?}, B {:?})", t - t1, a.link(), b.link());
+            }
+            was = now;
+            // how long since each heard the other
+            let age = |o: &Online| o.others().first().map(|(_, x)| o.t - x.seen).unwrap_or(99.0);
+            let (ga, gb) = (age(&a), age(&b));
+            worst_a = worst_a.max(ga);
+            worst_b = worst_b.max(gb);
+            if ga > 2.0 {
+                unseen_a += 0.05;
+            }
+            if gb > 2.0 {
+                unseen_b += 0.05;
+            }
+        }
+        eprintln!("soak via {via}: met after {met:.1}s; {secs:.0}s together: {drops} drop(s); longest unheard: A {worst_a:.1}s, B {worst_b:.1}s; unseen >2s: A {unseen_a:.1}s, B {unseen_b:.1}s");
+        assert_eq!(drops, 0, "the link dropped");
+        assert!(worst_a < 4.0 && worst_b < 4.0, "one went unheard for a while");
     }
 
     /// A public square through a real relay (needs the internet, or

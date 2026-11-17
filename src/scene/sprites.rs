@@ -453,6 +453,9 @@ pub enum PetKind {
     Dog,
     Cat,
     Bunny,
+    Reindeer,
+    Fox,
+    Bird,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -475,6 +478,9 @@ pub fn pet(kind: PetKind, body: Rgb, marks: Rgb, collar: Option<Rgb>, pose: PetP
             PetKind::Cat => draw_cat(body, marks, collar, pose, wag),
             PetKind::Dog => draw_dog(body, marks, collar, pose, wag),
             PetKind::Bunny => draw_bunny(body, marks, pose),
+            PetKind::Reindeer => draw_pet_reindeer(body, marks, collar, pose),
+            PetKind::Fox => draw_pet_fox(body, marks, pose),
+            PetKind::Bird => draw_bird(body, marks, pose),
         };
         if dir < 0.0 {
             c.mirror();
@@ -949,9 +955,13 @@ pub fn sleigh(santa: bool, light: f32) -> Arc<Picture> {
 }
 
 fn draw_fox(body: Rgb, pose: WildPose) -> Canvas {
+    draw_fox_marked(body, Rgb::hex(0x2a1a14), pose)
+}
+
+/// A fox with its ears and socks in `dark`.
+fn draw_fox_marked(body: Rgb, dark: Rgb, pose: WildPose) -> Canvas {
     let mut c = Canvas::new(28, 16);
     let g = 15;
-    let dark = Rgb::hex(0x2a1a14);
     let lift = if matches!(pose, WildPose::Kick(_)) { 1 } else { 0 };
     let by = 9.6 - lift as f32;
     wild_legs(&mut c, [17, 18, 9, 10], by as i32 + 1, g - lift, pose, dark, dark * 0.8, dark);
@@ -983,6 +993,142 @@ fn draw_fox(body: Rgb, pose: WildPose) -> Canvas {
     }
     let shut = matches!(pose, WildPose::Graze(1));
     c.set(hx as i32 + 1, hy as i32 - 1 + graze as i32, if shut { body * 0.7 } else { EYE });
+    c
+}
+
+// the villager's own young reindeer, fox and bird (their pictures are the
+// wild ones' size; pets.rs draws the reindeer and fox smaller)
+
+fn draw_pet_reindeer(body: Rgb, nose: Rgb, collar: Option<Rgb>, pose: PetPose) -> Canvas {
+    let wild = match pose {
+        PetPose::Walk(f) => WildPose::Walk(f),
+        PetPose::Up => WildPose::Kick(0),
+        PetPose::Eat => WildPose::Graze(0),
+        _ => WildPose::Stand,
+    };
+    let mut c = if pose == PetPose::Sleep { draw_deer_lying(body) } else { draw_deer(body, wild) };
+    // where draw_deer put the head
+    let lift = if matches!(wild, WildPose::Kick(_)) { 2.0 } else { 0.0 };
+    let by = 15.0 - lift;
+    let (hx, hy) = match pose {
+        PetPose::Sleep => (22.6, 15.6),
+        PetPose::Eat => (23.5, 22.0),
+        _ => (23.0, by - 8.6),
+    };
+    // Rudolph's nose, glowing (a plain one's already dark)
+    if nose.r > 0.5 && nose.g < 0.4 {
+        c.ellipse(hx + 4.3, hy + 0.4, 1.3, 1.1, nose);
+        c.set(hx as i32 + 4, hy as i32, Rgb::hex(0xffa0a0));
+    }
+    // a red collar with a gold bell (or the chosen colour)
+    if pose != PetPose::Sleep && pose != PetPose::Eat {
+        let k = collar.unwrap_or(Rgb::hex(0xc8202a));
+        c.line(18.6, by - 3.0, 20.8, by - 1.2, 2, k);
+        c.set(20, by as i32, Rgb::hex(0xffcc55));
+    }
+    c
+}
+
+/// A reindeer lying in the snow, legs folded under, head up, eyes shut.
+fn draw_deer_lying(body: Rgb) -> Canvas {
+    let mut c = Canvas::new(30, 26);
+    let belly = Rgb::hex(0xe8d8bc);
+    let antler = Rgb::hex(0xd8c49a);
+    // folded legs peeking out, the body low on the snow
+    c.line(16.0, 25.0, 21.0, 25.0, 1, body * 0.7);
+    c.line(6.0, 25.0, 10.0, 25.0, 1, body * 0.7);
+    c.ellipse(13.0, 22.4, 8.6, 3.2, body);
+    c.ellipse(5.0, 22.0, 1.8, 2.0, belly);
+    for (x, y) in [(9, 20), (12, 19), (15, 20)] {
+        c.set(x, y, body * 1.12);
+    }
+    let (hx, hy) = (22.6, 15.6);
+    c.line(19.0, 21.0, hx - 1.2, hy + 1.4, 3, body);
+    c.ellipse(hx, hy, 2.4, 1.9, body);
+    c.rect(hx as i32 + 1, hy as i32, 3, 2, body * 0.95);
+    c.set(hx as i32 + 4, hy as i32, Rgb::hex(0x1a1414));
+    c.line(hx - 0.8, hy - 0.4, hx + 0.4, hy - 0.4, 1, EYE);
+    c.line(hx - 1.6, hy - 1.4, hx - 3.4, hy - 3.0, 2, body * 0.92);
+    let (ax, ay) = (hx - 1.2, hy - 1.6);
+    c.line(ax, ay, ax - 1.6, ay - 5.6, 1, antler);
+    c.line(ax - 0.8, ay - 2.8, ax + 1.2, ay - 4.6, 1, antler);
+    c.line(ax - 1.4, ay - 5.0, ax - 3.4, ay - 6.4, 1, antler);
+    c.line(ax + 1.2, ay - 0.2, ax + 1.4, ay - 3.4, 1, antler * 0.8);
+    c
+}
+
+fn draw_pet_fox(body: Rgb, dark: Rgb, pose: PetPose) -> Canvas {
+    match pose {
+        PetPose::Sleep => {
+            // curled up, the brush of a tail round over the nose
+            let mut c = Canvas::new(28, 16);
+            c.ellipse(13.0, 12.4, 6.6, 2.8, body);
+            c.ellipse(9.0, 11.6, 2.4, 2.0, body);
+            c.line(8.0, 10.0, 7.4, 8.0, 1, dark);
+            c.line(10.0, 10.0, 10.4, 8.0, 1, dark);
+            c.line(8.0, 11.6, 9.4, 11.6, 1, EYE);
+            c.ellipse(15.0, 14.0, 6.2, 1.6, body * 0.92);
+            c.ellipse(9.6, 14.2, 1.8, 1.2, WHITE);
+            c
+        }
+        PetPose::Walk(f) => draw_fox_marked(body, dark, WildPose::Walk(f)),
+        PetPose::Up => draw_fox_marked(body, dark, WildPose::Kick(0)),
+        PetPose::Eat => draw_fox_marked(body, dark, WildPose::Graze(0)),
+        PetPose::Sit => draw_fox_marked(body, dark, WildPose::Stand),
+    }
+}
+
+/// A little bird: hopping about, or (`Walk`) fluttering along, wings up
+/// (0) and down (1).
+fn draw_bird(body: Rgb, breast: Rgb, pose: PetPose) -> Canvas {
+    let mut c = Canvas::new(14, 11);
+    let beak = Rgb::hex(0xf0a030);
+    let wing = body * 0.78;
+    let legs = Rgb::hex(0x3a2a20);
+    match pose {
+        PetPose::Sleep => {
+            // a round fluffed-up ball, head tucked
+            c.ellipse(7.0, 7.4, 3.8, 3.0, body);
+            c.ellipse(8.6, 8.2, 1.8, 1.6, breast);
+            c.line(3.4, 7.0, 1.6, 6.4, 2, wing);
+            c.line(8.6, 5.4, 9.8, 5.4, 1, EYE);
+            c.set(7, 10, legs);
+        }
+        PetPose::Walk(f) => {
+            // in flight: legs tucked, wings beating
+            c.ellipse(7.0, 6.0, 3.4, 2.2, body);
+            c.ellipse(8.6, 6.8, 1.6, 1.4, breast);
+            c.ellipse(10.0, 4.6, 1.9, 1.7, body);
+            c.set(10, 4, EYE);
+            c.set(12, 5, beak);
+            c.line(3.6, 6.0, 1.4, 5.0, 2, wing);
+            if f == 0 {
+                c.line(7.0, 5.0, 4.6, 0.6, 2, wing);
+            } else {
+                c.line(7.0, 6.6, 4.8, 9.4, 2, wing);
+            }
+        }
+        _ => {
+            let eat = pose == PetPose::Eat;
+            let up = pose == PetPose::Up;
+            c.set(6, 10, legs);
+            c.set(8, 10, legs);
+            c.set(6, 9, legs);
+            c.set(8, 9, legs);
+            c.ellipse(7.0, 6.6, 3.6, 2.6, body);
+            c.ellipse(8.6, 7.2, 1.8, 1.8, breast);
+            let (hx, hy) = if eat { (10.6, 8.0) } else if up { (9.8, 3.4) } else { (9.8, 4.2) };
+            c.ellipse(hx, hy, 2.0, 1.8, body);
+            c.set(hx as i32, hy as i32, EYE);
+            c.set(hx as i32 + 2, hy as i32 + 1, beak);
+            c.line(3.6, 6.6, 1.2, 5.2, 2, wing);
+            if up {
+                c.line(6.0, 5.6, 3.2, 2.8, 2, wing);
+            } else {
+                c.line(5.0, 6.0, 8.4, 6.6, 1, wing);
+            }
+        }
+    }
     c
 }
 

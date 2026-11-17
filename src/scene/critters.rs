@@ -1984,11 +1984,14 @@ impl Critters {
             PetKind::Dog => Sfx::Bark,
             PetKind::Cat => Sfx::Meow,
             PetKind::Bunny => Sfx::Rabbit,
+            PetKind::Reindeer => Sfx::Deer,
+            PetKind::Fox => Sfx::Fox,
+            PetKind::Bird => Sfx::Bird,
         }, px, 0.8);
         let i = match p.kind {
             PetKind::Dog => 0,
             PetKind::Cat => 1,
-            PetKind::Bunny => 2,
+            _ => 2,
         };
         let mut line = self.rng.pick(PET_FACTS[i]).replace("{n}", p.name);
         if kid {
@@ -3124,7 +3127,7 @@ impl Critters {
                 }
             }
             let pose = if t < p.happy_until { Pose::Up } else if p.walking { Pose::Walk } else { Pose::Sit };
-            pets::draw(f, p.kind, p.body, p.marks, mx(p.x) + 0.5, feet, p.dir, pose, t + c.id as f32, pk, Some(Rgb::hex(0xc8202a)));
+            pets::draw(f, p.kind, p.body, p.marks, mx(p.x) + 0.5, feet, p.dir, pose, t + c.id as f32, k, Some(Rgb::hex(0xc8202a)));
         }
     }
 

@@ -177,10 +177,18 @@ final class SettingsPanel {
     }
 
     private void showTab(int i) {
+        // (outside the game: only the phone's own page; the village's
+        // settings are in the game's menu)
+        if (!inGame) {
+            i = 4;
+        }
         tab = i;
         prefs.edit().putInt("settings_tab2", i).apply();
         tabBar.removeAllViews();
         for (int n = 0; n < TABS.length; n++) {
+            if (!inGame && n != 4) {
+                continue;
+            }
             final int which = n;
             TextView t = mono(TABS[n], 15, n == i ? GOLD : TEXT);
             t.setGravity(Gravity.CENTER);
@@ -447,6 +455,11 @@ final class SettingsPanel {
     // ------------------------------------------------------------ the save file
 
     private void pick(boolean export) {
+        pickSave(a, export);
+    }
+
+    /** A save to export to, or to import (the game's menu asks too). */
+    static void pickSave(Activity a, boolean export) {
         Intent i = new Intent(export ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType(export ? "application/toml" : "*/*");

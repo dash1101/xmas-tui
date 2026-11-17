@@ -31,6 +31,7 @@ pub mod sleigh;
 pub mod snow;
 pub mod sprites;
 pub mod tree;
+pub mod tv;
 pub mod village;
 
 use crate::audio::{AmbState, Sfx, SoundEvent};
@@ -148,6 +149,8 @@ pub struct Scene {
     balloon_star: bool,
     /// The villager's row last frame (falling onto the balloon: aboard).
     balloon_py: f32,
+    /// Jumped out of the balloon: not straight back in (until this time).
+    balloon_out_until: f32,
     /// The UI's own layer (its size in its cells, and how much bigger they
     /// are than the village's), when the front-end draws one: the scene's
     /// panels go there (see `draw_ui`), not over the village.
@@ -232,6 +235,13 @@ pub struct Scene {
     my_pet: Option<pets::MyPet>,
     pet_cfg: crate::config::PetCfg,
     pet_change: Option<crate::config::PetCfg>,
+    /// More pets coming along (each a step further behind), and their
+    /// config as last applied.
+    more_pets: Vec<pets::MyPet>,
+    more_pet_cfg: Vec<crate::config::PetCfg>,
+    /// Watching the television (indoors), and where the set's drawn.
+    tv: Option<tv::Tv>,
+    tv_at: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
     /// The villager's name (empty: "neighbour").
     you_name: String,
     /// The friends & family list as last set, and the friends in the
@@ -702,6 +712,7 @@ impl Scene {
             balloon_next: 900.0,
             balloon_star: false,
             balloon_py: 0.0,
+            balloon_out_until: 0.0,
             ui_wh: None,
             ui_k: 1.0,
             santa_clicks: vec![],
@@ -760,6 +771,10 @@ impl Scene {
             my_pet: None,
             pet_cfg: cfg.pet.clone(),
             pet_change: None,
+            more_pets: vec![],
+            more_pet_cfg: vec![],
+            tv: None,
+            tv_at: std::cell::Cell::new(None),
             you_name: cfg.name.clone(),
             friends: cfg.friends.clone(),
             friend_hi: vec![],
@@ -787,6 +802,7 @@ impl Scene {
             s.home = home;
             let py = s.player.as_ref().map(|p| p.y).unwrap_or(0.0);
             s.my_pet = pets::MyPet::new(&cfg.pet, px - 5.0, py);
+            s.set_more_pets(&cfg.pets);
         }
         // bubbles clear the heads of people drawn bigger
         s.director.lift = ((sprite_k(h) - 1.0) * 4.0).round() as i32;
@@ -877,7 +893,7 @@ impl Scene {
     }
 
     /// The right-click menu for screen cell (x, y): a title and what can be
-    /// done (the app adds "settings…").
+    /// done (the app adds "menu…").
     pub fn menu_at(&self, sx: i32, sy: i32) -> (String, Vec<(String, Do)>) {
         let (title, mut items) = self.menu_at_inner(sx, sy);
         // on a roof, a tree, the station, a lamp, a present, a widget…:
@@ -1228,6 +1244,35 @@ impl Scene {
         }
     }
 
+    /// The other pets (`set_pet`'s is the first): each comes along a step
+    /// further behind; one without a name is given one.
+    pub fn set_more_pets(&mut self, cfgs: &[crate::config::PetCfg]) {
+        if cfgs == self.more_pet_cfg.as_slice() {
+            return;
+        }
+        self.more_pet_cfg = cfgs.to_vec();
+        let (px, py) = self.player.as_ref().map(|p| (p.centre(), p.y)).unwrap_or((self.ww as f32 / 2.0, self.h as f32 - 4.0));
+        let mut old = std::mem::take(&mut self.more_pets).into_iter();
+        for (i, c) in cfgs.iter().enumerate() {
+            let mut c = c.clone();
+            if c.name.trim().is_empty() {
+                c.name = pets::NAMES[(i * 7 + c.kind.len() * 3 + 5) % pets::NAMES.len()].to_string();
+            }
+            match old.next() {
+                // (one already about keeps where it is)
+                Some(mut o) => {
+                    o.restyle(&c);
+                    self.more_pets.push(o);
+                }
+                None => {
+                    if let Some(p) = pets::MyPet::new(&c, px - 5.0 - 5.0 * (i + 1) as f32, py) {
+                        self.more_pets.push(p);
+                    }
+                }
+            }
+        }
+    }
+
     /// The pet was named / restyled in the village (for the app to save).
     pub fn take_pet_change(&mut self) -> Option<crate::config::PetCfg> {
         self.pet_change.take()
@@ -1268,10 +1313,20 @@ impl Scene {
                     Opt::new(&format!("a trick, {name}?"), Act::Pet(P::Trick)),
                     Opt::new("chase me!", Act::Pet(P::Zoomies)),
                 ],
-                pets::PetKind::Bunny => vec![
+                pets::PetKind::Bunny | pets::PetKind::Reindeer => vec![
                     Opt::new("roll a carrot", Act::Pet(P::Throw(3))),
                     Opt::new(&format!("{name}, do a trick!"), Act::Pet(P::Trick)),
                     Opt::new("a little race!", Act::Pet(P::Zoomies)),
+                ],
+                pets::PetKind::Fox => vec![
+                    Opt::new("throw the ball", Act::Pet(P::Throw(1))),
+                    Opt::new("dangle your scarf", Act::Pet(P::Tease)),
+                    Opt::new(&format!("{name}, do a trick!"), Act::Pet(P::Trick)),
+                    Opt::new("chase me!", Act::Pet(P::Zoomies)),
+                ],
+                pets::PetKind::Bird => vec![
+                    Opt::new(&format!("{name}, sing a song!"), Act::Pet(P::Trick)),
+                    Opt::new("follow me!", Act::Pet(P::Zoomies)),
                 ],
             };
             (format!("{name} looks up at you, all ears. what'll it be?"), v)
@@ -1286,7 +1341,7 @@ impl Scene {
             (format!("{name} tilts their head, listening"), v)
         } else if page == 1 {
             let mut v = vec![];
-            for (k, label) in ["a dog", "a cat", "a bunny"].iter().enumerate() {
+            for (k, label) in ["a dog", "a cat", "a bunny", "a reindeer", "a fox", "a bird"].iter().enumerate() {
                 if pets::PetKind::from_str(&label[2..]) != Some(pet.kind) {
                     v.push(Opt::new(&format!("make {name} {label}"), Act::Pet(P::Kind(k as u8))));
                 }
@@ -1299,6 +1354,9 @@ impl Scene {
                 pets::PetKind::Dog => "wags so hard the whole back end goes too",
                 pets::PetKind::Cat => "winds round your boots, purring",
                 pets::PetKind::Bunny => "does a happy little hop",
+                pets::PetKind::Reindeer => "prances on the spot, bells jingling",
+                pets::PetKind::Fox => "yips and pounces round your boots",
+                pets::PetKind::Bird => "flutters onto your shoulder, chirping",
             };
             let mut v = vec![
                 Opt::new(&format!("give {name} a fuss"), Act::Pet(P::Fuss)),
@@ -1361,6 +1419,9 @@ impl Scene {
             pets::PetKind::Dog => Sfx::Bark,
             pets::PetKind::Cat => Sfx::Meow,
             pets::PetKind::Bunny => Sfx::Pet,
+            pets::PetKind::Reindeer => Sfx::Deer,
+            pets::PetKind::Fox => Sfx::Fox,
+            pets::PetKind::Bird => Sfx::Bird,
         };
         let k = if self.inside.is_some() { 2.0 } else { sprite_k(self.h) };
         let you = self.player.as_ref().map(|p| (p.centre(), p.y, p.dir)).unwrap_or((pet.x, pet.y, 1.0));
@@ -1432,6 +1493,9 @@ impl Scene {
                     pets::PetKind::Dog => format!("{name} tears round and round you, ears flapping"),
                     pets::PetKind::Cat => format!("{name} gets the zoomies — and then sits down like nothing happened"),
                     pets::PetKind::Bunny => format!("{name} races you in a happy little loop. {name} wins"),
+                    pets::PetKind::Reindeer => format!("{name} gallops round you in a big jingling circle"),
+                    pets::PetKind::Fox => format!("{name} streaks round you, a flash of tail in the snow"),
+                    pets::PetKind::Bird => format!("{name} swoops round your head in a happy loop"),
                 };
                 self.pet_say(&line);
                 return;
@@ -1476,6 +1540,9 @@ impl Scene {
                     pets::PetKind::Dog => [format!("who's a good dog? {name} is. {name} absolutely is"), format!("{name} leans their whole weight on your legs. bliss"), format!("{name} rolls over for belly rubs. obviously")][pick].clone(),
                     pets::PetKind::Cat => [format!("{name} purrs like a little engine"), format!("{name} headbutts your hand. more, please"), format!("{name} allows exactly three strokes, then walks off. fair")][pick].clone(),
                     pets::PetKind::Bunny => [format!("{name}'s nose wiggles happily"), format!("{name} flattens out like a pancake, very content"), format!("{name} grinds their teeth softly — that's a bunny purr")][pick].clone(),
+                    pets::PetKind::Reindeer => [format!("{name} leans into the scratch behind their antlers"), format!("{name} snorts softly, eyes half shut"), format!("{name}'s ears go all floppy. bliss")][pick].clone(),
+                    pets::PetKind::Fox => [format!("{name} chitters and rolls over in the snow"), format!("{name} leans into your hand, tail swishing"), format!("{name}'s eyes go all squinty. a happy fox")][pick].clone(),
+                    pets::PetKind::Bird => [format!("{name} fluffs up under your fingertip"), format!("{name} trills a happy little song"), format!("{name} hops along your mitten, chirping")][pick].clone(),
                 };
                 say(self, &line);
             }
@@ -1500,7 +1567,7 @@ impl Scene {
             }
             P::Look => self.pet_menu(1),
             P::Kind(k) => {
-                let kind = [pets::PetKind::Dog, pets::PetKind::Cat, pets::PetKind::Bunny][k as usize % 3];
+                let kind = pets::KINDS[k as usize % pets::KINDS.len()];
                 let cfg = crate::config::PetCfg { kind: kind.name().into(), coat: kind.coats()[0].0.into(), name: pet.name.clone() };
                 pet.restyle(&cfg);
                 self.pet_changed();
@@ -1531,6 +1598,7 @@ impl Scene {
                 self.lean = 0.0;
                 self.convo = None;
             }
+            O::Tv => self.tv_next(),
             O::Gift(item) => {
                 self.pockets.add(item);
                 self.cheer(1);
@@ -1929,7 +1997,8 @@ impl Scene {
         if let Some(s) = &mut self.shop {
             s.open = false;
         }
-        let had = shop_open || self.show_pockets || self.show_stats || self.convo.is_some() || self.look.is_some();
+        let had = shop_open || self.show_pockets || self.show_stats || self.convo.is_some() || self.look.is_some() || self.tv.is_some();
+        self.tv_off();
         self.convo = None;
         self.look = None;
         self.show_pockets = false;
@@ -2608,8 +2677,14 @@ impl Scene {
             tr.jump(true);
             return;
         }
-        // (up in the balloon: no jumping out of the basket)
-        if self.balloon.as_ref().is_some_and(|b| b.aboard) {
+        // up in the balloon: out of the basket, whatever the height
+        if let (Some(b), Some(p)) = (self.balloon.as_mut().filter(|b| b.aboard), self.player.as_mut()) {
+            b.hop_off();
+            p.leap_out(t);
+            self.balloon_out_until = t + 2.0;
+            self.pockets.balloon += 1;
+            self.director.say(p.centre().round() as i32, p.y as i32 - 4, "wheee! thanks, balloon", t, 2.0, 8);
+            self.director.sound(Sfx::Pickup, p.centre(), 0.4);
             return;
         }
         if let Some(p) = &mut self.player {
@@ -2851,8 +2926,31 @@ impl Scene {
         }
     }
 
+    /// The television: on (the first channel), the next, or off after
+    /// the last.
+    fn tv_next(&mut self) {
+        let t = self.now();
+        self.tv = match self.tv {
+            None => Some(tv::Tv { channel: 0, since: t }),
+            Some(v) => v.next(t),
+        };
+        self.convo = None;
+        if let Some(inn) = &mut self.inside {
+            inn.tv_channel = self.tv.map(|v| v.channel);
+        }
+    }
+
+    /// The television off.
+    fn tv_off(&mut self) {
+        self.tv = None;
+        if let Some(inn) = &mut self.inside {
+            inn.tv_channel = None;
+        }
+    }
+
     /// Back out into the snow, on the doorstep.
     pub fn leave(&mut self) {
+        self.tv = None;
         self.look = None;
         self.convo = None;
         let Some(inn) = self.inside.take() else { return };
@@ -2917,6 +3015,15 @@ impl Scene {
         // the cocoa cabin, outside
         if what == "cabin" {
             return self.preview_cabin_outside();
+        }
+        // at home, the television on ("tv", or "tv3": that channel)
+        if let Some(c) = what.strip_prefix("tv") {
+            let Some(home) = self.home else { return };
+            self.enter(home);
+            for _ in 0..=c.parse::<u8>().unwrap_or(0) {
+                self.tv_next();
+            }
+            return;
         }
         // or: at the table in someone's home for a game
         if let Some(&k) = games::Kind::ALL.iter().find(|k| k.name().to_lowercase().replace('-', "") == what) {
@@ -3190,6 +3297,9 @@ impl Scene {
         if let Some(pet) = self.my_pet.as_mut().filter(|pet| !pet.staying) {
             (pet.x, pet.y) = (ex + 9.0, ey + 1.0);
         }
+        for (i, more) in self.more_pets.iter_mut().enumerate() {
+            (more.x, more.y) = (ex + 9.0 + 5.0 * (i + 1) as f32, ey + 1.0);
+        }
         self.goal = None;
         self.director.sound(Sfx::Chime, door.0, 0.6);
         if let Some((hx, hy)) = inn.keeper_head() {
@@ -3236,7 +3346,7 @@ impl Scene {
         if what >= 4 {
             let toy = match self.my_pet.as_ref().map(|p| p.kind) {
                 Some(pets::PetKind::Cat) => 0,
-                Some(pets::PetKind::Bunny) => 3,
+                Some(pets::PetKind::Bunny | pets::PetKind::Reindeer) => 3,
                 _ => 1,
             };
             self.pet_act(if what == 4 { story::PetAct::Throw(toy) } else { story::PetAct::Trick });
@@ -3744,6 +3854,15 @@ impl Scene {
                 return;
             }
         }
+        // watching television: a tap on the set, the next channel; anywhere
+        // else, it's off
+        if self.inside.is_some() && self.tv.is_some() {
+            match self.tv_at.get() {
+                Some((tx, ty, tw, th)) if x >= tx && x < tx + tw && y >= ty && y < ty + th => self.tv_next(),
+                _ => self.tv_off(),
+            }
+            return;
+        }
         if let (Some(inn), Some(p)) = (self.inside.as_mut(), self.player.as_mut()) {
             if self.my_pet.as_ref().is_some_and(|pet| (!pet.staying || inn.home) && pet.hit(x, y, 2.0)) {
                 self.pet_menu(0);
@@ -3772,6 +3891,16 @@ impl Scene {
                 pet.happy_until = t + 1.5;
             }
             self.pet_menu(0);
+            return;
+        }
+        // one of the other pets: a fuss, and it's delighted
+        let (k, t) = (sprite_k(self.h), self.now());
+        if let Some(pet) = self.more_pets.iter_mut().find(|pet| pet.hit(x, y, k)) {
+            pet.wake(t);
+            pet.happy_until = t + 2.5;
+            pet.voice(pets::Voice::Purr, t);
+            let (px, py) = (pet.x, pet.y);
+            self.director.emote(px, py - 2.0 * k, '♥', Rgb::hex(0xff6b8a), 2);
             return;
         }
         if let Some(owner) = self.critters.pet_at(x, y) {
@@ -3971,6 +4100,10 @@ impl Scene {
         };
         let before = self.player.as_ref().map(|p| (p.x, p.y));
         let mut walked_out = false;
+        // watching television: a step away turns it off
+        if self.tv.is_some() && (mv.0 != 0.0 || mv.1 != 0.0) {
+            self.tv_off();
+        }
         // looking out of a window: A/D lean to see along the street, W/S
         // step back
         let mv = if self.look.is_some() {
@@ -4197,6 +4330,26 @@ impl Scene {
                 _ => {}
             }
         }
+        // the other pets keep up too, each a step further behind
+        if let Some(p) = self.player.as_ref() {
+            for (i, pet) in self.more_pets.iter_mut().enumerate() {
+                let back = -p.dir * 5.0 * (i + 1) as f32;
+                match &self.inside {
+                    None => {
+                        let g = &self.ctx.ground_row;
+                        let lo = (g[(p.centre().max(0.0) as usize).min(g.len() - 1)] + 4).min(self.h as i32 - 2) as f32;
+                        let py = if p.aloft() { lo } else { p.y };
+                        let k = sprite_k(self.h);
+                        pet.update(dt, t, p.centre() + back * k, py, p.dir, p.moving, lo, self.h as f32 - 1.0, k);
+                    }
+                    Some(inn) if inn.is_climbing() => (pet.x, pet.y) = (p.centre() + 6.0 * -p.dir + back, p.y),
+                    Some(inn) => {
+                        let (lo, hi) = inn.walk_rows();
+                        pet.update(dt, t, p.centre() + back * 2.0, p.y, p.dir, p.moving, lo, hi, 2.0);
+                    }
+                }
+            }
+        }
         // what's in hand (gone once it runs out)
         let held = match self.held {
             Some(Held::Berries) if self.player.as_ref().is_some_and(|p| p.berries == 0) => None,
@@ -4211,8 +4364,8 @@ impl Scene {
                 _ => None,
             };
         }
-        // what the pet got up to: hearts, lines, barks
-        if let Some(pet) = &mut self.my_pet {
+        // what the pets got up to: hearts, lines, barks
+        for pet in self.my_pet.iter_mut().chain(self.more_pets.iter_mut()) {
             for ev in pet.take_events() {
                 let d = match self.inside.as_mut() {
                     Some(inn) => &mut inn.director,
@@ -4820,15 +4973,18 @@ impl Scene {
         self.draw_others(f, t, Some(v));
         if let (Some(p), None) = (&self.player, &self.inside) {
             let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
+            for more in &self.more_pets {
+                more.draw(f, t, sprite_k(self.h) * v.z, Some(v));
+            }
             // (in the villager's arms: drawn in front of them)
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
-                pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
+                pet.draw(f, t, sprite_k(self.h) * v.z, Some(v));
             }
             if !self.in_igloo {
                 p.draw(f, t, glow, Some(v));
             }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
-                pet.draw(f, t, critters::pet_scale(sprite_k(self.h) * v.z), Some(v));
+                pet.draw(f, t, sprite_k(self.h) * v.z, Some(v));
             }
         }
         f.day = 0.0;
@@ -4849,6 +5005,9 @@ impl Scene {
         }
         if let (Some(inn), Some(look)) = (&self.inside, &self.look) {
             inn.draw_window_frame(f, look, t, self.cfg.glow);
+        }
+        if let (Some(_), Some(v)) = (&self.inside, &self.tv) {
+            self.tv_at.set(Some(tv::draw(f, v, t, self.ui_look)));
         }
         if self.ui_wh.is_none() {
             self.draw_ui(f);
@@ -4923,7 +5082,12 @@ impl Scene {
             f.ox = 0;
             f.oy = 0;
             if let Some(pet) = self.my_pet.as_ref().filter(|pet| (!pet.staying || inn.home) && !inn.is_climbing()) {
-                pet.draw(f, t, 2, None);
+                pet.draw(f, t, 2.0, None);
+            }
+            if !inn.is_climbing() {
+                for more in &self.more_pets {
+                    more.draw(f, t, 2.0, None);
+                }
             }
             return;
         }
@@ -5023,8 +5187,11 @@ impl Scene {
         }
         if let (Some(p), None, true) = (&self.player, &self.inside, people) {
             let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
+            for more in &self.more_pets {
+                more.draw(f, t, sprite_k(self.h), None);
+            }
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
-                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
+                pet.draw(f, t, sprite_k(self.h), None);
             }
             if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
                 b.draw_back(f, t, sprite_k(self.h));
@@ -5033,7 +5200,7 @@ impl Scene {
                 p.draw(f, t, glow, None);
             }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
-                pet.draw(f, t, critters::pet_scale(sprite_k(self.h)), None);
+                pet.draw(f, t, sprite_k(self.h), None);
             }
             if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
                 b.draw_front(f, sprite_k(self.h));
@@ -5858,6 +6025,21 @@ mod tests {
             }
         }
         assert!(aboard, "fell past it");
+        // Space, high up: out of the basket and down to the snow, not
+        // straight back in
+        s.jump();
+        assert!(!s.balloon.as_ref().is_some_and(|b| b.aboard), "jumped out");
+        let mut down = false;
+        for _ in 0..400 {
+            s.update(DT, 0.0);
+            assert!(!s.balloon.as_ref().is_some_and(|b| b.aboard), "not back in");
+            if s.player.as_ref().is_some_and(|p| !p.in_air()) {
+                down = true;
+                break;
+            }
+        }
+        assert!(down, "landed");
+        assert!(s.player.as_ref().unwrap().y > by, "below where the basket was");
         // a jump up past one isn't a landing
         let mut s = scene();
         let (px, py) = s.player.as_ref().map(|p| (p.centre(), p.y)).unwrap();
@@ -6295,6 +6477,39 @@ mod tests {
         let p = s.player.as_ref().unwrap();
         assert_eq!(p.perch, Some(i), "landed on the tree");
         assert!((p.y - f).abs() < 0.01 && p.dizzy_until <= s.now(), "softly, on top");
+    }
+
+    /// The parlour's television: on, through its channels, off after the
+    /// last; and a step away turns it off.
+    #[test]
+    fn the_parlour_television_goes_through_its_channels() {
+        let mut s = scene();
+        let home = s.home.expect("a home");
+        s.enter(home);
+        let t = s.now();
+        let poke = |s: &mut Scene| {
+            let (inn, p) = (s.inside.as_mut().unwrap(), s.player.as_mut().unwrap());
+            let o = inn.poke(interior::Thing::Tv, p, t);
+            assert_eq!(o, interior::Outcome::Tv);
+            s.indoors(o);
+        };
+        poke(&mut s);
+        assert_eq!(s.tv.map(|v| v.channel), Some(0), "on");
+        assert_eq!(s.inside.as_ref().unwrap().tv_channel, Some(0), "its screen lit");
+        for c in 1..tv::CHANNELS.len() as u8 {
+            poke(&mut s);
+            assert_eq!(s.tv.map(|v| v.channel), Some(c));
+        }
+        poke(&mut s);
+        assert!(s.tv.is_none(), "off after the last");
+        // on again, then a step away
+        poke(&mut s);
+        let mut f = crate::frame::Frame::new(s.w, s.h);
+        s.draw_overlay(&mut f);
+        assert!(s.tv_at.get().is_some(), "the set drawn over the room");
+        s.set_move(1.0, 0.0);
+        s.update(DT, 0.0);
+        assert!(s.tv.is_none(), "off once walked away");
     }
 
     #[test]

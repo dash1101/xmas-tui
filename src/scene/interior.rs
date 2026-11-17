@@ -73,6 +73,8 @@ pub enum Thing {
     Doorway(bool),
     /// The cocoa cabin's counter (and the gifts behind it): the shop.
     Counter,
+    /// The television: on, and through its channels.
+    Tv,
 }
 
 /// What poking at something leads to (for the scene to act on).
@@ -95,6 +97,8 @@ pub enum Outcome {
     Cheer(u32),
     /// At the cocoa cabin's counter: the shop's open.
     Shop,
+    /// The television: on (or the next channel).
+    Tv,
 }
 
 /// A view out of a window: how far along the village it looks (screens,
@@ -405,6 +409,10 @@ pub struct Interior {
     /// Where the player stood outside (world column, row), to step back out.
     pub outside: (f32, f32),
     music_until: f32,
+    /// The television's screen (pixel rect), where there's one, and the
+    /// channel it's on (it glows with it).
+    tv_screen: Option<(i32, i32, i32, i32)>,
+    pub tv_channel: Option<u8>,
     nap_until: f32,
     greeted: bool,
     /// The villager is sitting in this seat.
@@ -553,6 +561,8 @@ impl Interior {
             rng,
             outside,
             music_until: 0.0,
+            tv_screen: None,
+            tv_channel: None,
             nap_until: 0.0,
             greeted: false,
             you_sit: None,
@@ -851,6 +861,7 @@ impl Interior {
     // ---------------------------------------------------------------- build
 
     fn build(&mut self) {
+        self.tv_screen = None;
         self.room = Layer::new(self.w.max(1) as usize, (self.h * 2).max(1) as usize);
         self.things.clear();
         self.windows.clear();
@@ -2244,6 +2255,43 @@ impl Interior {
         self.things.push((if radio { Thing::Radio } else { Thing::Gramophone }, gx, (ty - 12) / 2));
     }
 
+    /// A television on a low wooden cabinet, its screen dark (it lights
+    /// up when it's on: see `draw_room`).
+    fn tv_set(&mut self, cx: i32) {
+        let floor = self.floor;
+        let l = &mut self.room;
+        // the cabinet, with its two little doors
+        for y in floor - 6..floor + 1 {
+            for x in cx - 9..cx + 10 {
+                let door = (x == cx - 1 || x == cx) && y > floor - 6;
+                l.set(x, y, if door { Rgb::hex(0x3a2214) } else { Rgb::hex(0x6a3e22) * (0.9 + 0.1 * ((x + y) % 2) as f32) });
+            }
+        }
+        for x in cx - 10..cx + 11 {
+            l.set(x, floor - 7, Rgb::hex(0x7a4a2a));
+        }
+        // the set: a wooden box, a dark screen, a knob, an aerial
+        let top = floor - 21;
+        for y in top..floor - 7 {
+            for x in cx - 8..cx + 9 {
+                l.set(x, y, Rgb::hex(0x4a2a18));
+            }
+        }
+        for y in top + 2..floor - 9 {
+            for x in cx - 6..cx + 4 {
+                l.set(x, y, Rgb::hex(0x10141c));
+            }
+        }
+        l.set(cx + 6, top + 4, Rgb::hex(0xc8a040));
+        l.set(cx + 6, top + 7, Rgb::hex(0xc8a040));
+        for k in 0..5 {
+            l.set(cx - 3 - k, top - 1 - k, Rgb::hex(0x8a8a94));
+            l.set(cx + 1 + k, top - 1 - k, Rgb::hex(0x8a8a94));
+        }
+        self.tv_screen = Some((cx - 6, top + 2, 10, floor - 9 - (top + 2)));
+        self.things.push((Thing::Tv, cx, (top - 2) / 2));
+    }
+
     fn telescope(&mut self, tx: i32, top: i32) {
         let floor = self.floor;
         let l = &mut self.room;
@@ -2286,6 +2334,7 @@ impl Interior {
             self.rug(fx(0.38), 30.0);
             self.couch(fx(0.56));
             self.photo(fx(0.47), wtop, 0x3a5a7a);
+            self.tv_set(fx(0.485));
             self.the_tree(fx(0.70));
             self.stairs_up();
             self.things.push((Thing::Doorway(true), w - 6, floor / 2 - 12));
@@ -3202,13 +3251,13 @@ impl Interior {
                         match pet.kind {
                             PetKind::Dog => Sfx::Bark,
                             PetKind::Cat => Sfx::Meow,
-                            PetKind::Bunny => Sfx::Pet,
+                            _ => Sfx::Pet,
                         },
                         pet.x,
                         0.7,
                     );
                     // the dog gets a ball thrown; the cat chases a bit of string
-                    if pet.kind != PetKind::Bunny && self.rng.chance(0.6) {
+                    if matches!(pet.kind, PetKind::Dog | PetKind::Cat) && self.rng.chance(0.6) {
                         let dir = if pet.x > self.w as f32 / 2.0 { -1.0 } else { 1.0 };
                         pet.ball = Some((pet.x, dir * 40.0));
                         d.say(px, py, if pet.kind == PetKind::Dog { "fetch, {n}!" } else { "get the string, {n}!" }.replace("{n}", &pet.name).as_str(), t, 2.0, 40);
@@ -3216,7 +3265,7 @@ impl Interior {
                         let line = match pet.kind {
                             PetKind::Dog => "good dog! yes you are!",
                             PetKind::Cat => "prrrrr…",
-                            PetKind::Bunny => "*soft bunny nose*",
+                            _ => "*soft little nose*",
                         };
                         d.say(px, py, line, t, 2.0, 40);
                     }
@@ -3283,6 +3332,10 @@ impl Interior {
             Thing::Candles => {
                 d.sound(Sfx::Chime, px as f32, 0.5);
                 say(d, &mut self.rng, CANDLES);
+            }
+            Thing::Tv => {
+                d.sound(Sfx::Click, px as f32, 0.6);
+                return Outcome::Tv;
             }
             Thing::Oven => {
                 if self.cookies_ready {
@@ -3371,6 +3424,18 @@ impl Interior {
     fn draw_room(&self, f: &mut Frame, t: f32, glow: f32, you: Option<(&Player, Option<(i32, i32)>)>) {
         f.ox = 0;
         self.room.composite_from(f, 0);
+        // the television, on: the channel's colours flickering on its
+        // screen, and a glow on the room
+        if let (Some((x0, y0, w, h)), Some(c)) = (self.tv_screen, self.tv_channel) {
+            let base = [Rgb::hex(0x3a5aa0), Rgb::hex(0x2f7a4a), Rgb::hex(0xc87a6a), Rgb::hex(0x8a6aaa), Rgb::hex(0xbfe0ff), Rgb::hex(0xff8a3a)][c as usize % 6];
+            for y in y0..y0 + h {
+                for x in x0..x0 + w {
+                    let n = noise1(x as f32 * 0.4 + t * 3.0, (y * 7) as u32 + c as u32);
+                    f.px_set(x, y, base * (0.5 + 0.7 * n));
+                }
+            }
+            f.light_px((x0 + w / 2) as f32, (y0 + h / 2) as f32, base * (1.4 * glow));
+        }
         // snow falling past the windows (and a deep night sky)
         for (i, &((x0, y0, ww, wh), look)) in self.windows.iter().enumerate() {
             let round = matches!(look.hole, Hole::Round(..));
@@ -3522,7 +3587,7 @@ impl Interior {
             if !pet.hiding {
                 let pose = if t < pet.happy_until { Pose::Up } else { pet.pose };
                 let dir = if (pet.target - pet.x).abs() > 1.0 { (pet.target - pet.x).signum() } else { 1.0 };
-                pets::draw(f, pet.kind, pet.body, pet.marks, pet.x, pet.feet * 2 + 1, dir, pose, t, 2, Some(Rgb::hex(0xc8202a)));
+                pets::draw(f, pet.kind, pet.body, pet.marks, pet.x, pet.feet * 2 + 1, dir, pose, t, 2.0, Some(Rgb::hex(0xc8202a)));
                 if let Some((bx, _)) = pet.ball {
                     f.px_disc(bx, (pet.feet * 2 - 1) as f32, 1.4, if pet.kind == PetKind::Dog { Rgb::hex(0xc8e040) } else { Rgb::hex(0xc8202a) }, 1.0);
                 }

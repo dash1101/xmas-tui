@@ -28,7 +28,60 @@ final class Prefs {
      * beside the app's other files. On the wallpaper the villager's always
      * on autopilot, and it's quiet.
      */
+    /** The settings the game's menu keeps (the desktop's own config), once it has. */
+    static java.io.File configFile(Context c) {
+        return new java.io.File(c.getFilesDir(), "config.toml");
+    }
+
+    /** The game's menu changed the settings: kept for the game and the wallpaper. */
+    static void putConfig(Context c, String toml) {
+        java.io.File f = configFile(c), tmp = new java.io.File(c.getFilesDir(), "config.toml.tmp");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+            out.write(toml.getBytes("UTF-8"));
+        } catch (Exception e) {
+            return;
+        }
+        tmp.renameTo(f);
+    }
+
+    static String readConfig(Context c) {
+        java.io.File f = configFile(c);
+        if (!f.exists()) return null;
+        try {
+            byte[] b = new byte[(int) f.length()];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                int n = 0;
+                while (n < b.length) {
+                    int r = in.read(b, n, b.length - n);
+                    if (r < 0) break;
+                    n += r;
+                }
+            }
+            return new String(b, "UTF-8");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The settings for the game (`wallpaper`: for the live wallpaper: on autopilot, quiet). */
     static String toml(Context c, boolean wallpaper) {
+        String kept = readConfig(c);
+        if (kept != null) {
+            if (!wallpaper) return kept;
+            // the villager off on autopilot, no sound
+            String s = kept.replaceFirst("(?m)^autopilot = (true|false)$", "autopilot = true");
+            int snd = s.indexOf("\n[sound]");
+            if (snd >= 0) {
+                String head = s.substring(0, snd), tail = s.substring(snd);
+                s = head + tail.replaceFirst("(?m)^enabled = (true|false)$", "enabled = false");
+            }
+            return s;
+        }
+        return fromPrefs(c, wallpaper);
+    }
+
+    /** The settings from the phone's own preferences (before the game's menu kept its own). */
+    static String fromPrefs(Context c, boolean wallpaper) {
         SharedPreferences p = get(c);
         String time = p.getString("time", "auto");
         if (time.equals("day")) {
@@ -87,7 +140,7 @@ final class Prefs {
         }
         s.append("[ui]\n");
         s.append("look = ").append(q(p.getString("look", "classic"))).append('\n');
-        s.append("scale = ").append(Math.max(100, Math.min(250, p.getInt("ui_scale", 140))) / 100f).append('\n');
+        s.append("scale = ").append(Math.max(100, Math.min(250, Math.round(p.getInt("ui_scale", 140) / 1.4f))) / 100f).append('\n');
         s.append("[sound]\n");
         s.append("enabled = ").append(!wallpaper && p.getBoolean("game_sound", true)).append('\n');
         s.append("master = ").append(p.getInt("vol_master", 50) / 100f).append('\n');
