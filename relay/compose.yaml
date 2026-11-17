@@ -1,0 +1,33 @@
+# The relay behind a Cloudflare Tunnel. Neither port is published on the
+# host: the tunnel (cloudflared, on the same Docker network) reaches them.
+#   xmas-relay.<domain>  → http://xmas-relay:8080   (public: the game's WebSocket at /mqtt)
+#   xmas-admin.<domain>  → http://xmas-relay:8081   (behind a Cloudflare Access app: the admin only)
+services:
+  xmas-relay:
+    build: .
+    image: xmas-relay:latest
+    container_name: xmas-relay
+    restart: unless-stopped
+    environment:
+      # the admin's Cloudflare Access address: the console answers only them
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      TRUST_CF: "1"
+    volumes:
+      - xmas-relay-data:/data
+    networks:
+      - tunnel
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 2
+
+volumes:
+  xmas-relay-data:
+
+networks:
+  # the network cloudflared is on (make it external if the tunnel runs in
+  # another compose project: `external: true` and its name)
+  tunnel:
+    name: tunnel
+    external: true
