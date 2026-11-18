@@ -309,6 +309,17 @@ pub extern "C" fn set_keyboard(w: *mut Web, px: f32) {
     unsafe { &mut *w }.game.set_keyboard(px);
 }
 
+/// The page was opened by a link to another device (its code, in the
+/// scratch buffer): asked whether to link this one.
+#[no_mangle]
+pub extern "C" fn link_offer(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    unsafe { &mut *w }.game.link_offer(&String::from_utf8_lossy(&bytes));
+}
+
 /// Randomness from the page (its crypto), for codes and sealing.
 #[no_mangle]
 pub extern "C" fn entropy(a: u32, b: u32, c: u32, d: u32) {

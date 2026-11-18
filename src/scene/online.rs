@@ -449,6 +449,10 @@ pub struct Social {
     pub invited: Vec<(String, String)>,
     /// The card on show (whose; the friend code, for this villager's own).
     pub card: Option<(Card, Option<String>)>,
+    /// Linking another device: the card with the link code (see
+    /// `linkcard`), and where it was drawn.
+    pub link_card: Option<String>,
+    pub(super) link_at: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
     /// Carols being sung by someone here (their id, until).
     pub carols: Vec<(u32, f32, f32)>,
     /// Linked devices' sides of the villager, for the front end.
@@ -646,6 +650,13 @@ impl Scene {
         if self.post.len() > 6 {
             self.post.remove(0);
         }
+    }
+
+    #[allow(dead_code)]
+    /// Something for the front end to do, from the front end itself (a
+    /// link offered and said yes to).
+    pub fn queue_front(&mut self, f: Front) {
+        self.social.front.push(f);
     }
 
     /// A line in the post from the front end.
@@ -1827,7 +1838,7 @@ impl Scene {
     }
 
     pub fn close_card(&mut self) -> bool {
-        self.social.card.take().is_some()
+        self.social.link_card.take().is_some() | self.social.card.take().is_some()
     }
 
     /// Someone here under (x, y) (world cells): their id.
@@ -2047,6 +2058,7 @@ impl Scene {
         }
         self.draw_social(f);
         self.draw_chats(f);
+        self.draw_link_card(f);
         // what's being said (at a table, on a trip too), and the line typed,
         // over all of it
         self.social.chat_box.set(None);
@@ -2779,16 +2791,16 @@ impl Scene {
                 self.social.front.push(Front::Motto(m));
                 self.post("★ your card's line is set");
             }
-            TextFor::Link => {
-                if crate::net::seal::norm(text).len() != 12 {
-                    self.post("a link code is twelve letters and numbers");
-                } else {
+            TextFor::Link => match super::linkcard::code_in(text) {
+                // (the code, or the address with it in, pasted)
+                None => self.post("a link code is twelve letters and numbers (or paste the whole address)"),
+                Some(code) => {
                     if !self.online.wanted() {
                         self.online.go_online(true);
                     }
-                    self.social.front.push(Front::Link(text.to_string()));
+                    self.social.front.push(Front::Link(code));
                 }
-            }
+            },
             TextFor::NewVillager => self.social.front.push(Front::NewVillager(text.chars().take(24).collect())),
             TextFor::Chat => self.chat(text, t),
             TextFor::GroupNew => {

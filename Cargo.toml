@@ -1,6 +1,6 @@
 [package]
 name = "xmas-tui"
-version = "1.26.1"
+version = "1.26.2"
 edition = "2021"
 description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
 license-file = "LICENSE"
@@ -23,6 +23,8 @@ png = "0.17"
 jpeg-decoder = { version = "0.3", default-features = false }
 winit = "0.30"
 softbuffer = "0.4"
+# (a device's link drawn as a QR code: another device's camera opens it)
+qrcodegen = "1.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

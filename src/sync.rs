@@ -12,7 +12,7 @@
 //! up across the devices, whatever order things happen in (and both being
 //! played at once); for the villager, the newest change wins.
 
-use crate::net::{Book, Pal};
+use crate::net::{Book, ChatLine, Group, Pal};
 use crate::save::You;
 use crate::scene::shop::Pockets;
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,10 @@ struct State {
     asking: Vec<Pal>,
     gone: Vec<String>,
     mine: String,
+    /// The chats with friends (the latest lines of each, the most lately
+    /// talked to first, as many as fit), and the groups.
+    chats: BTreeMap<String, Vec<ChatLine>>,
+    groups: Vec<Group>,
     /// Running, and the village open here (its code); a beat that changes
     /// every couple of minutes, so the others hear this one's still about.
     live: bool,
@@ -289,6 +293,8 @@ impl Linked {
             asking: book.asking.clone(),
             gone: self.gone.clone(),
             mine: serde_json::to_string(&share(pockets, &self.others)).unwrap_or_default(),
+            chats: chats_to_send(book),
+            groups: book.groups.clone(),
             live: self.live,
             open: self.open.clone(),
             beat: now / 120,
@@ -386,6 +392,21 @@ impl Linked {
             }
         }
         b.asking.retain(|p| !b.friends.iter().any(|q| norm(&q.code) == norm(&p.code)));
+        // chats: every line either has, once, in order
+        for (code, lines) in &st.chats {
+            let code = norm(code);
+            if code.len() != 12 || gone.contains(&code) {
+                continue;
+            }
+            let mine = b.chats.entry(code).or_default();
+            merge_chat(mine, lines);
+        }
+        // groups: any either's in
+        for g in &st.groups {
+            if norm(&g.code).len() == 12 && !b.groups.iter().any(|h| norm(&h.code) == norm(&g.code)) && b.groups.len() < 30 {
+                b.groups.push(Group { name: crate::net::clean(&g.name, 32), code: norm(&g.code) });
+            }
+        }
         if &b != book {
             out.book = Some(b);
         }
@@ -404,6 +425,47 @@ impl Linked {
     }
 }
 
+/// The chats to send the other devices: each friend's latest lines (20 at
+/// most), the most lately talked to first, while they fit (some 32 KB: the
+/// relay takes what's kept on it in small pieces).
+fn chats_to_send(book: &Book) -> BTreeMap<String, Vec<ChatLine>> {
+    let mut by_latest: Vec<(&String, &Vec<ChatLine>)> = book.chats.iter().filter(|(_, v)| !v.is_empty()).collect();
+    by_latest.sort_by_key(|(_, v)| std::cmp::Reverse(v.last().map(|l| l.at).unwrap_or(0)));
+    let mut out = BTreeMap::new();
+    let mut size = 0;
+    for (code, lines) in by_latest {
+        let keep: Vec<ChatLine> = lines.iter().rev().take(20).rev().cloned().collect();
+        size += keep.iter().map(|l| l.text.len() + l.invite.len() + 40).sum::<usize>();
+        if size > 32 * 1024 {
+            break;
+        }
+        out.insert(code.clone(), keep);
+    }
+    out
+}
+
+/// Another device's lines of a chat taken in: each line once (the same
+/// time, side and words: the same line), in order, the latest kept.
+fn merge_chat(mine: &mut Vec<ChatLine>, theirs: &[ChatLine]) {
+    for l in theirs.iter().take(60) {
+        let text = crate::net::clean(&l.text, 300);
+        match mine.iter_mut().find(|m| m.at == l.at && m.mine == l.mine && m.text == text) {
+            // (got there, as either side knows it)
+            Some(m) => {
+                if l.state == crate::net::sent::THERE && m.state != crate::net::sent::THERE {
+                    m.state = crate::net::sent::THERE;
+                }
+            }
+            None => mine.push(ChatLine { text, invite: crate::net::seal::norm(&l.invite), ..l.clone() }),
+        }
+    }
+    mine.sort_by_key(|l| l.at);
+    if mine.len() > crate::net::CHAT_KEPT {
+        let extra = mine.len() - crate::net::CHAT_KEPT;
+        mine.drain(..extra);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +476,37 @@ mod tests {
 
     /// Two devices open at once: the first in line opens its village, the
     /// other goes in; one closed (or quiet a while) is left alone.
+    #[test]
+    fn chats_groups_and_the_friend_code_come_across() {
+        let pk = Pockets::default();
+        let mut desk = Linked::new("ABCD-EFGH-JKLM", false);
+        let mut phone = Linked::new("ABCD-EFGH-JKLM", true);
+        (desk.dev, phone.dev) = ("desk".into(), "phone".into());
+        let sam = "SAMSAMSAMSAM".to_string();
+        let line = |at: i64, mine: bool, t: &str| ChatLine { at, mine, text: t.into(), ..Default::default() };
+        let mut bd = Book { code: "DESKDESKDESK".into(), ..Default::default() };
+        bd.friends.push(Pal { name: "Sam".into(), code: sam.clone(), ..Default::default() });
+        bd.chats.insert(sam.clone(), vec![line(10, false, "snowball fight?"), line(12, true, "you're on")]);
+        bd.groups.push(Group { name: "carols".into(), code: "CAROLCAROLCA".into() });
+        let bp = Book { code: "PHONEPHONEPH".into(), ..Default::default() };
+        let now = 1_000;
+        // the phone joins: the desk's friend code, friends, chats, groups
+        let sd = desk.state(&you("Robin"), 5, &pk, &bd, now);
+        let got = phone.take("desk", now, &sd, now, &you("x"), 9, &pk, &bp).book.expect("the book");
+        assert_eq!(got.code, bd.code);
+        assert_eq!(got.friends.len(), 1);
+        assert_eq!(got.chats[&sam].iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), vec!["snowball fight?", "you're on"]);
+        assert_eq!(got.groups.len(), 1);
+        // a line written on the phone comes back to the desk, once; the
+        // desk's own lines aren't doubled
+        let mut bp = got;
+        bp.chats.get_mut(&sam).unwrap().push(line(20, true, "see you at the tree"));
+        let sp = phone.state(&you("Robin"), 5, &pk, &bp, now + 5);
+        let back = desk.take("phone", now + 5, &sp, now + 5, &you("Robin"), 5, &pk, &bd).book.expect("the book");
+        let texts: Vec<&str> = back.chats[&sam].iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["snowball fight?", "you're on", "see you at the tree"]);
+    }
+
     #[test]
     fn two_devices_open_at_once_share_a_village() {
         let (book, pk) = (Book::default(), Pockets::default());

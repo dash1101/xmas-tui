@@ -110,6 +110,14 @@ function build() {
   // a look at something (?preview=chats), once the village has settled
   const pv = new URLSearchParams(location.search).get("preview");
   if (pv && /^[a-z0-9-]{1,24}$/.test(pv)) setTimeout(() => game && wasm.preview(game, putText(pv)), 3000);
+  // opened by another device's link (its QR code scanned, its address
+  // followed): the village asks whether to link this one (and the code's
+  // taken out of the address, so a reload doesn't ask again)
+  const lk = /^#link=([0-9A-Za-z-]{12,20})$/.exec(location.hash);
+  if (lk) {
+    history.replaceState(null, "", location.pathname + location.search);
+    setTimeout(() => { if (game) { wasm.link_offer(game, putText(lk[1])); asked(getText(wasm.ask(game))); } }, 1500);
+  }
 }
 
 // other villagers kept in this browser: their saves and settings

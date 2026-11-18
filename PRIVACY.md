@@ -68,7 +68,7 @@ Everything goes through the relay sealed with ChaCha20-Poly1305. The key comes f
 | Where the villager is and what they're doing (walking, jumping, paused, their pets, up in a balloon, on the moon), what's said aloud, waves, games, snowballs, shooting stars, and the host's village settings, clock, music and sky (when the sleigh, a balloon, a comet or the aurora comes; from 1.26.0) | In a shared village | Everyone in that village (those with its code) |
 | "Just to …" messages inside a village | When written | Meant for one person, but sealed with the village's code: a modified app in the same village could read them |
 | Public squares, and villages listed in Public villages: everything above that happens in them, the listing itself (for example "Robin's village · 3 of 8 here") | While in one, or while listed | **Anyone.** Their codes are public by design. |
-| A villager's progress, name, look, pet, family, and the device's name (for example "dash-pc") | With linked devices | Only the linked devices (those with the link code) |
+| A villager's progress, name, look, pet, family, friend code and friends, and the device's name (for example "dash-pc"); from 1.26.2 also the latest lines of each chat and the groups | With linked devices | Only the linked devices (those with the link code) |
 
 Names are whatever the player types in. A first name or a nickname is plenty, and a full name isn't needed anywhere.
 

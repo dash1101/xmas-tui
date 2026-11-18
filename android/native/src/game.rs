@@ -161,6 +161,8 @@ pub struct Game {
     /// A line being typed in the village, as the app's keyboard was last
     /// told it (which line, how many changes in): see `typing_asks`.
     kb: Option<(u32, u32)>,
+    /// A link code this was opened with, waiting on a yes (see `link_offer`).
+    link_offer: Option<String>,
     /// The villager's own village (the scene may be a friend's).
     own_seed: u32,
     /// Online at all here (not on the wallpaper).
@@ -232,6 +234,9 @@ enum Act {
     Panel,
     /// The chat box.
     Chat,
+    /// Linking this device by the code it was opened with (yes), or not.
+    LinkYes,
+    LinkNo,
 }
 
 /// Rows a choice takes (room for a finger).
@@ -549,6 +554,7 @@ impl Game {
             lift: None,
             asks: vec![],
             kb: None,
+            link_offer: None,
             own_seed: seed,
             online_ok: true,
             rules_on: None,
@@ -751,7 +757,7 @@ impl Game {
                     let (c, d) = (l.code.clone(), l.dev.clone());
                     self.scene.online.sync_on(Some((&c, &d)));
                     self.asks.push(format!("copy:{code}"));
-                    self.scene.note(&format!("⇄ link code {code} (copied) · on the other device: ✉ → my devices → link this device"));
+                    self.scene.show_link_card(&code);
                     self.saved_at = -1e9;
                 }
                 Front::Link(code) => {
@@ -909,6 +915,15 @@ impl Game {
             Act::Panel => self.open_panel(),
             Act::Pause => self.toggle_pause(),
             Act::Chat => self.scene.open_chat(),
+            Act::LinkYes => {
+                if let Some(code) = self.link_offer.take() {
+                    if !self.scene.online.wanted() {
+                        self.scene.online.go_online(true);
+                    }
+                    self.scene.queue_front(crate::scene::online::Front::Link(code));
+                }
+            }
+            Act::LinkNo => self.link_offer = None,
         }
     }
 
@@ -967,6 +982,24 @@ impl Game {
     }
 
     /// A preview (a look at something: "chats", "card", "netchess"…).
+    /// Opened by a link to another device (its code: a QR code scanned,
+    /// an address followed): asked first, as it makes this one that
+    /// device's villager (and a link from someone else would hand them
+    /// this one's friends).
+    pub fn link_offer(&mut self, code: &str) {
+        let Some(code) = crate::scene::linkcard::code_in(code) else { return };
+        if self.linked.as_ref().is_some_and(|l| l.code == code) {
+            return;
+        }
+        self.link_offer = Some(code);
+        let items = vec![
+            ("✓ yes, link it: this becomes my villager from my other device".to_string(), Act::LinkYes),
+            ("✕ no (only ever a code from a device of my own)".to_string(), Act::LinkNo),
+        ];
+        let w = items.iter().map(|i| i.0.chars().count()).max().unwrap_or(10) as i32 + 8;
+        self.open((self.uw() - w) / 2, self.uh() / 5, "⇄ link this device to your other one?".into(), items);
+    }
+
     pub fn preview(&mut self, what: &str) {
         self.scene.preview_perch(what);
     }
@@ -2278,7 +2311,7 @@ impl Game {
                 }
                 // a question asked by someone online (yes, no), a profile
                 // card (put away), the post (friends & online)
-                if self.scene.prompt_click(uc.0, uc.1) || self.scene.close_card() {
+                if self.scene.link_card_click(uc.0, uc.1) || self.scene.prompt_click(uc.0, uc.1) || self.scene.close_card() {
                     self.scene.woke();
                     self.press = None;
                     return;

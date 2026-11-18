@@ -10,6 +10,7 @@ pub mod shop;
 pub mod high_sky;
 pub mod interior;
 pub mod land;
+pub mod linkcard;
 pub mod ledges;
 pub mod lines;
 pub mod player;
@@ -3046,6 +3047,11 @@ impl Scene {
     /// station / cabin, or "climb"ing a house, or "jump"ing off its roof.
     pub fn preview_perch(&mut self, what: &str) {
         use ledges::Kind as K;
+        // linking another device: the card with its QR code
+        if what == "linkcard" {
+            self.show_link_card("ABCD1234EFGH");
+            return;
+        }
         // the cocoa cabin, outside
         if what == "cabin" {
             return self.preview_cabin_outside();

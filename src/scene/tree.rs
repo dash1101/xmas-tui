@@ -47,8 +47,7 @@ pub struct Tree {
     pub top: i32,
     pub hw_base: f32,
     cells: HashMap<(i32, i32), TreeCell>,
-    order: Vec<(i32, i32)>,
-    /// The cells in that order, as they're drawn each frame (a list, not a
+    /// The cells in drawing order, as they're drawn each frame (a list, not a
     /// lookup each).
     drawn: Vec<(i32, i32, TreeCell)>,
     garland: Vec<(i32, i32, char, Rgb, f32)>,
@@ -250,7 +249,6 @@ impl Tree {
             hw_base: hw_max,
             cells,
             drawn,
-            order,
             garland,
             bulbs,
             ornaments,

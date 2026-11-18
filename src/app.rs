@@ -812,7 +812,7 @@ impl App {
                     let code = l.pretty_code();
                     self.scene.online.sync_on(Some((&l.code.clone(), &l.dev.clone())));
                     crate::net::copy_text(&code);
-                    self.scene.note(&format!("⇄ link code {code} (copied) · on the other device: ✉ → my devices → link this device, and type it"));
+                    self.scene.show_link_card(&code);
                     self.write_save();
                 }
                 Front::Link(code) => {
@@ -1458,7 +1458,7 @@ impl App {
                         let d = self.scene.chats_click(x, y);
                         self.chats_do(d, x, y);
                     }
-                } else if self.scene.prompt_click(x, y) || self.scene.close_card() {
+                } else if self.scene.link_card_click(x, y) || self.scene.prompt_click(x, y) || self.scene.close_card() {
                     // (a question answered, a profile card put away)
                 } else if self.scene.post_click(x, y) {
                     self.open_online();

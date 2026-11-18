@@ -1234,10 +1234,14 @@ impl Online {
     /// The friends list changed elsewhere (a linked device): taken on.
     pub fn merge_book(&mut self, book: Book) {
         let on = self.book.on;
+        let rooms_were: Vec<String> = self.rooms.iter().map(|r| r.0.clone()).collect();
         self.book = Book { on, ..book };
         self.relive();
+        self.regroup();
         self.dirty = true;
-        let topics: Vec<String> = self.live.iter().map(|l| l.here_topic.clone()).collect();
+        let mut topics: Vec<String> = self.live.iter().map(|l| l.here_topic.clone()).collect();
+        // (a group joined on the other device: its room heard here too)
+        topics.extend(self.rooms.iter().map(|r| r.0.clone()).filter(|t| !rooms_were.contains(t)));
         if !topics.is_empty() {
             self.subscribe(topics);
         }

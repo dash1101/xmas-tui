@@ -539,7 +539,11 @@ impl Scene {
         let code = if o.book.code.is_empty() { "…".to_string() } else { o.book.code.clone() };
         let x = f.text(x0 + 2, y0 + 1, "my friend code ", pal::UI_DIM, bg, 0.0);
         let x = button(f, x, y0 + 1, &format!(" {code} ⧉ "), ChatsDo::Net(NetDo::Code), Rgb::hex(0x9be08a));
-        button(f, x + 2, y0 + 1, " ✚ add a friend ", ChatsDo::Net(NetDo::Add), pal::UI_TITLE);
+        let x = button(f, x + 2, y0 + 1, " ✚ add a friend ", ChatsDo::Net(NetDo::Add), pal::UI_TITLE);
+        // (this villager on another device too: a phone, a laptop)
+        if x + 2 + 15 < x0 + w - 17 {
+            button(f, x + 2, y0 + 1, " ⇄ my devices ", ChatsDo::Menu(super::online::MORE_DEVICES), pal::UI_TITLE);
+        }
         if !o.wanted() {
             button(f, x0 + w - 16, y0 + 1, " ● go online ", ChatsDo::Net(NetDo::On), Rgb::hex(0x9be08a));
         }
