@@ -171,7 +171,8 @@ every key, Ctrl and all, until something else is clicked).
 | **Space** | jump; held, higher (up to twice as high); in the air, again: the Christmas spirit lifts the villager once more; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
 | **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
 | **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
-| **O** | friends & online (also the **✉ friends** button, top right): go online, friends (each with their own menu: write, ping, ask in, go into their village), groups, messages, open this village or go into a friend's, play with friends there, the profile card, linked devices |
+| **O** | friends & online: go online, friends, groups, messages, open this village or go into a friend's, play with friends there, the profile card, linked devices. The **✉ friends** button (top right) opens friends & chats |
+| **P** | pause the village (also the **⏸** button, top right; **▶** carries on): it stands still and goes quiet, the widgets and online carry on, and others in a shared village see the villager greyed |
 | **/** | talk: to everyone here; *@name what to say* to one person (a friend anywhere, or someone here, just them); *@group …* to a group's chat room |
 | **Y** / **N** | yes (or no thanks) to what a friend online asks (a game, tag, a race, the train); clicking the question works too |
 | **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
@@ -440,8 +441,12 @@ web) shows what's happening online; a click on it opens friends & online.
 - **A friend code** (`XXXX-XXXX-XXXX`) is made for the villager and kept in the save. *My friend code* copies it to
   give to a friend; *add a friend* takes theirs. They see the request (in the post, top left, and in their friends &
   online menu) and say yes, and from then on each sees whether the other is online.
-- **Friends** have a menu of their own (*★ friends*): each one's menu (*write to…*, *ping* — a little tone at their
-  end —, *ask into this village*, *into …'s village*, their profile card), adding one, the friend code. The
+- **Friends & chats** (the **✉ friends** button, or *★ friends & chats*): a window like a chat app. Each friend is
+  down the left (a little figure in their colours, online or not, what's new), and the chat with the one picked is
+  on the right, with a line to write the next. Each friend's **⋯** has their menu: chat, *ping* (a little tone at
+  their end), *ask into this village*, *into …'s village*, their profile card, *rename* (just here), *quiet* (no
+  chime), *clear the chat*, *unfriend*. **◂ back** goes to friends & online, as it does at the top of each of its
+  menus. Lines reach a friend only while they're online. The
   **friends widget** (Menu → Widgets → Friends) shows who's about (● online, ⌂ a village open), the last few
   messages, a line to talk and *⌂ public villages*. A click on a friend opens their menu. Offline, it offers
   *● go online*. Messages show in the post, and all of them in *✉ messages*.
@@ -854,6 +859,18 @@ out with a ♥ as they pass, and say hello like old friends. Clicking the little
 their look: **coat**, **hat** (or none, bare-headed), **hair**, **skin** and a **scarf**, with a picture of them
 as they'll appear. A change shows on them at once, wherever they are; left as it is, a look is picked from the
 name.
+
+## ⏸ Resting and pausing
+
+- **⏸** (top right), **P**, or *Paused* on the menu's home page: the village stands still and goes quiet, the widgets
+  carry on, and so does online (a village hosted here stays open; others there see the villager greyed, with ⏸).
+- **The desktop wallpaper rests by itself** while a game runs (Steam's, Proton ones included; on Windows, Epic's
+  and GOG's too; anything under gamescope) or while the processors or the graphics card are busy for a while (85% for about 6 seconds). It rests
+  only while something else has the focus: a click on the desktop wakes it, and it carries on as soon as the game
+  is closed or the computer's calm again. Resting, it's drawn twice a second, and the window snow and lights stop.
+  The setting: Menu → Desktop → *Rest while a game runs or the computer's busy* (on by default).
+- On Windows it also rests behind a fullscreen app or a maximized window, and while the computer's locked, with the
+  widgets and online going on there too.
 
 ## 🔁 Staying on
 It runs as a systemd user service (`xmas-tui.service`) that starts with the graphical session.
