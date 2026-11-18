@@ -2725,7 +2725,9 @@ mod tests {
                 }
                 let ids: Vec<u32> = (1..=players as u32).collect();
                 let names: Vec<String> = ["Robin", "Sam", "Bo", "Ash"].iter().take(players).map(|s| s.to_string()).collect();
+                // (everyone sat down at it)
                 let mut all: Vec<Table> = ids.iter().map(|&me| Table::online(kind, 99, ids.clone(), names.clone(), me, 5)).collect();
+                all.iter_mut().for_each(Table::all_sat);
                 // the same game, seen from each side
                 for (s, tb) in all.iter().enumerate().skip(1) {
                     assert_eq!(serde_json::to_string(&turn_round(all[0].game.state(), s)).unwrap(), serde_json::to_string(&tb.game.state()).unwrap(), "{kind:?} dealt differently for seat {s}");
@@ -2764,6 +2766,7 @@ mod tests {
         let ids = vec![1, 2, 3];
         let names: Vec<String> = ["Robin", "Sam", "Bo"].iter().map(|s| s.to_string()).collect();
         let mut all: Vec<Table> = ids.iter().map(|&me| Table::online(Kind::TwentyOne, 7, ids.clone(), names.clone(), me, 9)).collect();
+        all.iter_mut().for_each(Table::all_sat);
         for tb in &mut all {
             tb.result = Some(Result::Drawn);
         }
