@@ -406,6 +406,9 @@ pub struct Social {
     pub resting: bool,
     /// Friends & chats (the window).
     pub chats: super::chats::Chats,
+    /// The others last seen up in the air (or not): a jump or a landing
+    /// puffs the snow.
+    pub others_air: std::collections::HashMap<u32, bool>,
     /// (Tests, whose online side keeps to the village's clock: the seconds
     /// spent resting, which that clock doesn't count.)
     pub rested: f32,
@@ -666,9 +669,23 @@ impl Scene {
                 _ => -1,
             },
             rest: self.social.resting,
+            pets: self.pets_sent(),
             // (stamped as it's sent)
             at: 0.0,
         })
+    }
+
+    /// The pets following this villager, for the others to see them too
+    /// (those at home stay out of it).
+    fn pets_sent(&self) -> [u16; 4] {
+        let mut out = [0u16; 4];
+        let following = self.my_pet.iter().chain(self.more_pets.iter()).filter(|p| !p.staying);
+        for (slot, p) in out.iter_mut().zip(following) {
+            let kind = pets::KINDS.iter().position(|k| *k == p.kind).unwrap_or(0) as u16;
+            let coat = p.kind.coats().iter().position(|c| c.0.eq_ignore_ascii_case(p.coat.trim())).unwrap_or(0) as u16;
+            *slot = (kind + 1) << 8 | coat.min(255);
+        }
+        out
     }
 
     /// Paused (the pause button, the wallpaper resting): the village
@@ -757,6 +774,21 @@ impl Scene {
         };
         self.online.tick(real, me, self.seed);
         self.online.ease(dt);
+        // the others' jumps and landings (as they're drawn): a puff of
+        // snow, as for this villager
+        let mut puffs = vec![];
+        for (id, o) in self.online.others() {
+            let air = o.av.away == 0 && self.online.shown_as(o).0;
+            if self.social.others_air.insert(id, air).is_some_and(|was| was != air) {
+                puffs.push(self.local(o.shown.0, o.shown.1));
+            }
+        }
+        if self.social.others_air.len() > 64 {
+            self.social.others_air.clear();
+        }
+        for (x, y) in puffs {
+            self.director.snow_puff(x, y);
+        }
         // (back home: the village's own settings again)
         if self.online.guest_seed().is_none() {
             self.social.rules_in = None;
@@ -1259,6 +1291,13 @@ impl Scene {
                     }
                 }
             }
+            // a shooting star someone sent off
+            Event::Star { x, y } => {
+                let sx = self.local(x, 0.0).0 - self.cam;
+                if (-20.0..self.w as f32 + 20.0).contains(&sx) {
+                    self.director.shooting_star(sx, y.min(self.ctx.sky_rows as f32 * 2.0));
+                }
+            }
             Event::Tagged { id, it, left } => {
                 let me = self.online.my_id();
                 if let Some(g) = &mut self.social.tag {
@@ -1755,21 +1794,34 @@ impl Scene {
                 Some(v) => (v.x(wx), v.y(wy + 1.0) - 1.0, sprite_k(self.h) * v.z),
                 None => (wx, wy, sprite_k(self.h)),
             };
-            // (paused at their end: greyed, standing still)
+            // (paused at their end: greyed, standing still; otherwise as
+            // they were where they're drawn)
+            let (air, moving, dir) = self.online.shown_as(o);
             let look = if o.av.rest { greyed(look_of(&o.av, id)) } else { look_of(&o.av, id) };
             let pose = if o.av.rest {
                 sprites::Pose::Stand
-            } else if o.av.air {
+            } else if air {
                 sprites::Pose::Jump
-            } else if o.av.moving {
+            } else if moving {
                 sprites::Pose::Walk(((t * 6.0) as i32 % 2) as u8)
             } else if t < o.wave.0 {
                 if o.wave.1 == 1 { sprites::Pose::ArmsUp } else { sprites::Pose::Wave }
             } else {
                 sprites::Pose::Stand
             };
-            let pic = sprites::person(&look, pose, o.av.dir, 0.9 + 0.25 * f.day.max(0.0));
+            let pic = sprites::person(&look, pose, dir, 0.9 + 0.25 * f.day.max(0.0));
             let rows = sprites::rows_of(&pic, k);
+            // their pets, one behind the other (drawn first: behind them)
+            let ps = critters::pet_scale(k);
+            for (j, &code) in o.av.pets.iter().filter(|c| **c >> 8 != 0).enumerate() {
+                let Some(&kind) = pets::KINDS.get(((code >> 8) - 1) as usize) else { continue };
+                let coats = kind.coats();
+                let (_, body, marks) = coats.get((code & 0xff) as usize).copied().unwrap_or(coats[0]);
+                let (body, marks) = if o.av.rest { (Rgb::hex(body) * 0.55, Rgb::hex(marks) * 0.55) } else { (Rgb::hex(body), Rgb::hex(marks)) };
+                let px = x - dir * (3.5 + 3.5 * j as f32) * k;
+                let pose = if o.av.rest { pets::Pose::Sit } else if moving { pets::Pose::Walk } else { pets::Pose::Sit };
+                pets::draw(f, kind, body, marks, px, (y * 2.0).round() as i32 + 1, dir, pose, t + j as f32 + id as f32, ps as f32, Some(Rgb::hex(0xc8202a)));
+            }
             f.sprite(x, y + 1.0, rows, pic);
             // the name, over their head ("it" at tag)
             let mark = if it == Some(id) { " ⚑ it!" } else if o.av.rest { " ⏸" } else { "" };

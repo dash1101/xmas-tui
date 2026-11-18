@@ -227,6 +227,9 @@ pub struct Avatar {
     /// Paused (the pause button, or the wallpaper resting while a game
     /// runs): still here, standing still; the others show them greyed.
     pub rest: bool,
+    /// Their pets following them (up to four): the kind (1 up; 0 none) in
+    /// the high byte, which of its coats in the low one.
+    pub pets: [u16; 4],
     /// When this was sent: seconds on the sender's own clock (0: an older
     /// version, which doesn't say). The others draw them a moment behind,
     /// between the places heard, so walking reads smooth however the
@@ -393,6 +396,9 @@ enum Msg {
     Show { id: u32, what: u8, n: u16, x: f32 },
     /// Tag: who's "it" now, and how long the game has left (s).
     Tagged { id: u32, it: u32, left: f32 },
+    /// A shooting star sent off (a tap on the sky) at x (village
+    /// coordinates), `y` pixels up.
+    Star { id: u32, x: f32, y: f32 },
     /// A race down the mountain finished: the score and the time.
     Finish { id: u32, name: String, score: u32, secs: f32 },
     /// In a village: someone's villager.
@@ -462,6 +468,7 @@ pub enum Event {
     Up { id: u32, game: u32 },
     Show { id: u32, what: u8, n: u16, x: f32 },
     Tagged { id: u32, it: u32, left: f32 },
+    Star { x: f32, y: f32 },
     Finish { id: u32, name: String, score: u32, secs: f32 },
     /// A linked device's side of the villager (see `crate::sync`).
     Synced { dev: String, at: i64, state: String },
@@ -516,7 +523,8 @@ pub struct Other {
 /// smooth however unevenly the messages arrive (`at`).
 #[derive(Clone, Debug, Default)]
 pub struct Trail {
-    pts: std::collections::VecDeque<(f32, f32, f32)>,
+    /// (their clock, x, y, how they were: see `heard`)
+    pts: std::collections::VecDeque<(f32, f32, f32, u8)>,
     /// Their clock against ours: the least (ours - theirs) seen, the
     /// quickest a message has come, creeping up slowly after it so a drift
     /// in either clock isn't left behind (`low`); and what's drawn by,
@@ -530,10 +538,16 @@ impl Trail {
     /// Heard at (x, y), sent at `at` on their clock (`now` on ours); a step
     /// further than `jump` is a leap (a door, a teleport): no gliding there.
     pub fn heard(&mut self, now: f32, at: f32, x: f32, y: f32, jump: f32) {
+        self.heard_as(now, at, x, y, jump, 0);
+    }
+
+    /// Heard at (x, y), and how they were then (`how`: up in the air 1,
+    /// walking 2, facing right 4), for drawing them as they were there.
+    pub fn heard_as(&mut self, now: f32, at: f32, x: f32, y: f32, jump: f32, how: u8) {
         if ![now, at, x, y].iter().all(|v| v.is_finite()) {
             return;
         }
-        if let Some(&(last, lx, ly)) = self.pts.back() {
+        if let Some(&(last, lx, ly, _)) = self.pts.back() {
             if at <= last {
                 // (late, and out of turn: dropped; their clock started again: afresh)
                 if at > last - 5.0 {
@@ -551,7 +565,7 @@ impl Trail {
         if self.off.is_none_or(|o| (self.low - o).abs() > 2.0) {
             self.off = Some(self.low);
         }
-        self.pts.push_back((at, x, y));
+        self.pts.push_back((at, x, y, how));
         while self.pts.len() > 12 {
             self.pts.pop_front();
         }
@@ -572,6 +586,12 @@ impl Trail {
 
     /// Where to draw them at `now` (ours), `delay` behind; past the last
     /// heard, on the way they were going for `coast` seconds at most.
+    /// How they were where they're drawn at `now` (see `heard_as`).
+    pub fn how(&self, now: f32, delay: f32) -> Option<u8> {
+        let rt = now - self.off? - delay;
+        self.pts.iter().rev().find(|p| p.0 <= rt).or(self.pts.front()).map(|p| p.3)
+    }
+
     pub fn at(&self, now: f32, delay: f32, coast: f32) -> Option<(f32, f32)> {
         let rt = now - self.off? - delay;
         let (first, last) = (*self.pts.front()?, *self.pts.back()?);
@@ -1158,7 +1178,7 @@ impl Online {
         let me = self.id;
         // (one sender flooding the village is shrugged off)
         let sender = match &m {
-            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
+            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
             Msg::Village { host, .. } => *host,
             Msg::Crowd { id, .. } | Msg::Full { id, .. } => *id,
             _ => 0,
@@ -1189,7 +1209,8 @@ impl Online {
                     o.trail.clear();
                 }
                 if av.at > 0.0 {
-                    o.trail.heard(t, av.at, av.x, av.y, 0.6);
+                    let how = av.air as u8 | (av.moving as u8) << 1 | ((av.dir > 0.0) as u8) << 2;
+                    o.trail.heard_as(t, av.at, av.x, av.y, 0.6, how);
                 }
                 // (their speed: from where they were to where they are now)
                 let gap = (t - o.seen).max(0.05);
@@ -1220,6 +1241,7 @@ impl Online {
             Msg::Up { id, game } if id != me => self.events.push(Event::Up { id, game }),
             Msg::Show { id, what, n, x } if id != me => self.events.push(Event::Show { id, what, n, x }),
             Msg::Tagged { id, it, left } if id != me => self.events.push(Event::Tagged { id, it, left }),
+            Msg::Star { id, x, y } if id != me && x.is_finite() && y.is_finite() && x.abs() < 1e4 => self.events.push(Event::Star { x, y: y.clamp(0.0, 400.0) }),
             Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
             Msg::Talk { id, text } if id != me => {
                 let (text, links) = filter::tidy(&clean(&text, 120), self.clean_words);
@@ -1502,6 +1524,15 @@ impl Online {
                     o.shown.1 += (ty - o.shown.1) * k;
                 }
             }
+        }
+    }
+
+    /// How someone is where they're drawn (a moment behind: see `Trail`):
+    /// up in the air, walking, which way they face.
+    pub fn shown_as(&self, o: &Other) -> (bool, bool, f32) {
+        match o.trail.known().then(|| o.trail.how(self.t, TRAIL_DELAY)).flatten() {
+            Some(h) => (h & 1 != 0, h & 2 != 0, if h & 4 != 0 { 1.0 } else { -1.0 }),
+            None => (o.av.air, o.av.moving, o.av.dir),
         }
     }
 
@@ -2020,6 +2051,12 @@ impl Online {
 
     pub fn show(&mut self, what: u8, n: u16, x: f32) {
         let m = Msg::Show { id: self.id, what, n, x };
+        self.to_village(&m);
+    }
+
+    /// A shooting star sent off here, for everyone in the village.
+    pub fn star(&mut self, x: f32, y: f32) {
+        let m = Msg::Star { id: self.id, x, y };
         self.to_village(&m);
     }
 

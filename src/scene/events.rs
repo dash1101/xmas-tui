@@ -604,6 +604,11 @@ impl Director {
         }
     }
 
+    /// Shooting stars crossing the sky right now.
+    pub fn streaks(&self) -> usize {
+        self.streaks.len()
+    }
+
     pub fn shooting_star(&mut self, x: f32, y: f32) {
         let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
         let speed = self.rng.range(160.0, 240.0);

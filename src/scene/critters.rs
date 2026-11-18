@@ -807,11 +807,7 @@ impl Critters {
             let look = p.l.map(|l| FriendLook { coat: Rgb::hex(l[0]), hat: (l[1] != 0).then(|| Rgb::hex(l[1])), hair: Rgb::hex(l[2]), skin: Rgb::hex(l[3]), scarf: (l[4] != 0).then(|| Rgb::hex(l[4])) });
             let dir = if p.r { 1.0 } else { -1.0 };
             let pet = p.pet.map(|(k, b, m)| {
-                let kind = match k {
-                    0 => PetKind::Dog,
-                    1 => PetKind::Cat,
-                    _ => PetKind::Bunny,
-                };
+                let kind = super::pets::KINDS.get(k as usize).copied().unwrap_or(PetKind::Bunny);
                 VPet { kind, body: Rgb::hex(b), marks: Rgb::hex(m), name: "", x: x - dir * 3.0, y, dir, walking: false, happy_until: 0.0 }
             });
             self.pup_to.insert(p.id, (x, y));

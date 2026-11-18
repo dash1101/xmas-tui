@@ -3945,6 +3945,11 @@ impl Scene {
                 let msg = self.lines.wish();
                 d.bubble(x, y, &msg, t);
             }
+            // (everyone in a shared village sees it go)
+            if self.online.village().is_some() {
+                let vx = self.shared(x as f32, 0.0).0;
+                self.online.star(vx, (yf * 2.0).max(0.0));
+            }
             return;
         }
         if ground_hit {
@@ -6190,6 +6195,47 @@ mod tests {
         assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
     }
 
+    /// In a shared village, what one side sees happen the other sees too:
+    /// a jump (a puff of snow where they take off and land) and a shooting
+    /// star sent off from the sky.
+    #[test]
+    fn jumps_and_shooting_stars_show_on_both_sides() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 4.0);
+        assert!(b.online.other(a.online.my_id()).is_some());
+        b.take_sounds();
+        a.jump();
+        both(&mut a, &mut b, 2.0);
+        let puffs = b.take_sounds().iter().filter(|e| e.sfx == Sfx::Puff).count();
+        assert!(puffs >= 2, "no puffs on the other side (a jump and a landing): {puffs}");
+        let before = b.director.streaks();
+        let vx = a.shared(a.cam + 40.0, 0.0).0;
+        a.online.star(vx, 12.0);
+        both(&mut a, &mut b, 0.2);
+        assert!(b.director.streaks() > before, "the shooting star never showed");
+    }
+
     /// Friends & chats: each friend down the left (asked first, then
     /// online), the chat with the one picked on the right; a click on
     /// another picks them, their ⋯ opens their menu (back at the top of
@@ -6314,6 +6360,61 @@ mod tests {
             assert_eq!((a.id, a.k), (b.id, b.k));
             assert!((a.x - b.x).abs() <= 120, "{} vs {}", a.x, b.x);
         }
+    }
+
+    /// A public square, through a pretend relay: the first in hosts it,
+    /// the next comes in as a guest and sees the very same folk out and
+    /// about (who, which kind, their names).
+    #[test]
+    fn a_square_shows_everyone_the_same_folk() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let cfg = crate::config::SceneCfg::default();
+        let (mut a, mut b) = (Scene::new(200, 56, 7, &cfg), Scene::new(150, 42, 7, &cfg));
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Ann"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Bo"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        // (into a village: made again from its seed, as the app does)
+        let moved = |s: &mut Scene, w: usize, h: usize| {
+            if let Some(to) = s.take_village() {
+                let seed = to.unwrap_or(7);
+                let (online, social) = (s.take_online(), s.take_social());
+                *s = Scene::new(w, h, seed, &crate::config::SceneCfg::default());
+                s.put_online(online);
+                s.put_social(social);
+                s.arrive_by_host();
+            }
+        };
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+                moved(a, 200, 56);
+                moved(b, 150, 42);
+            }
+        };
+        both(&mut a, &mut b, 30.0);
+        a.online.join_square(0);
+        both(&mut a, &mut b, 40.0);
+        b.online.join_square(0);
+        both(&mut a, &mut b, 8.0);
+        assert_eq!(a.online.square().map(|s| s.1), Some(true), "Ann isn't hosting");
+        assert_eq!(b.online.square().map(|s| s.1), Some(false), "Bo isn't a guest");
+        let t = a.now();
+        let (ax, ay, u) = a.anchor;
+        let host: Vec<_> = a.critters.crowd(t, |x, y| ((x - ax) / u, (y - ay) / u));
+        let (bx, by, bu) = b.anchor;
+        let guest: Vec<_> = b.critters.crowd(b.now(), |x, y| ((x - bx) / bu, (y - by) / bu));
+        assert!(!host.is_empty(), "nobody out");
+        let key = |v: &Vec<critters::Pup>| {
+            let mut k: Vec<(u64, u8, String)> = v.iter().map(|p| (p.id, p.k, p.n.clone())).collect();
+            k.sort();
+            k
+        };
+        assert_eq!(key(&guest), key(&host), "not the same folk");
     }
 
     #[test]
