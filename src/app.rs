@@ -1195,9 +1195,13 @@ impl App {
 
     #[cfg(any(target_os = "linux", windows))]
     pub fn fx_cfg(&self) -> crate::winsnow::FxCfg {
-        let w = &self.cfg.windows;
-        let _ = w;
-        crate::winsnow::FxCfg::from_cfg(&self.cfg.windows)
+        let mut c = crate::winsnow::FxCfg::from_cfg(&self.cfg.windows);
+        // resting (a game, the pause button): the window snow and lights
+        // stop too
+        if self.resting() {
+            (c.snow, c.lights) = (false, false);
+        }
+        c
     }
 
     /// Hook up the window-snow overlay so settings changes reach it.
@@ -2838,6 +2842,13 @@ impl App {
         if resting != self.scene.resting() {
             self.scene.set_resting(resting);
             self.rest_base = None;
+            #[cfg(any(target_os = "linux", windows))]
+            if let Some(fx) = &self.fx {
+                let c = self.fx_cfg();
+                if let Ok(mut f) = fx.lock() {
+                    *f = c;
+                }
+            }
         }
         self.settings.resting = resting.then(|| if self.paused { String::new() } else { self.rest_why.clone().unwrap_or_default() });
         if resting {
