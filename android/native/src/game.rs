@@ -158,8 +158,9 @@ pub struct Game {
     /// Things for the app itself to do ("wallpaper", "settings",
     /// "text:<question>" for a line typed, "copy:<text>").
     asks: Vec<String>,
-    /// What a line asked for is for (see `give_text`).
-    text_for: Option<crate::scene::online::TextFor>,
+    /// A line being typed in the village, as the app's keyboard was last
+    /// told it (which line, how many changes in): see `typing_asks`.
+    kb: Option<(u32, u32)>,
     /// The villager's own village (the scene may be a friend's).
     own_seed: u32,
     /// Online at all here (not on the wallpaper).
@@ -202,6 +203,12 @@ pub struct Game {
     weather: crate::widgets::face::Weather,
     sun: Option<(f32, f32)>,
     friends_at: Option<crate::widgets::Rect>,
+    /// The web page's widgets as last drawn (the clock 0, the weather 3,
+    /// friends 6: as on the desktop), on their layer's cells; one being
+    /// moved or resized (which, by its corner, where it was taken
+    /// against its top left, where the finger went down, moved yet).
+    wid_rects: Vec<(usize, crate::widgets::Rect)>,
+    wid_drag: Option<(usize, bool, (i32, i32), (i32, i32), bool)>,
     friends_hover: Option<crate::widgets::face::FriendsHit>,
     friends_press: bool,
 }
@@ -223,6 +230,8 @@ enum Act {
     Pause,
     /// The menu.
     Panel,
+    /// The chat box.
+    Chat,
 }
 
 /// Rows a choice takes (room for a finger).
@@ -539,7 +548,7 @@ impl Game {
             card: None,
             lift: None,
             asks: vec![],
-            text_for: None,
+            kb: None,
             own_seed: seed,
             online_ok: true,
             rules_on: None,
@@ -566,6 +575,8 @@ impl Game {
             chats_drag: None,
             editing: None,
             widgets: cfg!(target_arch = "wasm32"),
+            wid_rects: vec![],
+            wid_drag: None,
             weather: crate::widgets::face::Weather { status: "the weather: set its city in the menu (Widgets)".into(), ..Default::default() },
             sun: None,
             friends_at: None,
@@ -897,6 +908,7 @@ impl Game {
             }
             Act::Panel => self.open_panel(),
             Act::Pause => self.toggle_pause(),
+            Act::Chat => self.scene.open_chat(),
         }
     }
 
@@ -935,6 +947,7 @@ impl Game {
         if phone {
             items.push(("set as the live wallpaper".to_string(), Act::Ask("wallpaper")));
         }
+        items.push(("☺ chat (say something)".to_string(), Act::Chat));
         items.push(("✉ friends & online".to_string(), Act::Online));
         items.push(("❄ the menu".to_string(), Act::Panel));
         items.push(("the controls".to_string(), Act::Help));
@@ -1283,6 +1296,85 @@ impl Game {
 
     /// A touch on the friends widget (the web page): a friend's menu, the
     /// messages, talking, adding a friend, going online, public villages.
+    /// A widget picked up and moved (or by its corner, resized), as on the
+    /// desktop: whether the touch was that. (A tap on the friends widget is
+    /// still its own: only a drag moves it.)
+    fn widget_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
+        if !self.widgets || self.cfg.layout.locked {
+            return false;
+        }
+        let (fw, fh) = self.wid_size();
+        match action {
+            0 => {
+                self.wid_drag = None;
+                let Some(&(i, r)) = self.wid_rects.iter().rev().find(|(_, r)| r.contains(c.0, c.1)) else { return false };
+                // (the corner: the weather and friends resize by it)
+                let corner = i != 0 && c.0 >= r.x + r.w - 2 && c.1 >= r.y + r.h - 1;
+                self.wid_drag = Some((i, corner, (c.0 - r.x, c.1 - r.y), c, false));
+                // (the friends widget's own taps go on, until it's dragged)
+                i != 6 || corner
+            }
+            1 => {
+                let Some((i, corner, grab, from, moved)) = self.wid_drag else { return false };
+                if !moved && (c.0 - from.0).abs() < 2 && (c.1 - from.1).abs() < 1 {
+                    return i != 6 || corner;
+                }
+                if !moved && i == 6 {
+                    // (a drag after all: not a tap on a friend)
+                    self.friends_touch(3, c);
+                }
+                self.wid_drag = Some((i, corner, grab, from, true));
+                let Some(&(_, r)) = self.wid_rects.iter().find(|(j, _)| *j == i) else { return true };
+                if corner {
+                    let (name, min) = if i == 3 { ("weather", (44, 8)) } else { ("friends", (28, 6)) };
+                    let nw = (c.0 - r.x + 1).clamp(min.0, (fw - r.x).max(min.0));
+                    let nh = (c.1 - r.y + 1).clamp(min.1, (fh - r.y).clamp(min.1, 30));
+                    self.cfg.layout.sizes.insert(name.into(), [nw, nh]);
+                    self.cfg.layout.set(i, Some([r.x as f32 / fw as f32, r.y as f32 / fh as f32]));
+                } else {
+                    let x = (c.0 - grab.0).clamp(0, (fw - r.w).max(0));
+                    let y = (c.1 - grab.1).clamp(0, (fh - r.h).max(0));
+                    self.cfg.layout.set(i, Some([x as f32 / fw as f32, y as f32 / fh as f32]));
+                }
+                true
+            }
+            _ => {
+                let Some((i, corner, _, _, moved)) = self.wid_drag.take() else { return false };
+                if moved {
+                    // (kept: the page saves it)
+                    self.cfg_dirty = true;
+                    return true;
+                }
+                i != 6 || corner
+            }
+        }
+    }
+
+    /// The widgets' layer, in cells.
+    fn wid_size(&self) -> (i32, i32) {
+        match &self.wl {
+            Some(u) => (u.frame.w as i32, u.frame.h as i32),
+            None => (self.uw(), self.uh()),
+        }
+    }
+
+    /// Where widget `i` goes: where it's been put (as a share of the
+    /// layer), else `def`; its size as it's been made, else `size`; kept on
+    /// the layer.
+    fn wid_place(cfg: &Config, i: usize, def: (i32, i32), size: (i32, i32), fw: i32, fh: i32) -> crate::widgets::Rect {
+        let size = match i {
+            3 => cfg.layout.sizes.get("weather").map(|s| (s[0], s[1])).unwrap_or(size),
+            6 => cfg.layout.sizes.get("friends").map(|s| (s[0], s[1])).unwrap_or(size),
+            _ => size,
+        };
+        let (w, h) = (size.0.min(fw), size.1.min(fh));
+        let (x, y) = match cfg.layout.get(i) {
+            Some([fx, fy]) => ((fx * fw as f32).round() as i32, (fy * fh as f32).round() as i32),
+            None => def,
+        };
+        crate::widgets::Rect { x: x.clamp(0, (fw - w).max(0)), y: y.clamp(0, (fh - h).max(0)), w, h }
+    }
+
     fn friends_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
         use crate::scene::online::{NetDo, MORE_FRIEND, MORE_MESSAGES, MORE_PUBLIC};
         use crate::widgets::face::{friends_rows, FriendsHit};
@@ -1470,9 +1562,64 @@ impl Game {
             }
             return;
         }
-        if let Some(what) = self.text_for.take() {
-            self.scene.woke();
-            self.scene.give_text(what, text);
+    }
+
+    /// What's typed in the app's own box (its keyboard), as it stands, and
+    /// where the caret is (None: at the end): the line in the village kept
+    /// to it.
+    pub fn typed(&mut self, text: &str, caret: Option<usize>) {
+        self.scene.woke();
+        self.scene.set_typed(text, caret);
+    }
+
+    /// A key in the app's own box: 1 Enter, 2 Esc (or the keyboard put
+    /// away), 3 up, 4 down.
+    pub fn type_key(&mut self, k: u32) {
+        use crate::scene::typing::TypeKey;
+        let k = match k {
+            1 => TypeKey::Enter,
+            3 => TypeKey::Up,
+            4 => TypeKey::Down,
+            _ => TypeKey::Esc,
+        };
+        self.scene.woke();
+        self.scene.type_key(k);
+        self.typing_asks();
+    }
+
+    /// The keyboard's height (pixels, as the village is drawn): what's typed
+    /// is drawn above it.
+    pub fn set_keyboard(&mut self, px: f32) {
+        // (in the rows of the layer the line's drawn on: the UI's, if it
+        // has one of its own)
+        let ch = self.ui.as_ref().map(|u| u.ch).unwrap_or(self.raster.ch).max(1);
+        let rows = if px > 1.0 { (px / ch as f32).ceil() as i32 } else { 0 };
+        self.scene.set_inset(rows);
+    }
+
+    /// A line opened in the village (or closed, or changed there): the
+    /// app's keyboard told ("keyboard:on\t<code|text>\t<text>",
+    /// "keyboard:set\t<text>", "keyboard:off").
+    fn typing_asks(&mut self) {
+        let now = self.scene.typing().map(|t| (t.id, t.rev, t.is_code(), t.text.clone()));
+        match (now, self.kb) {
+            (Some((id, rev, code, text)), Some((kid, _))) if kid != id => {
+                self.asks.push(format!("keyboard:on\t{}\t{text}", if code { "code" } else { "text" }));
+                self.kb = Some((id, rev));
+            }
+            (Some((id, rev, code, text)), None) => {
+                self.asks.push(format!("keyboard:on\t{}\t{text}", if code { "code" } else { "text" }));
+                self.kb = Some((id, rev));
+            }
+            (Some((id, rev, _, text)), Some((_, krev))) if krev != rev => {
+                self.asks.push(format!("keyboard:set\t{text}"));
+                self.kb = Some((id, rev));
+            }
+            (None, Some(_)) => {
+                self.asks.push("keyboard:off".into());
+                self.kb = None;
+            }
+            _ => {}
         }
     }
 
@@ -1492,10 +1639,7 @@ impl Game {
         if std::mem::take(&mut self.scene.online.dirty) {
             self.saved_at = self.saved_at.min(self.t - 55.0);
         }
-        if let Some((what, ask)) = self.scene.take_text_ask() {
-            self.text_for = Some(what);
-            self.asks.push(format!("text:{ask}"));
-        }
+        self.typing_asks();
         if let Some(text) = self.scene.take_copy() {
             self.asks.push(format!("copy:{text}"));
         }
@@ -1793,30 +1937,67 @@ impl Game {
             // (zoomed right in, not all of them fit: the weather goes
             // first, then friends; the clock stays)
             let room = if layered { 66 } else { 110 };
+            let mut rects = vec![];
             if uf.w >= room {
-                let x = uf.w as i32 - 64;
+                // (each where it's been put, else down the right, one under
+                // the other; one that doesn't fit is left out)
+                let (fw, fh) = (uf.w as i32, uf.h as i32);
+                let x = fw - 64;
                 let mut y = if layered { wid_top.unwrap_or(2) } else { 5 };
+                // (the bar at the top: nothing goes up under it)
+                let top = if layered { wid_top.unwrap_or(0) } else { 0 };
                 if self.cfg.clock.enabled {
-                    y = face::draw_clock(uf, x + 2, y, &self.cfg.clock, t) + 1;
+                    let r = Self::wid_place(&self.cfg, 0, (x, y), (62, 7), fw, fh);
+                    let r = Rect { y: r.y.max(top), ..r };
+                    let bottom = face::draw_clock(uf, r.x + 2, r.y, &self.cfg.clock, t);
+                    rects.push((0, Rect { h: (bottom - r.y).max(1), ..r }));
+                    if self.cfg.layout.get(0).is_none() {
+                        y = bottom + 1;
+                    }
                 }
                 let friends_room = if self.cfg.widgets.friends { 10 } else { 0 };
-                if self.cfg.widgets.weather && y + 9 + friends_room <= uf.h as i32 {
-                    let r = Rect { x, y, w: 60, h: 8 };
+                let wr = Self::wid_place(&self.cfg, 3, (x, y), (60, 8), fw, fh);
+                let placed = self.cfg.layout.get(3).is_some();
+                if self.cfg.widgets.weather && (placed || y + 9 + friends_room <= fh) {
+                    let r = Rect { y: wr.y.max(top), ..wr };
                     face::draw_weather(uf, r, &self.weather, t);
                     crate::widgets::looks::apply(uf, r, &self.cfg.widgets.looks.weather, face::PANEL, 4);
-                    y += 9;
+                    rects.push((3, r));
+                    if !placed {
+                        y += r.h + 1;
+                    }
                 }
                 if self.cfg.widgets.friends {
                     if let Some(v) = self.scene.friends_view() {
-                        let r = Rect { x: x + 20, y, w: 40, h: 10 };
-                        if r.y + r.h <= uf.h as i32 {
+                        let r = Self::wid_place(&self.cfg, 6, (x + 20, y), (40, 10), fw, fh);
+                        let r = Rect { y: r.y.max(top), ..r };
+                        if r.y + r.h <= fh {
                             face::draw_friends(uf, r, &v, self.friends_hover, t);
                             crate::widgets::looks::apply(uf, r, &self.cfg.widgets.looks.friends, face::PANEL, 4);
                             self.friends_at = Some(r);
+                            rects.push((6, r));
                         }
                     }
                 }
+                // (being moved or resized: its corner shows where to take it)
+                if let Some((i, ..)) = self.wid_drag.filter(|d| d.4) {
+                    if let Some(&(_, r)) = rects.iter().find(|(j, _)| *j == i) {
+                        for xx in r.x..r.x + r.w {
+                            for yy in [r.y, r.y + r.h - 1] {
+                                if let Some(g) = uf.glyph.get_mut(yy as usize * uf.w + xx as usize).and_then(|g| g.as_mut()) {
+                                    g.fg = crate::color::Rgb::hex(0xffd36b);
+                                }
+                            }
+                        }
+                    }
+                }
+                for &(i, r) in &rects {
+                    if i != 0 && !self.cfg.layout.locked {
+                        uf.put_g(r.x + r.w - 1, r.y + r.h - 1, crate::frame::Glyph::new('◢', crate::color::Rgb::hex(0xffd36b) * 0.7).lit(0.0));
+                    }
+                }
             }
+            self.wid_rects = rects;
         }
         if layered {
             self.scene.draw_ui(uf);
@@ -2063,6 +2244,9 @@ impl Game {
             return;
         }
         if self.menu_touch(action, uc) {
+            return;
+        }
+        if self.widget_touch(action, self.wid_cell(x, y)) {
             return;
         }
         if self.friends_touch(action, self.wid_cell(x, y)) {

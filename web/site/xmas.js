@@ -275,6 +275,8 @@ function asked(a) {
   else if (a.startsWith("text:")) {
     held.clear(); steer();
     askFor(a.slice(5));
+  } else if (a.startsWith("keyboard:")) {
+    keyboardAsk(a.slice(9));
   } else if (a.startsWith("rules:") && false) {
     // the village's settings, changed by a guest (said yes to): kept
     try {
@@ -330,6 +332,58 @@ function askDone(v) {
 askBox.onsubmit = (e) => { e.preventDefault(); askDone(askIn.value); };
 document.getElementById("ask-no").onclick = () => askDone("");
 askIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); askDone(""); } e.stopPropagation(); });
+
+// a line typed in the village itself (the chat box, a friend's chat, a
+// code): drawn there, typed here, in a box out of sight (so a phone brings
+// its keyboard up, and a browser's own typing, pasting and accents work),
+// the village kept to it as it changes
+const kb = document.getElementById("kb");
+let kbOn = false;
+function keyboardAsk(s) {
+  const [what, a, b] = s.split("\t");
+  if (what === "on") {
+    held.clear(); if (game) steer();
+    kbOn = true;
+    kb.value = b || "";
+    kb.autocapitalize = a === "code" ? "characters" : "sentences";
+    kb.focus({ preventScroll: true });
+    kb.setSelectionRange(kb.value.length, kb.value.length);
+  } else if (what === "set") {
+    kb.value = a || "";
+    kb.setSelectionRange(kb.value.length, kb.value.length);
+  } else if (what === "off") {
+    kbOn = false;
+    if (document.activeElement === kb) kb.blur();
+  }
+}
+// (where the caret is, in characters, not the page's UTF-16 units)
+const kbSend = () => { if (game && kbOn) wasm.typed(game, putText(kb.value), Array.from(kb.value.slice(0, kb.selectionStart || 0)).length); };
+kb.addEventListener("input", kbSend);
+kb.addEventListener("keyup", kbSend);
+kb.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  const k = { Enter: 1, Escape: 2, ArrowUp: 3, ArrowDown: 4 }[e.key];
+  if (!k || !game) return;
+  e.preventDefault();
+  wasm.type_key(game, k);
+  asked(getText(wasm.ask(game)));
+});
+// gone from the box: a phone's keyboard put away (a tap on the village):
+// the line's closed; with a mouse, the box keeps the keys (Esc closes it)
+kb.addEventListener("blur", () => setTimeout(() => {
+  if (!kbOn || document.activeElement === kb || !game) return;
+  if (touchy) { kbOn = false; wasm.type_key(game, 2); asked(getText(wasm.ask(game))); }
+  else if (!askBox.classList.contains("open")) kb.focus({ preventScroll: true });
+}, 0));
+// the phone's keyboard: what's typed is drawn above it (the page's own
+// box too)
+function keyboardHeight() {
+  const v = window.visualViewport;
+  const px = v ? Math.max(0, innerHeight - v.height - v.offsetTop) : 0;
+  askBox.style.bottom = px > 40 ? (px + 12) + "px" : "";
+  if (game) wasm.set_keyboard(game, px * H / Math.max(1, canvas.getBoundingClientRect().height));
+}
+if (window.visualViewport) { visualViewport.addEventListener("resize", keyboardHeight); visualViewport.addEventListener("scroll", keyboardHeight); }
 
 // ------------------------------------------------------------ online
 // The relay (the village's own, else a free public MQTT broker) through a
@@ -556,6 +610,8 @@ addEventListener("keydown", (e) => {
       else if (e.key === "?") wasm.help(game, 1);
       else if (e.key === "/") { wasm.chat(game); e.preventDefault(); }
   }
+  // (a line opened: the box takes the keys at once, in the same keypress)
+  asked(getText(wasm.ask(game)));
   steer();
   if (/^(Key[WASDEFRZTQICOYNP]|Arrow|Space|Enter|Digit|Escape|Slash)/.test(e.code)) e.preventDefault();
 });
@@ -600,6 +656,9 @@ canvas.addEventListener("pointerup", (e) => {
   const [x, y] = at(e);
   wasm.touch(game, 2, x, y);
   down = null;
+  // (a tap that opens a line to type: the keyboard comes up in the tap
+  // itself, as a phone's browser only allows)
+  asked(getText(wasm.ask(game)));
 });
 canvas.addEventListener("pointercancel", () => { clearTimeout(longT); if (game && down) wasm.touch(game, 3, down.x, down.y); down = null; });
 canvas.addEventListener("contextmenu", (e) => {
@@ -1003,6 +1062,7 @@ function togglePause() {
 }
 document.getElementById("b-pause").onclick = togglePause;
 document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.friends(game); };
+document.getElementById("b-chat").onclick = () => { if (!game) return; wasm.chat(game); asked(getText(wasm.ask(game))); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
 sizeButtons();
 document.getElementById("b-opts").onclick = () => game && wasm.open_panel(game);

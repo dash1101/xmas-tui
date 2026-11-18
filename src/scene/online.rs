@@ -35,6 +35,9 @@ pub enum NetDo {
     Invite(u8),
     /// Into the village friend i asked this villager into.
     GoInvited(u8),
+    /// Into the village a friend's asked this villager to (the latest in
+    /// the chat with them).
+    ChatInvite(u8),
     /// Ask someone here (their id) to play (see `net::ask`).
     With(u32, u8),
     /// A card game round the table: everyone here asked to sit in.
@@ -101,8 +104,7 @@ pub enum NetDo {
     ListMine(bool),
 }
 
-/// What a line of typing is for (the front end asks for it, see
-/// `take_text_ask`).
+/// What a line of typing is for (see `typing`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TextFor {
     Add,
@@ -433,8 +435,14 @@ pub struct Social {
     /// asked again (no answer yet: a message can go astray).
     pub asking: Option<(u32, u8, u32, f32)>,
     asked_again: f32,
-    /// Said yes to someone (their id, what): said again a few times, until.
-    yes_again: Vec<(u32, u8, f32, f32)>,
+    /// Said yes to someone (their id, what, its seed): said again a few
+    /// times, until.
+    yes_again: Vec<(u32, u8, u32, f32, f32)>,
+    /// Asked, then said yes to someone else's game instead (who was asked,
+    /// what, the seed, until): a yes to it still coming is dealt with (see
+    /// `dropped_yes`); and when the table now was sat down at.
+    dropped: Vec<(u32, u8, u32, f32)>,
+    table_since: f32,
     pub tag: Option<NetTag>,
     pub fight: Option<NetFight>,
     /// Friends asking the villager into their villages (name, code).
@@ -464,10 +472,15 @@ pub struct Social {
     next_card: f32,
     /// Where the question box and the post were drawn (for clicks).
     prompt_at: std::cell::Cell<Option<(i32, i32, i32, i32, i32)>>,
-    post_at: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
+    pub(super) post_at: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
+    /// Where the chat box (or a field's box) was drawn.
+    pub(super) chat_box: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
     /// The messages: said here, whispered, mailed, in groups, pings (the
     /// last few dozen), and how many came in unread.
     pub log: Vec<Line>,
+    /// Up in balloons, last frame: who, the balloon, where (village
+    /// coordinates).
+    pub riders: Vec<(u32, u32, f32, f32)>,
     pub unread: u32,
     /// A guest: the host's village settings, and whether this villager may
     /// change them (an admin).
@@ -622,11 +635,6 @@ impl Scene {
         self.village_switch.take()
     }
 
-    /// A line of typing wanted: what for, and the question.
-    pub fn take_text_ask(&mut self) -> Option<(TextFor, String)> {
-        self.text_ask.take()
-    }
-
     /// Text to put on the clipboard (a code).
     pub fn take_copy(&mut self) -> Option<String> {
         self.copy_ask.take()
@@ -683,6 +691,7 @@ impl Scene {
             },
             rest: self.social.resting,
             pets: self.pets_sent(),
+            ride: self.balloon.as_ref().filter(|b| b.aboard && self.inside.is_none() && self.trip.is_none()).map(|b| b.seed().max(1)).unwrap_or(0),
             // (stamped as it's sent)
             at: 0.0,
         })
@@ -838,10 +847,10 @@ impl Scene {
             }
         }
         let mut again = std::mem::take(&mut self.social.yes_again);
-        again.retain(|y| t < y.3);
-        for y in again.iter_mut().filter(|y| t >= y.2) {
-            y.2 = t + 2.0;
-            self.online.answer(y.0, y.1, true);
+        again.retain(|y| t < y.4);
+        for y in again.iter_mut().filter(|y| t >= y.3) {
+            y.3 = t + 2.0;
+            self.online.answer(y.0, y.1, true, y.2);
         }
         self.social.yes_again = again;
         self.update_net_tag(t);
@@ -982,7 +991,7 @@ impl Scene {
     /// The talk line (the / key).
     pub fn open_chat(&mut self) {
         let ask = if self.online.village().is_some() { "say something (@name: to one person · @group: to a group)" } else { "@name: to a friend · @group: to a group" };
-        self.text_ask = Some((TextFor::Chat, ask.into()));
+        self.open_typing(TextFor::Chat, ask.into());
     }
 
     /// A line from the talk line: "@who what" to one person or a group,
@@ -1040,7 +1049,7 @@ impl Scene {
         self.post(format!("nobody called {who}: a friend, someone here, or a group"));
     }
 
-    fn other_name(&self, id: u32) -> String {
+    pub(super) fn other_name(&self, id: u32) -> String {
         self.online.other(id).map(|o| o.name.clone()).unwrap_or_else(|| "someone".into())
     }
 
@@ -1210,20 +1219,30 @@ impl Scene {
                 self.post(format!("{} {name}: {}?{key}", ask_icon(what), ask_words(what)));
                 self.chime();
             }
-            Event::Answer { id, what, yes } => {
+            Event::Answer { id, what, yes, seed: said } => {
                 let name = self.other_name(id);
                 if what == ask::SETTING {
                     self.post(if yes { format!("⚙ {name} said yes") } else { format!("⚙ {name} would rather not") });
                     return;
                 }
-                let Some((to, w, seed, _)) = self.social.asking else {
+                // (an answer to the ask it says, if it says: an older
+                // version doesn't)
+                let pending = self.social.asking.filter(|&(to, w, s, _)| w == what && (to == id || to == 0) && (said == 0 || said == s));
+                let Some((to, _, seed, _)) = pending else {
                     if yes && what == ask::RACE {
                         self.post(format!("⇘ {name}'s in the race!"));
                     }
+                    // (a yes to a game asked, then dropped for another)
+                    if let Some(d) = self.social.dropped.iter().rev().find(|d| d.1 == what && (d.0 == id || d.0 == 0) && t < d.3 && (said == 0 || said == d.2)).copied() {
+                        if yes {
+                            self.dropped_yes(id, what, d.2, d.0 == 0, t);
+                        }
+                    }
                     return;
                 };
-                if w != what || (to != id && to != 0) {
-                    return;
+                // (what they asked of this villager meanwhile is moot now)
+                if yes && games::Kind::from_code(what).is_some() {
+                    self.social.asked.retain(|a| a.id != id || games::Kind::from_code(a.what).is_none());
                 }
                 if to != 0 {
                     self.social.asking = None;
@@ -1242,11 +1261,16 @@ impl Scene {
                     ask::TRIP => self.post(format!("⇄ {name}'s coming along!")),
                     ask::TAG => self.start_net_tag(id, true, t),
                     ask::FIGHT => self.start_net_fight(id, t),
-                    // everyone asked: they sit down at the table waiting
+                    // everyone asked: they sit down at the table waiting (no
+                    // room: they're told, so they're not left waiting)
                     _ if to == 0 => {
                         if let Some(tb) = self.table.as_mut().filter(|tb| tb.net.as_ref().is_some_and(|n| n.game == seed)) {
-                            tb.sit_in(id, &name);
-                            self.post(format!("☺ {name} sits down at the table"));
+                            if tb.sit_in(id, &name) {
+                                self.post(format!("☺ {name} sits down at the table"));
+                            } else if let Some(n) = &tb.net {
+                                let (seq, kind, st) = (n.seq.max(1), tb.kind.code(), tb.state_json());
+                                self.online.table(seed, seq, kind, st);
+                            }
                         }
                     }
                     k => {
@@ -1257,7 +1281,19 @@ impl Scene {
                 }
             }
             Event::Table { id, game, seq, kind, state } => {
-                let _ = id;
+                // waiting to sit down, and the one who deals says the table's
+                // full without this villager: up again
+                let me = self.online.my_id();
+                let full = self.table.as_ref().filter(|tb| tb.kind.code() == kind && tb.waiting && tb.net.as_ref().is_some_and(|n| n.game == game && !n.owner())).and_then(|tb| games::Table::seats_in(&state).map(|s| (s, tb.kind.seats())));
+                if let Some((seats, most)) = full {
+                    if seats.first() == Some(&id) && !seats.contains(&me) && seats.len() >= most {
+                        if let Some(tb) = self.table.take() {
+                            self.left_table(&tb);
+                        }
+                        self.post(format!("the table's full: {} and the others are playing", self.other_name(id)));
+                        return;
+                    }
+                }
                 if let Some(tb) = self.table.as_mut().filter(|tb| tb.kind.code() == kind && tb.net.as_ref().is_some_and(|n| n.game == game)) {
                     if tb.adopt(seq, &state) {
                         self.director.sound(Sfx::Click, self.cam + self.w as f32 / 2.0, 0.5);
@@ -1354,6 +1390,8 @@ impl Scene {
                 }
             }
             Event::Synced { dev, at, state } => self.social.synced.push((dev, at, state)),
+            Event::Sky { id, what, x, y, seed, host: _ } => self.on_sky(id, what, x, y, seed, t),
+            Event::Never { id, what, seed } => self.never_mind(id, what, seed),
         }
     }
 
@@ -1361,6 +1399,38 @@ impl Scene {
 
     /// A game with friends at the table in the games room, dealt now
     /// (`seats`: their ids, the asker first, and names).
+    /// A yes to a game this villager asked about, then dropped (said yes to
+    /// someone else's instead). Both said yes to each other at once: the
+    /// game with the lower number is the one both go to, the same rule on
+    /// each side; else they're told it's off (no waiting at an empty table).
+    fn dropped_yes(&mut self, id: u32, what: u8, seed: u32, everyone: bool, t: f32) {
+        let now = self.table.as_ref().and_then(|tb| tb.net.as_ref().map(|n| (n.game, n.seats.is_empty() || n.seats.contains(&id), tb.waiting || t - self.social.table_since < 20.0)));
+        match now {
+            // (there already)
+            Some((game, _, _)) if game == seed => {}
+            Some((game, with_them, fresh)) if with_them && fresh && seed < game => {
+                let name = self.other_name(id);
+                let me = self.online.my_id();
+                let mine = self.your_name().to_string();
+                if everyone {
+                    self.start_table(what, seed, vec![me], vec![mine], seed, true);
+                    if let Some(tb) = self.table.as_mut() {
+                        tb.sit_in(id, &name);
+                    }
+                } else {
+                    self.start_net_game(what, seed, vec![me, id], vec![mine, name.clone()], seed);
+                }
+                self.post(format!("☺ {name} and you both said yes: to your table"));
+            }
+            _ => self.online.table_up(seed),
+        }
+    }
+
+    /// Someone's never mind: what they asked is off.
+    fn never_mind(&mut self, id: u32, what: u8, seed: u32) {
+        self.social.asked.retain(|a| !(a.id == id && a.what == what && a.seed == seed));
+    }
+
     fn start_net_game(&mut self, what: u8, game: u32, seats: Vec<u32>, names: Vec<String>, seed: u32) {
         self.start_table(what, game, seats, names, seed, false);
     }
@@ -1377,6 +1447,7 @@ impl Scene {
             self.left_table(&old);
         }
         self.table = Some(tb);
+        self.social.table_since = self.now();
         self.convo = None;
         let with = if others.is_empty() { "friends".to_string() } else { others.join(", ") };
         self.post(format!("{} {} with {with}: to the games room", kind.icon(), kind.name()));
@@ -1675,7 +1746,7 @@ impl Scene {
         }
         let a = self.social.asked.remove(i);
         let t = self.now();
-        self.online.answer(a.id, a.what, yes);
+        self.online.answer(a.id, a.what, yes, a.seed);
         if let Some((key, value)) = a.rule {
             if yes {
                 self.post(format!("⚙ {}", Rules::words(&key, &value)));
@@ -1687,7 +1758,17 @@ impl Scene {
             return;
         }
         if a.what != ask::RACE {
-            self.social.yes_again.push((a.id, a.what, t + 2.0, t + 7.0));
+            self.social.yes_again.push((a.id, a.what, a.seed, t + 2.0, t + 7.0));
+        }
+        // a game of this villager's own asked about: never mind it (they
+        // said yes to this one instead), so nobody's left waiting at it
+        if games::Kind::from_code(a.what).is_some() {
+            if let Some((to, w, seed, _)) = self.social.asking.filter(|s| games::Kind::from_code(s.1).is_some()) {
+                self.online.never(w, seed);
+                self.social.dropped.push((to, w, seed, t + 30.0));
+                self.social.dropped.retain(|d| t < d.3);
+                self.social.asking = None;
+            }
         }
         match a.what {
             ask::TAG => {} // (the asker starts it, and says who's it)
@@ -1958,12 +2039,21 @@ impl Scene {
         f.cover_pictures = true;
         if self.trip.is_none() && self.look.is_none() && !self.chats_focused() {
             self.draw_post(f);
+        } else {
+            self.social.post_at.set(None);
         }
         if let Some(tb) = self.table.as_ref().filter(|_| self.table_shows()) {
             tb.draw(f, self.ui_look, self.now());
         }
         self.draw_social(f);
         self.draw_chats(f);
+        // what's being said (at a table, on a trip too), and the line typed,
+        // over all of it
+        self.social.chat_box.set(None);
+        if self.look.is_none() && !self.chats_focused() {
+            self.draw_chat_feed(f);
+        }
+        self.draw_typing(f);
         (f.ox, f.oy, f.cover_pictures) = (ox, oy, cover);
     }
 
@@ -2208,23 +2298,17 @@ impl Scene {
     /// One friend's menu.
     /// A chat with friend `i`: its title, then the last few lines (each
     /// on a line of its own), for the box it's typed in.
+    /// The village friend `i` lately asked this villager into (an hour at
+    /// most), if they did.
+    pub fn invite_from(&self, i: usize) -> Option<String> {
+        let now = crate::clock::now().timestamp();
+        let l = self.online.chat(i).iter().rev().find(|l| !l.mine && !l.invite.is_empty())?;
+        (now - l.at < 3600).then(|| l.invite.clone())
+    }
+
     pub fn chat_prompt(&self, i: usize) -> String {
         let name = self.online.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
-        // (the chat's on show in friends & chats: only who it's to)
-        if self.chats_shown() {
-            return format!("✉ to {name}");
-        }
-        let lines = self.online.chat(i);
-        let mut s = format!("✉ chat with {name}");
-        if lines.is_empty() {
-            s.push_str("\n  (nothing yet: say hello!)");
-        }
-        for l in lines.iter().rev().take(8).rev() {
-            let who = if l.mine { "you".to_string() } else { name.clone() };
-            let text: String = l.text.chars().take(72).collect();
-            s.push_str(&format!("\n  {who}: {text}"));
-        }
-        s
+        format!("✉ to {name}")
     }
 
     pub fn friend_menu(&self, i: usize) -> (String, Vec<(String, Do)>) {
@@ -2413,8 +2497,8 @@ impl Scene {
                     self.post(format!("⌂ village code {code} copied"));
                 }
             }
-            NetDo::Add => self.text_ask = Some((TextFor::Add, "a friend's code (XXXX-XXXX-XXXX)".into())),
-            NetDo::Mail(i) => self.text_ask = Some((TextFor::Mail(i), self.chat_prompt(i as usize))),
+            NetDo::Add => self.open_typing(TextFor::Add, "a friend's code (XXXX-XXXX-XXXX)".into()),
+            NetDo::Mail(i) => self.open_typing(TextFor::Mail(i), self.chat_prompt(i as usize)),
             NetDo::Join(i) => {
                 let code = self.online.friends().get(i as usize).and_then(|(_, h)| h.as_ref().and_then(|h| h.village.clone()));
                 if let Some(code) = code {
@@ -2441,12 +2525,12 @@ impl Scene {
                 self.social.front.push(Front::Apart);
                 self.post("⌂ the village is closed");
             }
-            NetDo::JoinCode => self.text_ask = Some((TextFor::JoinCode, "the village's code (XXXX-XXXX-XXXX)".into())),
+            NetDo::JoinCode => self.open_typing(TextFor::JoinCode, "the village's code (XXXX-XXXX-XXXX)".into()),
             NetDo::Leave => {
                 self.online.leave_village();
                 self.social.front.push(Front::Apart);
             }
-            NetDo::Say => self.text_ask = Some((TextFor::Say, "say something (everyone here hears it)".into())),
+            NetDo::Say => self.open_typing(TextFor::Say, "say something (everyone here hears it)".into()),
             NetDo::Invite(i) => {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
                 if self.online.village().is_none() {
@@ -2457,6 +2541,13 @@ impl Scene {
                     self.post(format!("⌂ {name} is asked in"));
                 } else {
                     self.post("not online yet");
+                }
+            }
+            NetDo::ChatInvite(i) => {
+                if let Some(code) = self.invite_from(i as usize) {
+                    if let Err(e) = self.online.join(&code) {
+                        self.post(e);
+                    }
                 }
             }
             NetDo::GoInvited(i) => {
@@ -2531,17 +2622,17 @@ impl Scene {
                 let c = self.my_card();
                 self.social.card = Some((c, Some(self.online.code())));
             }
-            NetDo::Motto => self.text_ask = Some((TextFor::Motto, "a line for your profile card".into())),
+            NetDo::Motto => self.open_typing(TextFor::Motto, "a line for your profile card".into()),
             NetDo::LinkShow => {
                 if !self.online.wanted() {
                     self.online.go_online(true);
                 }
                 self.social.front.push(Front::LinkShow);
             }
-            NetDo::LinkUse => self.text_ask = Some((TextFor::Link, "the link code from your other device (XXXX-XXXX-XXXX; this one becomes that villager)".into())),
+            NetDo::LinkUse => self.open_typing(TextFor::Link, "the link code from your other device (XXXX-XXXX-XXXX; this one becomes that villager)".into()),
             NetDo::Unlink => self.social.front.push(Front::Unlink),
             NetDo::Villager(i) => self.social.front.push(Front::Villager(i as usize)),
-            NetDo::NewVillager => self.text_ask = Some((TextFor::NewVillager, "the new villager's name".into())),
+            NetDo::NewVillager => self.open_typing(TextFor::NewVillager, "the new villager's name".into()),
             NetDo::Ping(i) => {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
                 if self.online.ping(i as usize) {
@@ -2552,11 +2643,11 @@ impl Scene {
                 }
             }
             NetDo::Chat => self.open_chat(),
-            NetDo::GroupNew => self.text_ask = Some((TextFor::GroupNew, "the new group's name".into())),
-            NetDo::GroupJoin => self.text_ask = Some((TextFor::GroupJoin, "the group's code (XXXX-XXXX-XXXX), then its name if you like".into())),
+            NetDo::GroupNew => self.open_typing(TextFor::GroupNew, "the new group's name".into()),
+            NetDo::GroupJoin => self.open_typing(TextFor::GroupJoin, "the group's code (XXXX-XXXX-XXXX), then its name if you like".into()),
             NetDo::GroupSay(i) => {
                 let name = self.online.book.groups.get(i as usize).map(|g| g.name.clone()).unwrap_or_default();
-                self.text_ask = Some((TextFor::GroupSay(i), format!("say something in #{name}")));
+                self.open_typing(TextFor::GroupSay(i), format!("say something in #{name}"));
             }
             NetDo::GroupCode(i) => {
                 if let Some(g) = self.online.book.groups.get(i as usize) {
@@ -2579,7 +2670,7 @@ impl Scene {
             NetDo::Friends => self.open_chats(None),
             NetDo::Rename(i) => {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
-                self.text_ask = Some((TextFor::Rename(i), format!("a name for {name} (just here; empty: as it was)")));
+                self.open_typing(TextFor::Rename(i), format!("a name for {name} (just here; empty: as it was)"));
             }
             NetDo::PinFriend(i) => self.pin_friend(i as usize),
             NetDo::ClearChat(i) => {
@@ -2634,7 +2725,7 @@ impl Scene {
             }
             NetDo::Whisper(id) => {
                 let name = self.other_name(id);
-                self.text_ask = Some((TextFor::Whisper(id), format!("just to {name}")));
+                self.open_typing(TextFor::Whisper(id), format!("just to {name}"));
             }
         }
     }
@@ -2660,7 +2751,7 @@ impl Scene {
                 if self.online.mail(i as usize, text) {
                     self.log_line(format!("✉ to {name}: {text}"), false);
                     // the chat stays open for the next line
-                    self.text_ask = Some((TextFor::Mail(i), self.chat_prompt(i as usize)));
+                    self.open_typing(TextFor::Mail(i), self.chat_prompt(i as usize));
                 } else {
                     self.post("✉ not sent (not online yet)");
                 }

@@ -285,6 +285,30 @@ pub extern "C" fn give_text(w: *mut Web, len: usize) {
     unsafe { &mut *w }.game.give_text(&String::from_utf8_lossy(&bytes));
 }
 
+/// What's typed in the page's own box, as it stands (in the scratch buffer,
+/// `len` bytes), and where its caret is (characters in; -1: the end).
+#[no_mangle]
+pub extern "C" fn typed(w: *mut Web, len: usize, caret: i32) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    unsafe { &mut *w }.game.typed(&String::from_utf8_lossy(&bytes), (caret >= 0).then_some(caret as usize));
+}
+
+/// A key in the page's own box: 1 Enter, 2 Esc (or put away), 3 up, 4 down.
+#[no_mangle]
+pub extern "C" fn type_key(w: *mut Web, k: u32) {
+    unsafe { &mut *w }.game.type_key(k);
+}
+
+/// How much of the canvas (its pixels, from the bottom) the phone's
+/// keyboard covers.
+#[no_mangle]
+pub extern "C" fn set_keyboard(w: *mut Web, px: f32) {
+    unsafe { &mut *w }.game.set_keyboard(px);
+}
+
 /// Randomness from the page (its crypto), for codes and sealing.
 #[no_mangle]
 pub extern "C" fn entropy(a: u32, b: u32, c: u32, d: u32) {

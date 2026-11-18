@@ -433,12 +433,20 @@ impl Table {
         }
     }
 
+    /// Who's sat where in a state sent across the table (None: not one).
+    pub fn seats_in(json: &str) -> Option<Vec<u32>> {
+        serde_json::from_str::<Wire>(json).ok().map(|w| w.seats)
+    }
+
     /// Online, seat 0: someone sits down (between hands they're dealt in
-    /// next time).
-    pub fn sit_in(&mut self, id: u32, name: &str) {
-        let Some(net) = &mut self.net else { return };
-        if !net.owner() || net.seats.contains(&id) || net.seats.len() >= self.kind.seats() {
-            return;
+    /// next time). False: there's no room (it's full).
+    pub fn sit_in(&mut self, id: u32, name: &str) -> bool {
+        let Some(net) = &mut self.net else { return false };
+        if net.seats.contains(&id) {
+            return true;
+        }
+        if !net.owner() || net.seats.len() >= self.kind.seats() {
+            return false;
         }
         net.seats.push(id);
         self.names.push(name.to_string());
@@ -447,6 +455,7 @@ impl Table {
             self.status = self.lobby_said();
             self.send();
         }
+        true
     }
 
     /// Online, seat 0: someone's gone (dealt out from the next hand on).

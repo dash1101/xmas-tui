@@ -43,6 +43,7 @@
   .btn.quiet { background: #24305a; color: var(--text); border: 1px solid var(--gold); }
   .friend { border: 1px solid #3a4470; padding: 4px 8px; margin: 6px 0; }
   .friend .row select { max-width: 92px; }
+  #kb { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0; border: 0; padding: 0; font-size: 16px; pointer-events: none; }
   #ask { display: none; left: 50%; bottom: 22%; transform: translateX(-50%); width: min(92vw, calc(520px * var(--ui, 1))); padding: 8px 10px 10px; }
   #ask.open { display: block; }
   #ask-q { white-space: pre-line;  color: var(--gold); margin-bottom: 6px; }
@@ -58,7 +59,7 @@
 <canvas id="village"></canvas>
 <canvas id="pad"></canvas>
 <div id="loading">❄ the village is waking up…</div>
-<div id="bar" class="box"><span id="b-todo" title="things to do (T)">✦ do</span><span id="b-more" title="more (pockets, invite along, lie down…)">☰</span><span id="b-centre" title="back to the villager (C)">⌖</span><span id="b-pause" title="pause the village (P)">⏸</span><span id="b-online" title="friends & online: play together (O)">✉</span><span id="b-sound" title="sound on / off">♪</span><span id="b-help" title="controls (?)">?</span><span id="b-opts" title="settings">⚙</span></div>
+<div id="bar" class="box"><span id="b-todo" title="things to do (T)">✦ do</span><span id="b-more" title="more (pockets, invite along, lie down…)">☰</span><span id="b-centre" title="back to the villager (C)">⌖</span><span id="b-pause" title="pause the village (P)">⏸</span><span id="b-chat" title="chat (/)">☺</span><span id="b-online" title="friends & online: play together (O)">✉</span><span id="b-sound" title="sound on / off">♪</span><span id="b-help" title="controls (?)">?</span><span id="b-opts" title="settings">⚙</span></div>
 <div id="opts" class="box">
   <div class="title" id="o-grip"><i>⠿</i><b>⚙ settings</b><u id="o-close" title="close">✕</u></div>
   <div id="tabs"></div>
@@ -67,6 +68,7 @@
 <div id="toast" class="box"></div>
 <form id="ask" class="box" autocomplete="off"><div id="ask-q"></div><input id="ask-in" maxlength="280" enterkeyhint="send"><div id="ask-hint">Enter: send · Esc: never mind</div><div class="btns"><button type="button" class="btn quiet" id="ask-no">never mind</button><button type="submit" class="btn">send</button></div></form>
 <input id="o-file" type="file" accept=".toml,text/plain" hidden>
+<input id="kb" maxlength="280" autocomplete="off" autocorrect="on" spellcheck="false" enterkeyhint="send" aria-label="type here">
 <script src="xmas.js"></script>
 </body>
 </html>

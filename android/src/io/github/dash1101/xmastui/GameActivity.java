@@ -49,6 +49,15 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     private FrameLayout root;
     /** The settings, over the village while they're open (null: shut). */
     private SettingsPanel settings;
+    /**
+     * A line typed in the village itself (the chat box, a friend's chat, a
+     * code): typed here, in a box out of sight that brings the keyboard up,
+     * and drawn in the village, above the keyboard.
+     */
+    private KbField kb;
+    private boolean kbOn;
+    /** (Set from here, not typed: not sent back.) */
+    private boolean kbSetting;
     private volatile boolean running;
     private Thread loop;
     private Thread sound;
@@ -73,7 +82,30 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         root.addView(surface, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         controls = new Controls(this);
         root.addView(controls, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        kb = new KbField(this);
+        root.addView(kb, new FrameLayout.LayoutParams(2, 2, android.view.Gravity.BOTTOM | android.view.Gravity.START));
         setContentView(root);
+        // the keyboard over the village, not pushing it about: what's typed
+        // is drawn above it (told how tall it is); older phones pan up to
+        // the box at the bottom instead
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+            root.setOnApplyWindowInsetsListener((v, in) -> {
+                int h = in.getInsets(WindowInsets.Type.ime()).bottom;
+                boolean shown = in.isVisible(WindowInsets.Type.ime());
+                if (game != 0) Native.setKeyboard(game, shown ? h : 0);
+                // (put away while a line's open: the line's closed)
+                if (!shown && kbOn && kb.wasShown) {
+                    kb.wasShown = false;
+                    kbOn = false;
+                    if (game != 0) Native.typeKey(game, 2);
+                }
+                if (shown) kb.wasShown = true;
+                return in;
+            });
+        } else {
+            getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
+        }
         immersive();
         SharedPreferences p = Prefs.get(this);
         if (!p.getBoolean("game_seen", false)) {
@@ -328,6 +360,90 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         return n + rest;
     }
 
+    /** The box out of sight that the keyboard types into (see `kb`). */
+    final class KbField extends android.widget.EditText {
+        boolean wasShown;
+
+        KbField(Context c) {
+            super(c);
+            setAlpha(0f);
+            setSingleLine(true);
+            setBackground(null);
+            setCursorVisible(false);
+            setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+            // (in landscape, no keyboard over the whole screen: the village
+            // shows above it, with the line in it)
+            setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);
+            setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(280)});
+            addTextChangedListener(new android.text.TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+
+                @Override
+                public void onTextChanged(CharSequence s, int a, int b, int c) {}
+
+                @Override
+                public void afterTextChanged(android.text.Editable s) {
+                    if (!kbSetting && kbOn && game != 0) Native.typed(game, s.toString(), s.toString().codePointCount(0, Math.max(0, Math.min(s.length(), getSelectionEnd()))));
+                }
+            });
+            setOnEditorActionListener((v, id, ev) -> {
+                if (game != 0) Native.typeKey(game, 1);
+                return true;
+            });
+        }
+
+        @Override
+        public boolean onKeyPreIme(int code, KeyEvent e) {
+            // (the back key puts the keyboard away: the line's closed)
+            if (code == KeyEvent.KEYCODE_BACK && e.getAction() == KeyEvent.ACTION_UP && kbOn) {
+                kbOn = false;
+                if (game != 0) Native.typeKey(game, 2);
+                hideKeyboard();
+                return true;
+            }
+            return super.onKeyPreIme(code, e);
+        }
+    }
+
+    private void hideKeyboard() {
+        android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (im != null) {
+            im.hideSoftInputFromWindow(kb.getWindowToken(), 0);
+        }
+        kb.clearFocus();
+    }
+
+    /** What the village says of a line being typed: "on\t<code|text>\t<text>", "set\t<text>", "off". */
+    private void keyboard(String s) {
+        String[] p = s.split("\t", -1);
+        if ("on".equals(p[0])) {
+            kbOn = true;
+            kb.wasShown = false;
+            boolean code = p.length > 1 && "code".equals(p[1]);
+            kb.setInputType(android.text.InputType.TYPE_CLASS_TEXT | (code ? android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS : android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES));
+            setKb(p.length > 2 ? p[2] : "");
+            kb.requestFocus();
+            android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (im != null) {
+                im.showSoftInput(kb, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            }
+        } else if ("set".equals(p[0])) {
+            setKb(p.length > 1 ? p[1] : "");
+        } else if ("off".equals(p[0])) {
+            kbOn = false;
+            hideKeyboard();
+            immersive();
+        }
+    }
+
+    private void setKb(String text) {
+        kbSetting = true;
+        kb.setText(text);
+        kb.setSelection(kb.getText().length());
+        kbSetting = false;
+    }
+
     private void typeLine(String question, String value) {
         // (reassigned below: a chat's title and its lines)
         // a chat: its title, then what's been said so far (a line each)
@@ -472,6 +588,8 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                         startActivity(i);
                     } catch (Exception ignored) {
                     }
+                } else if (ask != null && ask.startsWith("keyboard:")) {
+                    keyboard(ask.substring(9));
                 } else if (ask != null && ask.startsWith("text:")) {
                     typeLine(ask.substring(5), "");
                 } else if (ask != null && ask.startsWith("rules:")) {

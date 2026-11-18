@@ -24,7 +24,7 @@ Contact: open an issue at [github.com/dash1101/xmas-tui/issues](https://github.c
 | Where | What | Where it's kept |
 |---|---|---|
 | Desktop (Linux) | Settings | `~/.config/xmas-tui/config.toml` |
-| | The save: the village, the villager, pockets, friends, chats, linked devices | `~/.local/share/xmas-tui/save.toml` |
+| | The save: the village, the villager, pockets, friends, chats (and what's waiting to send), linked devices | `~/.local/share/xmas-tui/save.toml` |
 | | The log (what the wallpaper did, for troubleshooting) | `~/.local/state/xmas-tui/wallpaper.log` |
 | Desktop (Windows) | Settings and the save | `%APPDATA%\xmas-tui\` |
 | | The log | `%LOCALAPPDATA%\xmas-tui\wallpaper.log` |
@@ -63,8 +63,9 @@ Everything goes through the relay sealed with ChaCha20-Poly1305. The key comes f
 | What | Sent when | Who can read it |
 |---|---|---|
 | The villager's name, look, profile card (the line on it, the pet, games won, best ski score and so on), whether they're online, and what they're playing on (Windows, Linux, a phone, a browser; from 1.25.3) | Online, now and then | Friends (those with the friend code) |
-| Direct messages to a friend | When written | The friend. **Note:** a message is sealed with the receiver's friend code, which the receiver's other friends also have. A modified app in one of their hands could read it. Nothing secret belongs in a chat. |
-| Where the villager is and what they're doing (walking, jumping, paused, their pets), what's said aloud, waves, games, snowballs, shooting stars, and the host's village settings, clock and music | In a shared village | Everyone in that village (those with its code) |
+| Direct messages to a friend, invites into a village, and asking to be friends (or saying yes) | When written, and again whenever the friend next comes online until it gets there (from 1.26.0; until then it waits on the writer's device, marked "waiting to send", for up to a month, an invite only while its village is open) | The friend. **Note:** a message is sealed with the receiver's friend code, which the receiver's other friends also have. A modified app in one of their hands could read it. Nothing secret belongs in a chat. |
+| "It got there" (from 1.26.0): a short reply naming the number of the message that arrived, so the writer's chat stops saying "waiting to send" | When a message arrives | The writer |
+| Where the villager is and what they're doing (walking, jumping, paused, their pets, up in a balloon, on the moon), what's said aloud, waves, games, snowballs, shooting stars, and the host's village settings, clock, music and sky (when the sleigh, a balloon, a comet or the aurora comes; from 1.26.0) | In a shared village | Everyone in that village (those with its code) |
 | "Just to …" messages inside a village | When written | Meant for one person, but sealed with the village's code: a modified app in the same village could read them |
 | Public squares, and villages listed in Public villages: everything above that happens in them, the listing itself (for example "Robin's village · 3 of 8 here") | While in one, or while listed | **Anyone.** Their codes are public by design. |
 | A villager's progress, name, look, pet, family, and the device's name (for example "dash-pc") | With linked devices | Only the linked devices (those with the link code) |
@@ -114,7 +115,7 @@ From the console, the project can quieten someone in those villages (what they s
 | Players quietened in a village the host keeps: their id | Until lifted |
 | The welcome said in each village the host keeps, announcements still to come, extra words starred out in public villages, and the public list's order | Until changed |
 
-These are kept in the relay's memory and saved to a file on its server so they survive a restart. **Messages and chats aren't kept on the relay at all** (apart from the host's last lines in its own villages, above, which are only ever in memory). They're passed on to whoever is online and listening right then, and a friend who is offline doesn't get them later.
+These are kept in the relay's memory and saved to a file on its server so they survive a restart. **Messages and chats aren't kept on the relay at all** (apart from the host's last lines in its own villages, above, which are only ever in memory). They're passed on to whoever is online and listening right then. A friend who is offline doesn't get them from the relay later; from 1.26.0 the writer's own app sends them again when the friend is next online (see above).
 
 ### Another relay
 

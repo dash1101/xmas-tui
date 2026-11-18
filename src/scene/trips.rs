@@ -5,6 +5,10 @@
 //! mountain (lanes, jumps and tricks, flags and snowflakes for points,
 //! others racing down too), and the same way home. And a drive: the car
 //! parked by the villager's home, out along a quiet snowy road at night.
+//! And the moon: jumped high enough, on Christmas spirit, right off the top
+//! of the sky, the villager's up there (a little moon, round in a few
+//! hundred steps, light enough to bound about on, the Earth hanging over
+//! it), with anyone else who's got there; ↓ comes back down.
 //!
 //! Each part is a scene of its own, drawn full screen in the same pixel-art
 //! way as the village.
@@ -29,6 +33,8 @@ pub enum Where {
     Ski,
     /// Out for a drive.
     Drive,
+    /// On the moon (since when: the first moments, flying up to it).
+    Moon { since: f32 },
 }
 
 /// What a trip asks of the village (when it's over).
@@ -38,6 +44,30 @@ pub enum Back {
     Station,
     /// At home (out of the car).
     Home,
+    /// Down from the sky (the moon), where the villager left.
+    Sky,
+}
+
+/// Round the little moon (columns): walking on from here comes back to the
+/// start.
+pub const MOON_W: f32 = 360.0;
+/// Flying up to the moon (s), and how high a bound goes up there.
+const LIFT_OFF: f32 = 2.2;
+const MOON_G: f32 = 9.0;
+
+/// On the moon: where round it (columns), how high off the dust and how
+/// fast up, the jump held, the steps (for footprints), footprints and
+/// flags planted (where round).
+struct MoonWalk {
+    x: f32,
+    air: f32,
+    vy: f32,
+    held: bool,
+    walk: f32,
+    prints: Vec<f32>,
+    flags: Vec<f32>,
+    /// The time last frame.
+    now: f32,
 }
 
 /// How long the train takes (s); sitting down, it goes by quicker.
@@ -234,6 +264,8 @@ pub struct Trip {
     pub best: Option<f32>,
     pub km: f32,
     pub best_score: u32,
+    /// On the moon (see `Where::Moon`).
+    moon: Option<MoonWalk>,
 }
 
 /// Where things stand at the lodge (columns, on an 160-wide layout
@@ -262,6 +294,16 @@ impl Trip {
         tr.at = Where::Shuttle { home: false, since: t };
         tr.say("the shuttle up to the station…", t, 3.0);
         tr.sounds.push((Sfx::Chime, 0.6));
+        tr
+    }
+
+    /// Up to the moon (`x`: where round it the villager comes down).
+    pub fn moon(t: f32, seed: u32, x: f32) -> Self {
+        let mut tr = Trip::new(seed);
+        tr.at = Where::Moon { since: t };
+        tr.moon = Some(MoonWalk { x: x.rem_euclid(MOON_W), air: 0.0, vy: 0.0, held: false, walk: 0.0, prints: vec![], flags: vec![], now: t });
+        tr.say("up, up… and up! is that… the moon?!", t, 2.4);
+        tr.sounds.push((Sfx::Magic, 1.0));
         tr
     }
 
@@ -317,6 +359,7 @@ impl Trip {
             best: None,
             km: 0.0,
             best_score: 0,
+            moon: None,
         }
     }
 
@@ -382,6 +425,10 @@ impl Trip {
                 None => TripAt { at: 3, ..base },
             },
             Where::Drive => TripAt { at: 6, ..base },
+            Where::Moon { since } => match &self.moon {
+                Some(m) => TripAt { at: 8, x: m.x, air: m.air, sat: m.walk.fract() > 0.5 && m.air <= 0.0, el: t - since, ..base },
+                None => TripAt { at: 8, ..base },
+            },
         }
     }
 
@@ -605,6 +652,27 @@ impl Trip {
             Where::Ski if self.down.is_some() => self.lift_back(t),
             Where::Ski => {}
             Where::Drive => self.done = Some(Back::Home),
+            Where::Moon { since } => {
+                // a flag planted where the villager stands (five at most)
+                if t - since < LIFT_OFF {
+                    return;
+                }
+                if let Some(m) = &mut self.moon {
+                    if m.air > 0.0 {
+                        return;
+                    }
+                    if m.flags.iter().any(|&fx| moon_gap(fx, m.x).abs() < 6.0) {
+                        self.say("there's a flag just here already", t, 2.0);
+                        return;
+                    }
+                    if m.flags.len() >= 5 {
+                        m.flags.remove(0);
+                    }
+                    m.flags.push(m.x);
+                    self.say("a flag on the moon! (a candy-cane one)", t, 2.5);
+                    self.sounds.push((Sfx::Present, 0.7));
+                }
+            }
         }
     }
 
@@ -663,6 +731,8 @@ impl Trip {
             Where::Ski if self.down.is_some() => Some("back up the lift now"),
             Where::Ski => None,
             Where::Drive => Some("home"),
+            Where::Moon { since } if self.t_ok(since) => Some("plant a flag"),
+            Where::Moon { .. } => None,
         }
     }
 
@@ -755,6 +825,16 @@ impl Trip {
 
     /// Space: jump (skiing); held, higher. The car's horn, driving.
     pub fn jump(&mut self, held: bool) {
+        if let (Where::Moon { .. }, Some(m)) = (self.at, &mut self.moon) {
+            // (light up here: a bound, held for longer still)
+            if held && m.air <= 0.0 {
+                m.vy = 13.0;
+                m.air = 0.01;
+                self.sounds.push((Sfx::Pickup, 0.35));
+            }
+            m.held = held;
+            return;
+        }
         if self.at == Where::Drive && held {
             self.sounds.push((Sfx::Honk, 0.7));
             return;
@@ -859,6 +939,7 @@ impl Trip {
                 self.update_folk(dt, t);
             }
             Where::Ski => self.ski_step(dt, t, mv),
+            Where::Moon { since } => self.moon_step(dt, t, since, mv),
             Where::Drive => {
                 // a gentle drive: speed up, ease off, the other lane
                 self.speed = if mv.0 > 0.0 { (self.speed + dt * 0.3).min(1.0) } else if mv.0 < 0.0 { (self.speed - dt * 0.6).max(0.0) } else { (self.speed - dt * 0.03).max(0.15) };
@@ -1104,6 +1185,7 @@ impl Trip {
             Where::Lift { since } => self.draw_lift(f, t, (t - since).min(7.0), look),
             Where::Ski => self.draw_ski(f, t, look),
             Where::Drive => self.draw_drive(f, t),
+            Where::Moon { since } => self.draw_moon(f, t, t - since, look),
         }
         let _ = (w, h);
     }
@@ -1120,6 +1202,7 @@ impl Trip {
             Where::Lift { .. } => ((w / 2.0) as i32, (h / 3.0) as i32),
             Where::Ski => ((w / 3.0) as i32, (h * 0.5 - 12.0) as i32),
             Where::Drive => ((w / 2.0) as i32, (h * 0.6) as i32),
+            Where::Moon { .. } => ((w / 2.0) as i32, (moon_surface(0.0, f.ph as f32) / 2.0 - self.moon.as_ref().map(|m| m.air).unwrap_or(0.0) - 9.0) as i32),
         }
     }
 
@@ -1155,6 +1238,7 @@ impl Trip {
             Where::Ski if self.down.is_some() => " waiting for everyone at the bottom · E: back up the lift now ",
             Where::Ski => " → tuck · ← slow · ↑ ↓ lanes · Space jump · air: ← → spin, ↓ grab ",
             Where::Drive => " → faster · ← slower · ↑ ↓ lanes · Space honk · E home ",
+            Where::Moon { .. } => " ← → walk round the moon · Space: bound (so light!) · E: a flag · ↓ or Esc: back down home ",
         };
         let n = hint.chars().count() as i32;
         let (hx, hy) = spot(n, 1, false);
@@ -2072,6 +2156,189 @@ fn name_tag(f: &mut Frame, name: &str, cx: f32, row: i32) {
     let s = format!(" {name} ");
     let n = s.chars().count() as i32;
     f.text(cx.round() as i32 - n / 2, row.max(1), &s, Rgb::hex(0xffe9a8), Bg::Mix(pal::UI_PANEL, 0.7), 0.0);
+}
+
+/// How far round the moon from `a` to `b`, the short way (columns).
+fn moon_gap(a: f32, b: f32) -> f32 {
+    (b - a + MOON_W / 2.0).rem_euclid(MOON_W) - MOON_W / 2.0
+}
+
+/// The moon's dust under screen column `dx` from the middle (pixel row, a
+/// screen `ph` pixels tall): a little round moon, its edge falling away
+/// either side.
+fn moon_surface(dx: f32, ph: f32) -> f32 {
+    ph * 0.7 + dx * dx * 0.0016
+}
+
+impl Trip {
+    fn t_ok(&self, since: f32) -> bool {
+        self.moon.as_ref().is_some_and(|m| m.now - since >= LIFT_OFF)
+    }
+
+    /// On the moon, each frame: walking round, bounding (low, slow, a held
+    /// jump floating longer), footprints; ↓ back home.
+    fn moon_step(&mut self, dt: f32, t: f32, since: f32, mv: (f32, f32)) {
+        let Some(m) = &mut self.moon else { return };
+        m.now = t;
+        if t - since < LIFT_OFF {
+            return;
+        }
+        if mv.1 > 0.5 && m.air <= 0.0 {
+            self.done = Some(Back::Sky);
+            self.say("back down to the village… wheee!", t, 2.0);
+            self.sounds.push((Sfx::Magic, 0.7));
+            return;
+        }
+        if mv.0 != 0.0 {
+            self.dir = mv.0.signum();
+            m.x = (m.x + mv.0 * 10.0 * dt).rem_euclid(MOON_W);
+            if m.air <= 0.0 {
+                let was = m.walk;
+                m.walk += dt * 4.0;
+                // a footprint each step, in the dust
+                if was.floor() != m.walk.floor() {
+                    m.prints.push(m.x);
+                    if m.prints.len() > 160 {
+                        m.prints.remove(0);
+                    }
+                }
+            }
+        }
+        if m.air > 0.0 || m.vy > 0.0 {
+            let g = if m.held && m.vy > 0.0 { MOON_G * 0.45 } else { MOON_G };
+            m.vy -= g * dt;
+            m.air += m.vy * dt;
+            if m.air <= 0.0 {
+                m.air = 0.0;
+                m.vy = 0.0;
+                m.prints.push(m.x);
+                self.sounds.push((Sfx::Drop, 0.25));
+            }
+        }
+    }
+
+    /// The moon: the black sky full of stars, the Earth hanging in it, the
+    /// dust (craters, footprints, flags) curving away, whoever else is up
+    /// here, and the villager in the middle; at first, flying up to it.
+    fn draw_moon(&self, f: &mut Frame, t: f32, el: f32, look: &crate::scene::sprites::Look) {
+        use crate::scene::sprites::Pose;
+        let Some(m) = &self.moon else { return };
+        let (pw, ph) = (f.pw as i32, f.ph as i32);
+        let up = (el / LIFT_OFF).clamp(0.0, 1.0);
+        // the sky: black, the stars (streaming by while flying up)
+        for y in 0..ph {
+            for x in 0..pw {
+                f.px_set(x, y, Rgb::hex(0x02030a));
+            }
+        }
+        let rush = (1.0 - up) * 220.0;
+        for i in 0..(pw * ph / 90).clamp(60, 900) {
+            let sx = (h01(hash2(i, 17)) * pw as f32 + m.x * 0.15).rem_euclid(pw as f32);
+            let sy = (h01(hash2(i, 29)) * ph as f32 + el * rush).rem_euclid(ph as f32);
+            let tw = 0.5 + 0.5 * (t * (1.0 + h01(hash2(i, 3)) * 2.0) + i as f32).sin();
+            let c = Rgb::hex(0xdfe7f4) * (0.25 + 0.6 * h01(hash2(i, 41)) * (0.6 + 0.4 * tw));
+            f.px_set(sx as i32, sy as i32, c);
+            if rush > 1.0 {
+                f.px_set(sx as i32, sy as i32 - 1, c * 0.5);
+            }
+        }
+        // the Earth, far below and away now: blue sea, green and white
+        // land, cloud, a glint where the village is
+        // (up in the middle of the sky: the corners are the widgets')
+        let er = (ph as f32 * 0.1 * (1.0 + (1.0 - up) * 2.0)).max(4.0);
+        let (ex, ey) = (pw as f32 * 0.6, ph as f32 * (0.3 + (1.0 - up) * 0.9));
+        for dy in -(er as i32)..=er as i32 {
+            for dx in -(er as i32)..=er as i32 {
+                let (u, v) = (dx as f32 / er, dy as f32 / er);
+                let d2 = u * u + v * v;
+                if d2 > 1.0 {
+                    continue;
+                }
+                let spin = t * 0.02;
+                let land = noise1(u * 2.2 + spin * 6.0, 7) * noise1(v * 2.0 + 3.0, 11);
+                let cloud = noise1(u * 3.0 - spin * 9.0 + v, 23);
+                let pole = v < -0.72 || v > 0.8;
+                let mut c = if pole { Rgb::hex(0xf2f6ff) } else if land > 0.32 { Rgb::hex(0x3a8a4a) } else { Rgb::hex(0x1f5aa8) };
+                if cloud > 0.62 {
+                    c = c.lerp(Rgb::hex(0xf4f6fa), 0.7);
+                }
+                // (the sun from the left: the right side in shadow)
+                let lit = (0.35 + 0.65 * (1.0 - ((u + 0.3).max(0.0) * 1.1).min(1.0))).max(0.15) * (1.0 - d2 * 0.25);
+                f.px_set((ex + dx as f32) as i32, (ey + dy as f32) as i32, c * lit);
+            }
+        }
+        if up >= 1.0 && (t * 2.0).sin() > 0.0 {
+            f.light_px(ex - er * 0.35, ey - er * 0.55, Rgb::hex(0xffd36b) * 1.2);
+        }
+        // the dust: grey, a little bluish at the far edge, craters and
+        // rocks round the moon (the same for everyone up here)
+        let cam = m.x;
+        let mid = pw as f32 / 2.0;
+        let rise = (1.0 - up) * ph as f32 * 0.6;
+        let surf = |x: f32| moon_surface(x - mid, ph as f32) + rise;
+        for x in 0..pw {
+            let wx = (cam + (x as f32 - mid)).rem_euclid(MOON_W);
+            let top = surf(x as f32);
+            for y in (top as i32).max(0)..ph {
+                let depth = (y as f32 - top) / (ph as f32 - top).max(1.0);
+                let n = h01(hash2((wx * 1.0) as i32, y / 2));
+                let mut c = Rgb::hex(0xa8a8b4) * (0.78 + 0.12 * n - depth * 0.25);
+                // craters: rings in the dust, darker in, a lit rim
+                for k in 0..14 {
+                    let cx = h01(hash2(k, self.seed as i32 ^ 0x3c)) * MOON_W;
+                    let r = 4.0 + 10.0 * h01(hash2(k, 77));
+                    let dxw = moon_gap(cx, wx);
+                    let dyw = (y as f32 - top - r * 0.45) * 2.4;
+                    let d = (dxw * dxw + dyw * dyw).sqrt();
+                    if d < r {
+                        c = c * if d > r * 0.8 { 1.15 } else { 0.72 };
+                    }
+                }
+                f.px_set(x, y, c);
+            }
+            // (the edge against the sky: a little brighter)
+            f.px_set(x, top as i32, Rgb::hex(0xd8d8e4));
+        }
+        // footprints and flags
+        let screen = |wx: f32| mid + moon_gap(cam, wx);
+        for &p in &m.prints {
+            let sx = screen(p);
+            if (0.0..pw as f32).contains(&sx) {
+                f.px_set(sx as i32, surf(sx) as i32 + 1, Rgb::hex(0x5a5a68));
+            }
+        }
+        for &fl in &m.flags {
+            let sx = screen(fl) as i32;
+            if !(0..pw).contains(&sx) {
+                continue;
+            }
+            let base = surf(sx as f32) as i32;
+            for y in 0..14 {
+                f.px_set(sx, base - y, if (y / 2) % 2 == 0 { Rgb::hex(0xd8283a) } else { Rgb::hex(0xf4f0ea) });
+            }
+            let wave = ((t * 3.0 + fl).sin() * 1.0) as i32;
+            for dy in 0..4 {
+                for dx in 1..7 {
+                    f.px_set(sx + dx, base - 13 + dy + if dx > 3 { wave } else { 0 }, if (dx + dy) % 2 == 0 { Rgb::hex(0x2fae5c) } else { Rgb::hex(0xffd36b) });
+                }
+            }
+        }
+        // whoever else is up here, where they are round the moon
+        for fw in self.fellows.iter().filter(|fw| fw.at.at == 8) {
+            let sx = screen(fw.at.x);
+            if !(-10.0..pw as f32 + 10.0).contains(&sx) {
+                continue;
+            }
+            let feet = surf(sx) / 2.0 - fw.at.air;
+            let pose = if fw.at.air > 0.2 { Pose::Jump } else if fw.at.sat { Pose::Walk(1) } else { Pose::Stand };
+            person(f, &fw.look, pose, fw.at.dir, sx, feet, 1.6);
+            name_tag(f, &fw.name, sx, (feet - 11.0) as i32);
+        }
+        // the villager, flying up into place, then about on the dust
+        let feet = if up < 1.0 { surf(mid) / 2.0 + (1.0 - up) * ph as f32 * 0.5 } else { surf(mid) / 2.0 - m.air };
+        let pose = if up < 1.0 || m.air > 0.0 { Pose::Jump } else if m.walk.fract() > 0.5 { Pose::Walk(1) } else { Pose::Stand };
+        person(f, look, pose, self.dir, mid, feet, 1.6);
+    }
 }
 
 /// The villager (or anyone) drawn as in the village, `k` times the

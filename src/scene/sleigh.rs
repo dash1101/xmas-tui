@@ -38,6 +38,13 @@ pub struct Sleigh {
     pub hold: bool,
     /// Santa's fallen out (and is off running about): the seat's empty.
     pub santa_out: bool,
+    /// A guest in a shared village: the fly-bys on the schedule are the
+    /// host's (it says when); a fly-by just started here, for the others
+    /// to see too (taken by the scene); the next one asked for came from
+    /// someone else (not told on).
+    pub follow: bool,
+    pub went: bool,
+    pub heard: bool,
 }
 
 const DEER: usize = 4;
@@ -68,6 +75,9 @@ impl Sleigh {
             pace: 1.0,
             hold: false,
             santa_out: false,
+            follow: false,
+            went: false,
+            heard: false,
         }
     }
 
@@ -136,10 +146,11 @@ impl Sleigh {
 
     pub fn update(&mut self, dt: f32, t: f32) {
         let asked = self.requested.is_some_and(|r| t >= r);
-        let due = self.interval > 0.0 && t >= self.next;
+        let due = self.interval > 0.0 && t >= self.next && !self.follow;
         if !self.active && !self.hold && (asked || due) {
             self.active = true;
             self.requested = None;
+            self.went = !std::mem::take(&mut self.heard);
             self.x = self.w + 4.0;
             self.speed = self.rng.range(22.0, 30.0);
             self.y0 = self.moon_row + self.rng.range(-2.0, 2.0);

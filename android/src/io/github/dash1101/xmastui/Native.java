@@ -74,6 +74,15 @@ final class Native {
     /** The line typed for a "text:" ask ("" for never mind). */
     static native void giveText(long game, String text);
 
+    /** What's typed in the app's own box (its keyboard), and where the caret is (-1: the end). */
+    static native void typed(long game, String text, int caret);
+
+    /** A key in the app's own box: 1 Enter, 2 the keyboard put away, 3 up, 4 down. */
+    static native void typeKey(long game, int k);
+
+    /** How much of the screen (pixels, from the bottom) the keyboard covers. */
+    static native void setKeyboard(long game, float px);
+
     /** A save's seed (its text), or 0 when it isn't one. */
     static native long saveSeed(String text);
 

@@ -526,6 +526,26 @@ impl Scene {
         self.director.sound(if ski { Sfx::TrainWhistle } else { Sfx::Honk }, self.player.as_ref().map(|p| p.centre()).unwrap_or(0.0), 0.8);
     }
 
+    /// Up off the top of the sky (jump after jump, on Christmas spirit):
+    /// the moon. In a shared village, everyone who gets there comes down
+    /// near the same spot (and the same craters).
+    pub(super) fn to_the_moon(&mut self) {
+        let t = self.now();
+        let Some(p) = &self.player else { return };
+        self.moon_from = Some(p.x);
+        let shared = self.online.village().is_some();
+        let seed = if shared { self.seed ^ 0x300d } else { self.rng.next_u32() };
+        let x = if shared { (self.online.my_id() % 9) as f32 * 4.0 } else { 0.0 };
+        self.goal = None;
+        self.balloon = None;
+        self.trip = Some(super::trips::Trip::moon(t, seed, x));
+        self.pockets.moon += 1;
+        if shared {
+            let name = self.your_name().to_string();
+            self.online.say(&format!("{name}'s gone to the moon!"));
+        }
+    }
+
     /// Along to where someone online is on their trip.
     pub(super) fn join_trip(&mut self, id: u32) {
         let t = self.now();
@@ -568,6 +588,22 @@ impl Scene {
         let Some(back) = tr.done else { return };
         let (runs, best, km, score) = (tr.runs, tr.best, tr.km, tr.best_score);
         self.trip = None;
+        // down from the moon: falling back into the sky where they left it
+        if back == super::trips::Back::Sky {
+            let x = self.moon_from.take().unwrap_or(self.cam + self.w as f32 / 2.0);
+            if let Some(p) = self.player.as_mut() {
+                p.x = x;
+                p.y = -(self.h as f32) * 0.25;
+                p.perch = None;
+                p.lie = None;
+                p.leap_out(t);
+            }
+            self.look_at(x);
+            self.cam = self.cam_target;
+            self.ctx.cam = self.cam;
+            self.you_say("what a view up there!", t + 1.5);
+            return;
+        }
         self.pockets.ski_score = self.pockets.ski_score.max(score);
         self.pockets.ski_runs += runs;
         if let Some(b) = best {
@@ -750,9 +786,35 @@ pub struct Runaway {
     pub(super) slips: bool,
     slip: Option<f32>,
     caught: Option<f32>,
+    /// Someone else's (they knocked him out, in a shared village): where
+    /// they say he is (village column), and when that was last heard;
+    /// down on the ice until then. This side's own: when where he is was
+    /// last told.
+    pub(super) theirs: bool,
+    pub(super) want: Option<f32>,
+    pub(super) heard: f32,
+    pub(super) iced: f32,
+    pub(super) told: f32,
 }
 
 impl Runaway {
+    /// Someone else's (they knocked him out): tumbling from (x, y) to the
+    /// snow at `land`, then where they say.
+    pub fn theirs(x: f32, y: f32, land: f32, t: f32) -> Self {
+        Runaway { x, y, vy: -4.0, land, dizzy_until: 0.0, running: None, dir: 1.0, phase: 0.0, next_line: 0.0, gone: false, slips: false, slip: None, caught: None, theirs: true, want: None, heard: t, iced: 0.0, told: 0.0 }
+    }
+
+    pub fn caught_yet(&self) -> bool {
+        self.caught.is_some()
+    }
+
+    /// Caught (by someone else): a word, then the sleigh's back for him.
+    pub fn catch_now(&mut self, t: f32) {
+        self.caught = Some(t);
+        self.running = self.running.or(Some(t));
+        self.dizzy_until = self.dizzy_until.max(1.0);
+    }
+
     pub fn rebase(&mut self, s: f32) {
         self.dizzy_until -= s;
         self.next_line -= s;
@@ -780,8 +842,13 @@ impl Scene {
             _ => (self.lo_at(x) + 3.0).min(self.h as f32 - 2.0),
         };
         let away = self.player.as_ref().map(|p| (x - p.centre()).signum()).unwrap_or(1.0);
-        self.runaway = Some(Runaway { x, y: sy - self.oy_i() as f32, vy: -4.0, land, dizzy_until: 0.0, running: None, dir: if away == 0.0 { 1.0 } else { away }, phase: 0.0, next_line: 0.0, gone: false, slips: crate::rng::h01(crate::rng::hash((t * 1000.0) as u32 ^ 0x5a1c)) < 0.25, slip: None, caught: None });
+        self.runaway = Some(Runaway { x, y: sy - self.oy_i() as f32, vy: -4.0, land, dizzy_until: 0.0, running: None, dir: if away == 0.0 { 1.0 } else { away }, phase: 0.0, next_line: 0.0, gone: false, slips: crate::rng::h01(crate::rng::hash((t * 1000.0) as u32 ^ 0x5a1c)) < 0.25, slip: None, caught: None, theirs: false, want: None, heard: t, iced: 0.0, told: 0.0 });
         self.sleigh.santa_out = true;
+        // (everyone in the village sees him tumble)
+        if self.online.village().is_some() {
+            let (vx, vy) = self.shared(x, sy - self.oy_i() as f32);
+            self.online.sky(crate::net::sky::SANTA, vx, vy, 0);
+        }
         self.director.say(x.round() as i32, sy as i32 - 2, "whoa — WHOA!", t, 1.8, 8);
         self.director.sound(Sfx::Magic, x, 0.8);
         true
@@ -823,6 +890,38 @@ impl Scene {
             if t - at > 4.5 {
                 r.gone = true;
             }
+        } else if r.theirs {
+            // someone else's: running where they say he is (and down on
+            // the ice when they say, there for the catching here too)
+            if let Some(w) = r.want {
+                let gap = w - r.x;
+                if gap.abs() > 30.0 {
+                    r.x = w;
+                } else {
+                    r.x += gap * (1.0 - (-dt * 6.0).exp());
+                }
+                r.phase += dt * 12.0 * (gap.abs() > 0.05) as i32 as f32;
+            }
+            let slipping = t < r.iced;
+            if let (true, Some((px, py, ..))) = (slipping, you) {
+                if (r.x - px).abs() < 2.2 && (r.y - py).abs() < 3.0 {
+                    r.caught = Some(t);
+                    self.santa_caught(r.x, r.y, t, true);
+                    let vx = self.shared(r.x, 0.0).0;
+                    self.online.sky(crate::net::sky::CAUGHT, vx, 0.0, self.online.my_id());
+                    self.runaway = Some(r);
+                    return;
+                }
+            }
+            if t > r.next_line {
+                r.next_line = t + 4.5;
+                let line = *self.rng.pick(SANTA_RUN);
+                self.director.say(r.x.round() as i32, r.y as i32 - 4, line, t, 2.2, 8);
+            }
+            // (not heard of a while: they've gone, and he with them)
+            if t - r.heard > 6.0 {
+                r.gone = true;
+            }
         } else {
             // away from the villager: walking pace to begin with; chased,
             // always a tenth faster than they are (and faster still if
@@ -839,7 +938,11 @@ impl Scene {
             if let (true, Some((px, py, ..))) = (slipping, you) {
                 if (r.x - px).abs() < 2.2 && (r.y - py).abs() < 3.0 {
                     r.caught = Some(t);
-                    self.santa_caught(r.x, r.y, t);
+                    self.santa_caught(r.x, r.y, t, true);
+                    if self.online.village().is_some() {
+                        let vx = self.shared(r.x, 0.0).0;
+                        self.online.sky(crate::net::sky::CAUGHT, vx, 0.0, self.online.my_id());
+                    }
                     self.runaway = Some(r);
                     return;
                 }
@@ -875,9 +978,23 @@ impl Scene {
                 r.gone = true;
             }
         }
+        // this side's own, running: where he is, for the others (a few
+        // times a second)
+        if !r.theirs && r.running.is_some() && r.caught.is_none() && self.online.village().is_some() && (t - r.told >= 0.2 || r.gone) {
+            r.told = t;
+            let vx = self.shared(r.x, 0.0).0;
+            if r.gone {
+                self.online.sky(crate::net::sky::SANTA_GONE, vx, 0.0, 0);
+            } else {
+                let slipping = r.slip.is_some_and(|s| t >= s && t < s + 1.4);
+                self.online.sky(crate::net::sky::SANTA_AT, vx, r.dir, slipping as u32);
+            }
+        }
         if r.gone {
             self.sleigh.santa_out = false;
-            self.pockets.santa_chases += 1;
+            if !r.theirs {
+                self.pockets.santa_chases += 1;
+            }
             return;
         }
         self.runaway = Some(r);
@@ -885,7 +1002,14 @@ impl Scene {
 
     /// Santa caught: he laughs, a present for the villager (and one under
     /// the tree), the stats say so.
-    fn santa_caught(&mut self, x: f32, y: f32, t: f32) {
+    pub(super) fn santa_caught(&mut self, x: f32, y: f32, t: f32, mine: bool) {
+        if !mine {
+            // (someone else caught him: a cheer, the present's theirs)
+            self.director.say(x.round() as i32, y as i32 - 4, "ho ho HO! caught! the nice list for them", t, 3.5, 8);
+            self.director.burst(x, y - 2.0, 20, &[Rgb::hex(0xffd36b), Rgb::WHITE, Rgb::hex(0xd8283a)], 5.0, 3.0);
+            self.director.sound(Sfx::Fanfare, x, 0.6);
+            return;
+        }
         self.director.say(x.round() as i32, y as i32 - 4, "ho ho HO! you caught me! the nice list, for sure", t, 4.0, 8);
         self.director.burst(x, y - 2.0, 30, &[Rgb::hex(0xffd36b), Rgb::WHITE, Rgb::hex(0xd8283a), Rgb::hex(0x7fe0a0)], 6.0, 3.0);
         self.director.sound(Sfx::Fanfare, x, 0.9);
@@ -902,11 +1026,17 @@ impl Scene {
     /// star; aboard, it's steered (see `balloon.rs`).
     pub(super) fn update_balloon(&mut self, dt: f32, t: f32) {
         let k = super::sprite_k(self.h);
+        // (a guest: the host says when one comes, see `skyshare`; the
+        // relay's own host, with no villager of its own: by the middle)
         if self.balloon.is_none() && self.inside.is_none() && self.trip.is_none() && self.online.guest_seed().is_none() {
-            if let Some(p) = &self.player {
+            let me = match &self.player {
+                Some(p) => Some((p.centre(), p.y, p.perch.is_some())),
+                None if self.online.village().is_some() => Some((self.cam + self.w as f32 / 2.0, self.h as f32 - 3.0, false)),
+                None => None,
+            };
+            if let Some((pc, py, perched)) = me {
                 let star = self.trees.iter().find(|tr| tr.is_big()).map(|tr| tr.star());
-                let on_star = star.is_some_and(|(sx, sy)| p.perch.is_some() && (p.centre() - sx as f32).abs() < 3.0 && p.y <= sy as f32 + 3.0);
-                let (pc, py) = (p.centre(), p.y);
+                let on_star = star.is_some_and(|(sx, sy)| perched && (pc - sx as f32).abs() < 3.0 && py <= sy as f32 + 3.0);
                 if on_star && !self.balloon_star {
                     // up on the star: one drifts over, its ladder down to them
                     self.balloon_star = true;
@@ -914,21 +1044,30 @@ impl Scene {
                     let seed = self.rng.next_u32();
                     self.balloon = Some(super::balloon::Balloon::coming(from, py - 30.0, pc + 5.0 * k, py, 5.0 * k, seed));
                     self.director.say(pc.round() as i32, py as i32 - 4, "is that… a balloon?!", t, 2.6, 8);
-                } else if !on_star && t > self.balloon_next && p.perch.is_none() {
+                } else if !on_star && t > self.balloon_next && !perched {
                     self.balloon_next = t + self.rng.range(700.0, 1600.0);
                     // somewhere in view, on the snow (not on a house)
                     let x = (self.cam + self.w as f32 * self.rng.range(0.2, 0.8)).clamp(8.0, self.ww as f32 - 8.0);
                     if !self.village.houses.iter().any(|h| h.contains(x as i32, (self.lo_at(x) + 2.0) as i32)) {
-                        let ground = (self.lo_at(x) + 3.0).min(self.h as f32 - 2.0);
-                        let from = if x > pc { self.cam + self.w as f32 + 40.0 } else { self.cam - 40.0 };
+                        let right = x > pc;
                         let seed = self.rng.next_u32();
-                        self.balloon = Some(super::balloon::Balloon::coming(from, -12.0, x, ground, 0.0, seed));
-                        self.director.say(pc.round() as i32, py as i32 - 4, "look — a hot-air balloon!", t, 2.6, 8);
+                        self.balloon_comes(x, right, seed, t);
+                        // (the same balloon, for everyone in the village)
+                        if self.online.village().is_some() {
+                            let sx = self.shared(x, 0.0).0;
+                            self.online.sky(crate::net::sky::BALLOON, sx, right as u8 as f32, seed);
+                        }
                     }
                 }
                 if !on_star {
                     self.balloon_star = false;
                 }
+            }
+        }
+        // someone else up in this one: it's theirs now (drawn with them)
+        if let Some(seed) = self.balloon.as_ref().filter(|b| !b.aboard).map(|b| b.seed()) {
+            if self.online.others().iter().any(|(_, o)| o.av.ride == seed.max(1)) {
+                self.balloon = None;
             }
         }
         let ww = self.ww as f32;

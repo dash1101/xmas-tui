@@ -102,6 +102,8 @@ pub struct Pockets {
     /// Santa caught (he's never easy to catch), and rides in the balloon.
     pub santa_caught: u32,
     pub balloon: u32,
+    /// Trips to the moon (jumped right off the top of the sky).
+    pub moon: u32,
     /// Games at the table (chess, checkers, cards) won and lost.
     pub games_won: u32,
     pub games_lost: u32,

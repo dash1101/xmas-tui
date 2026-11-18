@@ -59,6 +59,30 @@ impl Balloon {
         }
     }
 
+    /// Someone else's, with them aboard, its basket at (x, y): drawn where
+    /// they are.
+    pub fn ridden(x: f32, y: f32, seed: u32) -> Self {
+        let mut b = Balloon::coming(x, y, x, y, 0.0, seed);
+        b.board();
+        b
+    }
+
+    /// One someone's hopped off (at x, y): away up into the sky.
+    pub fn leaving(x: f32, y: f32, seed: u32) -> Self {
+        let mut b = Balloon::coming(x, y, x, y, 0.0, seed);
+        b.stage = Stage::Leaving;
+        b
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    /// Lit now and then (someone else's: flying up).
+    pub fn light(&mut self, until: f32) {
+        self.burner = until;
+    }
+
     /// Gone: drifted off well out of the village (nobody aboard).
     pub fn gone(&self, ww: f32) -> bool {
         self.stage == Stage::Leaving && (self.y < -60.0 || self.x < -60.0 || self.x > ww + 60.0)

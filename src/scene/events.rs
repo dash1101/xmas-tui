@@ -312,6 +312,11 @@ pub struct Director {
     sparkle_cd: f32,
     /// Animals and people the scene should send by (handled by `critters`).
     pub spawn_requests: Vec<Kind>,
+    /// A guest in a shared village: what's in the sky is the host's to say
+    /// (see `sky`), none of its own; the host: what's come up in the sky
+    /// lately (`net::sky`, x, y), for the others to see too.
+    pub guest: bool,
+    pub shared: Vec<(u8, f32, f32)>,
 }
 
 /// Sound position for "everywhere / no particular place".
@@ -360,7 +365,63 @@ impl Director {
             crunch_cd: 0.0,
             sparkle_cd: 0.0,
             spawn_requests: vec![],
+            guest: false,
+            shared: vec![],
         }
+    }
+
+    /// What the host's sky has done (see `net::sky`), here too.
+    pub fn sky(&mut self, what: u8, x: f32, y: f32, t: f32, ctx: &Ctx) {
+        use crate::net::sky;
+        match what {
+            sky::COMET => self.comet(if y < 0.0 { -1.0 } else { 1.0 }, ctx),
+            sky::METEORS => self.meteors(ctx),
+            sky::FLARE => {
+                self.flare.fire(t, y.clamp(5.0, 60.0));
+                self.happenings.push((super::dialogue::Ev::Aurora, None));
+            }
+            sky::BLIZZARD => {
+                self.blizzard.fire(t, y.clamp(5.0, 40.0));
+                self.happenings.push((super::dialogue::Ev::Blizzard, None));
+            }
+            sky::GUST => {
+                if !self.gust.active(t) {
+                    self.gust_dir = if y < 0.0 { -1.0 } else { 1.0 };
+                }
+                self.gust.fire(t, x.clamp(2.0, 15.0));
+            }
+            sky::LIGHTS => {
+                if self.show_at.is_none() && !self.show.active(t) {
+                    self.plan_light_show(t, SHOW_LEAD, y.clamp(5.0, 60.0));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A shower of shooting stars across the sky.
+    fn meteors(&mut self, ctx: &Ctx) {
+        for i in 0..self.rng.int(5, 10) {
+            let x = self.rng.range(10.0, ctx.vw as f32 - 10.0);
+            let y = self.rng.range(2.0, ctx.sky_rows as f32 * 0.8);
+            self.shooting_star(x, y);
+            self.streaks.last_mut().unwrap().age = -(i as f32) * self.rng.range(0.3, 0.8);
+        }
+    }
+
+    /// The rare comet, drifting across the whole sky (`dir` its way).
+    fn comet(&mut self, dir: f32, ctx: &Ctx) {
+        let x = if dir > 0.0 { -10.0 } else { ctx.vw as f32 + 10.0 };
+        self.streaks.push(Streak {
+            x,
+            y: self.rng.range(4.0, ctx.sky_rows as f32 * 1.2),
+            vx: dir * ctx.vw as f32 / 45.0,
+            vy: self.rng.range(0.2, 0.8),
+            age: 0.0,
+            life: 50.0,
+            len: 70.0,
+            bright: 0.7,
+        });
     }
 
     /// Shift every stored timestamp by `-s` seconds (scene clock rebase).
@@ -774,7 +835,12 @@ impl Director {
     }
 
     fn random_event(&mut self, t: f32, ctx: &Ctx) {
+        use crate::net::sky;
         let roll = self.rng.int(0, 100);
+        // (a guest: the sky's the host's; what's on the ground is its own)
+        if self.guest && (62..=88).contains(&roll) || self.guest && roll >= 95 {
+            return;
+        }
         match roll {
             0..=17 => self.spawn_requests.push(Kind::Deer),
             18..=27 => self.spawn_requests.push(Kind::Fox),
@@ -794,47 +860,45 @@ impl Director {
                 if !self.gust.active(t) {
                     self.gust_dir = dir;
                 }
-                self.gust.fire(t, self.rng.range(5.0, 10.0));
+                let dur = self.rng.range(5.0, 10.0);
+                self.gust.fire(t, dur);
+                self.shared.push((sky::GUST, dur, dir));
             }
             72..=77 => {
-                for i in 0..self.rng.int(5, 10) {
-                    let x = self.rng.range(10.0, ctx.vw as f32 - 10.0);
-                    let y = self.rng.range(2.0, ctx.sky_rows as f32 * 0.8);
-                    self.shooting_star(x, y);
-                    self.streaks.last_mut().unwrap().age = -(i as f32) * self.rng.range(0.3, 0.8);
-                }
+                self.meteors(ctx);
+                self.shared.push((sky::METEORS, 0.0, 0.0));
             }
             78..=83 => {
-                self.flare.fire(t, self.rng.range(25.0, 45.0));
+                let dur = self.rng.range(25.0, 45.0);
+                self.flare.fire(t, dur);
                 self.happenings.push((super::dialogue::Ev::Aurora, None));
+                self.shared.push((sky::FLARE, 0.0, dur));
             }
             84..=88 => {
                 // announced: everyone gathers round the big tree first
                 if self.show_at.is_none() && !self.show.active(t) {
                     let dur = self.rng.range(14.0, 22.0);
                     self.plan_light_show(t, SHOW_LEAD, dur);
+                    self.shared.push((sky::LIGHTS, 0.0, dur));
                 }
             }
             89..=94 => self.house_toggle = Some(self.rng.int(0, 64) as usize),
             95..=96 => {
-                self.blizzard.fire(t, self.rng.range(15.0, 25.0));
+                let dur = self.rng.range(15.0, 25.0);
+                self.blizzard.fire(t, dur);
                 self.happenings.push((super::dialogue::Ev::Blizzard, None));
+                self.shared.push((sky::BLIZZARD, 0.0, dur));
             }
             _ => {
                 // rare: a comet drifting across the whole sky
                 let dir = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
-                let x = if dir > 0.0 { -10.0 } else { ctx.vw as f32 + 10.0 };
-                self.streaks.push(Streak {
-                    x,
-                    y: self.rng.range(4.0, ctx.sky_rows as f32 * 1.2),
-                    vx: dir * ctx.vw as f32 / 45.0,
-                    vy: self.rng.range(0.2, 0.8),
-                    age: 0.0,
-                    life: 50.0,
-                    len: 70.0,
-                    bright: 0.7,
-                });
+                self.comet(dir, ctx);
+                self.shared.push((sky::COMET, 0.0, dir));
             }
+        }
+        // (kept only a moment: a host sends them on each frame)
+        if self.shared.len() > 8 {
+            self.shared.remove(0);
         }
     }
 

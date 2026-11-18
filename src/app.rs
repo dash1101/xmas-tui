@@ -219,9 +219,9 @@ pub struct App {
     /// The village to be made anew (another villager, the village changed
     /// on a linked device): next frame.
     reseed_soon: bool,
-    /// A line being typed (a friend's code, a message): what for, the
-    /// question, the text.
-    typing: Option<(crate::scene::online::TextFor, String, String)>,
+    /// A line was being typed (in the village: see `scene::typing`) last
+    /// frame.
+    was_typing: bool,
     /// A line's to be typed (or a setting edited): the front-end should
     /// bring the keyboard here (Windows, behind the icons: take the focus).
     pub want_keys: bool,
@@ -461,7 +461,7 @@ impl App {
             link: None,
             linked: None,
             reseed_soon: false,
-            typing: None,
+            was_typing: false,
             want_keys: false,
             can_focus: false,
             safe_front: 0,
@@ -626,11 +626,8 @@ impl App {
     pub fn ctrl_key(&mut self, c: char, shift: bool) {
         let t = self.t();
         // Ctrl+V while typing: the clipboard (a friend's code)
-        if let (Some((_, ask, text)), 'v' | 'V') = (self.typing.as_mut(), c) {
-            text.push_str(crate::net::paste_text().trim());
-            if let Some(more) = crate::net::seal::asks_code(ask) {
-                *text = crate::net::seal::typing_code(text, more);
-            }
+        if self.scene.typing().is_some() && matches!(c, 'v' | 'V') {
+            self.scene.type_text(crate::net::paste_text().trim());
             return;
         }
         let (up, down) = (matches!(c, '=' | '+'), matches!(c, '-' | '_'));
@@ -927,15 +924,13 @@ impl App {
             // (the friends list changed: saved soon)
             self.saved_at = self.saved_at.min(self.t() - 55.0);
         }
-        if let Some((what, ask)) = self.scene.take_text_ask() {
-            self.typing = Some((what, ask, String::new()));
+        // a line to type (in the village itself): the keyboard here
+        let typing = self.scene.typing().is_some();
+        if typing && !self.was_typing {
             self.menu = None;
             self.want_keys = true;
         }
-        // a chat open: what's come in since, as it comes
-        if let Some((crate::scene::online::TextFor::Mail(i), ask, _)) = &mut self.typing {
-            *ask = self.scene.chat_prompt(*i as usize);
-        }
+        self.was_typing = typing;
         if let Some(text) = self.scene.take_copy() {
             crate::net::copy_text(&text);
         }
@@ -989,50 +984,6 @@ impl App {
     }
 
     /// The line being typed, over the bottom of the village.
-    fn draw_typing(&mut self) {
-        let blink = (self.t() * 2.0) as i32 % 2 == 0;
-        let Some((what, ask, text)) = &self.typing else { return };
-        use crate::color::pal;
-        use crate::frame::{Bg, Glyph};
-        // a chat: what's been said so far, under its title
-        let mut lines = ask.lines();
-        let title = lines.next().unwrap_or("").to_string();
-        let said: Vec<String> = lines.map(|l| l.to_string()).collect();
-        let chat = matches!(what, crate::scene::online::TextFor::Mail(_));
-        let f = &mut self.frame;
-        let widest = said.iter().map(|l| l.chars().count()).chain([title.chars().count(), text.chars().count() + 2]).max().unwrap_or(0);
-        let w = (widest as i32 + 6).clamp(30, f.w as i32 - 4);
-        let n = said.len() as i32;
-        let h = 4 + n;
-        let (x0, y0) = ((f.w as i32 - w) / 2, (f.h as i32 - 8 - n).max(0));
-        let bg = Bg::Mix(pal::UI_PANEL, 0.95);
-        for y in y0..y0 + h {
-            for x in x0..x0 + w {
-                let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
-                    (true, _, true, _) => '╭',
-                    (_, true, true, _) => '╮',
-                    (true, _, _, true) => '╰',
-                    (_, true, _, true) => '╯',
-                    (_, _, true, _) | (_, _, _, true) => '─',
-                    (true, _, _, _) | (_, true, _, _) => '│',
-                    _ => ' ',
-                };
-                f.put_g(x, y, Glyph::new(ch, crate::color::Rgb::hex(0xffd36b) * 0.8).bg(bg).lit(0.0));
-            }
-        }
-        f.text(x0 + 2, y0, &format!(" {title} "), pal::UI_TITLE, bg, 0.0);
-        for (k, l) in said.iter().enumerate() {
-            let mine = l.trim_start().starts_with("you:");
-            let l: String = l.chars().take((w - 4) as usize).collect();
-            f.text(x0 + 2, y0 + 1 + k as i32, &l, if mine { pal::UI_DIM * 1.3 } else { pal::UI_TEXT }, bg, 0.0);
-        }
-        let shown: String = text.chars().rev().take((w - 6) as usize).collect::<Vec<_>>().into_iter().rev().collect();
-        f.text(x0 + 2, y0 + 1 + n, &format!("{shown}{}", if blink { "▏" } else { " " }), pal::UI_TEXT, bg, 0.0);
-        let help = if chat { "Enter: send · Esc: close the chat · Ctrl+V: paste" } else { "Enter: send · Esc: never mind · Ctrl+V: paste" };
-        f.text(x0 + 2, y0 + 2 + n, help, pal::UI_DIM, bg, 0.0);
-        crate::widgets::looks::apply(f, crate::widgets::Rect { x: x0, y: y0, w, h }, &self.cfg.ui.look, bg, 3);
-    }
-
     /// A click on the friends widget: a friend's menu, the messages, the
     /// talk line, adding a friend.
     fn friends_click(&mut self, h: crate::widgets::FriendsHit, x: i32, y: i32) {
@@ -1862,30 +1813,19 @@ impl App {
 
     pub fn key(&mut self, k: KeyIn) {
         // a line being typed (a friend's code, a message)
-        if let Some((what, ask, text)) = self.typing.as_mut() {
-            let code = crate::net::seal::asks_code(ask);
-            match k {
-                KeyIn::Char(c) if !c.is_control() && text.chars().count() < 200 => {
-                    text.push(c);
-                    // a code: capitals and dashes, as it's typed
-                    if let Some(more) = code {
-                        *text = crate::net::seal::typing_code(text, more);
-                    }
-                }
-                KeyIn::Backspace => {
-                    text.pop();
-                    if let Some(more) = code {
-                        *text = crate::net::seal::typing_code(text, more);
-                    }
-                }
-                KeyIn::Enter => {
-                    let (what, text) = (*what, std::mem::take(text));
-                    self.typing = None;
-                    self.scene.give_text(what, &text);
-                }
-                KeyIn::Esc => self.typing = None,
-                _ => {}
-            }
+        if self.scene.typing().is_some() {
+            use crate::scene::typing::TypeKey;
+            let tk = match k {
+                KeyIn::Char(c) => TypeKey::Char(c),
+                KeyIn::Backspace => TypeKey::Back,
+                KeyIn::Enter => TypeKey::Enter,
+                KeyIn::Esc => TypeKey::Esc,
+                KeyIn::Up => TypeKey::Up,
+                KeyIn::Down => TypeKey::Down,
+                KeyIn::Left => TypeKey::Left,
+                KeyIn::Right => TypeKey::Right,
+            };
+            self.scene.type_key(tk);
             return;
         }
         // friends & chats open: up and down the friends, Enter to write,
@@ -1963,6 +1903,11 @@ impl App {
         // at the table for a game: the arrows, Enter, D/S, Esc to get up
         if self.settings.editing.is_none() && !self.settings.open && self.scene.at_table() {
             use crate::scene::games::Key as G;
+            // (talking at the table: the chat key opens the chat box)
+            if self.key_action(k) == Some(10) {
+                self.scene.open_chat();
+                return;
+            }
             // on a board WASD moves about too; at cards D draws, S stands
             let board = self.scene.table_board();
             let g = match k {
@@ -3153,7 +3098,6 @@ impl App {
             crate::widgets::looks::apply(&mut self.frame, m.rect(), &self.cfg.ui.look, crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.95), 5);
         }
         self.settings.draw_perf(&mut self.frame, &self.cfg);
-        self.draw_typing();
         self.frame.ui_out(full_h);
         self.part_out(windows_layer);
         // (the layers aren't composed: what's under their panels cut away here)

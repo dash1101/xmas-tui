@@ -157,6 +157,54 @@ pub struct Book {
     /// is new.
     #[serde(default)]
     pub read: std::collections::BTreeMap<String, (i64, u32)>,
+    /// What's for friends' mailboxes and not known to have reached them yet
+    /// (asking to be friends, a yes, messages, invites): it goes when this
+    /// villager's online, and again whenever they're next online, until
+    /// their side says it has it (see `Msg::Got`).
+    pub outbox: Vec<Outgoing>,
+    /// The number the next one goes out with.
+    pub next_n: u32,
+    /// The numbers lately heard from each (their code), so one that comes
+    /// again (their side never heard it arrive) isn't shown twice.
+    pub got: std::collections::BTreeMap<String, Vec<u32>>,
+}
+
+/// Something on its way to a friend's mailbox (see `Book::outbox`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Outgoing {
+    /// Their code.
+    pub to: String,
+    pub n: u32,
+    /// What: see `out`.
+    pub kind: u8,
+    /// A message's words; an invite's village code.
+    pub text: String,
+    /// When it was written, and last sent (seconds since 1970; 0: not
+    /// yet), and how many times it's gone.
+    pub at: i64,
+    pub sent: i64,
+    pub tries: u8,
+}
+
+/// What's in the outbox (see `Outgoing::kind`).
+pub mod out {
+    /// Asking to be friends.
+    pub const HI: u8 = 0;
+    /// Yes to being friends.
+    pub const YES: u8 = 1;
+    pub const MAIL: u8 = 2;
+    pub const INVITE: u8 = 3;
+}
+
+/// A chat line's way there (see `ChatLine::state`).
+pub mod sent {
+    /// There (or theirs).
+    pub const THERE: u8 = 0;
+    /// Waiting to go (this villager, or they, offline).
+    pub const WAITING: u8 = 1;
+    /// Never got there (given up on).
+    pub const LOST: u8 = 2;
 }
 
 /// One line of a chat with a friend.
@@ -168,6 +216,12 @@ pub struct ChatLine {
     /// Written by this villager (else by the friend).
     pub mine: bool,
     pub text: String,
+    /// This villager's: its number in the outbox, and whether it's there
+    /// yet (see `sent`).
+    pub n: u32,
+    pub state: u8,
+    /// An invite: the village's code (a "join" by it).
+    pub invite: String,
 }
 
 /// The most lines kept of a chat with one friend.
@@ -264,6 +318,8 @@ pub struct Avatar {
     /// Their pets following them (up to four): the kind (1 up; 0 none) in
     /// the high byte, which of its coats in the low one.
     pub pets: [u16; 4],
+    /// Up in a hot-air balloon: its seed and 1 (0: not).
+    pub ride: u32,
     /// When this was sent: seconds on the sender's own clock (0: an older
     /// version, which doesn't say). The others draw them a moment behind,
     /// between the places heard, so walking reads smooth however the
@@ -388,12 +444,34 @@ pub fn paste_text() -> String {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "k")]
 enum Msg {
-    /// In a mailbox: asking to be friends (`back`: saying yes).
-    Hi { from: String, name: String, back: bool },
+    /// In a mailbox: asking to be friends (`back`: saying yes). `n`: its
+    /// number from the sender's outbox (0: an older version), for a `Got`
+    /// back.
+    Hi {
+        from: String,
+        name: String,
+        back: bool,
+        #[serde(default)]
+        n: u32,
+    },
     /// In a mailbox: a message.
-    Mail { from: String, name: String, text: String },
+    Mail {
+        from: String,
+        name: String,
+        text: String,
+        #[serde(default)]
+        n: u32,
+    },
     /// In a mailbox: come into this village (its code).
-    Invite { from: String, name: String, village: String },
+    Invite {
+        from: String,
+        name: String,
+        village: String,
+        #[serde(default)]
+        n: u32,
+    },
+    /// In a mailbox: what the sender sent with number `n` got here.
+    Got { from: String, n: u32 },
     /// In a mailbox: a ping (a little tone at the friend's end).
     Ping { from: String, name: String },
     /// In a group's room: said to everyone in it; and "I'm here" now and
@@ -422,7 +500,16 @@ enum Msg {
     Wave { id: u32, to: u32, what: u8 },
     /// In a village: asking someone (0: everyone) to play (see `ask`).
     Ask { id: u32, to: u32, what: u8, seed: u32 },
-    Answer { id: u32, to: u32, what: u8, yes: bool },
+    /// (`seed`: what was asked's, so a late answer to an old ask isn't
+    /// taken for a newer one's; 0 from an older version.)
+    Answer {
+        id: u32,
+        to: u32,
+        what: u8,
+        yes: bool,
+        #[serde(default)]
+        seed: u32,
+    },
     /// In a village: a game at a table (its number), as it stands after a
     /// move (see `scene::games`), and the move's number.
     Table { id: u32, game: u32, seq: u32, kind: u8, state: String },
@@ -502,6 +589,49 @@ enum Msg {
     Kick { id: u32, to: u32 },
     /// From a village's host: an announcement (to everyone there, or `to`).
     Notice { id: u32, to: u32, text: String },
+    /// In a village: something in the sky (or come down from it) for
+    /// everyone there to see the same (see `sky`): from the host when it's
+    /// due (the sleigh, a balloon, a comet…), from whoever set it off
+    /// (Santa knocked out of his sleigh, and where he runs).
+    Sky { id: u32, what: u8, x: f32, y: f32, seed: u32 },
+    /// In a village: never mind what was asked (`what`, its seed): the
+    /// asker's said yes to something else.
+    Never { id: u32, what: u8, seed: u32 },
+}
+
+/// What's in the sky (see `Msg::Sky`).
+pub mod sky {
+    /// The sleigh crosses (`seed`: its speed and height).
+    pub const SLEIGH: u8 = 1;
+    /// The sleigh pulls up a moment (`y`: seconds).
+    pub const HALT: u8 = 2;
+    /// A hot-air balloon comes down to rest at `x` (`y`: from the left 0,
+    /// the right 1).
+    pub const BALLOON: u8 = 3;
+    /// Santa tumbles out of his sleigh at `x` (`y`: rows from the top).
+    pub const SANTA: u8 = 4;
+    /// Where he's running (`x`; `y`: his way, 1 or -1; `seed` 1: down on
+    /// the ice).
+    pub const SANTA_AT: u8 = 5;
+    /// Caught (by `seed`, an id), at `x`.
+    pub const CAUGHT: u8 = 6;
+    /// Run clean off.
+    pub const SANTA_GONE: u8 = 7;
+    /// A comet (`y`: its way), a shower of shooting stars, the aurora
+    /// flaring (`y`: seconds), a blizzard (seconds), a gust (`y`: its way,
+    /// `x`: seconds), a light show by the big tree (seconds).
+    pub const COMET: u8 = 10;
+    pub const METEORS: u8 = 11;
+    pub const FLARE: u8 = 12;
+    pub const BLIZZARD: u8 = 13;
+    pub const GUST: u8 = 14;
+    pub const LIGHTS: u8 = 15;
+
+    /// Only the host's word goes (what's due: the others leave theirs to
+    /// it).
+    pub fn hosts(what: u8) -> bool {
+        matches!(what, SLEIGH | BALLOON | COMET | METEORS | FLARE | BLIZZARD | GUST | LIGHTS)
+    }
 }
 
 /// What happened, for the scene to show.
@@ -524,7 +654,7 @@ pub enum Event {
     Waved { id: u32, to: u32, what: u8 },
     /// Someone asks to play (see `ask`; `to` 0: everyone).
     Play { id: u32, to: u32, what: u8, seed: u32 },
-    Answer { id: u32, what: u8, yes: bool },
+    Answer { id: u32, what: u8, yes: bool, seed: u32 },
     Table { id: u32, game: u32, seq: u32, kind: u8, state: String },
     Up { id: u32, game: u32 },
     Show { id: u32, what: u8, n: u16, x: f32 },
@@ -550,6 +680,11 @@ pub enum Event {
     Crowd(String),
     /// An announcement from the village's host.
     Notice(String),
+    /// Something in the sky (see `Msg::Sky`); `host`: from the village's
+    /// host.
+    Sky { id: u32, what: u8, x: f32, y: f32, seed: u32, host: bool },
+    /// Never mind what they asked (see `Msg::Never`).
+    Never { id: u32, what: u8, seed: u32 },
 }
 
 /// The link to the relay, as the menus show it.
@@ -951,6 +1086,10 @@ pub struct Online {
     /// Heard lately, per sender: (when the window started, how many),
     /// to shrug off a flood.
     heard: HashMap<u32, (f32, u32)>,
+    /// Friends (their codes) whose waiting messages go at once (they've
+    /// just come online), and when the outbox is next looked over.
+    out_due: std::collections::HashSet<String>,
+    next_out: f32,
 }
 
 fn now() -> i64 {
@@ -1020,6 +1159,8 @@ impl Online {
             watch_until: 0.0,
             next_status: 0.0,
             heard: HashMap::new(),
+            out_due: Default::default(),
+            next_out: 0.0,
             book,
         };
         o.relive();
@@ -1265,6 +1406,8 @@ impl Online {
         self.next_rooms = self.t + 2.0;
         self.next_ping = self.t + 30.0;
         self.note("✉ online");
+        // (whatever was written meanwhile goes now)
+        self.next_out = self.t + 1.0;
         if let Some(code) = self.pending_join.take() {
             self.enter(code, false);
             self.note("⌂ knocking…");
@@ -1387,10 +1530,15 @@ impl Online {
         }
         if topic == self.my_mail {
             match parse(&self.me) {
-                Some(Msg::Hi { from, name, back }) => self.hi(from, name, back),
-                Some(Msg::Mail { from, name, text }) => {
+                Some(Msg::Hi { from, name, back, n }) => {
+                    if self.not_flooded(0, 12) && self.got_it(&from, n, !back || self.book.friends.iter().any(|p| seal::norm(&p.code) == seal::norm(&from))) {
+                        self.hi(from, name, back);
+                    }
+                }
+                Some(Msg::Got { from, n }) => self.arrived(&from, n),
+                Some(Msg::Mail { from, name, text, n }) => {
                     // only from friends
-                    if self.is_friend(&from) && self.not_flooded(0, 8) {
+                    if self.is_friend(&from) && self.not_flooded(0, 12) && self.got_it(&from, n, true) {
                         let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
                         self.keep_chat(&from, false, &text);
                         // (by the name they have here; a quiet friend's only
@@ -1402,9 +1550,14 @@ impl Online {
                         }
                     }
                 }
-                Some(Msg::Invite { from, name, village }) => {
-                    if self.is_friend(&from) && self.not_flooded(0, 8) && seal::norm(&village).len() == 12 {
-                        self.events.push(Event::Invited { name: clean(&name, 32), code: seal::norm(&village) });
+                Some(Msg::Invite { from, name, village, n }) => {
+                    if self.is_friend(&from) && self.not_flooded(0, 12) && seal::norm(&village).len() == 12 && self.got_it(&from, n, true) {
+                        let code = seal::norm(&village);
+                        // (in the chat with them too, with a way in)
+                        self.keep_line(&from, ChatLine { at: now(), mine: false, text: "⌂ come and join me in my village!".into(), invite: code.clone(), ..Default::default() });
+                        let pal = self.book.friends.iter().find(|p| seal::norm(&p.code) == seal::norm(&from));
+                        let name = pal.map(|p| p.name.clone()).unwrap_or_else(|| clean(&name, 32));
+                        self.events.push(Event::Invited { name, code });
                     }
                 }
                 Some(Msg::Ping { from, name }) => {
@@ -1436,6 +1589,11 @@ impl Online {
                 if on && !was_on && fresh {
                     let n = self.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
                     self.note(format!("● {n} is online"));
+                    // (anything waiting for them goes now)
+                    if let Some(code) = self.book.friends.get(i).map(|p| seal::norm(&p.code)) {
+                        self.out_due.insert(code.clone());
+                        self.flush(&code);
+                    }
                 }
             }
             return;
@@ -1482,7 +1640,7 @@ impl Online {
         let said_by = match &m {
             Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Go { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => Some(*id),
             Msg::Village { host, .. } => Some(*host),
-            Msg::Crowd { id, .. } | Msg::Full { id, .. } | Msg::Kick { id, .. } | Msg::Notice { id, .. } => Some(*id),
+            Msg::Crowd { id, .. } | Msg::Full { id, .. } | Msg::Kick { id, .. } | Msg::Notice { id, .. } | Msg::Sky { id, .. } | Msg::Never { id, .. } => Some(*id),
             _ => None,
         };
         // the relay's own host's ids: only on its official topic (and 0 is
@@ -1555,7 +1713,8 @@ impl Online {
                 if av.at > 0.0 {
                     let how = av.air as u8 | (av.moving as u8) << 1 | ((av.dir > 0.0) as u8) << 2;
                     o.trail.heard_as(t, av.at, av.x, av.y, 0.6, how);
-                    match av.trip.filter(|tr| av.away == 2 && tr.at == 5) {
+                    // (down the slope, round the moon: drawn smoothly)
+                    match av.trip.filter(|tr| av.away == 2 && (tr.at == 5 || tr.at == 8)) {
                         Some(tr) => {
                             o.trip_trail.heard(t, av.at, tr.x, tr.lane, 40.0);
                             o.trip_air.heard(t, av.at, tr.air, 0.0, 1e6);
@@ -1590,13 +1749,21 @@ impl Online {
                 self.events.push(Event::Waved { id, to, what });
             }
             Msg::Ask { id, to, what, seed } if id != me && (to == 0 || to == me) => self.events.push(Event::Play { id, to, what, seed }),
-            Msg::Answer { id, to, what, yes } if to == me => self.events.push(Event::Answer { id, what, yes }),
+            Msg::Answer { id, to, what, yes, seed } if to == me => self.events.push(Event::Answer { id, what, yes, seed }),
             Msg::Table { id, game, seq, kind, state } if id != me && state.len() <= 8192 => self.events.push(Event::Table { id, game, seq, kind, state }),
             Msg::Up { id, game } if id != me => self.events.push(Event::Up { id, game }),
             Msg::Show { id, what, n, x } if id != me => self.events.push(Event::Show { id, what, n, x }),
             Msg::Tagged { id, it, left } if id != me => self.events.push(Event::Tagged { id, it, left }),
             Msg::Go { id, seed, at } if id != me => self.events.push(Event::Go { seed, at }),
             Msg::Star { id, x, y } if id != me && x.is_finite() && y.is_finite() && x.abs() < 1e4 => self.events.push(Event::Star { x, y: y.clamp(0.0, 400.0) }),
+            Msg::Sky { id, what, x, y, seed } if id != me && x.is_finite() && y.is_finite() && x.abs() < 1e5 && y.abs() < 1e4 => {
+                let host = v.host_id == Some(id);
+                // (what's due is the host's to say)
+                if host || !sky::hosts(what) {
+                    self.events.push(Event::Sky { id, what, x, y, seed, host });
+                }
+            }
+            Msg::Never { id, what, seed } if id != me => self.events.push(Event::Never { id, what, seed }),
             Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
             // (someone the host's keeping quiet: not heard)
             Msg::Talk { id, .. } if v.muted.contains(&id) => {}
@@ -1749,8 +1916,14 @@ impl Online {
             if !back {
                 let seal = Seal::new(&code);
                 let mail = seal::topic("mail", &code);
-                let m = Msg::Hi { from: self.book.code.clone(), name: self.name.clone(), back: true };
+                let m = Msg::Hi { from: self.book.code.clone(), name: self.name.clone(), back: true, n: 0 };
                 self.send(&mail, &seal, &m, false);
+            }
+            // (they've said yes, or asked too: asking them is done)
+            let before = self.book.outbox.len();
+            self.book.outbox.retain(|o| !(o.to == code && o.kind == out::HI));
+            if self.book.outbox.len() != before {
+                self.dirty = true;
             }
             return;
         }
@@ -1778,6 +1951,10 @@ impl Online {
         if t >= self.next_ping {
             self.next_ping = t + 30.0;
             self.out.extend(mqtt::ping());
+        }
+        if t >= self.next_out {
+            self.next_out = t + 5.0;
+            self.tend_outbox();
         }
         if t >= self.next_here {
             self.next_here = t + 60.0;
@@ -1979,7 +2156,7 @@ impl Online {
         let now = crate::clock::now().timestamp();
         let v = self.book.chats.entry(code).or_default();
         for (mine, text, ago) in lines {
-            v.push(ChatLine { at: now - ago, mine: *mine, text: text.to_string() });
+            v.push(ChatLine { at: now - ago, mine: *mine, text: text.to_string(), ..Default::default() });
         }
     }
 
@@ -2097,10 +2274,9 @@ impl Online {
             let topic = self.live.last().map(|l| l.here_topic.clone()).unwrap_or_default();
             self.subscribe(vec![topic]);
         }
-        let m = Msg::Hi { from: self.book.code.clone(), name: self.name.clone(), back: false };
-        self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
-        if self.link != Link::On {
-            self.note("✉ asked (it goes when online)");
+        // (asked again: the one already waiting will do)
+        if !self.book.outbox.iter().any(|o| o.to == code && o.kind == out::HI) {
+            self.queue(&code, out::HI, String::new());
         }
         Ok(())
     }
@@ -2118,8 +2294,7 @@ impl Online {
         self.relive();
         let topic = self.live.last().map(|l| l.here_topic.clone()).unwrap_or_default();
         self.subscribe(vec![topic]);
-        let m = Msg::Hi { from: self.book.code.clone(), name: self.name.clone(), back: true };
-        self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
+        self.queue(&code, out::YES, String::new());
     }
 
     pub fn decline(&mut self, i: usize) {
@@ -2132,8 +2307,10 @@ impl Online {
     pub fn remove_friend(&mut self, i: usize) {
         if i < self.book.friends.len() {
             let topic = self.live[i].here_topic.clone();
-            // (the chat with them goes too)
+            // (the chat with them goes too, and anything waiting for them)
             self.clear_chat(i);
+            let code = seal::norm(&self.book.friends[i].code);
+            self.book.outbox.retain(|o| o.to != code);
             self.book.friends.remove(i);
             self.dirty = true;
             self.relive();
@@ -2145,30 +2322,182 @@ impl Online {
     }
 
     /// A message to friend `i`.
+    /// (Offline, or they are: it waits, shown so, and goes when it can.)
     pub fn mail(&mut self, i: usize, text: &str) -> bool {
         let Some(p) = self.book.friends.get(i).filter(|p| !p.waiting) else { return false };
-        if self.link != Link::On {
-            return false;
-        }
-        let code = p.code.clone();
+        let code = seal::norm(&p.code);
         let text: String = text.chars().take(280).collect();
-        let m = Msg::Mail { from: self.book.code.clone(), name: self.name.clone(), text: text.clone() };
-        self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
-        self.keep_chat(&code, true, &text);
+        let n = self.queue(&code, out::MAIL, text.clone());
+        self.keep_line(&code, ChatLine { at: now(), mine: true, text, n, state: sent::WAITING, invite: String::new() });
+        self.flush(&code);
         true
     }
 
     /// A line of a chat with the friend whose code that is, kept.
     fn keep_chat(&mut self, code: &str, mine: bool, text: &str) {
+        self.keep_line(code, ChatLine { at: now(), mine, text: text.to_string(), ..Default::default() });
+    }
+
+    fn keep_line(&mut self, code: &str, line: ChatLine) {
         let key = seal::norm(code);
-        let at = crate::clock::now().timestamp();
         let lines = self.book.chats.entry(key).or_default();
-        lines.push(ChatLine { at, mine, text: text.to_string() });
+        lines.push(line);
         if lines.len() > CHAT_KEPT {
             let extra = lines.len() - CHAT_KEPT;
             lines.drain(..extra);
         }
         self.dirty = true;
+    }
+
+    // ------------------------------------------------------------ the outbox
+
+    /// Into the outbox for `to` (sent now if it can be; see `flush`): its
+    /// number.
+    fn queue(&mut self, to: &str, kind: u8, text: String) -> u32 {
+        let to = seal::norm(to);
+        self.book.next_n = self.book.next_n.wrapping_add(1).max(1);
+        let n = self.book.next_n;
+        self.book.outbox.push(Outgoing { to: to.clone(), n, kind, text, at: now(), sent: 0, tries: 0 });
+        // (a long way offline: the oldest give way, at most 200 waiting)
+        while self.book.outbox.len() > 200 {
+            let o = self.book.outbox.remove(0);
+            self.lost(&o);
+        }
+        self.dirty = true;
+        self.out_due.insert(to.clone());
+        self.flush(&to);
+        n
+    }
+
+    /// What goes for an outbox entry.
+    fn out_msg(&self, o: &Outgoing) -> Msg {
+        let (from, name, n) = (self.book.code.clone(), self.name.clone(), o.n);
+        match o.kind {
+            out::HI => Msg::Hi { from, name, back: false, n },
+            out::YES => Msg::Hi { from, name, back: true, n },
+            out::INVITE => Msg::Invite { from, name, village: o.text.clone(), n },
+            _ => Msg::Mail { from, name, text: o.text.clone(), n },
+        }
+    }
+
+    /// Whatever's waiting for `to` that's due goes (online): never sent
+    /// yet, or not lately (they've just come online: `out_due`).
+    fn flush(&mut self, to: &str) {
+        if self.link != Link::On {
+            return;
+        }
+        let due_now = self.out_due.remove(to);
+        let t = now();
+        let mut sent_n = 0;
+        let mut msgs = vec![];
+        for o in self.book.outbox.iter_mut().filter(|o| o.to == to) {
+            // (a few at a time: their mailbox shrugs off a flood)
+            if sent_n >= 4 {
+                self.out_due.insert(to.to_string());
+                break;
+            }
+            let on = self.live.iter().zip(&self.book.friends).any(|(l, p)| seal::norm(&p.code) == to && l.here.as_ref().is_some_and(|h| h.on));
+            if o.sent == 0 || due_now || (on && t - o.sent >= 600) {
+                o.sent = t;
+                o.tries = o.tries.saturating_add(1);
+                sent_n += 1;
+                msgs.push(o.clone());
+            }
+        }
+        if !msgs.is_empty() {
+            self.dirty = true;
+        }
+        for o in msgs {
+            let m = self.out_msg(&o);
+            self.send(&seal::topic("mail", &o.to), &Seal::new(&o.to), &m, false);
+        }
+    }
+
+    /// Now and then: what's due goes; what's waited too long is given up
+    /// (a month; an invite, once its village has closed or after an hour).
+    fn tend_outbox(&mut self) {
+        let t = now();
+        let open = self.village.as_ref().filter(|v| v.host).map(|v| v.code.clone());
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.book.outbox).into_iter().partition(|o| {
+            let old = t - o.at > if o.kind == out::INVITE { 3600 } else { 30 * 86400 };
+            let closed = o.kind == out::INVITE && open.as_deref() != Some(o.text.as_str());
+            !(old || closed || o.tries >= 12)
+        });
+        self.book.outbox = keep;
+        for o in &gone {
+            self.lost(o);
+        }
+        if !gone.is_empty() {
+            self.dirty = true;
+        }
+        let mut to: Vec<String> = self.book.outbox.iter().map(|o| o.to.clone()).collect();
+        to.dedup();
+        for code in to {
+            self.flush(&code);
+        }
+    }
+
+    /// Given up on: its line in the chat says so.
+    fn lost(&mut self, o: &Outgoing) {
+        if let Some(l) = self.book.chats.get_mut(&o.to).and_then(|v| v.iter_mut().find(|l| l.mine && l.n == o.n)) {
+            l.state = sent::LOST;
+        }
+        if o.kind == out::HI {
+            self.note("✉ a friend request couldn't be sent (a month waiting): try again");
+        }
+    }
+
+    /// From `from`, its number `n`: their side's told it came (true: it's
+    /// new, to be shown; false: had it already). `back`: worth saying so.
+    fn got_it(&mut self, from: &str, n: u32, back: bool) -> bool {
+        let code = seal::norm(from);
+        if n == 0 || code.len() != 12 {
+            return true;
+        }
+        if back {
+            let m = Msg::Got { from: self.book.code.clone(), n };
+            self.send(&seal::topic("mail", &code), &Seal::new(&code), &m, false);
+        }
+        if self.book.got.len() >= 400 && !self.book.got.contains_key(&code) {
+            return true;
+        }
+        let seen = self.book.got.entry(code).or_default();
+        if seen.contains(&n) {
+            return false;
+        }
+        seen.push(n);
+        if seen.len() > 64 {
+            seen.remove(0);
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Their side says number `n` came: out of the outbox, and its line in
+    /// the chat says so.
+    fn arrived(&mut self, from: &str, n: u32) {
+        let code = seal::norm(from);
+        let Some(i) = self.book.outbox.iter().position(|o| o.to == code && o.n == n) else { return };
+        self.book.outbox.remove(i);
+        if let Some(l) = self.book.chats.get_mut(&code).and_then(|v| v.iter_mut().find(|l| l.mine && l.n == n)) {
+            l.state = sent::THERE;
+        }
+        self.dirty = true;
+    }
+
+    /// Something for friend `i` not there yet: asking to be friends (or a
+    /// yes), how many messages.
+    pub fn waiting_for(&self, i: usize) -> (bool, usize) {
+        let Some(code) = self.book.friends.get(i).map(|p| seal::norm(&p.code)) else { return (false, 0) };
+        let mine = self.book.outbox.iter().filter(|o| o.to == code);
+        let (mut hi, mut n) = (false, 0);
+        for o in mine {
+            match o.kind {
+                out::HI | out::YES => hi = true,
+                _ => n += 1,
+            }
+        }
+        (hi, n)
     }
 
     /// The chat with friend `i` so far (the latest last).
@@ -2529,12 +2858,14 @@ impl Online {
     pub fn invite(&mut self, i: usize) -> bool {
         let Some((code, true)) = self.village.as_ref().map(|v| (v.code.clone(), v.host)) else { return false };
         let Some(p) = self.book.friends.get(i).filter(|p| !p.waiting) else { return false };
-        if self.link != Link::On {
-            return false;
+        let to = seal::norm(&p.code);
+        // (asked in already, and still waiting: that one will do)
+        if self.book.outbox.iter().any(|o| o.to == to && o.kind == out::INVITE && o.text == code) {
+            return true;
         }
-        let to = p.code.clone();
-        let m = Msg::Invite { from: self.book.code.clone(), name: self.name.clone(), village: code };
-        self.send(&seal::topic("mail", &to), &Seal::new(&to), &m, false);
+        let n = self.queue(&to, out::INVITE, code.clone());
+        self.keep_line(&to, ChatLine { at: now(), mine: true, text: "⌂ asked you into my village".into(), n, state: sent::WAITING, invite: code });
+        self.flush(&to);
         true
     }
 
@@ -2549,8 +2880,8 @@ impl Online {
         self.to_village(&m);
     }
 
-    pub fn answer(&mut self, to: u32, what: u8, yes: bool) {
-        let m = Msg::Answer { id: self.id, to, what, yes };
+    pub fn answer(&mut self, to: u32, what: u8, yes: bool, seed: u32) {
+        let m = Msg::Answer { id: self.id, to, what, yes, seed };
         self.to_village(&m);
     }
 
@@ -2591,6 +2922,25 @@ impl Online {
         m.t += ((now - m.at).clamp(0, 10_000)) as f32 / 1000.0;
         m.at = now;
         Some(m)
+    }
+
+    /// Something in the sky, for everyone in the village (see `sky`).
+    pub fn sky(&mut self, what: u8, x: f32, y: f32, seed: u32) {
+        let m = Msg::Sky { id: self.id, what, x, y, seed };
+        self.to_village(&m);
+    }
+
+    /// Never mind what this villager asked (they've said yes to something
+    /// else).
+    pub fn never(&mut self, what: u8, seed: u32) {
+        let m = Msg::Never { id: self.id, what, seed };
+        self.to_village(&m);
+    }
+
+    /// Hosting the shared village (or not in one: the village is this
+    /// villager's own).
+    pub fn hosting(&self) -> bool {
+        self.village.as_ref().is_none_or(|v| v.host)
     }
 
     /// A shooting star sent off here, for everyone in the village.
@@ -2751,6 +3101,11 @@ pub(crate) mod tests {
     }
 
     impl Relay {
+        /// The `i`th's gone (offline): nothing more reaches it.
+        pub(crate) fn gone(&mut self, i: usize) {
+            self.subs.retain(|s| s.0 != i);
+        }
+
         pub(crate) fn pump(&mut self, all: &mut [&mut Online]) {
             for _ in 0..6 {
                 let mut deliver: Vec<(usize, Vec<u8>)> = vec![];
@@ -3348,7 +3703,7 @@ pub(crate) mod tests {
             }
         }
         assert!(asked, "the question didn't arrive");
-        a.answer(b.my_id(), ask::CHESS, true);
+        a.answer(b.my_id(), ask::CHESS, true, 0);
         let mut yes = false;
         for _ in 0..200 {
             step(&mut a, &mut b, &mut la, &mut lb, &mut t);
@@ -3667,9 +4022,9 @@ pub(crate) mod tests {
         a.ask(ib, ask::CHESS, 77);
         relay.pump(&mut [&mut a, &mut b]);
         assert!(b.take_events().contains(&Event::Play { id: ia, to: ib, what: ask::CHESS, seed: 77 }));
-        b.answer(ia, ask::CHESS, true);
+        b.answer(ia, ask::CHESS, true, 0);
         relay.pump(&mut [&mut a, &mut b]);
-        assert!(a.take_events().contains(&Event::Answer { id: ib, what: ask::CHESS, yes: true }));
+        assert!(a.take_events().iter().any(|e| matches!(e, Event::Answer { id, what: ask::CHESS, yes: true, .. } if *id == ib)));
         a.table(77, 1, 1, "{}".into());
         relay.pump(&mut [&mut a, &mut b]);
         assert!(b.take_events().contains(&Event::Table { id: ia, game: 77, seq: 1, kind: 1, state: "{}".into() }));
@@ -3846,5 +4201,73 @@ pub(crate) mod tests {
         c.connected();
         relay.pump(&mut [&mut a, &mut b, &mut c]);
         assert!(c.friends().is_empty() && c.take_events().iter().all(|e| matches!(e, Event::Note(_))));
+    }
+
+    /// Written while offline (or while they are): it waits, shown so, and
+    /// goes when both are online; once there, it's said so, and it's never
+    /// shown twice. An invite shows in the chat too, with the way in.
+    #[test]
+    fn written_while_offline_goes_when_both_are_on() {
+        let mut relay = Relay::default();
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Robin");
+        let mut b = Online::new(Book { on: true, ..Default::default() }, "Sam");
+        // Robin, offline, asks Sam: waiting
+        let code_b = b.code();
+        a.add_friend(&code_b).unwrap();
+        assert_eq!(a.waiting_for(0), (true, 0));
+        // Robin comes online; Sam's still off: it hasn't reached Sam
+        a.connected();
+        relay.pump(&mut [&mut a, &mut b]);
+        a.tick(1.0, None, 7);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(b.book.asking.is_empty());
+        assert_eq!(a.waiting_for(0), (true, 0));
+        // Sam comes on: Robin sees, sends it again, Sam has it and says so
+        b.connected();
+        relay.pump(&mut [&mut a, &mut b]);
+        b.tick(1.0, None, 7);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert_eq!(b.book.asking.len(), 1, "the request came");
+        assert_eq!(a.waiting_for(0), (false, 0), "and Robin knows it did");
+        b.accept(0);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(!a.book.friends[0].waiting);
+        assert!(b.book.outbox.is_empty(), "the yes came");
+        // Sam goes off (the relay says so: "gone"); Robin writes: waiting,
+        // shown so
+        b.go_online(false);
+        relay.pump(&mut [&mut a, &mut b]);
+        relay.gone(1);
+        b.disconnected();
+        assert!(!a.friends()[0].1.as_ref().is_some_and(|h| h.on));
+        assert!(a.mail(0, "see you at the tree"));
+        relay.pump(&mut [&mut a, &mut b]);
+        assert_eq!(a.waiting_for(0), (false, 1));
+        assert_eq!(a.chat(0).last().map(|l| l.state), Some(sent::WAITING));
+        // back on: it comes, once, and Robin's line says it's there
+        b.go_online(true);
+        b.connected();
+        relay.pump(&mut [&mut a, &mut b]);
+        b.tick(400.0, None, 7);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert_eq!(b.chat(0).iter().filter(|l| l.text == "see you at the tree").count(), 1);
+        assert_eq!(a.chat(0).last().map(|l| l.state), Some(sent::THERE));
+        assert_eq!(a.waiting_for(0), (false, 0));
+        // the same again (its "came" lost): not shown twice
+        let again = Outgoing { to: seal::norm(&code_b), n: a.book.next_n, kind: out::MAIL, text: "see you at the tree".into(), ..Default::default() };
+        a.book.outbox.push(again);
+        a.tick(10.0, None, 7);
+        relay.pump(&mut [&mut a, &mut b]);
+        assert_eq!(b.chat(0).iter().filter(|l| l.text == "see you at the tree").count(), 1);
+        assert!(a.book.outbox.is_empty());
+        // an invite: in Sam's chat, with the village's code
+        let vcode = a.host();
+        a.tick(12.0, Some(Avatar::default()), 4242);
+        assert!(a.invite(0));
+        relay.pump(&mut [&mut a, &mut b]);
+        let l = b.chat(0).last().cloned().unwrap();
+        assert_eq!(seal::norm(&l.invite), seal::norm(&vcode));
+        assert!(b.take_events().iter().any(|e| matches!(e, Event::Invited { .. })));
+        assert!(a.chat(0).last().is_some_and(|l| l.mine && !l.invite.is_empty()));
     }
 }

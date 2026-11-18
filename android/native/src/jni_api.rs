@@ -300,6 +300,27 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_giveText(mut env: 
     with_game(h, "giveText", (), |g| g.give_text(&text));
 }
 
+/// What's typed in the app's own box (its keyboard), as it stands, and
+/// where its caret is (-1: the end).
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_typed(mut env: JNIEnv, _: JClass, h: jlong, text: JString, caret: jint) {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    with_game(h, "typed", (), |g| g.typed(&text, (caret >= 0).then_some(caret as usize)));
+}
+
+/// A key in the app's own box: 1 Enter, 2 Esc (or the keyboard put away),
+/// 3 up, 4 down.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_typeKey(_: JNIEnv, _: JClass, h: jlong, k: jint) {
+    with_game(h, "typeKey", (), |g| g.type_key(k.max(0) as u32));
+}
+
+/// How much of the screen (pixels, from the bottom) the keyboard covers.
+#[no_mangle]
+pub extern "system" fn Java_io_github_dash1101_xmastui_Native_setKeyboard(_: JNIEnv, _: JClass, h: jlong, px: jfloat) {
+    with_game(h, "setKeyboard", (), |g| g.set_keyboard(px));
+}
+
 /// A save (its text): its seed, or 0 when it isn't one.
 /// New settings (from the settings screen): taken in where things stand.
 #[no_mangle]

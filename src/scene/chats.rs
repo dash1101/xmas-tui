@@ -4,7 +4,7 @@
 //! line at the bottom to write the next. Drawn over everything (see
 //! `draw_top`), the same on the desktop, the web and a phone.
 
-use super::online::{ago_short, NetDo, MORE_FRIEND, MORE_ONLINE};
+use super::online::{ago_short, NetDo, TextFor, MORE_FRIEND, MORE_ONLINE};
 use super::*;
 use crate::color::pal;
 use crate::frame::{Bg, Glyph};
@@ -444,7 +444,7 @@ impl Scene {
             let cw = (w - 4) as usize;
             let mut out: Vec<(String, Rgb)> = vec![];
             for l in o.chat(i).iter().rev().take(20) {
-                let mut body = wrap(&l.text, cw.saturating_sub(4).max(8));
+                let mut body = wrap(&format!("{}{}", l.text, super::typing::chat_mark(l)), cw.saturating_sub(4).max(8));
                 body.reverse();
                 let who = if l.mine { "you" } else { name.as_str() };
                 let col = if l.mine { pal::UI_TEXT * 0.85 } else { pal::UI_TEXT };
@@ -462,11 +462,17 @@ impl Scene {
                 f.text(x0 + 2, y0 + h - 3 - j as i32, &line, *col, bg, 0.0);
             }
             let wy = y0 + h - 2;
-            let wbg = Bg::Mix(Rgb::hex(0x0b1020), 0.9);
+            let typing = self.typing.as_ref().filter(|t| t.what == TextFor::Mail(i as u8));
+            let wbg = Bg::Mix(if typing.is_some() { Rgb::hex(0x1a2340) } else { Rgb::hex(0x0b1020) }, 0.9);
             for x in x0 + 2..x0 + w - 2 {
                 f.put_g(x, wy, Glyph::new(' ', pal::UI_TEXT).bg(wbg).lit(0.0));
             }
-            f.text(x0 + 3, wy, "✎ write…", pal::UI_DIM, wbg, 0.0);
+            match typing {
+                Some(ty) => self.draw_field(f, x0 + 3, wy, w - 6, ty, "› ", (self.now() * 2.0) as i32 % 2 == 0, wbg),
+                None => {
+                    f.text(x0 + 3, wy, "✎ write…", pal::UI_DIM, wbg, 0.0);
+                }
+            }
             writes.push((x0 + 2, wy, w - 4, i));
         }
         f.keep_ui = keep;
@@ -581,8 +587,11 @@ impl Scene {
             if unread > 0 {
                 f.text(nx + 1, y, &format!("✉{unread}"), Rgb::hex(0xffd36b), rbg, 0.0);
             }
+            let (hi_waiting, n_waiting) = o.waiting_for(i);
             let (dot, col, what) = match here {
+                _ if p.waiting && hi_waiting => ('⧗', pal::UI_DIM, "asked · waiting to send"),
                 _ if p.waiting => ('…', pal::UI_DIM, "asked"),
+                _ if n_waiting > 0 => ('⧗', Rgb::hex(0xffd36b) * 0.8, "messages waiting to send"),
                 Some(h) if h.village.is_some() => ('⌂', Rgb::hex(0xffd36b), "village open"),
                 Some(h) if h.on => ('●', Rgb::hex(0x9be08a), "online"),
                 _ => ('○', pal::UI_DIM, "offline"),
@@ -608,6 +617,7 @@ impl Scene {
                 let name: String = p.name.chars().take((cw - 24).max(4) as usize).collect();
                 let x = f.text(cx, y0 + 3, &name, Rgb::hex(0xffd36b), bg, 0.0);
                 let (what, col) = match here {
+                    _ if p.waiting && o.waiting_for(i).0 => ("· ⧗ asked: it goes when you're both online", pal::UI_DIM),
                     _ if p.waiting => ("· asked, no answer yet", pal::UI_DIM),
                     Some(h) if h.village.is_some() => ("· ⌂ their village is open", Rgb::hex(0xffd36b) * 0.85),
                     Some(h) if h.on => (
@@ -621,11 +631,13 @@ impl Scene {
                         },
                         Rgb::hex(0x9be08a),
                     ),
-                    _ => ("· ○ offline: lines reach them only while they're online", pal::UI_DIM),
+                    _ => ("· ○ offline: what you write waits, and goes when they're on", pal::UI_DIM),
                 };
                 let x = f.text(x + 1, y0 + 3, what, col, bg, 0.0);
                 if here.as_ref().is_some_and(|h| h.village.is_some()) {
                     button(f, x + 2, y0 + 3, " ⌂ join ", ChatsDo::Net(NetDo::Join(i as u8)), Rgb::hex(0x9be08a));
+                } else if self.invite_from(i).is_some() {
+                    button(f, x + 2, y0 + 3, " ⌂ join (they asked you) ", ChatsDo::Net(NetDo::ChatInvite(i as u8)), Rgb::hex(0x9be08a));
                 }
                 let lines = o.chat(i);
                 let now = crate::clock::now().timestamp();
@@ -633,7 +645,7 @@ impl Scene {
                 let mut out: Vec<(String, Rgb)> = vec![];
                 for l in lines.iter().rev().take(40) {
                     let who = if l.mine { "you" } else { &p.name };
-                    let head = format!("{who} · {}", ago_short(now - l.at));
+                    let head = format!("{who} · {}{}", ago_short(now - l.at), super::typing::chat_mark(l));
                     let mut body = wrap(&l.text, (cw - 2).max(10) as usize);
                     body.reverse();
                     for b in body {
@@ -649,14 +661,25 @@ impl Scene {
                     let s: String = s.chars().take(cw as usize).collect();
                     f.text(cx, bottom - 3 - k as i32, &s, *col, bg, 0.0);
                 }
-                // the line to write on
+                // the line to write on (typed right there)
                 if !p.waiting {
                     let wy = bottom - 1;
+                    let typing = self.typing.as_ref().filter(|t| t.what == TextFor::Mail(i as u8));
+                    let wbg = Bg::Mix(if typing.is_some() { Rgb::hex(0x1a2340) } else { Rgb::hex(0x0b1020) }, 0.95);
                     for xx in cx..cx + cw {
-                        f.put_g(xx, wy, Glyph::new(' ', pal::UI_TEXT).bg(Bg::Mix(Rgb::hex(0x0b1020), 0.9)).lit(0.0));
+                        f.put_g(xx, wy, Glyph::new(' ', pal::UI_TEXT).bg(wbg).lit(0.0));
                     }
-                    let hint: String = format!("✎ write to {}…  (Enter)", p.name).chars().take(cw as usize).collect();
-                    f.text(cx + 1, wy, &hint, pal::UI_DIM, Bg::Mix(Rgb::hex(0x0b1020), 0.9), 0.0);
+                    match typing {
+                        Some(ty) => {
+                            let blink = (self.now() * 2.0) as i32 % 2 == 0;
+                            self.draw_field(f, cx + 1, wy, cw - 2, ty, "› ", blink, wbg);
+                            f.text(cx, wy - 1, "Enter: send · Esc: stop writing", pal::UI_DIM, bg, 0.0);
+                        }
+                        None => {
+                            let hint: String = format!("✎ write to {}…  (Enter)", p.name).chars().take(cw as usize).collect();
+                            f.text(cx + 1, wy, &hint, pal::UI_DIM, wbg, 0.0);
+                        }
+                    }
                     write = Some((cx, wy, cx + cw));
                 } else {
                     f.text(cx, bottom - 1, "waiting for them to say yes", pal::UI_DIM, bg, 0.0);
@@ -702,7 +725,7 @@ fn figure(f: &mut Frame, x: i32, y: i32, look: [u32; 5], faded: bool, bg: Bg) {
 }
 
 /// `text` in lines at most `w` long (at the spaces where it can).
-fn wrap(text: &str, w: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, w: usize) -> Vec<String> {
     let mut out = vec![];
     let mut line = String::new();
     for word in text.split_whitespace() {

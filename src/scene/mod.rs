@@ -28,11 +28,13 @@ pub mod newyear;
 pub mod pets;
 pub mod santa;
 pub mod story;
+pub mod skyshare;
 pub mod sleigh;
 pub mod snow;
 pub mod sprites;
 pub mod tree;
 pub mod tv;
+pub mod typing;
 pub mod village;
 
 use crate::audio::{AmbState, Sfx, SoundEvent};
@@ -152,6 +154,8 @@ pub struct Scene {
     balloon_py: f32,
     /// Jumped out of the balloon: not straight back in (until this time).
     balloon_out_until: f32,
+    /// Off to the moon from this column (where to come back down).
+    moon_from: Option<f32>,
     /// The UI's own layer (its size in its cells, and how much bigger they
     /// are than the village's), when the front-end draws one: the scene's
     /// panels go there (see `draw_ui`), not over the village.
@@ -181,7 +185,12 @@ pub struct Scene {
     anchor: (f32, f32, f32),
     /// The last few things that happened online (when, what).
     post: Vec<(f32, String)>,
-    text_ask: Option<(online::TextFor, String)>,
+    /// A line being typed (see `typing.rs`), what's been said before (the
+    /// chat box's ↑), and the bottom rows a phone's keyboard covers.
+    typing: Option<typing::Typing>,
+    said_before: Vec<String>,
+    inset: i32,
+    typing_n: u32,
     copy_ask: Option<String>,
     village_switch: Option<Option<u32>>,
     /// The villager's own village (this one may be someone else's).
@@ -716,6 +725,7 @@ impl Scene {
             balloon_star: false,
             balloon_py: 0.0,
             balloon_out_until: 0.0,
+            moon_from: None,
             ui_wh: None,
             ui_k: 1.0,
             santa_clicks: vec![],
@@ -730,7 +740,10 @@ impl Scene {
             social: online::Social::default(),
             anchor: (main_cx as f32, main_base as f32, u),
             post: vec![],
-            text_ask: None,
+            typing: None,
+            said_before: vec![],
+            inset: 0,
+            typing_n: 0,
             copy_ask: None,
             village_switch: None,
             own_seed: seed,
@@ -2007,7 +2020,11 @@ impl Scene {
         }
         // away on a trip: Esc heads home
         if let Some(tr) = &mut self.trip {
-            tr.done = Some(if matches!(tr.at, trips::Where::Drive) { trips::Back::Home } else { trips::Back::Station });
+            tr.done = Some(match tr.at {
+                trips::Where::Drive => trips::Back::Home,
+                trips::Where::Moon { .. } => trips::Back::Sky,
+                _ => trips::Back::Station,
+            });
             return true;
         }
         let shop_open = self.shop.as_ref().map(|s| s.open).unwrap_or(false);
@@ -3106,12 +3123,23 @@ impl Scene {
                 Some(r) => (r, true),
                 None => (rest, false),
             };
-            let mut tr = if rest == "drive" { trips::Trip::drive(t, 7) } else { trips::Trip::ski(t, 7) };
+            let mut tr = match rest {
+                "drive" => trips::Trip::drive(t, 7),
+                // (on the moon a while: landed, a flag up)
+                "moon" => {
+                    let mut tr = trips::Trip::moon(t - 5.0, 7, 30.0);
+                    tr.update(0.1, t, (0.0, 0.0));
+                    tr.interact(t);
+                    tr
+                }
+                _ => trips::Trip::ski(t, 7),
+            };
             tr.preview(rest, t);
             if friends {
                 let at = |a: u8, x: f32, lane: f32, air: f32, sat: bool| crate::net::TripAt { at: a, x, lane, air, sat, dir: 1.0, el: 2.0, ..Default::default() };
                 let (a, x, lane, sat) = match rest {
                     "carriage" => (2, 0.32, 0.0, false),
+                    "moon" => (8, 44.0, 0.0, false),
                     "lodge" => (3, 0.6, 0.0, false),
                     _ => (5, tr.here(t).x + 14.0, 2.0, false),
                 };
@@ -3990,6 +4018,9 @@ impl Scene {
             let line = *self.rng.pick(santa::HO_HO);
             self.director.say(wx.round() as i32, sy as i32 - 2, line, t, 2.6, 8);
             self.sleigh.halt(t + 1.2);
+            if self.online.village().is_some() {
+                self.online.sky(crate::net::sky::HALT, 0.0, 1.2, 0);
+            }
             self.pockets.santa += 1;
             return;
         }
@@ -4010,6 +4041,9 @@ impl Scene {
         d.say(wxi, wyi, &lines[4], t0 + 9.4, 2.2, 8);
         d.sound(Sfx::Greet, px, 0.6);
         self.sleigh.halt(t0 + 9.2);
+        if self.online.village().is_some() {
+            self.online.sky(crate::net::sky::HALT, 0.0, t0 + 9.2 - t, 0);
+        }
         self.pockets.santa += 1;
         self.cheer(2);
         self.deed(Deed::SantaChat(folk[0].0), px);
@@ -4260,6 +4294,13 @@ impl Scene {
         self.update_table(t);
         self.update_runaway(dt, t);
         self.update_balloon(dt, t);
+        // jumped right off the top of the sky, and on up: the moon
+        let aboard = self.balloon.as_ref().is_some_and(|b| b.aboard);
+        if self.trip.is_none() && self.inside.is_none() && !self.in_igloo && !aboard && self.table.is_none() {
+            if self.player.as_ref().is_some_and(|p| p.in_air() && p.y < -(self.h as f32) * 0.6) {
+                self.to_the_moon();
+            }
+        }
         // the pet out and about: after an animal now and then (a dog chases,
         // a cat stalks, a bunny hops along with rabbits), or playing with
         // another pet
@@ -4433,6 +4474,7 @@ impl Scene {
         };
         self.critters.set_player(you);
         self.director.update(dt, t, &self.ctx);
+        self.share_sky();
         // what's going on, for what people say (and who reacts to what)
         let arrivals = std::mem::take(&mut self.director.arrivals);
         if !arrivals.is_empty() {
@@ -5123,6 +5165,7 @@ impl Scene {
         // pixel layer (sky things stay on screen, the world scrolls)
         f.ox = 0;
         self.sky.draw_px(f, t, self.director.flare.value(t), self.sky_off());
+        self.draw_moon_visitors(f);
         let dl = self.daylight;
         if oy > 0 {
             f.specks = true;
@@ -5222,6 +5265,7 @@ impl Scene {
             if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
                 b.draw_back(f, t, sprite_k(self.h));
             }
+            self.draw_ridden(f, t, false);
             if !self.in_igloo {
                 p.draw(f, t, glow, None);
             }
@@ -5234,6 +5278,7 @@ impl Scene {
                     player::Player::draw_prompt(f, b.x.round() as i32, (b.y - 4.0 * sprite_k(self.h)).round() as i32, 'E', t);
                 }
             }
+            self.draw_ridden(f, t, true);
         }
         if self.inside.is_none() {
             self.draw_runaway(f, t);
@@ -6347,6 +6392,253 @@ mod tests {
         a.online.star(vx, 12.0);
         both(&mut a, &mut b, 0.2);
         assert!(b.director.streaks() > before, "the shooting star never showed");
+    }
+
+    /// In a shared village the sky's the host's: the guest's own schedules
+    /// wait, and what the host's sky does (the sleigh, a balloon, a comet)
+    /// the guest sees too; Santa knocked out of his sleigh by the guest
+    /// tumbles on the host's side too, runs where the guest says, and
+    /// someone up in a balloon is seen in it.
+    #[test]
+    fn the_sky_is_the_same_for_everyone_in_a_village() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 4.0);
+        assert!(b.online.other(a.online.my_id()).is_some());
+        assert!(b.director.guest && b.sleigh.follow, "the guest's sky waits on the host");
+        assert!(!a.director.guest && !a.sleigh.follow);
+        // the host's sleigh: both see it go over
+        let t = a.now();
+        a.sleigh.trigger(t);
+        both(&mut a, &mut b, 0.5);
+        assert!(a.sleigh.flying() && b.sleigh.flying(), "the sleigh on both sides");
+        // a balloon comes to the host's village: the guest's too
+        let t = a.now();
+        let x = a.cam + a.w as f32 / 2.0;
+        a.balloon_comes(x, true, 77, t);
+        let vx = a.shared(x, 0.0).0;
+        a.online.sky(crate::net::sky::BALLOON, vx, 1.0, 77);
+        both(&mut a, &mut b, 0.3);
+        assert_eq!(b.balloon.as_ref().map(|b| b.seed()), Some(77), "the same balloon");
+        // a comet in the host's sky
+        let before = b.director.streaks();
+        a.director.shared.push((crate::net::sky::COMET, 0.0, 1.0));
+        both(&mut a, &mut b, 0.2);
+        assert!(b.director.streaks() > before, "the comet never came");
+        // the guest knocks Santa out (clicked five times running)
+        both(&mut a, &mut b, 0.5);
+        let t = b.now();
+        for _ in 0..5 {
+            b.santa_spammed(t);
+        }
+        assert!(b.runaway.is_some(), "Santa never fell");
+        both(&mut a, &mut b, 0.3);
+        assert!(a.runaway.as_ref().is_some_and(|r| r.theirs), "the host never saw him fall");
+        assert!(a.sleigh.santa_out);
+        both(&mut a, &mut b, 4.0);
+        // (where he is on the host's side, against where the guest says: a
+        // few cells behind at most, the way he's running)
+        let ra = a.runaway.as_ref().map(|r| r.x);
+        let rb = b.runaway.as_ref().map(|r| a.local(b.shared(r.x, 0.0).0, 0.0).0);
+        if let (Some(ra), Some(rb)) = (ra, rb) {
+            assert!((ra - rb).abs() < 8.0, "running in different places: {ra} {rb}");
+        }
+        // the guest up in a balloon: seen in it
+        b.balloon = Some(balloon::Balloon::coming(b.cam + 30.0, 10.0, b.cam + 30.0, 10.0, 0.0, 99));
+        b.balloon.as_mut().unwrap().board();
+        both(&mut a, &mut b, 1.0);
+        let ride = a.online.other(b.online.my_id()).map(|o| o.av.ride);
+        assert_eq!(ride, Some(99), "not seen up in it");
+    }
+
+    /// Two asking each other to a game at once, and both saying yes at
+    /// once: they end up at the same table (the lower-numbered game), not
+    /// each waiting at the other's. Someone saying yes to one game drops
+    /// their own ask, so it can't be said yes to after. A table that's
+    /// full turns the one too many away.
+    #[test]
+    fn two_asking_each_other_at_once_sit_at_one_table() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 4.0);
+        let (ia, ib) = (a.online.my_id(), b.online.my_id());
+        let chess = crate::net::ask::CHESS;
+        // (the two villages' dice not in step: each game its own number)
+        b.rng.next_u32();
+        // each asks the other, the same moment; each says yes, the same moment
+        a.act(Do::Net(online::NetDo::With(ib, chess)));
+        b.act(Do::Net(online::NetDo::With(ia, chess)));
+        both(&mut a, &mut b, 0.3);
+        assert!(a.asked_now() && b.asked_now(), "both asked");
+        a.prompt_key(true);
+        b.prompt_key(true);
+        both(&mut a, &mut b, 3.0);
+
+        let ga = a.table.as_ref().and_then(|t| t.net.as_ref()).map(|n| n.game);
+        let gb = b.table.as_ref().and_then(|t| t.net.as_ref()).map(|n| n.game);
+        assert!(ga.is_some() && ga == gb, "at different tables: {ga:?} {gb:?}");
+        // one says yes first: the other's ask is dropped (no yes to it left)
+        a.table = None;
+        b.table = None;
+        both(&mut a, &mut b, 8.0);
+        a.act(Do::Net(online::NetDo::With(ib, chess)));
+        b.act(Do::Net(online::NetDo::With(ia, chess)));
+        both(&mut a, &mut b, 0.3);
+        a.prompt_key(true);
+        both(&mut a, &mut b, 0.3);
+        assert!(!b.asked_now(), "Robin's ask still there to say yes to");
+        both(&mut a, &mut b, 3.0);
+        let ga = a.table.as_ref().and_then(|t| t.net.as_ref()).map(|n| n.game);
+        let gb = b.table.as_ref().and_then(|t| t.net.as_ref()).map(|n| n.game);
+        assert!(ga.is_some() && ga == gb, "at different tables: {ga:?} {gb:?}");
+    }
+
+    /// Jump after jump, right off the top of the sky: the moon (the
+    /// others there seen, the villager seen from the village, tiny, on its
+    /// rim); ↓ falls back down into the village.
+    #[test]
+    fn jumping_off_the_top_of_the_sky_goes_to_the_moon() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32, jump: bool| {
+            for k in 0..(secs / DT) as usize {
+                if jump && k % 4 == 0 {
+                    a.jump();
+                } else if jump && k % 4 == 2 {
+                    a.release_jump();
+                }
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 4.0, false);
+        // up, and up, and up
+        both(&mut a, &mut b, 20.0, true);
+        assert!(a.trip.as_ref().is_some_and(|tr| matches!(tr.at, trips::Where::Moon { .. })), "never got to the moon (y {:?})", a.player.as_ref().map(|p| p.y));
+        assert_eq!(a.pockets.moon, 1);
+        both(&mut a, &mut b, 3.0, false);
+        // seen from the village: up there
+        let up = b.online.other(a.online.my_id()).and_then(|o| o.av.trip).map(|t| t.at);
+        assert_eq!(up, Some(8), "not seen on the moon");
+        // the other one up too: each sees the other
+        b.to_the_moon();
+        both(&mut a, &mut b, 3.0, false);
+        assert!(a.trip.as_ref().unwrap().fellows.iter().any(|f| f.at.at == 8));
+        assert!(b.trip.as_ref().unwrap().fellows.iter().any(|f| f.at.at == 8));
+        // ↓: back down, falling into the village
+        a.mv = (0.0, 1.0);
+        both(&mut a, &mut b, 0.5, false);
+        a.mv = (0.0, 0.0);
+        both(&mut a, &mut b, 1.5, false);
+        assert!(a.trip.is_none(), "still up there");
+        both(&mut a, &mut b, 6.0, false);
+        assert!(a.player.as_ref().is_some_and(|p| !p.in_air() && p.y > 0.0), "never landed");
+    }
+
+    /// The chat box: / opens it, what's typed is there (the caret moved,
+    /// a letter put in the middle), Enter says it (and it's kept for ↑),
+    /// Esc closes it; a code is typed in capitals with dashes; a phone's
+    /// own box keeps it as it types; it's drawn above a phone's keyboard.
+    #[test]
+    fn typing_in_the_chat_box() {
+        use typing::TypeKey as K;
+        let mut s = walker_scene();
+        for _ in 0..10 {
+            s.update(DT, 0.0);
+        }
+        s.open_chat();
+        assert!(s.typing().is_some_and(|t| t.is_talk()));
+        for c in "hi there".chars() {
+            s.type_key(K::Char(c));
+        }
+        for _ in 0..6 {
+            s.type_key(K::Left);
+        }
+        s.type_key(K::Char(','));
+        assert_eq!(s.typing().unwrap().text, "hi, there");
+        s.type_key(K::Enter);
+        assert!(s.typing().is_none());
+        assert_eq!(s.said_before.last().map(|s| s.as_str()), Some("hi, there"));
+        s.open_chat();
+        s.type_key(K::Up);
+        assert_eq!(s.typing().unwrap().text, "hi, there");
+        s.type_key(K::Down);
+        assert_eq!(s.typing().unwrap().text, "");
+        s.type_key(K::Esc);
+        assert!(s.typing().is_none());
+        // a friend's code
+        s.act(Do::Net(online::NetDo::Add));
+        assert!(s.typing().is_some_and(|t| t.is_code()));
+        s.type_text("abcd1234efgh");
+        assert_eq!(s.typing().unwrap().text, "ABCD-1234-EFGH");
+        // a phone's box: kept to it, the caret where it says
+        s.set_typed("abcd12", Some(6));
+        assert_eq!(s.typing().unwrap().text, "ABCD-12");
+        s.type_key(K::Esc);
+        // drawn above the keyboard
+        s.open_chat();
+        s.type_text("hello");
+        s.set_inset(10);
+        let mut f = Frame::new(100, 40);
+        s.draw_top(&mut f);
+        let (_, top, _, h) = s.social.chat_box.get().expect("the chat box drawn");
+        assert!(top + h <= 40 - 10, "under the keyboard: {top}+{h}");
+        let row: String = (0..100).map(|x| f.glyph[(top + h - 2) as usize * 100 + x].map(|g| g.ch).unwrap_or(' ')).collect();
+        assert!(row.contains("hello"), "{row}");
     }
 
     /// Friends & chats: each friend down the left (asked first, then
