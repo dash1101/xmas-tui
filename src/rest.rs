@@ -174,6 +174,12 @@ fn gpu_busy() -> Option<f32> {
         if !name.starts_with("card") || name.contains('-') {
             continue;
         }
+        // (a card that's asleep is idle: asking would only wake it, as on a
+        // laptop's second graphics card)
+        if std::fs::read_to_string(e.path().join("device/power/runtime_status")).is_ok_and(|s| s.trim() == "suspended") {
+            most = Some(most.unwrap_or(0.0));
+            continue;
+        }
         if let Some(v) = std::fs::read_to_string(e.path().join("device/gpu_busy_percent")).ok().and_then(|s| s.trim().parse::<f32>().ok()) {
             most = Some(most.unwrap_or(0.0).max(v / 100.0));
         }
@@ -197,12 +203,20 @@ fn game() -> Option<String> {
             continue;
         }
         let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
-        let cmd = String::from_utf8_lossy(&raw).replace('\0', " ");
-        if let Some(name) = game_in(&cmd) {
+        if let Some(name) = game_in_cmdline(&raw) {
             return Some(name);
         }
     }
     None
+}
+
+/// The game a process is, from its command line: by the program it runs
+/// (the first part) only, not whatever's passed to it (a shell or an
+/// editor that only mentions a game's folder isn't a game).
+#[cfg(any(target_os = "linux", test))]
+fn game_in_cmdline(raw: &[u8]) -> Option<String> {
+    let prog = raw.split(|b| *b == 0).next()?;
+    game_in(&String::from_utf8_lossy(prog))
 }
 
 #[cfg(windows)]
@@ -379,6 +393,11 @@ mod tests {
         assert_eq!(game_in("C:\\Program Files\\Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\x.exe").as_deref(), Some("Fortnite"));
         assert_eq!(game_in("/usr/bin/gamescope -W 1920 -- game").as_deref(), Some("a game (gamescope)"));
         assert_eq!(game_in("/usr/bin/kitty"), None);
+        // by the program run, not what's passed to it
+        assert_eq!(game_in_cmdline(b"/home/a/.local/share/Steam/steamapps/common/Test Game/Game.exe\x0025\x00").as_deref(), Some("Test Game"));
+        assert_eq!(game_in_cmdline(b"bash\x00-c\x00exec -a /home/a/.local/share/Steam/steamapps/common/Test Game/Game.exe sleep 25\x00"), None);
+        assert_eq!(game_in_cmdline(b"nvim\x00/home/a/.local/share/Steam/steamapps/common/Celeste/Content/x.json\x00"), None);
+        assert_eq!(game_in_cmdline(b"Z:\\home\\a\\.local\\share\\Steam\\steamapps\\common\\RaceRoom Racing Experience\\Game\\x64\\RRRE64.exe\x00").as_deref(), Some("RaceRoom Racing Experience"));
     }
 
     /// What it sees on this computer right now (`--ignored --nocapture`).
