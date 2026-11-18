@@ -2872,6 +2872,8 @@ impl App {
         // resting: only the online side goes on (the village held as it
         // was, its picture kept); back again, it carries on from there
         let resting = self.resting();
+        // (an automatic update waits while a game's on)
+        crate::update::hold(resting);
         if resting != self.scene.resting() {
             self.scene.set_resting(resting);
             self.rest_base = None;

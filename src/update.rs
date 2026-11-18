@@ -88,6 +88,9 @@ fn shared() -> &'static Mutex<Shared> {
 }
 
 static RESTART: AtomicBool = AtomicBool::new(false);
+/// The village resting (a game running, the computer busy, paused): an
+/// automatic install, and the restart after it, wait till it's over.
+static HOLD: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 fn with<T>(f: impl FnOnce(&mut Shared) -> T) -> T {
@@ -134,6 +137,19 @@ pub fn install_now() {
 /// calls [`relaunch`], as after an update.
 pub fn restart_now() {
     RESTART.store(true, Ordering::SeqCst);
+}
+
+/// Resting or not (each frame): an automatic install waits while it is,
+/// so a game isn't interrupted by the wallpaper starting again. (One asked
+/// for by hand goes ahead.)
+pub fn hold(on: bool) {
+    HOLD.store(on, Ordering::Relaxed);
+}
+
+/// A newer version found: installed now if asked for by hand, or if it's
+/// automatic and nothing's holding it (a game).
+fn installs_now(by_hand: bool, auto: bool, held: bool) -> bool {
+    by_hand || (auto && !held)
 }
 
 /// The new version is in place: the front-end should shut down cleanly and
@@ -260,7 +276,7 @@ fn run() {
             }
         }
         if let Some(r) = &found {
-            if now_i || auto {
+            if installs_now(now_i, auto, HOLD.load(Ordering::Relaxed)) {
                 with(|s| s.status = Status::Installing(r.version.clone()));
                 match install(r) {
                     Ok(()) => {
@@ -562,6 +578,16 @@ mod tests {
     }
 
     use super::*;
+
+    /// Automatic installs wait while a game's on; one asked for doesn't.
+    #[test]
+    fn an_automatic_install_waits_for_the_game() {
+        assert!(installs_now(false, true, false));
+        assert!(!installs_now(false, true, true), "installed (and restarted) during a game");
+        assert!(installs_now(true, true, true));
+        assert!(installs_now(true, false, true));
+        assert!(!installs_now(false, false, false));
+    }
 
     #[test]
     fn sha256_matches_known_vectors() {
