@@ -178,6 +178,12 @@ pub struct Trip {
     pub finished: Option<(u32, f32)>,
     /// The others' results in the race (name, score, seconds).
     pub results: Vec<(String, u32, f32)>,
+    /// A race: at the top since when (waiting for everyone), and when it
+    /// starts (scene time; set by whoever asked, once everyone's up).
+    pub gate: Option<f32>,
+    pub go_at: Option<f32>,
+    /// The countdown last said (3, 2, 1).
+    counted: i32,
     /// Skis rented at the shop.
     pub skis: bool,
     /// The villager at the lodge or in the carriage: column (0..1), facing.
@@ -217,7 +223,7 @@ pub struct Trip {
     pub caption: Option<(String, f32)>,
     /// The last run: (seconds, flags passed, of how many, jumps).
     pub last: Option<(f32, u32, u32, u32)>,
-    seed: u32,
+    pub seed: u32,
     rng: Rng,
     sounds: Vec<(Sfx, f32)>,
     /// Done: back to the village.
@@ -277,6 +283,9 @@ impl Trip {
             race: false,
             finished: None,
             results: vec![],
+            gate: None,
+            go_at: None,
+            counted: 0,
             skis: false,
             x: 0.05,
             dir: 1.0,
@@ -365,6 +374,8 @@ impl Trip {
             Where::Shuttle { home, since } => TripAt { at: 1, home, el: t - since, ..base },
             Where::Carriage { home, since } => TripAt { at: 2, home, air: self.ride, sat: self.sat, el: t - since, ..base },
             Where::Lodge => TripAt { at: 3, sat: self.skis, ..base },
+            // (a race: at the top, waiting for the others)
+            Where::Lift { .. } if self.gate.is_some() => TripAt { at: 7, ..base },
             Where::Lift { since } => TripAt { at: 4, el: t - since, ..base },
             Where::Ski => match &self.run {
                 Some(r) => TripAt { at: 5, x: r.x, lane: r.lane, air: r.air, score: r.score, sat: r.tumble > t, el: t - r.started, dir: if (((r.spin / 90.0).round() as i32).rem_euclid(4)) == 2 { -1.0 } else { 1.0 }, ..base },
@@ -398,6 +409,47 @@ impl Trip {
         }
         tr.sounds.push((Sfx::Chime, 0.6));
         tr
+    }
+
+    /// A race: at the top of the chairlift, waiting till everyone's up and
+    /// whoever asked says go (a countdown to it); late, straight off; and
+    /// if nobody says, off anyway after a while.
+    fn at_the_gate(&mut self, t: f32) {
+        let gate = match self.gate {
+            Some(g) => g,
+            None => {
+                self.gate = Some(t);
+                self.say("at the top · waiting for everyone to get here…", t, 6.0);
+                t
+            }
+        };
+        match self.go_at {
+            Some(go) if t >= go => {
+                self.gate = None;
+                self.go_at = None;
+                self.counted = 0;
+                self.sounds.push((Sfx::Chime, 0.9));
+                self.start_run(t);
+                self.say("GO!", t, 1.2);
+            }
+            Some(go) => {
+                let n = (go - t).ceil() as i32;
+                if n != self.counted && n <= 3 {
+                    self.counted = n;
+                    self.say(&format!("{n}…"), t, 1.0);
+                    self.sounds.push((Sfx::Click, 0.8));
+                }
+            }
+            None if t - gate > 40.0 => self.go(t),
+            None => {}
+        }
+    }
+
+    /// A race: off at `at` (scene time; a countdown to it at the top).
+    pub fn go(&mut self, at: f32) {
+        if self.race && self.go_at.is_none() && self.run.is_none() {
+            self.go_at = Some(at);
+        }
     }
 
     /// A friend's result in the race.
@@ -492,6 +544,8 @@ impl Trip {
             Where::Lift { since } => Where::Lift { since: since - s },
             w => w,
         };
+        self.gate = self.gate.map(|g| g - s);
+        self.go_at = self.go_at.map(|g| g - s);
         if let Some(r) = &mut self.run {
             r.tumble -= s;
             r.started -= s;
@@ -789,6 +843,8 @@ impl Trip {
                 if t - since > 7.0 {
                     if self.lift_home {
                         self.lift_arrive(t);
+                    } else if self.race {
+                        self.at_the_gate(t);
                     } else {
                         self.start_run(t);
                     }
@@ -1045,7 +1101,7 @@ impl Trip {
             Where::Shuttle { home, since } => self.draw_shuttle(f, t, t - since, home, look),
             Where::Carriage { home, .. } => self.draw_carriage(f, t, home, look),
             Where::Lodge => self.draw_lodge(f, t, look),
-            Where::Lift { since } => self.draw_lift(f, t, t - since, look),
+            Where::Lift { since } => self.draw_lift(f, t, (t - since).min(7.0), look),
             Where::Ski => self.draw_ski(f, t, look),
             Where::Drive => self.draw_drive(f, t),
         }

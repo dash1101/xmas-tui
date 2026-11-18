@@ -155,6 +155,9 @@ pub struct Table {
     pub net: Option<Seat>,
     /// Online, waiting for the first deal.
     pub waiting: bool,
+    /// Online, dealt but waiting for everyone to sit down (since when:
+    /// negative, not looked yet): no moves till then.
+    pub to_sit: Option<f32>,
     game: Game,
     rng: Rng,
     /// What's happening (the line under the board).
@@ -241,6 +244,7 @@ impl Table {
             ai,
             net: None,
             waiting: false,
+            to_sit: None,
             game,
             rng,
             status,
@@ -273,8 +277,17 @@ impl Table {
             tb.game.adopt(st);
         }
         tb.net = Some(Seat { game, seats, me, seat, seq: 0, hand: 1, out: None, sent: 0.0, left: false });
-        tb.status = tb.opening();
+        // (it starts once everyone's sat down at it)
+        tb.to_sit = Some(-1.0);
+        tb.status = format!("waiting for {} to sit down…", and(tb.names.get(1..).unwrap_or(&[])));
         tb
+    }
+
+    /// Everyone's at the table (or the wait's over): off it goes.
+    pub fn all_sat(&mut self) {
+        if self.to_sit.take().is_some() {
+            self.status = self.opening();
+        }
     }
 
     /// A table online, waiting for friends to sit down and the first deal
@@ -494,6 +507,9 @@ impl Table {
 
     /// A key at the table.
     pub fn key(&mut self, k: Key, t: f32) {
+        if self.to_sit.is_some() {
+            return;
+        }
         if self.waiting {
             if matches!(k, Key::Pick | Key::Deal) {
                 if self.net.as_ref().is_some_and(|n| n.owner()) && self.names.len() >= 2 {
@@ -614,6 +630,9 @@ impl Table {
     /// A click (screen cell): a button, a square on the board, a card in
     /// the hand or the deck. Anywhere else, nothing.
     pub fn click(&mut self, x: i32, y: i32, t: f32) {
+        if self.to_sit.is_some() {
+            return;
+        }
         let b = self.buttons.borrow().iter().find(|b| y == b.1 && x >= b.0 && x < b.0 + b.2).map(|b| b.3);
         if let Some(k) = b {
             return self.key(k, t);

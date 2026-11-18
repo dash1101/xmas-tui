@@ -474,6 +474,16 @@ impl Scene {
             return;
         }
         let Some(tb) = &mut self.table else { return };
+        // online: no moves till everyone's sat down at it (45 s at most)
+        if let (Some(since), Some(n)) = (tb.to_sit, tb.net.as_ref()) {
+            let since = if since < 0.0 { t } else { since };
+            tb.to_sit = Some(since);
+            let me_sat = self.inside.as_ref().and_then(|i| i.sitting()).is_some();
+            let others_sat = n.seats.iter().filter(|&&s| s != n.me).all(|&s| self.online.other(s).is_some_and(|o| o.av.room == n.game && o.av.seat >= 0));
+            if (me_sat && others_sat) || t - since > 45.0 {
+                tb.all_sat();
+            }
+        }
         tb.update(t);
         if let (Some(r), false) = (tb.result, tb.scored) {
             tb.scored = true;

@@ -605,6 +605,7 @@ impl Director {
     }
 
     /// Shooting stars crossing the sky right now.
+    #[cfg(test)]
     pub fn streaks(&self) -> usize {
         self.streaks.len()
     }

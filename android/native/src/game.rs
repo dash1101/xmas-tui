@@ -1530,6 +1530,26 @@ impl Game {
         } else if let Some(p) = &mut self.pull {
             p.frame(sounds, self.scene.audio_state(t));
         }
+        // a shared village's music: the host's sent to the guests; a guest
+        // plays the same, unless their music's off or a style of their own
+        let host = self.scene.online.village().is_some_and(|(_, h)| h);
+        let cue = if !host {
+            None
+        } else if let Some(a) = &self.audio {
+            a.cue()
+        } else {
+            self.pull.as_ref().and_then(|p| p.cue())
+        };
+        let now_ms = crate::clock::now().timestamp_millis();
+        self.scene.online.set_tune(cue.map(|c| crate::net::Tune { style: c.style, carol: c.carol, seed: c.seed, t: c.t, at: now_ms }));
+        if let Some(m) = self.scene.online.take_tune().filter(|_| crate::audio::follows_host(&self.cfg.sound) && !self.paused) {
+            let c = crate::audio::Cue { style: m.style, carol: m.carol, seed: m.seed, t: m.t };
+            if let Some(a) = &self.audio {
+                a.follow(c);
+            } else if let Some(p) = &mut self.pull {
+                p.follow(c);
+            }
+        }
         self.frame.clear();
         let want = self.scene.zoom_focus();
         let f = match self.focus {

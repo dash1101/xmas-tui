@@ -24,7 +24,7 @@ mod sfx;
 mod voice;
 
 pub use ambience::AmbState;
-pub use music::STYLES;
+pub use music::{Cue, STYLES};
 
 use crate::config::SoundCfg;
 use mixer::Mixer;
@@ -195,6 +195,14 @@ enum Msg {
     Events(Vec<SoundEvent>),
     State(AmbState),
     Config(SoundCfg),
+    /// Play what this is (a shared village's host's music).
+    Follow(Cue),
+}
+
+/// Whether this side plays a shared village's host's music: its sound and
+/// music on, and its music left to shuffle (a style picked: its own).
+pub fn follows_host(c: &SoundCfg) -> bool {
+    c.enabled && c.music > 0.01 && music::Style::parse(&c.track).is_none()
 }
 
 /// Counters the audio thread keeps (for `--audio-test` and debugging).
@@ -214,6 +222,8 @@ pub struct Audio {
     /// Disconnects when the audio thread has finished (output closed).
     done: Receiver<()>,
     pub stats: Arc<Stats>,
+    /// What music's playing (for a shared village's guests to play too).
+    cue: Arc<std::sync::Mutex<Option<Cue>>>,
 }
 
 impl Audio {
@@ -223,15 +233,29 @@ impl Audio {
         let (cfg, st) = (cfg.clone(), stats.clone());
         let meters: Meters = Arc::new(std::sync::Mutex::new([0.0; METERS]));
         let m = meters.clone();
+        let cue = Arc::new(std::sync::Mutex::new(None));
+        let c = cue.clone();
         let (done_tx, done) = sync_channel::<()>(1);
         std::thread::Builder::new()
             .name("xmas-audio".into())
             .spawn(move || {
-                run(rx, cfg, st, m);
+                run(rx, cfg, st, m, c);
                 drop(done_tx);
             })
             .ok()?;
-        Some(Audio { tx: Some(tx), meters, done, stats })
+        Some(Audio { tx: Some(tx), meters, done, stats, cue })
+    }
+
+    /// What music's playing right now (None: none, or no sound).
+    pub fn cue(&self) -> Option<Cue> {
+        self.cue.lock().ok().and_then(|c| *c)
+    }
+
+    /// Play what someone else is playing (a shared village's host).
+    pub fn follow(&self, c: Cue) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.try_send(Msg::Follow(c));
+        }
     }
 
     /// Once per frame: this frame's effects plus the ambience state. Never
@@ -296,6 +320,14 @@ impl Pull {
         }
     }
 
+    pub fn cue(&self) -> Option<Cue> {
+        audible(&self.cfg).then(|| self.mx.music.cue()).flatten()
+    }
+
+    pub fn follow(&mut self, c: Cue) {
+        self.mx.music.follow(c);
+    }
+
     /// `n` frames (48 kHz stereo), interleaved, into `out`.
     pub fn render(&mut self, n: usize, out: &mut Vec<f32>) {
         self.buf.resize(n, [0.0; 2]);
@@ -326,7 +358,7 @@ fn to_pcm(buf: &[[f32; 2]], pcm: &mut [i16]) {
     }
 }
 
-fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>, meters: Meters) {
+fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>, meters: Meters, cue: Arc<std::sync::Mutex<Option<Cue>>>) {
     let mut meters_at = Instant::now();
     let debug = std::env::var_os("XMAS_AUDIO_DEBUG").is_some();
     let dev = out::Dev::from_env();
@@ -395,6 +427,7 @@ fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>, meters: Meters) 
                     cfg = c;
                     mx.configure(&cfg);
                 }
+                Msg::Follow(c) => mx.music.follow(c),
             }
         }
         let live = last_state.elapsed() < Duration::from_secs(1) && audible(&cfg);
@@ -436,6 +469,9 @@ fn run(rx: Receiver<Msg>, mut cfg: SoundCfg, stats: Arc<Stats>, meters: Meters) 
             meters_at = Instant::now();
             if let Ok(mut m) = meters.lock() {
                 *m = if out.is_some() { mx.meters } else { [0.0; METERS] };
+            }
+            if let Ok(mut c) = cue.lock() {
+                *c = if out.is_some() { mx.music.cue() } else { None };
             }
         }
         if debug && mx.music.title != title {

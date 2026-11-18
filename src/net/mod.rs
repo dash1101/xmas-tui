@@ -399,6 +399,9 @@ enum Msg {
     /// A shooting star sent off (a tap on the sky) at x (village
     /// coordinates), `y` pixels up.
     Star { id: u32, x: f32, y: f32 },
+    /// A race down the mountain (its seed), from whoever asked: everyone's
+    /// at the top, and it starts at `at` (milliseconds, the wall clock).
+    Go { id: u32, seed: u32, at: i64 },
     /// A race down the mountain finished: the score and the time.
     Finish { id: u32, name: String, score: u32, secs: f32 },
     /// In a village: someone's villager.
@@ -432,6 +435,10 @@ enum Msg {
         /// (minutes), so everyone in the village has the same sky.
         #[serde(default)]
         clock: Option<[f32; 3]>,
+        /// The host's music, for guests to play the same (as far as they
+        /// want it).
+        #[serde(default)]
+        music: Option<Tune>,
     },
     /// In a village: gone (`host`: the village closes; a square's next
     /// villager takes over).
@@ -469,6 +476,7 @@ pub enum Event {
     Show { id: u32, what: u8, n: u16, x: f32 },
     Tagged { id: u32, it: u32, left: f32 },
     Star { x: f32, y: f32 },
+    Go { seed: u32, at: i64 },
     Finish { id: u32, name: String, score: u32, secs: f32 },
     /// A linked device's side of the villager (see `crate::sync`).
     Synced { dev: String, at: i64, state: String },
@@ -516,6 +524,10 @@ pub struct Other {
     /// Where they've been heard, and when (they're drawn a moment behind,
     /// between two of those).
     pub trail: Trail,
+    /// The same on a trip (down the slope: how far, which lane; how high
+    /// off the snow).
+    pub trip_trail: Trail,
+    pub trip_air: Trail,
 }
 
 /// The places someone's been heard at (the sender's clock, x, y), oldest
@@ -625,6 +637,19 @@ impl Trail {
 /// messages, so the next is nearly always in by then.
 const TRAIL_DELAY: f32 = 0.2;
 
+/// A piece of music as it's playing (see `crate::audio::Cue`), and when
+/// that was (milliseconds, the wall clock): a shared village's guests play
+/// the same, from the same place.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Tune {
+    pub style: u8,
+    pub carol: i16,
+    pub seed: u32,
+    pub t: f32,
+    pub at: i64,
+}
+
 /// A friend's last "here I am".
 #[derive(Clone, Debug, Default)]
 pub struct Here {
@@ -686,6 +711,10 @@ pub struct Online {
     /// This side's clock (minutes into the day, sunrise, sunset), sent to
     /// the guests while hosting (see `set_clock`).
     my_clock: [f32; 3],
+    /// This side's music (sent to the guests while hosting), and the
+    /// host's as last heard (a guest), not yet taken.
+    my_tune: Option<Tune>,
+    host_tune: Option<Tune>,
     pub book: Book,
     /// The book's changed (worth saving soon).
     pub dirty: bool,
@@ -764,6 +793,8 @@ impl Online {
             trusted: false,
             square_rules: HashMap::new(),
             my_clock: [720.0, 450.0, 1020.0],
+            my_tune: None,
+            host_tune: None,
             me: Seal::new(&code),
             my_mail: seal::topic("mail", &code),
             my_here: seal::topic("here", &code),
@@ -1178,7 +1209,7 @@ impl Online {
         let me = self.id;
         // (one sender flooding the village is shrugged off)
         let sender = match &m {
-            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
+            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Go { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
             Msg::Village { host, .. } => *host,
             Msg::Crowd { id, .. } | Msg::Full { id, .. } => *id,
             _ => 0,
@@ -1203,7 +1234,7 @@ impl Online {
                 let av = av.cleaned();
                 let new = !v.others.contains_key(&id);
                 let host = v.host_id == Some(id);
-                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host, card: None, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default() });
+                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host, card: None, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default(), trip_trail: Trail::default(), trip_air: Trail::default() });
                 // (going in or out, off on a trip: a leap, not a walk)
                 if o.av.away != av.away {
                     o.trail.clear();
@@ -1211,6 +1242,16 @@ impl Online {
                 if av.at > 0.0 {
                     let how = av.air as u8 | (av.moving as u8) << 1 | ((av.dir > 0.0) as u8) << 2;
                     o.trail.heard_as(t, av.at, av.x, av.y, 0.6, how);
+                    match av.trip.filter(|tr| av.away == 2 && tr.at == 5) {
+                        Some(tr) => {
+                            o.trip_trail.heard(t, av.at, tr.x, tr.lane, 40.0);
+                            o.trip_air.heard(t, av.at, tr.air, 0.0, 1e6);
+                        }
+                        None => {
+                            o.trip_trail.clear();
+                            o.trip_air.clear();
+                        }
+                    }
                 }
                 // (their speed: from where they were to where they are now)
                 let gap = (t - o.seen).max(0.05);
@@ -1241,6 +1282,7 @@ impl Online {
             Msg::Up { id, game } if id != me => self.events.push(Event::Up { id, game }),
             Msg::Show { id, what, n, x } if id != me => self.events.push(Event::Show { id, what, n, x }),
             Msg::Tagged { id, it, left } if id != me => self.events.push(Event::Tagged { id, it, left }),
+            Msg::Go { id, seed, at } if id != me => self.events.push(Event::Go { seed, at }),
             Msg::Star { id, x, y } if id != me && x.is_finite() && y.is_finite() && x.abs() < 1e4 => self.events.push(Event::Star { x, y: y.clamp(0.0, 400.0) }),
             Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
             Msg::Talk { id, text } if id != me => {
@@ -1281,7 +1323,8 @@ impl Online {
             Msg::Village { host, .. } if host != me && v.square.is_some() && (v.host || v.host_id.is_some_and(|h| h < host)) => {}
             // (the first host heard is the host: nobody else takes over)
             Msg::Village { host, .. } if host != me && v.square.is_none() && v.host_id.is_some_and(|h| h != host) => {}
-            Msg::Village { host, name, seed, rules, admins, limit, clock } if host != me => {
+            Msg::Village { host, name, seed, rules, admins, limit, clock, music } if host != me => {
+                self.host_tune = music.filter(|m| m.t.is_finite() && m.t >= 0.0 && (m.style as usize) < 4);
                 v.host_seen = t;
                 v.host_id = Some(host);
                 if let Some(c) = clock.filter(|c| c.iter().all(|x| x.is_finite() && (0.0..=1440.0).contains(x))) {
@@ -1435,8 +1478,8 @@ impl Online {
         if host && t >= self.next_village {
             self.next_village = t + 2.0;
             let m = match square {
-                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16, clock: Some(self.my_clock) },
-                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16, clock: Some(self.my_clock) },
+                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune },
+                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune },
             };
             self.send(&topic, &seal, &m, false);
         }
@@ -1503,6 +1546,8 @@ impl Online {
                 // drawn a moment behind, between the places heard (only a
                 // light easing on top, for a message that changes course)
                 o.trail.tick(dt);
+                o.trip_trail.tick(dt);
+                o.trip_air.tick(dt);
                 if let Some((tx, ty)) = o.trail.known().then(|| o.trail.at(t, TRAIL_DELAY, 0.3)).flatten() {
                     if (tx - o.shown.0).abs() > 0.6 || (ty - o.shown.1).abs() > 0.6 {
                         o.shown = (tx, ty);
@@ -1525,6 +1570,21 @@ impl Online {
                 }
             }
         }
+    }
+
+    /// Someone's trip as it's drawn: down the slope, a moment behind,
+    /// between the places heard (see `Trail`).
+    pub fn trip_shown(&self, o: &Other) -> Option<TripAt> {
+        let mut at = o.av.trip?;
+        if o.trip_trail.known() {
+            if let Some((x, lane)) = o.trip_trail.at(self.t, TRAIL_DELAY, 0.3) {
+                (at.x, at.lane) = (x, lane);
+            }
+            if let Some((air, _)) = o.trip_air.at(self.t, TRAIL_DELAY, 0.0) {
+                at.air = air.max(0.0);
+            }
+        }
+        Some(at)
     }
 
     /// How someone is where they're drawn (a moment behind: see `Trail`):
@@ -1551,7 +1611,7 @@ impl Online {
         let code = seal::new_code();
         let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT, clock: None };
         for (id, name, av, card) in others {
-            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default() });
+            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default(), trip_trail: Trail::default(), trip_air: Trail::default() });
         }
         self.village = Some(v);
     }
@@ -2054,6 +2114,28 @@ impl Online {
         self.to_village(&m);
     }
 
+    /// A race: everyone's at the top; off at `at` (wall-clock ms).
+    pub fn go(&mut self, seed: u32, at: i64) {
+        let m = Msg::Go { id: self.id, seed, at };
+        self.to_village(&m);
+    }
+
+    /// This side's music as it's playing (sent to the guests while
+    /// hosting).
+    pub fn set_tune(&mut self, t: Option<Tune>) {
+        self.my_tune = t;
+    }
+
+    /// A guest: the host's music, newly heard (once), brought up to now.
+    pub fn take_tune(&mut self) -> Option<Tune> {
+        self.village.as_ref().filter(|v| !v.host)?;
+        let mut m = self.host_tune.take()?;
+        let now = crate::clock::now().timestamp_millis();
+        m.t += ((now - m.at).clamp(0, 10_000)) as f32 / 1000.0;
+        m.at = now;
+        Some(m)
+    }
+
     /// A shooting star sent off here, for everyone in the village.
     pub fn star(&mut self, x: f32, y: f32) {
         let m = Msg::Star { id: self.id, x, y };
@@ -2335,8 +2417,15 @@ pub(crate) mod tests {
         run(&mut relay, &mut [&mut a, &mut b], &mut t, 6.0);
         b.join_square(0);
         a.set_clock(1300.0, 480.0, 960.0);
+        // the host's music, for the guest to play the same
+        let at = crate::clock::now().timestamp_millis();
+        a.set_tune(Some(Tune { style: 1, carol: 2, seed: 77, t: 30.0, at }));
         run(&mut relay, &mut [&mut a, &mut b], &mut t, 3.0);
         assert_eq!(b.square(), Some(("North Pole Square".to_string(), false)));
+        let m = b.take_tune().expect("no music heard from the host");
+        assert_eq!((m.style, m.carol, m.seed), (1, 2, 77));
+        assert!(m.t >= 30.0, "not brought up to now");
+        assert!(a.take_tune().is_none(), "the host follows nobody");
         // the host's clock, moved on by the time since it was heard
         let (m, r, s) = b.village_clock().expect("the host's clock");
         assert!((1300.0..1301.0).contains(&m) && (r, s) == (480.0, 960.0), "{m} {r} {s}");

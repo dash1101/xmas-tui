@@ -35,6 +35,17 @@ impl Style {
     }
 }
 
+/// A piece as everyone in a shared village can play it: its style (in
+/// `STYLES`), the carol (-1: a tune of its own), the seed it's made from,
+/// and how far into it (seconds).
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Cue {
+    pub style: u8,
+    pub carol: i16,
+    pub seed: u32,
+    pub t: f32,
+}
+
 /// A melody with its harmony, in beats.
 pub struct Mel {
     /// (start, length, MIDI note)
@@ -412,6 +423,8 @@ struct Piece {
     t: f64,
     group: u8,
     style: Style,
+    /// What it is (for others to play the same).
+    cue: Cue,
 }
 
 pub struct Music {
@@ -429,6 +442,9 @@ pub struct Music {
     pub restarted: Option<u8>,
     /// What's playing, for logs.
     pub title: String,
+    /// Following someone else's music (a shared village's host): how long
+    /// since a cue last came; none for a good while, its own again.
+    following: Option<f64>,
 }
 
 impl Music {
@@ -444,6 +460,31 @@ impl Music {
             fades: [1.0; 3],
             restarted: None,
             title: String::new(),
+            following: None,
+        }
+    }
+
+    /// What's playing, as others can play it too.
+    pub fn cue(&self) -> Option<Cue> {
+        self.cur.as_ref().map(|p| Cue { t: p.t as f32, ..p.cue })
+    }
+
+    /// Play what someone else is playing (a shared village's host), from
+    /// where they are in it: the same piece, made from the same seed.
+    pub fn follow(&mut self, c: Cue) {
+        self.following = Some(0.0);
+        let Some(&style) = STYLES.get(c.style as usize) else { return };
+        let same = self.cur.as_ref().is_some_and(|p| p.cue.seed == c.seed && p.cue.carol == c.carol && p.style == style);
+        if !same {
+            let carol = (c.carol >= 0).then_some(c.carol as usize);
+            self.start_seeded(style, carol, c.seed);
+        }
+        // (a little out is fine; more, and it skips to where they are)
+        if let Some(p) = self.cur.as_mut() {
+            if (p.t - c.t as f64).abs() > 0.35 {
+                p.t = c.t.max(0.0) as f64;
+                p.idx = p.notes.iter().position(|n| n.at as f64 >= p.t).unwrap_or(p.notes.len());
+            }
         }
     }
 
@@ -464,13 +505,20 @@ impl Music {
 
     /// Start a specific piece now (used by the WAV export).
     pub fn start(&mut self, style: Style, carol: Option<usize>) {
+        let seed = self.rng.next_u32();
+        self.start_seeded(style, carol, seed);
+    }
+
+    /// Start a piece made from `seed` (the same seed, the same piece).
+    fn start_seeded(&mut self, style: Style, carol: Option<usize>, seed: u32) {
+        let mut rng = Rng::new(seed as u64 ^ 0x9f17);
         if let Some(c) = &self.cur {
             self.fades[c.group as usize] = 0.0;
         }
         let (mel, tempo, title) = match carol {
             Some(i) => {
                 let t = &TUNES[i % TUNES.len()];
-                let tempo = self.rng.range(t.tempo.0, t.tempo.1)
+                let tempo = rng.range(t.tempo.0, t.tempo.1)
                     * match style {
                         Style::Piano => 0.85,
                         Style::Celesta => 0.9,
@@ -479,11 +527,11 @@ impl Music {
                 (harmonize(t), tempo, t.name.to_string())
             }
             None => {
-                let (m, tempo) = compose(style, &mut self.rng);
+                let (m, tempo) = compose(style, &mut rng);
                 (m, tempo, "an original tune".to_string())
             }
         };
-        let mut notes = arrange(&mel, style, tempo, &mut self.rng);
+        let mut notes = arrange(&mel, style, tempo, &mut rng);
         // short tunes play twice, the second time an octave brighter
         let one = notes.iter().map(|n| n.at + n.dur).fold(0.0, f32::max);
         if one < 40.0 {
@@ -497,7 +545,8 @@ impl Music {
         self.fades[self.group as usize] = 1.0;
         self.restarted = Some(self.group);
         self.title = format!("{title} ({})", style.name());
-        self.cur = Some(Piece { notes, idx: 0, t: 0.0, group: self.group, style });
+        let cue = Cue { style: STYLES.iter().position(|s| *s == style).unwrap_or(0) as u8, carol: carol.map(|c| c as i16).unwrap_or(-1), seed, t: 0.0 };
+        self.cur = Some(Piece { notes, idx: 0, t: 0.0, group: self.group, style, cue });
         self.last_style = Some(style);
     }
 
@@ -524,9 +573,17 @@ impl Music {
     /// Advance by `n` samples, spawning the notes that fall in this block.
     pub fn render(&mut self, n: usize, voices: &mut Vec<Voice>) {
         let dt = n as f64 / SR as f64;
+        // (following someone: no cue for 8 s, and it's its own music again)
+        if let Some(f) = &mut self.following {
+            *f += dt;
+            if *f > 8.0 {
+                self.following = None;
+            }
+        }
         if self.cur.is_none() {
             self.gap -= dt;
-            if self.gap <= 0.0 {
+            // (following: the next piece is theirs to start)
+            if self.gap <= 0.0 && self.following.is_none() {
                 self.next_piece();
             }
             return;
@@ -553,6 +610,45 @@ impl Music {
             // let the last notes ring, then a short breath before the next
             self.cur = None;
             self.gap = self.rng.range(3.0, 6.0) as f64;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shared village's guest, handed the host's cue, plays the very
+    /// same piece (made from the same seed) from the same place; a carol
+    /// and a tune of its own alike.
+    #[test]
+    fn a_cue_plays_the_same_piece_from_the_same_place() {
+        for (style, carol) in [(Style::Piano, None), (Style::SleighRide, Some(2)), (Style::MusicBox, Some(0))] {
+            let (mut a, mut b) = (Music::new(1), Music::new(99));
+            a.start(style, carol);
+            let mut v = vec![];
+            for _ in 0..300 {
+                a.render(256, &mut v);
+            }
+            let c = a.cue().expect("nothing playing");
+            assert!(c.t > 1.0);
+            b.follow(c);
+            let (pa, pb) = (a.cur.as_ref().unwrap(), b.cur.as_ref().unwrap());
+            assert_eq!(pa.notes.len(), pb.notes.len(), "not the same piece");
+            for (x, y) in pa.notes.iter().zip(&pb.notes).take(40) {
+                assert_eq!((x.at, x.midi, x.dur), (y.at, y.midi, y.dur));
+            }
+            assert_eq!(pa.idx, pb.idx, "not at the same place in it");
+            assert!((pa.t - pb.t).abs() < 1e-3);
+            // a little later, a little out: it carries on (no skip); far
+            // out, it skips to where the host is
+            let mut late = a.cue().unwrap();
+            late.t += 0.2;
+            b.follow(late);
+            assert!((b.cur.as_ref().unwrap().t - pa.t).abs() < 1e-3, "skipped for a small drift");
+            late.t += 2.0;
+            b.follow(late);
+            assert!((b.cur.as_ref().unwrap().t - late.t as f64).abs() < 1e-3, "didn't catch up");
         }
     }
 }

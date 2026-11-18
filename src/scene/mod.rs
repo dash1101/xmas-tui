@@ -6177,9 +6177,12 @@ mod tests {
         assert!(b.prompt_key(true));
         both(&mut a, &mut b, 1.0);
         assert!(a.table.is_some() && b.table.is_some(), "no table (a {}, b {})", a.table.is_some(), b.table.is_some());
+        // no moves till both are sat at it
+        assert!(a.table.as_ref().unwrap().to_sit.is_some(), "it started before anyone sat down");
         // into the games room, over to their chairs, and sat down: each
         // sees the other in theirs
         both(&mut a, &mut b, 16.0);
+        assert!(a.table.as_ref().unwrap().to_sit.is_none() && b.table.as_ref().unwrap().to_sit.is_none(), "still waiting with both sat down");
         for (who, s) in [("a", &a), ("b", &b)] {
             let inn = s.inside.as_ref().unwrap_or_else(|| panic!("{who} isn't indoors"));
             assert!(inn.is_games(), "{who} isn't in the games room");
@@ -6193,6 +6196,72 @@ mod tests {
         let sb = b.table.as_ref().unwrap().state_json();
         assert!(b.table.as_ref().unwrap().net.as_ref().unwrap().seq == 1, "the move never came: {sb}");
         assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
+    }
+
+    /// A race down the mountain: whoever's up the chairlift first waits at
+    /// the top; once everyone's there, a countdown, and they're off
+    /// together (not each when they happen to get there).
+    #[test]
+    fn a_race_starts_for_everyone_together() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        for _ in 0..(4.0 / DT) as usize {
+            a.update(DT, 0.0);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        a.act(Do::Net(online::NetDo::Race));
+        // Sam's slow to answer: Robin's up first, and waits
+        for _ in 0..(6.0 / DT) as usize {
+            a.update(DT, 0.0);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        assert!(b.asked_now(), "never asked");
+        assert!(b.prompt_key(true));
+        // Sam's device stalls a few seconds (a slow phone, a page loading)
+        for _ in 0..(5.0 / DT) as usize {
+            a.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        let (mut sa, mut sb) = (None, None);
+        let mut waited = 0;
+        for k in 0..(60.0 / DT) as usize {
+            a.update(DT, 0.0);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+            // (one up at the top while the other isn't yet)
+            let gate = |s: &Scene| s.trip.as_ref().is_some_and(|tr| tr.gate.is_some());
+            if gate(&a) != gate(&b) {
+                waited += 1;
+            }
+            let run = |s: &Scene| s.trip.as_ref().is_some_and(|tr| tr.at == trips::Where::Ski);
+            if sa.is_none() && run(&a) {
+                sa = Some(k);
+            }
+            if sb.is_none() && run(&b) {
+                sb = Some(k);
+            }
+            if sa.is_some() && sb.is_some() {
+                break;
+            }
+        }
+        let (sa, sb) = (sa.expect("Robin never set off"), sb.expect("Sam never set off"));
+        assert!((sa as i32 - sb as i32).abs() <= 3, "off at different times: frames {sa} and {sb}");
+        assert!(waited > 30, "nobody waited at the top for the other ({waited} frames)");
     }
 
     /// In a shared village, what one side sees happen the other sees too:

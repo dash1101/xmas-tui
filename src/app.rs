@@ -2871,6 +2871,16 @@ impl App {
             if want != self.sound_sent && a.config(&want) {
                 self.sound_sent = want;
             }
+            // a shared village's music: the host's is sent to the guests;
+            // a guest plays the same, unless their music's off or set to
+            // a style of their own
+            let host = self.scene.online.village().is_some_and(|(_, h)| h);
+            self.scene.online.set_tune(host.then(|| a.cue()).flatten().map(|c| crate::net::Tune { style: c.style, carol: c.carol, seed: c.seed, t: c.t, at: crate::clock::now().timestamp_millis() }));
+            if let Some(m) = self.scene.online.take_tune() {
+                if crate::audio::follows_host(&self.cfg.sound) && !resting {
+                    a.follow(crate::audio::Cue { style: m.style, carol: m.carol, seed: m.seed, t: m.t });
+                }
+            }
         }
         self.frame.clear();
         self.frame.safe_bottom = self.safe_bottom();

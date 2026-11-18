@@ -406,6 +406,8 @@ pub struct Social {
     pub resting: bool,
     /// Friends & chats (the window).
     pub chats: super::chats::Chats,
+    /// A race this villager asked for: who said yes, and whether it's gone.
+    pub race: Option<RaceHost>,
     /// The others last seen up in the air (or not): a jump or a landing
     /// puffs the snow.
     pub others_air: std::collections::HashMap<u32, bool>,
@@ -471,6 +473,13 @@ pub struct Social {
     /// Hosting: when who's out is next told the guests; a guest: when it
     /// was last heard.
     crowd_at: f32,
+}
+
+/// A race asked for here: its seed, who's in it, and gone (said go).
+pub struct RaceHost {
+    pub seed: u32,
+    pub racers: Vec<u32>,
+    pub went: bool,
 }
 
 /// Who's out in the village and what they've said, as its host sends it.
@@ -1220,7 +1229,12 @@ impl Scene {
                     return;
                 }
                 match what {
-                    ask::RACE => self.post(format!("⇘ {name}'s in the race!")),
+                    ask::RACE => {
+                        if let Some(r) = self.social.race.as_mut().filter(|r| r.seed == seed && !r.racers.contains(&id)) {
+                            r.racers.push(id);
+                        }
+                        self.post(format!("⇘ {name}'s in the race!"));
+                    }
                     ask::TRIP => self.post(format!("⇄ {name}'s coming along!")),
                     ask::TAG => self.start_net_tag(id, true, t),
                     ask::FIGHT => self.start_net_fight(id, t),
@@ -1289,6 +1303,13 @@ impl Scene {
                         self.critters.gather(px, t + 12.0, t, &mut self.director, "a carol! wait for me!");
                         self.post(format!("♪ {name} is singing a carol"));
                     }
+                }
+            }
+            // a race: everyone's at the top; off at the time said
+            Event::Go { seed, at } => {
+                let wait = ((at - crate::clock::now().timestamp_millis()) as f32 / 1000.0).clamp(0.0, 10.0);
+                if let Some(tr) = self.trip.as_mut().filter(|tr| tr.race && tr.seed == seed) {
+                    tr.go(t + wait);
                 }
             }
             // a shooting star someone sent off
@@ -1605,7 +1626,8 @@ impl Scene {
             .others()
             .iter()
             .filter_map(|(id, o)| {
-                let at = o.av.trip.filter(|_| o.av.away == 2)?;
+                // (on the slope: drawn a moment behind, smoothly)
+                let at = self.online.trip_shown(o).filter(|_| o.av.away == 2)?;
                 Some(trips::Fellow { name: o.name.clone(), look: look_of(&o.av, *id), at })
             })
             .collect();
@@ -1618,6 +1640,21 @@ impl Scene {
         };
         if let Some((score, secs)) = done {
             self.online.finish(score, secs);
+        }
+        // a race this villager asked for: once everyone who said yes is at
+        // the top (25 s at most), go, a moment from now, for everyone
+        let t = self.now();
+        if let (Some(race), Some(tr)) = (&mut self.social.race, &mut self.trip) {
+            if !race.went && tr.race && tr.seed == race.seed && tr.gate.is_some() {
+                let since = tr.gate.unwrap_or(t);
+                let up = race.racers.iter().all(|id| self.online.other(*id).and_then(|o| o.av.trip).is_some_and(|at| at.at == 7 || at.at == 5));
+                if up || t - since > 25.0 {
+                    race.went = true;
+                    let at = crate::clock::now().timestamp_millis() + 3200;
+                    self.online.go(race.seed, at);
+                    tr.go(t + 3.2);
+                }
+            }
         }
     }
 
@@ -2451,6 +2488,7 @@ impl Scene {
             }
             NetDo::Race => {
                 let seed = self.rng.next_u32();
+                self.social.race = Some(RaceHost { seed, racers: vec![], went: false });
                 self.online.ask(0, ask::RACE, seed);
                 self.social.asking = Some((0, ask::RACE, seed, t + ASK_TIME));
                 self.goal = None;
