@@ -8,6 +8,18 @@
 # whenever it exits (e.g. when the monitor sleeps and disconnects).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# quit on purpose (the tray's or the menu's Quit) in the last minute: the
+# app asked systemd to stop the service, but if that didn't take, systemd
+# restarts it; then it stops itself here instead of coming back
+NOTE="${XDG_STATE_HOME:-$HOME/.local/state}/xmas-tui/quit"
+if [[ -f "$NOTE" ]]; then
+  at="$(cat "$NOTE" 2>/dev/null || echo 0)"
+  if [[ "$at" =~ ^[0-9]+$ ]] && (( $(date +%s) - at < 60 )); then
+    echo "xmas-tui: quit on purpose a moment ago: staying closed" >&2
+    systemctl --user --no-block stop xmas-tui.service 2>/dev/null || true
+    exit 0
+  fi
+fi
 # kitty draws it: the newest of the one on the PATH and an official build in
 # ~/.local/kitty.app (Settings → Desktop → "set as wallpaper" fetches one).
 # From 0.42 the panel is `kitten panel`; 0.34–0.41 (Debian 13 has 0.41) only

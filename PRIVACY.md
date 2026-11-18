@@ -48,6 +48,7 @@ Some widgets and effects read things on the device to show them. None of this le
 - **Window snow and lights**: where open windows are on the screen (on KDE Plasma, through a small script that xmas-tui loads into KWin and unloads again).
 - **Shelves**: the names and icons of the files in the folders chosen for them.
 - **Resting for games**: which programs are running (to spot a game), and how busy the processors and graphics card are.
+- **Easing off**: how much processor time the wallpaper itself uses (and, on Linux, the kitty terminal drawing it), to lower its frame rate on a computer that struggles.
 - **The clipboard**: only when copying or pasting a code.
 
 ## Going online

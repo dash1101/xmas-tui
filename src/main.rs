@@ -26,6 +26,7 @@ mod settings;
 mod sync;
 mod term;
 mod tray;
+mod perf;
 mod update;
 mod widgets;
 mod window;
@@ -628,6 +629,12 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             }
         }
         if app.quit || STOP.load(std::sync::atomic::Ordering::SeqCst) || tray::quit_requested() || update::restart_requested() || app::RESTART_FOR_SCALE.load(std::sync::atomic::Ordering::SeqCst) {
+            // the menu's Quit, as the wallpaper: stopped for good, as the
+            // tray's Quit does (a plain exit would be restarted by systemd)
+            #[cfg(target_os = "linux")]
+            if app.quit && wallpaper && !tray::quit_requested() {
+                tray::quit_wallpaper();
+            }
             break;
         }
         // popped out into a window of its own (another copy, online in its

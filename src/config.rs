@@ -17,6 +17,10 @@ pub struct Config {
     /// and online go on) while a game runs or the computer's busy, unless
     /// the desktop itself has the focus.
     pub rest_for_games: bool,
+    /// The frame rate eased off (as far as 10 a second) while the
+    /// wallpaper costs the computer a lot, and back as it can (see
+    /// `App::govern`).
+    pub ease_off: bool,
     /// A relay of the player's own choosing (a community's own server:
     /// `wss://…/mqtt` or `https://…/poll`); empty: the village's own.
     pub relay: String,
@@ -788,6 +792,7 @@ impl Default for Config {
             zoom: 1.0,
             seed: 0,
             rest_for_games: true,
+            ease_off: true,
             relay: String::new(),
             scene: SceneCfg::default(),
             clock: ClockCfg::default(),

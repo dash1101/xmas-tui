@@ -50,6 +50,7 @@ pub enum F {
     WinSnow,
     /// The wallpaper rests while a game runs or the computer's busy.
     RestForGames,
+    EaseOff,
     WinLights,
     Sound,
     SoundMaster,
@@ -311,6 +312,8 @@ pub struct Settings {
     /// Resting (the village standing still): "" paused by hand, else why
     /// the wallpaper rests (shown by the ⏸ button).
     pub resting: Option<String>,
+    /// The frame rate eased off to, while it is (see `App::govern`).
+    pub eased_fps: Option<f32>,
     /// Where the panel was dragged to (top-left), and the grab offset while
     /// it's being dragged by its title bar.
     pub pos: Option<(i32, i32)>,
@@ -599,6 +602,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Locked => cfg.layout.locked ^= true,
                 F::WinSnow => cfg.windows.snow ^= true,
                 F::RestForGames => cfg.rest_for_games ^= true,
+                F::EaseOff => cfg.ease_off ^= true,
                 F::WinLights => cfg.windows.lights ^= true,
                 F::Sound => cfg.sound.enabled ^= true,
                 F::SoundCursor => cfg.sound.cursor ^= true,
@@ -930,6 +934,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::UpdCheck => "Look for new versions now and then.",
         F::UpdAuto => "Install new versions without asking.",
         F::WinSnow => "Snow settles on top of open windows.",
+        F::EaseOff => "On a computer that struggles (an older laptop, or one drawing without its graphics card), the frame rate drops by itself, as far as 10 a second, and comes back up when it can.",
         F::RestForGames => "While a game runs, or the computer's working hard, the village stands still (the widgets and online carry on). A click on the desktop wakes it.",
         F::WinFront => "The snow falls in front of windows too.",
         F::WinBrush => "Moving the pointer through the snow sweeps it away.",
@@ -2029,9 +2034,10 @@ impl Settings {
         let c = f.text(zx + 7, yy, &format!("{:.2}×", cfg.zoom), pal::UI_TITLE, BG, 0.0);
         self.arrow(f, c + 1, yy, '▸', Act::Inc(F::Zoom));
         yy += 1;
-        let fps = match self.fps_override {
-            Some(o) => format!("{o:.0} fps (--fps)"),
-            None => format!("{:.0} fps", cfg.fps),
+        let fps = match (self.fps_override, self.eased_fps) {
+            (Some(o), _) => format!("{o:.0} fps (--fps)"),
+            (None, Some(e)) if e + 0.5 < cfg.fps => format!("{:.0} fps  (easing off: {e:.0} now)", cfg.fps),
+            (None, _) => format!("{:.0} fps", cfg.fps),
         };
         self.stepper(f, lx, vx, yy, "Frame rate", F::Fps, &fps);
         yy += 1;
@@ -2108,6 +2114,8 @@ impl Settings {
             }
         }
         self.check(f, lx, yy, "Rest while a game runs or the computer's busy", Act::Toggle(F::RestForGames), cfg.rest_for_games);
+        yy += 1;
+        self.check(f, lx, yy, "Ease off the frame rate when the computer struggles", Act::Toggle(F::EaseOff), cfg.ease_off);
         yy += 1;
         if let Some(why) = self.resting.as_deref().filter(|w| !w.is_empty()) {
             f.text(lx + 4, yy, &clip(&format!("⏸ resting now: {why}")), pal::UI_DIM, BG, 0.0);

@@ -111,22 +111,48 @@ fn systemd_unit() -> Option<String> {
         .map(str::to_string)
 }
 
-/// Stop the wallpaper for good. Under systemd (which would restart us)
-/// ask systemd to stop the unit; otherwise just exit cleanly.
+/// Where a quit on purpose is noted (Linux): the launcher reads it, so a
+/// wallpaper restarted straight after a Quit (if systemd couldn't be asked
+/// to stop it) stops itself instead of coming back.
+#[cfg(target_os = "linux")]
+pub fn quit_note() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"))
+        .join("xmas-tui")
+        .join("quit")
+}
+
+/// Stop the wallpaper for good (the tray's Quit, the menu's Quit). Under
+/// systemd, which restarts it whenever it exits, the service is stopped
+/// (ours by the cgroup we're in, or by its name if it's running), and the
+/// quit is noted for the launcher; then this exits as well.
 pub fn quit_wallpaper() {
     #[cfg(target_os = "linux")]
-    if let Some(unit) = systemd_unit() {
-        // --no-block: systemctl lives in our cgroup and gets stopped with us
-        let ok = Command::new("systemctl")
-            .args(["--user", "--no-block", "stop", &unit])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return;
+    {
+        // (tests: a stand-in)
+        let systemctl = std::env::var("XMAS_TEST_SYSTEMCTL").unwrap_or_else(|_| "systemctl".into());
+        let unit = systemd_unit().or_else(|| {
+            let active = Command::new(&systemctl).args(["--user", "is-active", "xmas-tui.service"]).stderr(Stdio::null()).output().ok().is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "active");
+            active.then(|| "xmas-tui.service".to_string())
+        });
+        if let Some(unit) = unit {
+            let note = quit_note();
+            if let Some(dir) = note.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let _ = std::fs::write(&note, now.to_string());
+            // --no-block: systemctl lives in our cgroup and gets stopped with us
+            let ok = Command::new(&systemctl)
+                .args(["--user", "--no-block", "stop", &unit])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            eprintln!("xmas-tui: quitting on purpose{}", if ok { "" } else { " (systemd couldn't be asked to stop the service: the launcher won't start it again for a minute)" });
         }
     }
     QUIT.store(true, Ordering::SeqCst);
@@ -213,4 +239,33 @@ pub fn toggle_flag(path: &Path, (sec, key, def): (&str, &str, bool)) -> bool {
 /// `n` x `n` pixels, straight (non-premultiplied) RGBA, row-major.
 pub fn icon_rgba(n: usize) -> Vec<u8> {
     crate::icon::rgba(n)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    /// Quit on purpose, with the wallpaper's service running: the service
+    /// is stopped (by name, though this isn't in its cgroup), the quit is
+    /// noted for the launcher, and the app's told to quit too.
+    #[test]
+    fn quit_stops_the_service_and_notes_it() {
+        let dir = std::env::temp_dir().join(format!("xmas-quit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fake = dir.join("systemctl");
+        let log = dir.join("calls");
+        std::fs::write(&fake, format!("#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$2\" = is-active ] && echo active\nexit 0\n", log.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("XMAS_TEST_SYSTEMCTL", &fake);
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        super::quit_wallpaper();
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(calls.contains("--user is-active xmas-tui.service"), "{calls}");
+        assert!(calls.contains("--user --no-block stop xmas-tui.service"), "never stopped: {calls}");
+        let at: u64 = std::fs::read_to_string(super::quit_note()).unwrap().trim().parse().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(now - at < 5, "the note's time is off");
+        assert!(super::quit_requested());
+        std::env::remove_var("XMAS_TEST_SYSTEMCTL");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

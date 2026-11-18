@@ -288,6 +288,12 @@ pub struct App {
     shift: bool,
     /// Turned away by the relay as too old: an update's been looked for.
     looked_for_update: bool,
+    /// The frame rate eased off to, if it is; and the last look at what
+    /// the wallpaper costs (when, processor seconds), and since when it's
+    /// been light (see `govern`).
+    eased: Option<f32>,
+    cost_look: Option<(Instant, f64, f64)>,
+    light_since: Option<Instant>,
 }
 
 pub fn random_seed() -> u32 {
@@ -373,6 +379,9 @@ impl App {
         }
         App {
             looked_for_update: false,
+            eased: None,
+            cost_look: None,
+            light_since: None,
             sync: config::FileSync::new(path, &cfg, Duration::from_secs(1)),
             fps_override: FPS_OVERRIDE.get().copied(),
             applied: cfg.clone(),
@@ -1232,7 +1241,71 @@ impl App {
             return Duration::from_millis(500);
         }
         // clean_fps: NaN.clamp() is NaN, and from_secs_f32(NaN) panics
-        Duration::from_secs_f32(1.0 / config::clean_fps(self.fps_override.unwrap_or(self.cfg.fps)))
+        let fps = config::clean_fps(self.fps_override.unwrap_or(self.cfg.fps));
+        let fps = self.eased.filter(|_| self.fps_override.is_none() && self.cfg.ease_off).map_or(fps, |e| e.min(fps));
+        Duration::from_secs_f32(1.0 / config::clean_fps(fps))
+    }
+
+    /// Every few seconds: what the wallpaper's costing the computer (its
+    /// own processor time, and on Linux the terminal drawing it). Over 40%
+    /// of one core, the frame rate eases off a step (30, 24, 20, 15, 12,
+    /// 10); light for half a minute (under 15%, and still light at the
+    /// next step up), it comes back a step, never past the one chosen.
+    /// Only the wallpaper (not a window or a test), and not while resting.
+    fn govern(&mut self) {
+        if !self.saves || !self.cfg.ease_off || self.fps_override.is_some() || self.resting() {
+            self.cost_look = None;
+            return;
+        }
+        // (a look every five seconds is enough)
+        if self.cost_look.is_some_and(|(at, ..)| at.elapsed().as_secs_f32() < 5.0) {
+            return;
+        }
+        if let Some((own, term)) = crate::perf::cpu_parts() {
+            self.govern_with(Instant::now(), own + term, own);
+        }
+    }
+
+    /// `govern`, given the time and the processor seconds so far (in all,
+    /// and the app's own part of it).
+    fn govern_with(&mut self, now: Instant, cpu: f64, own: f64) {
+        const STEPS: [f32; 6] = [30.0, 24.0, 20.0, 15.0, 12.0, 10.0];
+        let Some((at, was, own_was)) = self.cost_look else {
+            self.cost_look = Some((now, cpu, own));
+            return;
+        };
+        let wall = now.duration_since(at).as_secs_f64();
+        if wall < 5.0 {
+            return;
+        }
+        self.cost_look = Some((now, cpu, own));
+        let share = ((cpu - was) / wall).max(0.0);
+        let own_share = ((own - own_was) / wall).max(0.0);
+        let chosen = config::clean_fps(self.cfg.fps);
+        let cur = self.eased.unwrap_or(chosen).min(chosen);
+        if share > 0.40 {
+            self.light_since = None;
+            if let Some(&down) = STEPS.iter().find(|&&s| s < cur - 0.5) {
+                // (and what of it the terminal drawing it costs: on Linux,
+                // kitty without a working graphics driver can be most of it)
+                let term = share - own_share;
+                let split = if term > 0.01 { format!(": the village {:.0}%, kitty drawing it {:.0}%", own_share * 100.0, term * 100.0) } else { String::new() };
+                eprintln!("xmas-tui: easing off: {cur:.0} → {down:.0} frames a second (the wallpaper was using {:.0}% of a core{split})", share * 100.0);
+                self.eased = Some(down);
+            }
+        } else if let Some(e) = self.eased {
+            let up = STEPS.iter().rev().find(|&&s| s > e + 0.5).copied().unwrap_or(chosen).min(chosen);
+            // (what it would cost at the next step up, from what it costs now)
+            let light = share < 0.15 && share * ((up / e) as f64) < 0.30;
+            if !light {
+                self.light_since = None;
+            } else if now.duration_since(*self.light_since.get_or_insert(now)).as_secs() >= 30 {
+                self.light_since = None;
+                eprintln!("xmas-tui: easing back up: {e:.0} → {up:.0} frames a second");
+                self.eased = (up + 0.5 < chosen).then_some(up);
+            }
+        }
+        self.settings.eased_fps = self.eased;
     }
 
     /// Resting (paused by hand, or the wallpaper resting): the village
@@ -2477,6 +2550,7 @@ impl App {
 
     pub fn step(&mut self) -> &[Cell] {
         let t = self.t();
+        self.govern();
         // testing: a preview set up once things have settled
         // (XMAS_TEST_PREVIEW=netcards: a card game at a table, say)
         if self.test_dropped < 100 && t > 3.0 {
@@ -3620,6 +3694,53 @@ mod tests {
         assert!(app.scene.chats_dragging(), "the click went to the pinned tab under it");
         assert!(!app.settings.pin_dragging());
         app.mouse(MouseIn::Up(Btn::Left), x, y);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Easing off: costing more than 40% of a core, the frame rate drops a
+    /// step at a time (as far as 10); light again for half a minute, it
+    /// comes back a step at a time, never past the one chosen; the setting
+    /// off, it's what was chosen.
+    #[test]
+    fn the_frame_rate_eases_off_when_the_computer_struggles() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-ease-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.fps = 30.0;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 120, 40, true, true, false);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let fps = |app: &App| (1.0 / app.frame_dt().as_secs_f32()).round();
+        // a full core at 30: down a step every look, to 10 at the least
+        let mut cpu = 0.0;
+        app.govern_with(at(0), cpu, cpu);
+        for k in 1..=8u64 {
+            cpu += 5.0;
+            app.govern_with(at(5 * k), cpu, cpu);
+        }
+        assert_eq!(fps(&app), 10.0);
+        assert_eq!(app.settings.eased_fps, Some(10.0));
+        // light (5%): back up a step after half a minute of it, and so on
+        let mut s = 40;
+        let mut seen = vec![];
+        for _ in 0..60 {
+            s += 5;
+            cpu += 0.25;
+            app.govern_with(at(s), cpu, cpu);
+            if seen.last() != Some(&fps(&app)) {
+                seen.push(fps(&app));
+            }
+        }
+        assert_eq!(seen, vec![10.0, 12.0, 15.0, 20.0, 24.0, 30.0], "{seen:?}");
+        assert_eq!(app.settings.eased_fps, None);
+        // never past what's chosen; and off, what's chosen
+        app.cfg.fps = 20.0;
+        cpu += 10.0;
+        s += 5;
+        app.govern_with(at(s), cpu, cpu);
+        assert_eq!(fps(&app), 15.0);
+        app.cfg.ease_off = false;
+        assert_eq!(fps(&app), 20.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

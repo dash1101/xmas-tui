@@ -389,6 +389,8 @@ fn install_wallpaper(job: &Mutex<Job>) -> Result<String, String> {
     std::fs::create_dir_all(&units).map_err(|e| format!("can't make {} ({e})", units.display()))?;
     let unit = UNIT.replace("@DIR@", &data.display().to_string());
     std::fs::write(units.join("xmas-tui.service"), unit).map_err(|e| format!("can't write the service ({e})"))?;
+    // (a recent Quit, forgotten: this starts it on purpose)
+    let _ = std::fs::remove_file(crate::tray::quit_note());
     for args in [&["--user", "daemon-reload"][..], &["--user", "enable", "xmas-tui.service"], &["--user", "restart", "xmas-tui.service"]] {
         if !run_ok("systemctl", args) {
             return Err(format!("systemctl {} failed", args[1..].join(" ")));
