@@ -18,6 +18,9 @@ services:
       # console answers only requests Access signed in as that address
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       TRUST_CF: "1"
+      # behind a proxy of one's own instead (TRUST_CF "0"): the header it puts
+      # the player's address in (X-Real-IP, X-Forwarded-For); see SELF-HOSTING.md
+      IP_HEADER: ${IP_HEADER:-}
       # the secret the relay's own host signs in with (in .env; unset: no host)
       HOST_TOKEN: ${HOST_TOKEN:-}
     volumes:

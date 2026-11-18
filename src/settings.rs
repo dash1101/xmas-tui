@@ -183,6 +183,13 @@ pub enum Act {
     Privacy,
     /// Back to the village's own relay.
     ClearRelay,
+    /// Pin this tab (its number) over the village, as a window of its own.
+    PinTab(u8),
+    /// A pinned window (its place among the pins): unpinned, folded or
+    /// unfolded, moved (to x, y).
+    Unpin(u8),
+    PinFold(u8),
+    PinMove(u8, i16, i16),
     /// The controls card.
     Help,
     /// A setting that's a public square's own (pointed at: says so).
@@ -295,6 +302,10 @@ pub struct Settings {
     pub tab: usize,
     /// Sound is currently faded out for other media.
     pub media_quiet: bool,
+    /// The pinned tabs' windows as last drawn (which pin, where), and one
+    /// being moved (which, where it was taken, where it is now).
+    pin_rects: Vec<(usize, Rect)>,
+    pin_drag: Option<(usize, i32, i32, i32, i32)>,
     /// Resting (the village standing still): "" paused by hand, else why
     /// the wallpaper rests (shown by the ⏸ button).
     pub resting: Option<String>,
@@ -716,6 +727,28 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
             cfg.relay.clear();
             had
         }
+        Act::PinTab(tab) => {
+            let what = format!("tab:{tab}");
+            if cfg.ui.pins.iter().any(|p| p.what == what) || cfg.ui.pins.len() >= 12 {
+                return false;
+            }
+            // (each new one a little lower and further along than the last)
+            let k = cfg.ui.pins.len() as i32;
+            cfg.ui.pins.push(crate::config::PinCfg { what, x: 2 + 4 * k, y: 3 + 2 * k, min: false });
+            true
+        }
+        Act::Unpin(i) => (i as usize) < cfg.ui.pins.len() && {
+            cfg.ui.pins.remove(i as usize);
+            true
+        },
+        Act::PinFold(i) => cfg.ui.pins.get_mut(i as usize).is_some_and(|p| {
+            p.min ^= true;
+            true
+        }),
+        Act::PinMove(i, x, y) => cfg.ui.pins.get_mut(i as usize).is_some_and(|p| {
+            (p.x, p.y) = (x as i32, y as i32);
+            true
+        }),
         Act::Net(_) | Act::Restart | Act::Pause | Act::Privacy | Act::Help | Act::Locked => false,
         Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
@@ -773,6 +806,10 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Edit(Field::City) => return Some("The weather widget's city (and the real sunrise, sunset and side of the road)."),
         Act::Edit(Field::Relay) => return Some("A community's own relay (wss://…/mqtt), tried before the village's: its public villages, its squares, its people. Blank: the village's own."),
         Act::ClearRelay => return Some("Back to the village's own relay."),
+        Act::PinTab(_) => return Some("Pin this tab over the village as a window of its own (its title bar moves it; _ folds it; ✕ unpins it)."),
+        Act::PinFold(_) => return Some("Fold the window down to its title bar, or open it again."),
+        Act::Unpin(_) => return Some("Unpin it (it's still in the menu)."),
+        Act::PinMove(..) => return None,
         Act::Edit(Field::Name) => return Some("What the village calls the villager. Word gets round once it's set."),
         Act::Edit(Field::PetName(_)) => return Some("The pet's name. People mention it, and it answers to it."),
         Act::PetAdd => return Some("Another pet, to come along too: a dog, a cat, a bunny, a young reindeer, a fox or a little bird."),
@@ -1099,9 +1136,51 @@ impl Settings {
         Some(Act::Set(f, frac))
     }
 
+    /// (Tests: where a button for `a` was last drawn; where pin `i` was.)
+    #[cfg(test)]
+    pub fn region_of(&self, a: Act) -> Option<(i32, i32, i32, i32)> {
+        self.regions.iter().rev().find(|(_, b)| *b == a).map(|(r, _)| (r.x, r.y, r.w, r.h))
+    }
+
+    #[cfg(test)]
+    pub fn pin_at(&self, i: usize) -> Option<(i32, i32, i32, i32)> {
+        self.pin_rects.iter().find(|(k, _)| *k == i).map(|(_, r)| (r.x, r.y, r.w, r.h))
+    }
+
+    /// Over a pinned tab's window (which, among the pins).
+    pub fn on_pin(&self, x: i32, y: i32) -> Option<usize> {
+        self.pin_rects.iter().rev().find(|(_, r)| r.contains(x, y)).map(|(i, _)| *i)
+    }
+
+    /// On a pinned window's title bar (where it's picked up), not its
+    /// buttons: picked up, to move.
+    pub fn pin_grab(&mut self, x: i32, y: i32) -> bool {
+        let Some(&(i, r)) = self.pin_rects.iter().rev().find(|(_, r)| y == r.y && x >= r.x && x < r.x + r.w - 8) else { return false };
+        self.pin_drag = Some((i, x - r.x, y - r.y, r.x, r.y));
+        true
+    }
+
+    /// A pinned window being moved: where it's put now.
+    pub fn pin_drag_to(&mut self, x: i32, y: i32) {
+        if let Some((i, dx, dy, _, _)) = self.pin_drag {
+            self.pin_drag = Some((i, dx, dy, x - dx, y - dy));
+        }
+    }
+
+    pub fn pin_dragging(&self) -> bool {
+        self.pin_drag.is_some()
+    }
+
+    /// Let go: where it's been put, kept (an act for the settings).
+    pub fn pin_drop(&mut self) -> Option<Act> {
+        let (i, _, _, x, y) = self.pin_drag.take()?;
+        Some(Act::PinMove(i as u8, x.clamp(-200, 2000) as i16, y.clamp(0, 2000) as i16))
+    }
+
     /// On the title bar (where the panel can be picked up), not its ✕.
     pub fn on_title(&self, x: i32, y: i32) -> bool {
-        self.rect.is_some_and(|r| y == r.y && x >= r.x && x < r.x + r.w - 5)
+        // (its buttons up there, ▣ pin and ✕, are clicked, not dragged)
+        self.rect.is_some_and(|r| y == r.y && x >= r.x && x < r.x + r.w - 5) && !self.regions.iter().any(|(b, _)| b.contains(x, y))
     }
 
     /// Start moving the panel (grabbed at (x, y) on its title bar).
@@ -1313,6 +1392,9 @@ impl Settings {
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
+        self.regions.clear();
+        self.hints.clear();
+        self.draw_pins(f, cfg, t);
         self.draw_panel(f, cfg, t);
         // dressed in the look chosen for the app's own panels
         if let Some(r) = self.rect {
@@ -1320,9 +1402,58 @@ impl Settings {
         }
     }
 
+    /// The menu's tabs pinned over the village: each a window of its own
+    /// where it was put (its title bar picks it up), folded down to its
+    /// title bar or not, its settings working as in the menu.
+    fn draw_pins(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
+        self.pin_rects.clear();
+        let keep = (self.tab, self.rect, self.scroll);
+        for (i, p) in cfg.ui.pins.iter().enumerate() {
+            let Some(tab) = p.what.strip_prefix("tab:").and_then(|n| n.parse::<usize>().ok()).filter(|&n| n < TABS.len() && self.tab_shown(n)) else { continue };
+            self.tab = tab;
+            let w = PANEL_W.min(f.w as i32);
+            let full = if p.min { 1 } else { (self.tab_height(cfg, t) - 3).clamp(3, (f.h as i32).max(4)) };
+            let (px, py) = match self.pin_drag {
+                Some((d, _, _, x, y)) if d == i => (x, y),
+                _ => (p.x, p.y),
+            };
+            let (x, y) = (px.clamp(0, (f.w as i32 - w).max(0)), py.clamp(0, (f.h as i32 - full).max(0)));
+            let r = Rect { x, y, w, h: full };
+            self.pin_rects.push((i, r));
+            let b = pal::UI_BORDER;
+            for yy in y..y + full {
+                for xx in x..x + w {
+                    let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + full - 1) {
+                        _ if full == 1 => '─',
+                        (true, _, true, _) => '╭',
+                        (_, true, true, _) => '╮',
+                        (true, _, _, true) => '╰',
+                        (_, true, _, true) => '╯',
+                        (_, _, true, _) | (_, _, _, true) => '─',
+                        (true, _, _, _) | (_, true, _, _) => '│',
+                        _ => ' ',
+                    };
+                    f.put_g(xx, yy, Glyph::new(ch, b).bg(BG).lit(0.0));
+                }
+            }
+            if !p.min {
+                self.rect = Some(r);
+                // (its rows under the title bar, not under a tab bar)
+                self.tab_body(f, cfg, x, y - 4, w, t);
+            }
+            f.text(x + 2, y, &format!(" ▣ {} ", self.tab_label(tab)), pal::UI_TITLE, BG, 0.0);
+            let fold = Rect { x: x + w - 8, y, w: 3, h: 1 };
+            let close = Rect { x: x + w - 5, y, w: 3, h: 1 };
+            f.text(fold.x, y, if p.min { " ▢ " } else { " _ " }, pal::UI_TEXT, BG, 0.0);
+            f.text(close.x, y, " ✕ ", if close.contains(self.hover.0, self.hover.1) { pal::CANDY_RED * 1.3 } else { pal::UI_TEXT }, BG, 0.0);
+            self.regions.push((fold, Act::PinFold(i as u8)));
+            self.regions.push((close, Act::Unpin(i as u8)));
+            crate::widgets::looks::apply(f, r, &cfg.ui.look, BG, 11);
+        }
+        (self.tab, self.rect, self.scroll) = keep;
+    }
+
     fn draw_panel(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
-        self.regions.clear();
-        self.hints.clear();
         self.rect = None;
         if !self.open {
             return;
@@ -1394,6 +1525,15 @@ impl Settings {
         if !self.extras {
             // a grip: drag the title bar to move the panel
             f.text(x + w - 9, y, " ⠿ ", pal::UI_DIM, BG, 0.0);
+        }
+        // pin this tab: a window of its own over the village
+        if self.tab != TAB_HOME {
+            let pinned = cfg.ui.pins.iter().any(|p| p.what == format!("tab:{}", self.tab));
+            let pin = Rect { x: x + w - 18, y, w: 8, h: 1 };
+            f.text(pin.x, y, if pinned { " ▣ pinned" } else { " ▣ pin  " }, if pinned { pal::UI_DIM } else { pal::UI_TITLE }, BG, 0.0);
+            if !pinned {
+                self.regions.push((pin, Act::PinTab(self.tab as u8)));
+            }
         }
         let close = Rect { x: x + w - 5, y, w: 3, h: 1 };
         let hot = close.contains(self.hover.0, self.hover.1);

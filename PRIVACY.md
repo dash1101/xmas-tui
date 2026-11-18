@@ -1,6 +1,6 @@
 # Privacy
 
-*Last updated: 17 November 2026. Applies to xmas-tui 1.24.0 and later: the desktop app (Linux and Windows), the Android app, the web page at [xmas.novalabs.app](https://xmas.novalabs.app), and the village's own relay at xmas-relay.novalabs.app.*
+*Last updated: 17 November 2026. Applies to xmas-tui 1.25.0 and later: the desktop app (Linux and Windows), the Android app, the web page at [xmas.novalabs.app](https://xmas.novalabs.app), and the village's own relay at xmas-relay.novalabs.app.*
 
 xmas-tui is a small, free, source-available hobby project: a Christmas village that lives on the desktop, on a phone, or in a browser. This page sets out what it keeps, what it sends, who it sends it to, and the choices there are about all of it. Everything here can be checked against the source code in this repository.
 
@@ -10,6 +10,7 @@ xmas-tui is a small, free, source-available hobby project: a Christmas village t
 - **Almost everything stays on the device**: the settings, the save (the village, the villager, the pockets, friends and chats), and the log.
 - **Going online is optional, and off until it's turned on.** Once on, it stays on until it's turned off again.
 - **What goes through the relay is sealed** (encrypted). The relay passes it along without being able to read it, apart from the public squares and listed villages, which are public by design.
+- **The public squares are looked after.** The relay's own host keeps them open, and the project can see what's said aloud there, to keep them friendly: someone can be quietened, sent home, or kept out.
 - **A few outside services are used**, only for the features that need them: Cloudflare (in front of the relay), three public message brokers (only if the relay can't be reached), Open-Meteo (the weather widget), and GitHub (updates, downloads and hosting the web page).
 
 ## Who runs it
@@ -76,8 +77,22 @@ The relay runs on a server the project looks after, behind Cloudflare. Like any 
 
 - **The IP address** of each connection. It's used to limit how many connections one address can make, and, if the relay is being abused, to block that address.
 - **When** a connection comes and goes, how much it sends, and **which topics** it uses. Topics are long codes made from hashes, which don't say who is talking to whom.
+- **A player tag** (from 1.25.0): a number worked out from the player's friend code by a one-way hash, sent as part of the connection's name. It's the same each time the same player connects, so that if a player is kept out, it holds when they come back. The friend code can't be worked out from it.
 
-The relay doesn't log connections or messages. Its own log has only lines like "started" and "stopping". The project's admin console shows the connections open right now (address, how long connected, how much sent) and totals. It's protected by a sign-in, and none of it is written down, apart from blocked addresses.
+The relay doesn't log connections or messages. Its own log has only lines like "started" and "stopping". The project's admin console shows the connections open right now (address, how long connected, how much sent) and totals, and what the relay's own host reports (below). It's protected by a sign-in, and none of it is written down, apart from what's listed under "What the relay keeps".
+
+### The relay's own host
+
+Alongside the relay runs its own host: a copy of the game with no window, signed in to the relay with a secret only it has. It keeps the public squares open (so they're the same for everyone, whoever's there), and any "server villages" the project sets up: villages hosted by the server rather than by a player, either listed in Public villages or private (reached only with their code).
+
+In the villages it keeps, the host is there like any other player, so it sees what everyone there sees. It doesn't keep what it sees, except for these, which it sends to the admin console every few seconds:
+
+- who's in each of those villages right now (the id the game picked for them, and the name they gave);
+- the last 60 lines said aloud in each (who said it, and when).
+
+These are held in memory only, replaced as they come, and gone within two minutes once the host stops sending them. They're never written to disk. The host doesn't see friends' messages, and it doesn't keep "just to …" messages.
+
+From the console, the project can quieten someone in those villages (what they say isn't passed on), send someone home, make announcements (now, or at set times), greet newcomers, and keep villages or players out of the relay.
 
 ### What the relay keeps, and for how long
 
@@ -88,8 +103,17 @@ The relay doesn't log connections or messages. Its own log has only lines like "
 | Public village listings and the public squares' status | Forgotten after 7 days without an update |
 | The public squares' settings, set by the project | Until changed |
 | Blocked IP addresses | Until unblocked |
+| Server villages: their names, codes and settings | Until the project removes them |
+| Villages kept out: their codes, the name they were listed under, why, and when | Until lifted |
+| Players kept out: their id and player tag, the name they went by, why, and when | Until lifted |
+| Players quietened in a village the host keeps: their id | Until lifted |
+| The welcome said in each village the host keeps, announcements still to come, extra words starred out in public villages, and the public list's order | Until changed |
 
-These are kept in the relay's memory and saved to a file on its server so they survive a restart. **Messages and chats aren't kept on the relay at all.** They're passed on to whoever is online and listening right then, and a friend who is offline doesn't get them later.
+These are kept in the relay's memory and saved to a file on its server so they survive a restart. **Messages and chats aren't kept on the relay at all** (apart from the host's last lines in its own villages, above, which are only ever in memory). They're passed on to whoever is online and listening right then, and a friend who is offline doesn't get them later.
+
+### Another relay
+
+The game can be pointed at a different relay (Menu → Online → Relay), run by someone else: a club, a school, a group of friends. Everything sent then goes through that relay instead, and whoever runs it is responsible for it, under their own privacy notice. The project has no part in it and no access to it. The sealing works the same way there.
 
 ## Other services
 
@@ -120,7 +144,7 @@ For people in the EU, the UK and similar places: the only personal data the proj
   - Uninstall (Menu → Upkeep → uninstall). On a computer, uninstalling keeps the settings and the save, so the village is there if it comes back; deleting the folders listed above removes them too. On Android, uninstalling the app removes its storage.
   - On the web, clear the site's data for xmas.novalabs.app in the browser.
 - **Unlink a device**: Menu → Online → devices → unlink.
-- **Ask the project**: to say what it holds about a connection, to delete what the relay keeps, to unblock an address, or anything else. Open an issue as described under "Who runs it". In practice the relay holds very little that can be tied to a person, and most of it can't be read even by the project, but the request will be looked at either way.
+- **Ask the project**: to say what it holds about a connection, to delete what the relay keeps, to unblock an address or lift a ban, or anything else. Open an issue as described under "Who runs it". In practice the relay holds very little that can be tied to a person, and most of it can't be read even by the project, but the request will be looked at either way.
 
 Depending on where someone lives, they may also have the right to access, correct, delete or move their data, to restrict or object to how it's handled, and to complain to their data protection authority. Those rights are respected here, and the steps above are the quickest way to use them.
 
@@ -128,7 +152,7 @@ The project doesn't sell personal information or share it for advertising, as "s
 
 ## Children
 
-xmas-tui is made for a general audience, families included. It doesn't ask for anyone's age, real name, email address, phone number or location, and it doesn't knowingly collect personal information from children. Online play is off until it's turned on. Strong language is starred out and links are hidden by default, and only friends (who've exchanged codes) can send direct messages.
+xmas-tui is made for a general audience, families included. It doesn't ask for anyone's age, real name, email address, phone number or location, and it doesn't knowingly collect personal information from children. Online play is off until it's turned on. Strong language is starred out and links are hidden by default, only friends (who've exchanged codes) can send direct messages, and the public squares are looked after (see "The relay's own host").
 
 If a child has shared something they shouldn't have, a parent or guardian can contact the project (see "Who runs it") to have what the relay keeps removed.
 
@@ -137,6 +161,7 @@ If a child has shared something they shouldn't have, a parent or guardian can co
 - What goes through the relay is sealed end to end with ChaCha20-Poly1305.
 - The connections to the relay use TLS (wss:// and https://).
 - The relay limits connections and message sizes, and the topics it keeps are restricted to the village's own.
+- Only the relay's own host can speak for the relay (its settings, its public list, its announcements): it signs in with a secret, the relay refuses a wrong one, and what anyone else sends on the relay's own topics is dropped.
 - No system is perfectly secure, and this is a hobby project. Anything that must stay secret belongs somewhere else.
 - Security problems can be reported as described under "Who runs it".
 

@@ -896,7 +896,8 @@ impl Game {
                 let (title, items) = self.scene.more_menu(k);
                 self.open(x - 2, y + 1, title, Self::scene_items(items));
             }
-            ChatsDo::Done => {}
+            // (the window's own buttons: done there)
+            ChatsDo::Done | ChatsDo::Pin | ChatsDo::Fold | ChatsDo::FriendFold(_) | ChatsDo::FriendClose(_) => {}
         }
     }
 
@@ -1072,10 +1073,51 @@ impl Game {
     /// what's under it; a drag along a slider sets it; elsewhere a drag
     /// scrolls a tab taller than the screen; a tap outside closes it.
     fn panel_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
-        if !self.panel.open {
-            return false;
-        }
         use crate::settings::Act as S;
+        // a tab pinned over the village: its title bar moves it, the rest
+        // works as in the menu
+        if !self.panel.open {
+            match action {
+                0 if self.panel.on_pin(c.0, c.1).is_some() => {
+                    if !self.panel.pin_grab(c.0, c.1) {
+                        self.panel_press = Some((c.0, c.1, 0));
+                        if let Some(a @ S::Set(f, _)) = self.panel.click(c.0, c.1) {
+                            self.panel.slider_drag = Some(f);
+                            self.panel_act(a);
+                        }
+                    }
+                    return true;
+                }
+                1 if self.panel.pin_dragging() => {
+                    self.panel.pin_drag_to(c.0, c.1);
+                    return true;
+                }
+                1 if self.panel.slider_drag.is_some() => {
+                    if let Some(a) = self.panel.drag_slider(c.0, c.1) {
+                        self.panel_act(a);
+                    }
+                    return true;
+                }
+                2 | 3 if self.panel.pin_dragging() => {
+                    if let Some(a) = self.panel.pin_drop() {
+                        self.panel_act(a);
+                    }
+                    return true;
+                }
+                2 | 3 if self.panel_press.is_some() || self.panel.slider_drag.is_some() => {
+                    let was_slider = self.panel.slider_drag.take().is_some();
+                    if let (false, Some((px, py, _))) = (was_slider, self.panel_press.take()) {
+                        if action == 2 && (c.1 - py).abs() <= 1 && (c.0 - px).abs() <= 2 {
+                            if let Some(a) = self.panel.click(px, py) {
+                                self.panel_act(a);
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         self.panel.hover = c;
         let inside = self.panel.rect.is_some_and(|r| r.contains(c.0, c.1));
         match action {
@@ -1525,6 +1567,13 @@ impl Game {
             self.cfg.scene.pet = p;
             self.saved_at = -1e9;
         }
+        // friends & chats (and friends' own chats) pinned, moved, folded or
+        // let go: kept in the settings; the settings' pins, there
+        for e in self.scene.take_pin_edits() {
+            crate::scene::chats::pin_edit(&mut self.cfg.ui.pins, e);
+            self.cfg_dirty = true;
+        }
+        self.scene.set_pins(&self.cfg.ui.pins);
         self.update_online();
         // linked devices: a change here reaches the others in a moment
         // (an unchanged side isn't sent again)
@@ -1621,7 +1670,8 @@ impl Game {
         if self.panel.open {
             self.fill_net();
         }
-        let shown = self.panel.open.then(|| self.shown_cfg());
+        // (the menu open, or a tab of it pinned over the village)
+        let shown = (self.panel.open || !self.cfg.ui.pins.is_empty()).then(|| self.shown_cfg());
         // the settings changed: for the app to keep (now and then, not
         // while a slider's being dragged)
         if self.cfg_dirty && self.panel.slider_drag.is_none() {
@@ -1924,9 +1974,12 @@ impl Game {
                 // write (a drag goes down the friends)
                 if self.scene.on_chats(uc.0, uc.1) {
                     self.press = None;
-                    self.chats_drag = Some(uc.1);
-                    let d = self.scene.chats_click(uc.0, uc.1);
-                    self.chats_do(d, uc.0, uc.1);
+                    // (its title bar picks it up to move it)
+                    if !self.scene.chats_grab(uc.0, uc.1) {
+                        self.chats_drag = Some(uc.1);
+                        let d = self.scene.chats_click(uc.0, uc.1);
+                        self.chats_do(d, uc.0, uc.1);
+                    }
                     return;
                 }
                 // a question asked by someone online (yes, no), a profile
@@ -1965,6 +2018,8 @@ impl Game {
                     self.scene.woke();
                 }
             }
+            1 if self.scene.chats_dragging() => self.scene.chats_drag_to(uc.0, uc.1),
+            2 | 3 if self.scene.chats_dragging() => self.scene.chats_drop(),
             1 if self.chats_drag.is_some() => {
                 let from = self.chats_drag.unwrap_or(uc.1);
                 // (three rows to a friend)

@@ -1117,7 +1117,8 @@ impl App {
                 let (w, h) = (self.w as i32, self.ui_h() as i32);
                 self.menu = Some(CtxMenu::plain(x, y, title, items, w, h));
             }
-            ChatsDo::Done => {}
+            // (the window's own buttons: done there)
+            ChatsDo::Done | ChatsDo::Pin | ChatsDo::Fold | ChatsDo::FriendFold(_) | ChatsDo::FriendClose(_) => {}
         }
     }
 
@@ -1358,7 +1359,9 @@ impl App {
                 } else if self.settings.open && in_panel && self.settings.on_title(x, y) {
                     // pick the panel up by its title bar
                     self.settings.start_drag(x, y);
-                } else if self.settings.open && in_panel {
+                } else if !in_panel && self.settings.on_pin(x, y).is_some() && self.settings.pin_grab(x, y) {
+                    // a pinned tab's window, picked up by its title bar
+                } else if self.settings.open && in_panel || (!in_panel && self.settings.on_pin(x, y).is_some()) {
                     match self.settings.click(x, y) {
                         // clicking into a text field (or back into the one
                         // being typed in) doesn't put away what's typed
@@ -1405,9 +1408,12 @@ impl App {
                 } else if self.scene.close_click(x, y) {
                     // (a ✕ or ⌂ button: as Esc)
                 } else if self.scene.on_chats(x, y) {
-                    // friends & chats: a friend picked, their ⋯, a line to write…
-                    let d = self.scene.chats_click(x, y);
-                    self.chats_do(d, x, y);
+                    // friends & chats: a friend picked, their ⋯, a line to
+                    // write… (its title bar picks it up to move it)
+                    if !self.scene.chats_grab(x, y) {
+                        let d = self.scene.chats_click(x, y);
+                        self.chats_do(d, x, y);
+                    }
                 } else if self.scene.prompt_click(x, y) || self.scene.close_card() {
                     // (a question answered, a profile card put away)
                 } else if self.scene.post_click(x, y) {
@@ -1462,6 +1468,10 @@ impl App {
                     self.settings.drag_to(x, y);
                     return;
                 }
+                if self.settings.pin_dragging() {
+                    self.settings.pin_drag_to(x, y);
+                    return;
+                }
                 if let (Some((dx, dy)), Some(m)) = (self.menu_drag, self.menu.as_mut()) {
                     m.move_to(x - dx, y - dy, self.w as i32, self.h as i32);
                     self.last_menu_at = (m.x, m.y);
@@ -1469,6 +1479,10 @@ impl App {
                 }
                 if self.scene.table_dragging() {
                     self.scene.table_drag_to(x, y);
+                    return;
+                }
+                if self.scene.chats_dragging() {
+                    self.scene.chats_drag_to(x, y);
                     return;
                 }
                 if self.scene.convo_dragging() {
@@ -1555,6 +1569,7 @@ impl App {
             }
             MouseIn::Up(Btn::Left) if self.menu_drag.is_some() => self.menu_drag = None,
             MouseIn::Up(Btn::Left) if self.scene.table_dragging() => self.scene.table_drop(),
+            MouseIn::Up(Btn::Left) if self.scene.chats_dragging() => self.scene.chats_drop(),
             MouseIn::Up(Btn::Left) if self.scene.convo_dragging() => {
                 self.scene.convo_drag_to(x, y);
                 self.scene.convo_drop();
@@ -1584,6 +1599,11 @@ impl App {
             }
             MouseIn::Up(Btn::Left) if self.settings.slider_drag.take().is_some() => {}
             MouseIn::Up(Btn::Left) => {
+                // a pinned window let go: kept where it was put
+                if let Some(a) = self.settings.pin_drop() {
+                    self.acts.push(a);
+                    return;
+                }
                 if let Some((4, ..)) = self.drag.filter(|_| (gx, gy) == self.press_at) {
                     // a click on the map (no drag): look over there
                     self.drag = None;
@@ -2675,6 +2695,12 @@ impl App {
         if let Some(p) = self.scene.take_pet_change() {
             self.cfg.scene.pet = p;
         }
+        // friends & chats (and friends' own chats) pinned, moved, folded or
+        // let go there: kept in the settings; the settings' pins, there
+        for e in self.scene.take_pin_edits() {
+            crate::scene::chats::pin_edit(&mut self.cfg.ui.pins, e);
+        }
+        self.scene.set_pins(&self.cfg.ui.pins);
         if self.sync.poll(&mut self.cfg, self.drag.is_none()) && self.cfg.seed != 0 && self.cfg.seed as u32 != self.seed {
             self.seed = self.cfg.seed as u32;
             reseed = true;
@@ -3496,6 +3522,62 @@ mod tests {
         app.set_rest(Some("a game is running".into()));
         app.step();
         assert_eq!(app.settings.resting.as_deref(), Some("a game is running"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A menu tab pinned (▣ pin in the menu's title): once the menu's
+    /// closed, a window of its own over the village, its settings working
+    /// there; moved by its title bar, folded and unpinned, each kept in
+    /// the settings.
+    #[test]
+    fn a_menu_tab_pinned_over_the_village() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-pins-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.widgets.weather = false;
+        cfg.sound.master = 0.5;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 240, 72, true, true, false);
+        let click = |app: &mut App, (x, y): (i32, i32)| {
+            app.mouse(MouseIn::Down(Btn::Left), x, y);
+            app.mouse(MouseIn::Up(Btn::Left), x, y);
+            app.step();
+        };
+        app.settings.open = true;
+        app.settings.tab = settings::TAB_SOUND;
+        app.step();
+        let (px, py, ..) = app.settings.region_of(Act::PinTab(settings::TAB_SOUND as u8)).expect("no ▣ pin in the menu's title");
+        click(&mut app, (px + 1, py));
+        assert_eq!(app.cfg.ui.pins.iter().map(|p| p.what.as_str()).collect::<Vec<_>>(), vec!["tab:5"]);
+        // the menu closed: the tab, a window of its own
+        app.settings.open = false;
+        app.step();
+        let (x, y, w, h) = app.settings.pin_at(0).expect("the pinned tab isn't drawn");
+        assert!(h > 3, "folded already ({h} rows)");
+        let row: String = (x..x + w).map(|cx| app.frame.glyph[y as usize * app.frame.w + cx as usize].map(|g| g.ch).unwrap_or(' ')).collect();
+        assert!(row.contains("▣ Sound"), "its title: {row:?}");
+        // its settings work there
+        let (ix, iy, ..) = app.settings.region_of(Act::Inc(settings::F::SoundMaster)).expect("no master volume in the pinned tab");
+        assert!(ix >= x && ix < x + w && iy > y && iy < y + h, "the master volume isn't in the pinned window");
+        click(&mut app, (ix, iy));
+        assert!(app.cfg.sound.master > 0.5, "the pinned tab's ▸ did nothing: {}", app.cfg.sound.master);
+        // moved by its title bar
+        app.mouse(MouseIn::Down(Btn::Left), x + 3, y);
+        app.mouse(MouseIn::Drag, x + 13, y + 4);
+        app.mouse(MouseIn::Up(Btn::Left), x + 13, y + 4);
+        app.step();
+        let p = &app.cfg.ui.pins[0];
+        assert_eq!((p.x, p.y), (x + 10, y + 4), "not kept where it was put");
+        assert_eq!(app.settings.pin_at(0).map(|r| (r.0, r.1)), Some((x + 10, y + 4)));
+        // folded, then unpinned
+        let fold = app.settings.region_of(Act::PinFold(0)).expect("no _");
+        click(&mut app, (fold.0 + 1, fold.1));
+        assert!(app.cfg.ui.pins[0].min);
+        assert_eq!(app.settings.pin_at(0).map(|r| r.3), Some(1), "not folded to its title bar");
+        let close = app.settings.region_of(Act::Unpin(0)).expect("no ✕");
+        click(&mut app, (close.0 + 1, close.1));
+        assert!(app.cfg.ui.pins.is_empty(), "still pinned");
+        assert_eq!(app.settings.pin_at(0), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

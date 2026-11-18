@@ -731,6 +731,9 @@ impl Broker {
     /// The announcements due now (and when each comes next): what to say,
     /// where. A missed one isn't said late; a repeating one goes on.
     pub fn due(&mut self, now: u64) -> Vec<(String, String)> {
+        // (the host's reports: gone a while after it stops sending them,
+        // whether or not anything else comes)
+        self.reports.retain(|_, (at, _)| at.elapsed().as_secs() < 120);
         let mut out = vec![];
         for s in self.kept.schedules.iter_mut().filter(|s| s.on) {
             if s.at > now {
@@ -955,6 +958,12 @@ mod tests {
         assert!(b.reports.is_empty());
         b.publish(h, &format!("{ADMIN_REPORT}x"), b"{\"n\":2}", false).unwrap();
         assert_eq!(b.reports.get("x").map(|r| r.1["n"].clone()), Some(serde_json::json!(2)));
+        // a report not sent again: gone after two minutes, nothing else coming
+        if let Some(r) = b.reports.get_mut("x") {
+            r.0 = Instant::now().checked_sub(std::time::Duration::from_secs(121)).unwrap();
+        }
+        b.due(now_secs());
+        assert!(b.reports.is_empty(), "a stale report kept");
         // the host's ids are its own
         assert!(b.may_join("xt00000fffzz", false).is_err());
         assert!(b.may_join("xt00000fffzz", true).is_ok());

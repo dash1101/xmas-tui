@@ -110,6 +110,9 @@ pub fn run() -> Result<(), String> {
     let mut next_id = 2u32;
     let start = Instant::now();
     let (mut last, mut reported, mut looked) = (start, -10.0f32, -100.0f32);
+    // (signed in or not, and turned away, said in the log: once each time
+    // it changes, and a refusal at most once a minute)
+    let (mut was_on, mut refusals, mut refused_said) = (false, 0u32, -100.0f32);
     loop {
         std::thread::sleep(Duration::from_millis(100));
         let now = Instant::now();
@@ -118,6 +121,18 @@ pub fn run() -> Result<(), String> {
         let t = now.duration_since(start).as_secs_f32();
         control.tick(t, None, 0);
         net::tcp::pump(&mut control, &mut control_link);
+        let on = control.link() == net::Link::On;
+        if on != was_on {
+            was_on = on;
+            eprintln!("xmas-tui host: {}", if on { "signed in to the relay" } else { "away from the relay: trying again" });
+        }
+        if control.refusals != refusals {
+            refusals = control.refusals;
+            if t - refused_said > 60.0 {
+                refused_said = t;
+                eprintln!("xmas-tui host: the relay turned it away (is HOST_TOKEN the same as the relay's, at least 16 letters?)");
+            }
+        }
         // what the relay's said: the villages to keep, and things to do
         for (topic, payload) in std::mem::take(&mut control.admin_in) {
             if topic == net::ADMIN_HOST {

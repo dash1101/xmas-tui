@@ -6393,6 +6393,105 @@ mod tests {
         assert!(!s.chats_open());
     }
 
+    /// Friends & chats pinned: kept open where it's put (moved by its title
+    /// bar), Esc folds it to its title bar rather than putting it away, it
+    /// opens out again, and ✕ unpins it. A friend's own chat pinned over
+    /// the village (from their ⋯) shows their latest lines and a line to
+    /// write on; it folds, moves and is let go. Each change is one for the
+    /// settings to keep. (`--nocapture` shows it.)
+    #[test]
+    fn friends_and_chats_pinned_moved_and_folded() {
+        use chats::ChatsDo;
+        let mut s = walker_scene();
+        for _ in 0..30 {
+            s.update(DT, 0.0);
+        }
+        s.preview_perch("chats");
+        let mut pins: Vec<crate::config::PinCfg> = vec![];
+        // a frame as the front ends have it: edits kept, pins set, drawn
+        let frame = |s: &mut Scene, pins: &mut Vec<crate::config::PinCfg>| -> String {
+            for e in s.take_pin_edits() {
+                chats::pin_edit(pins, e);
+            }
+            s.set_pins(pins);
+            s.update(DT, 0.0);
+            let mut f = Frame::new(120, 34);
+            s.draw_top(&mut f);
+            (0..f.h).map(|y| (0..f.w).map(|x| f.glyph[y * f.w + x].map(|g| g.ch).unwrap_or(' ')).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        let button = |s: &Scene, d: ChatsDo| -> (i32, i32) {
+            let b = s.social.chats.buttons.borrow();
+            let b = b.iter().find(|b| b.3 == d).unwrap_or_else(|| panic!("no {d:?} button"));
+            (b.0 + 1, b.1)
+        };
+        frame(&mut s, &mut pins);
+        let (_, _, _, h) = s.social.chats.at.get();
+        // pinned
+        let (px, py) = button(&s, ChatsDo::Pin);
+        assert_eq!(s.chats_click(px, py), ChatsDo::Done);
+        let all = frame(&mut s, &mut pins);
+        assert!(all.contains("▣ pinned"), "not shown pinned");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].what, "chats");
+        // moved by its title bar
+        let (x0, y0, ..) = s.social.chats.at.get();
+        assert!(s.chats_grab(x0 + 40, y0), "the title bar didn't pick it up");
+        assert!(s.chats_dragging());
+        s.chats_drag_to(x0 + 45, y0 + 2);
+        s.chats_drop();
+        frame(&mut s, &mut pins);
+        assert_eq!((pins[0].x, pins[0].y), (x0 + 5, y0 + 2), "not kept where it was put");
+        assert_eq!(s.social.chats.at.get().0, x0 + 5);
+        // Esc: folded, still there
+        s.close_chats();
+        frame(&mut s, &mut pins);
+        assert!(s.chats_open(), "pinned, but put away");
+        assert_eq!(s.social.chats.at.get().3, 1, "not folded");
+        assert!(pins[0].min);
+        // opened out again
+        let (fx, fy) = button(&s, ChatsDo::Fold);
+        s.chats_click(fx, fy);
+        frame(&mut s, &mut pins);
+        assert_eq!(s.social.chats.at.get().3, h);
+        assert!(!pins[0].min);
+        // Sam's own chat, pinned from their ⋯ menu
+        let (_, items) = s.more_menu(online::MORE_FRIEND);
+        let pin = items.iter().find(|(l, _)| l.contains("pin Sam")).expect("no pin in Sam's menu").1;
+        s.act(pin);
+        // ✕ on friends & chats: unpinned and put away; Sam's stays
+        let (cx, cy) = button(&s, ChatsDo::Done);
+        s.chats_click(cx, cy);
+        let all = frame(&mut s, &mut pins);
+        println!("{all}");
+        assert!(!s.chats_open());
+        assert_eq!(pins.iter().map(|p| p.what.starts_with("friend:")).collect::<Vec<_>>(), vec![true], "pins: {pins:?}");
+        for want in ["✉ Sam", "the lights on the square", "✎ write…"] {
+            assert!(all.contains(want), "no {want:?} in Sam's pinned chat");
+        }
+        // its write line writes to Sam; its title bar moves it
+        let (wx, wy, _, i) = s.social.chats.friend_writes.borrow()[0];
+        assert_eq!(i, 0);
+        assert!(s.on_chats(wx + 1, wy));
+        assert_eq!(s.chats_click(wx + 1, wy), ChatsDo::Net(online::NetDo::Mail(0)));
+        let (_, (sx, sy, ..)) = s.social.chats.friend_at.borrow()[0];
+        assert!(s.chats_grab(sx + 2, sy));
+        s.chats_drag_to(sx + 12, sy + 5);
+        s.chats_drop();
+        frame(&mut s, &mut pins);
+        assert_eq!((pins[0].x, pins[0].y), (sx + 10, sy + 5));
+        // folded, then let go
+        let (ffx, ffy) = button(&s, ChatsDo::FriendFold(0));
+        s.chats_click(ffx, ffy);
+        frame(&mut s, &mut pins);
+        assert!(pins[0].min);
+        assert_eq!(s.social.chats.friend_at.borrow()[0].1 .3, 1);
+        let (fcx, fcy) = button(&s, ChatsDo::FriendClose(0));
+        s.chats_click(fcx, fcy);
+        let all = frame(&mut s, &mut pins);
+        assert!(pins.is_empty(), "pins left: {pins:?}");
+        assert!(!all.contains("✉ Sam"));
+    }
+
     /// Paused (the button, or the wallpaper resting for a game): the
     /// village stands still, but online goes on: the other villager still
     /// sees this one, greyed, long past the time a quiet one is let go; and

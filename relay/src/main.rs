@@ -14,6 +14,10 @@
 //! - TRUST_CF (1): take the client's address from Cloudflare's
 //!   CF-Connecting-IP header (behind a Cloudflare Tunnel, every connection
 //!   comes from the tunnel itself).
+//! - IP_HEADER: behind a proxy of one's own instead (nginx, Caddy…), the
+//!   header it puts the client's address in (X-Real-IP, or
+//!   X-Forwarded-For, whose last address is taken). Believed only from a
+//!   connection on this machine or its own network: the proxy beside it.
 //! - HOST_TOKEN: the secret the relay's own host signs in with (user name
 //!   "xmas-host"). Unset, no host is let in.
 
@@ -41,6 +45,7 @@ pub struct App {
     pub data: PathBuf,
     pub admin_email: Option<String>,
     pub trust_cf: bool,
+    pub ip_header: Option<String>,
     /// The secret the relay's own host signs in with.
     pub host_token: Option<String>,
     /// Clients on HTTPS long polling (where WebSockets don't get through).
@@ -83,6 +88,7 @@ async fn main() {
         data,
         admin_email: std::env::var("ADMIN_EMAIL").ok().filter(|e| !e.trim().is_empty()).map(|e| e.trim().to_lowercase()),
         trust_cf: env("TRUST_CF", "1") != "0",
+        ip_header: std::env::var("IP_HEADER").ok().map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()),
         host_token: std::env::var("HOST_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| t.len() >= 16),
         polls: poll::Polls::default(),
     };
@@ -178,11 +184,19 @@ async fn main() {
     a.abort();
 }
 
-/// The client's address: Cloudflare's header (behind its tunnel), else the
-/// connection's own.
-pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_cf: bool) -> IpAddr {
+/// The client's address: Cloudflare's header (behind its tunnel), or the
+/// header a proxy beside the relay puts it in, else the connection's own.
+pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_cf: bool, ip_header: Option<&str>) -> IpAddr {
     if trust_cf {
         if let Some(ip) = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok()) {
+            return ip;
+        }
+    }
+    // (only from the proxy itself: from anywhere else, it could say anything;
+    // a list's last address is the one the proxy saw, the rest are hearsay)
+    if let Some(h) = ip_header.filter(|_| broker::internal(addr.ip())) {
+        let last = headers.get_all(h).iter().last().and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).and_then(|v| v.trim().parse().ok());
+        if let Some(ip) = last {
             return ip;
         }
     }
@@ -190,7 +204,7 @@ pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_cf: bool) -> IpAdd
 }
 
 async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(app): State<App>) -> Response {
-    let ip = client_ip(&headers, addr, app.trust_cf);
+    let ip = client_ip(&headers, addr, app.trust_cf, app.ip_header.as_deref());
     let max = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(why) = b.admit(ip) {
@@ -350,4 +364,36 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
 /// at the host's token learns nothing from how long the answer took).
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_ip;
+    use axum::http::HeaderMap;
+    use std::net::{IpAddr, SocketAddr};
+
+    /// The client's address: Cloudflare's header when trusted; a proxy's
+    /// own header only from the proxy beside the relay (its list's last
+    /// address); else the connection's.
+    #[test]
+    fn whose_address() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let at = |s: &str| SocketAddr::new(ip(s), 40000);
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        h.append("x-forwarded-for", "203.0.113.9, 198.51.100.1".parse().unwrap());
+        h.append("x-forwarded-for", "203.0.113.20".parse().unwrap());
+        assert_eq!(client_ip(&h, at("10.0.0.2"), true, None), ip("198.51.100.7"));
+        assert_eq!(client_ip(&h, at("10.0.0.2"), false, None), ip("10.0.0.2"));
+        // the proxy beside it: the last address it added
+        assert_eq!(client_ip(&h, at("172.18.0.5"), false, Some("x-forwarded-for")), ip("203.0.113.20"));
+        assert_eq!(client_ip(&h, at("127.0.0.1"), false, Some("x-forwarded-for")), ip("203.0.113.20"));
+        // from outside: not believed
+        assert_eq!(client_ip(&h, at("192.0.2.50"), false, Some("x-forwarded-for")), ip("192.0.2.50"));
+        // nothing there, or nonsense: the connection's own
+        assert_eq!(client_ip(&h, at("127.0.0.1"), false, Some("x-real-ip")), ip("127.0.0.1"));
+        let mut bad = HeaderMap::new();
+        bad.insert("x-real-ip", "not an address".parse().unwrap());
+        assert_eq!(client_ip(&bad, at("127.0.0.1"), false, Some("x-real-ip")), ip("127.0.0.1"));
+    }
 }

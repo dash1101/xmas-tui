@@ -115,7 +115,7 @@ async fn preflight(_m: Method) -> Response {
 }
 
 async fn open(headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(st): State<St>) -> Response {
-    let ip = client_ip(&headers, addr, st.app.trust_cf);
+    let ip = client_ip(&headers, addr, st.app.trust_cf, st.app.ip_header.as_deref());
     let (max, queue, per_ip, most) = {
         let mut b = st.app.broker.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(why) = b.admit(ip) {

@@ -83,6 +83,8 @@ pub enum NetDo {
     Quiet(u8),
     /// Friend i: the chat with them, cleared.
     ClearChat(u8),
+    /// Friend i: their chat pinned over the village.
+    PinFriend(u8),
     /// Friends & chats (the window).
     Friends,
     /// Friends & chats, with friend i picked.
@@ -2243,6 +2245,9 @@ impl Scene {
         }
         v.push((format!("✎ rename {} (just here)", p.name), Do::Net(NetDo::Rename(i as u8))));
         v.push((if p.quiet { format!("♪ let {}'s messages chime again", p.name) } else { format!("⊘ quiet: no chime for {}'s messages", p.name) }, Do::Net(NetDo::Quiet(i as u8))));
+        if !p.waiting && !self.social.chats.friend_pins.iter().any(|f| f.0 == crate::net::seal::norm(&p.code)) {
+            v.push((format!("▣ pin {}'s chat over the village", p.name), Do::Net(NetDo::PinFriend(i as u8))));
+        }
         if !self.online.chat(i).is_empty() {
             v.push((format!("⌫ clear the chat with {} (on this device)", p.name), Do::Net(NetDo::ClearChat(i as u8))));
         }
@@ -2573,6 +2578,7 @@ impl Scene {
                 let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
                 self.text_ask = Some((TextFor::Rename(i), format!("a name for {name} (just here; empty: as it was)")));
             }
+            NetDo::PinFriend(i) => self.pin_friend(i as usize),
             NetDo::ClearChat(i) => {
                 self.online.clear_chat(i as usize);
                 self.post("⌫ the chat's cleared (from this device)");

@@ -130,11 +130,26 @@ pub struct UiCfg {
     /// The buttons up top (unset: the same as `scale`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buttons: Option<f32>,
+    /// Windows pinned over the village (a menu tab, friends & chats, a
+    /// friend's chat): kept open there, where they were put.
+    pub pins: Vec<PinCfg>,
+}
+
+/// A window pinned over the village: what ("tab:3", "chats",
+/// "friend:<code>"), where (its top-left, in the windows' cells), and
+/// whether it's folded down to its title bar.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct PinCfg {
+    pub what: String,
+    pub x: i32,
+    pub y: i32,
+    pub min: bool,
 }
 
 impl Default for UiCfg {
     fn default() -> Self {
-        UiCfg { look: "classic".into(), scale: 1.0, widgets: None, buttons: None }
+        UiCfg { look: "classic".into(), scale: 1.0, widgets: None, buttons: None, pins: vec![] }
     }
 }
 

@@ -799,6 +799,9 @@ pub struct Online {
     /// won't have us, is left for the next one.
     link_since: f32,
     refused: bool,
+    /// Times the relay's turned this connection away (a wrong sign-in, a
+    /// banned player): for the relay's own host to say so.
+    pub refusals: u32,
     relay_skip: usize,
     sub: u16,
     t: f32,
@@ -878,6 +881,7 @@ impl Online {
             link: Link::Off,
             link_since: 0.0,
             refused: false,
+            refusals: 0,
             relay_skip: 0,
             sub: 1,
             t: 0.0,
@@ -1180,6 +1184,7 @@ impl Online {
                 mqtt::Packet::ConnAck(_) => {
                     self.link = Link::Off;
                     self.refused = true;
+                    self.refusals = self.refusals.wrapping_add(1);
                 }
                 mqtt::Packet::Publish { topic, payload } => self.got(&topic, &payload),
                 _ => {}

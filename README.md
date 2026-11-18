@@ -446,20 +446,36 @@ web) shows what's happening online; a click on it opens friends & online.
   on the right, with a line to write the next. Each friend's **⋯** has their menu: chat, *ping* (a little tone at
   their end), *ask into this village*, *into …'s village*, their profile card, *rename* (just here), *quiet* (no
   chime), *clear the chat*, *unfriend*. **◂ back** goes to friends & online, as it does at the top of each of its
-  menus. Lines reach a friend only while they're online. The
+  menus. Lines reach a friend only while they're online.
+  - **Moved and pinned:** its title bar moves it. **▣ pin** keeps it open over the village where it's put, through
+    restarts; **_** folds it down to its title bar (and Esc folds a pinned one rather than putting it away), and
+    **✕** unpins it.
+  - **A friend's own chat, pinned:** *▣ pin Sam's chat over the village* in their **⋯** puts a little window of
+    their own over the village: their latest lines, what's new when it's folded, and a line to write the next. Each
+    moves, folds and closes the same way.
+
+  The
   **friends widget** (Menu → Widgets → Friends) shows who's about (● online, ⌂ a village open), the last few
   messages, a line to talk and *⌂ public villages*. A click on a friend opens their menu. Offline, it offers
   *● go online*. Messages show in the post, and all of them in *✉ messages*.
 - **Public villages** (*⌂ public villages*, in friends & online and on the friends widget; one click, online or not):
   - **The squares**: North Pole Square, Candy Cane Lane, Frosty Hollow and Pine Peak Lodge. Each is always there,
     the same village whoever's in it, with how many are about.
-    - The first one in hosts it, and when they go, whoever's next takes over: nobody's sent home.
+    - The relay's own host keeps them open (`xmas-tui --host`, beside the relay): the same townsfolk, animals and
+      names for everyone, all the time, whoever comes and goes.
+    - Without it, the first one in hosts a square, and when they go, whoever's next takes over: nobody's sent home.
     - A square takes 16. A full one opens another copy of itself (#2, #3…), and joining finds the first with room.
     - Each square's own settings (its time of day, how many folk and animals come by, the surprises, the sleigh)
       are set by the relay's keeper in its console, the same for everyone there; each villager's snow, wind, glow
       and aurora stay their own.
   - **Villagers' villages**: a host can list their open village there for anyone (*list my village here for
     anyone*), showing how many are in it of how many it takes.
+  - **Server villages** (*· server*): villages the relay's own host keeps open, rather than a player's game. Some
+    are listed; private ones are reached only with their code (*into a village by its code*). **★** marks the ones
+    the relay features, and the list comes in the relay's order, the rest after, busiest first.
+  - **Looked after**: in the villages the relay's host keeps, its keeper can quieten someone, send them home, keep a
+    village or a player out of the relay, greet newcomers and make announcements, now or at set times. Notices show
+    in the post with a chime, and stay in ✉ messages.
   - **A village's limit**: Menu → Online → *Most visitors* (8 by default, 2 to 48). Past it, a newcomer is told
     it's full.
 - **One sky**: in a shared village everyone has the host's time of day (their clock, sunrise and sunset), wherever
@@ -500,6 +516,10 @@ web) shows what's happening online; a click on it opens friends & online.
   if it can't be reached: broker.emqx.io, broker.hivemq.com, test.mosquitto.org. The web page reads
   [`relays.json`](web/site/relays.json) beside it, and `XMAS_RELAY=wss://…` (or `https://…/poll`) puts another relay
   first.
+- **Another relay:** Menu → Online → **Relay** takes another relay's address (one run by a club, a school, a group of
+  friends), which then comes first, and is believed as itself: its squares' settings, its public list, its
+  announcements. *Use the village's own* goes back. Running one takes the two containers in [`relay/`](relay): see
+  [SELF-HOSTING.md](relay/SELF-HOSTING.md). Whoever runs it is responsible for it.
   Everything is sealed end to end (ChaCha20-Poly1305, keys made from the codes by SHA-256) on topics named by hashes
   of the codes: the relay, or anyone listening, can't read it or tell whose it is, though it does see that some
   device is connected. A friend code is the key to a mailbox and to whether that villager's about, so it's for
@@ -796,7 +816,10 @@ on a **home page**:
 - quick switches for autopilot, the sound and the zoom;
 - how it stands online.
 
-It can be dragged by its title bar, and too tall for the screen it scrolls (the wheel, or a finger). Pointing at any
+It can be dragged by its title bar, and too tall for the screen it scrolls (the wheel, or a finger). **▣ pin** in
+its title pins the tab showing as a window of its own over the village, kept open where it's put through restarts:
+its title bar moves it, **_** folds it to its title bar, **✕** unpins it (up to 12 pinned, the friends' chats
+included). Pointing at any
 setting shows what it does along the bottom; sliders can be clicked or dragged along their bar, or stepped with ◂ ▸
 or the wheel. Its tabs, in two rows:
 - **Home:** as above.
@@ -809,7 +832,8 @@ or the wheel. Its tabs, in two rows:
 - **Pets:** the first pet and up to five more, each of any kind (a dog, a cat, a bunny, a young **reindeer**, a
   **fox** or a little **bird**), its colour (Rudolph's coat comes with the nose) and name. They all come along
   wherever the villager goes, each a step further behind; a click on one gets a happy fuss.
-- **Online:** going on and off (through which relay, and how), the friend code to copy, friends & messages, the
+- **Online:** going on and off (through which relay, and how), **the relay** (another one's address, or the
+  village's own), the friend code to copy, friends & messages, the
   public villages, adding a friend, the profile card, linked devices; **your village** (*Most visitors*, opening it
   to friends, listing it in Public villages); **what others write** (strong language starred out; links always
   hidden).
