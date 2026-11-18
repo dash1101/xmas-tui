@@ -106,19 +106,12 @@ pub(super) fn stream(tls: bool, host: &str, port: u16, timeout: Duration) -> io:
     })
 }
 
-/// The app's version: the main Cargo.toml's, read when this is built (the
-/// Android library is built from these same files as a package of its own,
-/// whose CARGO_PKG_VERSION isn't the app's).
-fn version() -> &'static str {
-    include_str!("../../Cargo.toml").lines().find_map(|l| l.strip_prefix("version = \"")?.split('"').next()).unwrap_or(env!("CARGO_PKG_VERSION"))
-}
-
 /// What the app calls itself to a relay, in the User-Agent of the
-/// WebSocket's opening request and of each long-polling request: its
-/// version and the system it's on, as in "xmas-tui/1.26.0 (linux)". The
-/// relay's admin console shows it beside the connection.
+/// WebSocket's opening request and of each long-polling request (see
+/// `super::agent`). The relay's admin console shows it beside the
+/// connection.
 pub(crate) fn user_agent() -> String {
-    format!("xmas-tui/{} ({})", version(), std::env::consts::OS)
+    super::agent()
 }
 
 /// Connect, and ask for the WebSocket (the "mqtt" subprotocol). Reads
@@ -294,13 +287,13 @@ mod tests {
     fn the_app_names_itself() {
         let ua = user_agent();
         assert!(ua.starts_with("xmas-tui/"), "{ua}");
-        assert!(ua.ends_with(&format!(" ({})", std::env::consts::OS)), "{ua}");
+        assert!(ua.ends_with(&format!(" ({})", super::super::platform())), "{ua}");
         // (it goes in a request's head as it is: nothing that would break a line)
         assert!(!ua.chars().any(|c| c.is_control()), "{ua}");
         // the app's own version, whichever package builds this file
-        assert!(version().starts_with(|c: char| c.is_ascii_digit()), "{ua}");
+        assert!(super::super::app_version().starts_with(|c: char| c.is_ascii_digit()), "{ua}");
         if env!("CARGO_PKG_NAME") == "xmas-tui" {
-            assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+            assert_eq!(super::super::app_version(), env!("CARGO_PKG_VERSION"));
         }
     }
 }

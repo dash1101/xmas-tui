@@ -314,7 +314,9 @@ pub extern "C" fn net_bye(w: *mut Web) -> usize {
 #[no_mangle]
 pub extern "C" fn net_want(w: *mut Web) -> u32 {
     let o = &mut unsafe { &mut *w }.game.scene.online;
-    if !o.wanted() {
+    // (too old for the relay: not connected anywhere till the page is
+    // reloaded with the new version)
+    if !o.wanted() || o.too_old() {
         return 0;
     }
     if o.take_relink() {

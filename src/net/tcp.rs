@@ -297,6 +297,13 @@ pub fn pump(online: &mut Online, link: &mut Option<Tcp>) {
         }
         return;
     }
+    // too old for the relay: nowhere, until updated (or it's worth a try)
+    if online.too_old() {
+        if let Some(l) = link.take() {
+            l.close(online.take_out());
+        }
+        return;
+    }
     if online.take_relink() {
         // (another friend code: a new link, with its own goodbye-will)
         if let Some(l) = link.take() {

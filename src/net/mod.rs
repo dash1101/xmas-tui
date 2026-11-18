@@ -115,6 +115,11 @@ pub struct PublicRules {
     #[serde(default)]
     pub banned_ids: Vec<String>,
     pub words: Vec<String>,
+    /// The relay's own version, and the oldest game it lets in.
+    #[serde(default)]
+    pub relay: String,
+    #[serde(default)]
+    pub min_app: String,
 }
 
 impl PublicRules {
@@ -712,6 +717,30 @@ pub struct Here {
     pub os: Option<String>,
 }
 
+/// The app's version: the main Cargo.toml's, read when this is built (the
+/// Android library and the web page are built from these same files as
+/// packages of their own, whose CARGO_PKG_VERSION isn't the app's).
+pub fn app_version() -> &'static str {
+    include_str!("../../Cargo.toml").lines().find_map(|l| l.strip_prefix("version = \"")?.split('"').next()).unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// What the app tells a relay it is, as "xmas-tui/1.25.4 (linux)": in its
+/// sign-in (every way in, the web page's too) and the web request's
+/// User-Agent. The relay turns away versions older than it allows.
+pub fn agent() -> String {
+    format!("xmas-tui/{} ({})", app_version(), platform())
+}
+
+/// The relay this one is out of date before ("1.6.0": the first that
+/// turns away games too old to be safe, and says its own version).
+pub const MIN_RELAY: &str = "1.6.0";
+
+/// A version ("1.25.4") as numbers, to compare.
+pub fn version_num(v: &str) -> Option<(u32, u32, u32)> {
+    let mut it = v.trim().split(['.', ' ', '-']).map(|n| n.parse::<u32>().ok());
+    Some((it.next()??, it.next().flatten().unwrap_or(0), it.next().flatten().unwrap_or(0)))
+}
+
 /// What this is playing on, as friends are told.
 pub fn platform() -> &'static str {
     if cfg!(target_arch = "wasm32") {
@@ -840,6 +869,12 @@ pub struct Online {
     /// Times the relay's turned this connection away (a wrong sign-in, a
     /// banned player): for the relay's own host to say so.
     pub refusals: u32,
+    /// Turned away by the relay as too old (its online clock, then): online
+    /// waits for an update, rather than going elsewhere, and tries again
+    /// in half an hour.
+    too_old_at: Option<f32>,
+    /// Told this relay is out of date (once).
+    said_old_relay: bool,
     relay_skip: usize,
     sub: u16,
     t: f32,
@@ -922,6 +957,8 @@ impl Online {
             link_since: 0.0,
             refused: false,
             refusals: 0,
+            too_old_at: None,
+            said_old_relay: false,
             relay_skip: 0,
             sub: 1,
             t: 0.0,
@@ -1083,6 +1120,12 @@ impl Online {
         self.book.on
     }
 
+    /// Turned away by the relay as too old, lately (half an hour): not to
+    /// be connected anywhere until updated (or until it's worth a try).
+    pub fn too_old(&self) -> bool {
+        self.too_old_at.is_some_and(|at| self.t - at < 1800.0)
+    }
+
     pub fn link(&self) -> Link {
         self.link
     }
@@ -1153,7 +1196,9 @@ impl Online {
         // code, which can't be turned back into it: the relay keeps a
         // banned player out by it)
         let client = format!("xt{:08x}{:08x}{:04x}", self.id, self.tag, seal::random() as u16);
-        let login = self.login.clone();
+        // (the relay's own host signs in as itself; everyone else says what
+        // version they are, and a relay turns away one too old)
+        let login = self.login.clone().or_else(|| Some((agent(), String::new())));
         self.out.extend(mqtt::connect_as(&client, 45, Some((&self.my_here.clone(), &will)), login.as_ref().map(|(u, p)| (u.as_str(), p.as_str()))));
     }
 
@@ -1221,6 +1266,16 @@ impl Online {
         while let Some(p) = self.reader.next() {
             match p {
                 mqtt::Packet::ConnAck(0) => self.on_connack(),
+                // too old for this relay: wait for an update (not another relay)
+                mqtt::Packet::ConnAck(1) if !self.server => {
+                    self.link = Link::Off;
+                    self.refused = true;
+                    self.refusals = self.refusals.wrapping_add(1);
+                    if self.too_old_at.is_none() {
+                        self.note(format!("⚠ this version of xmas-tui ({}) is too old for the village's relay: update it to play online", app_version()));
+                    }
+                    self.too_old_at = Some(self.t);
+                }
                 mqtt::Packet::ConnAck(_) => {
                     self.link = Link::Off;
                     self.refused = true;
@@ -1253,7 +1308,15 @@ impl Online {
         if topic == ADMIN_PUBLIC {
             if self.trusted && payload.len() <= 64 * 1024 {
                 if let Ok(r) = serde_json::from_slice::<PublicRules>(payload) {
-                    self.public_rules = PublicRules { banned: r.banned.iter().map(|c| seal::norm(c)).collect(), banned_ids: r.banned_ids.iter().take(2000).map(|b| b.to_lowercase()).collect(), words: r.words.iter().take(400).map(|w| w.to_lowercase()).collect(), ..r };
+                    self.public_rules = PublicRules { banned: r.banned.iter().map(|c| seal::norm(c)).collect(), banned_ids: r.banned_ids.iter().take(2000).map(|b| b.to_lowercase()).collect(), words: r.words.iter().take(400).map(|w| w.to_lowercase()).collect(), relay: r.relay.chars().take(20).collect(), min_app: r.min_app.chars().take(20).collect(), ..r };
+                    // a relay older than the fixes this game expects: said
+                    // (its keeper's to update; a community's own, say)
+                    let old = version_num(&self.public_rules.relay).is_none_or(|v| version_num(MIN_RELAY).is_some_and(|m| v < m));
+                    if old && !self.said_old_relay {
+                        self.said_old_relay = true;
+                        let v = if self.public_rules.relay.is_empty() { "an older version".to_string() } else { self.public_rules.relay.clone() };
+                        self.note(format!("⚠ this relay ({v}) is out of date: whoever runs it should update it"));
+                    }
                 }
             }
             return;
@@ -3350,6 +3413,42 @@ pub(crate) mod tests {
         a.connected();
         a.feed(&[0x20, 2, 0, 5]);
         assert!(a.link_stuck());
+    }
+
+    /// The game says what version it is when it signs in, and a relay that
+    /// turns it away as too old gets a word to update, not another relay:
+    /// it stays off for half an hour (until updated, really), then tries
+    /// again.
+    #[test]
+    fn too_old_for_the_relay_waits_for_an_update() {
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Robin");
+        a.tick(1.0, None, 1);
+        a.connected();
+        let hello = a.take_out();
+        let me = agent();
+        assert!(me.starts_with(&format!("xmas-tui/{} (", env!("CARGO_PKG_VERSION"))), "{me}");
+        assert!(hello.windows(me.len()).any(|w| w == me.as_bytes()), "the hello doesn't say the version");
+        a.take_events();
+        a.feed(&[0x20, 2, 0, 1]);
+        assert!(a.too_old() && a.link_stuck());
+        assert!(a.take_events().iter().any(|e| matches!(e, Event::Note(n) if n.contains("too old"))), "nothing said");
+        a.disconnected();
+        a.tick(1000.0, None, 1);
+        assert!(a.too_old(), "tried again too soon");
+        a.tick(1900.0, None, 1);
+        assert!(!a.too_old(), "never tries again");
+        // a relay older than the fixes: said once
+        a.set_trusted(true);
+        a.connected();
+        a.feed(&[0x20, 2, 0, 0]);
+        a.take_events();
+        let rules = serde_json::json!({ "featured": [], "order": [], "banned": [], "words": [], "relay": "1.5.0", "min_app": "1.25.4" });
+        let p = mqtt::publish(ADMIN_PUBLIC, &serde_json::to_vec(&rules).unwrap(), true);
+        a.feed(&p);
+        a.feed(&p);
+        let said = a.take_events().iter().filter(|e| matches!(e, Event::Note(n) if n.contains("out of date"))).count();
+        assert_eq!(said, 1);
+        assert_eq!(version_num("1.25.4"), Some((1, 25, 4)));
     }
 
     #[test]

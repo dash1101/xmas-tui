@@ -286,6 +286,8 @@ pub struct App {
     pub wall_full_req: Option<bool>,
     /// Shift is held (the villager runs).
     shift: bool,
+    /// Turned away by the relay as too old: an update's been looked for.
+    looked_for_update: bool,
 }
 
 pub fn random_seed() -> u32 {
@@ -370,6 +372,7 @@ impl App {
             crate::update::spawn(cfg.updates.check, cfg.updates.auto_install);
         }
         App {
+            looked_for_update: false,
             sync: config::FileSync::new(path, &cfg, Duration::from_secs(1)),
             fps_override: FPS_OVERRIDE.get().copied(),
             applied: cfg.clone(),
@@ -897,6 +900,11 @@ impl App {
             return;
         }
         crate::net::tcp::pump(&mut self.scene.online, &mut self.link);
+        // too old for the relay: look for the update now (with "install
+        // automatically" on, it's installed; else the banner offers it)
+        if self.scene.online.too_old() && !std::mem::replace(&mut self.looked_for_update, true) {
+            crate::update::check_now();
+        }
         if std::mem::take(&mut self.scene.online.dirty) {
             // (the friends list changed: saved soon)
             self.saved_at = self.saved_at.min(self.t() - 55.0);
