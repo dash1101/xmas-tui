@@ -36,6 +36,9 @@ pub fn router(app: App) -> Router {
         .route("/api/say", post(say))
         .route("/api/welcome", post(set_welcome))
         .route("/api/schedules", post(set_schedules))
+        .route("/api/keep-out", post(keep_out))
+        .route("/api/let-back", post(let_back))
+        .route("/api/update", post(update))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
@@ -67,7 +70,7 @@ async fn stats(State(app): State<App>) -> Json<serde_json::Value> {
 
 async fn conns(State(app): State<App>) -> Json<serde_json::Value> {
     let b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-    let list: Vec<serde_json::Value> = b.conns().into_iter().map(|(id, ip, client, secs, subs, sent, got, dropped)| json!({ "id": id, "ip": ip, "client": client, "secs": secs, "subs": subs, "sent": sent, "got": got, "dropped": dropped })).collect();
+    let list: Vec<serde_json::Value> = b.conns().into_iter().map(|(id, ip, client, secs, subs, sent, got, dropped, agent, host, country)| json!({ "id": id, "ip": ip, "client": client, "secs": secs, "subs": subs, "sent": sent, "got": got, "dropped": dropped, "agent": agent, "host": host, "country": country })).collect();
     Json(json!(list))
 }
 
@@ -113,6 +116,10 @@ async fn kick(State(app): State<App>, Json(Id { id }): Json<Id>) -> Response {
 
 async fn ban(State(app): State<App>, Json(Ip { ip }): Json<Ip>) -> Response {
     let Ok(ip) = ip.trim().parse() else { return (StatusCode::BAD_REQUEST, "not an address").into_response() };
+    // (the relay's own network: its host, or a proxy with everyone behind it)
+    if crate::broker::internal(ip) {
+        return (StatusCode::BAD_REQUEST, "that address is on the relay's own network (its host, or a proxy in front of it): blocking it would block the host, or everyone").into_response();
+    }
     app.broker.lock().unwrap_or_else(|e| e.into_inner()).ban(ip);
     app.save();
     StatusCode::NO_CONTENT.into_response()
@@ -176,7 +183,50 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
             (slot.clone(), v)
         })
         .collect();
+    // each player the host reports: where they're connected from, and with what
+    let mut reports = reports;
+    for (_, r) in reports.iter_mut() {
+        if let Some(ps) = r.get_mut("players").and_then(|p| p.as_array_mut()) {
+            for p in ps {
+                let from = p["id"].as_u64().and_then(|id| b.where_from(id as u32));
+                if let Some((ip, country, agent)) = from {
+                    p["ip"] = json!(ip);
+                    p["country"] = json!(country);
+                    p["agent"] = json!(agent);
+                }
+            }
+        }
+    }
+    // the villages in use right now, named where the relay knows the name
+    // (the host's own, and the listed ones); a private one is just a topic
+    let mut names: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    for (slot, r) in reports.iter() {
+        if let Some(code) = r["code"].as_str() {
+            names.insert(crate::broker::topic_of("village", code), (r["name"].as_str().unwrap_or(slot).to_string(), r["kind"].as_str().unwrap_or("").to_string()));
+        }
+    }
+    if let Some(ls) = reports.get("_public").and_then(|r| r["listings"].as_array()) {
+        for l in ls {
+            if let Some(code) = l["code"].as_str() {
+                names.entry(crate::broker::topic_of("village", code)).or_insert((l["name"].as_str().unwrap_or("").to_string(), "listed".to_string()));
+            }
+        }
+    }
+    let villages: Vec<serde_json::Value> = b
+        .villages()
+        .into_iter()
+        .take(300)
+        .map(|(topic, who)| {
+            let (name, kind) = names.get(&topic).cloned().unwrap_or_default();
+            let short: String = topic.rsplit('/').next().unwrap_or("").chars().take(8).collect();
+            let who: Vec<serde_json::Value> = who.into_iter().take(60).map(|(ip, client, agent, host, country)| json!({ "ip": ip, "client": client, "agent": agent, "host": host, "country": country })).collect();
+            json!({ "topic": short, "name": name, "kind": kind, "who": who })
+        })
+        .collect();
     Json(json!({
+        "keepouts": k.keepouts,
+        "villages": villages,
+        "update": updater(&app.data),
         "host_here": b.host_here(),
         "host_token": app.host_token.is_some(),
         "host_squares": k.host_squares,
@@ -192,6 +242,72 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
         "reports": reports,
         "now": crate::broker::now_secs(),
     }))
+}
+
+/// The updater beside the relay (see DEPLOY.md): heard from lately or not,
+/// its last word, and whether an update's been asked for and not yet
+/// taken up.
+fn updater(data: &std::path::Path) -> serde_json::Value {
+    let read = |n: &str| std::fs::read_to_string(data.join(n)).ok();
+    let alive = read("update.alive").and_then(|s| s.trim().parse::<u64>().ok()).is_some_and(|t| crate::broker::now_secs().saturating_sub(t) < 60);
+    let status = read("update.status").filter(|s| s.len() < 4096).and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok());
+    json!({ "alive": alive, "status": status, "asked": data.join("update.request").exists(), "relay": env!("CARGO_PKG_VERSION") })
+}
+
+/// Update in place: asked of the updater beside the relay, by a file in
+/// the data folder (the relay itself can't touch Docker, and shouldn't).
+async fn update(State(app): State<App>) -> Response {
+    if updater(&app.data)["alive"] != json!(true) {
+        return (StatusCode::CONFLICT, "no updater is running beside the relay (see DEPLOY.md: COMPOSE_PROFILES=updater)").into_response();
+    }
+    match std::fs::write(app.data.join("update.request"), crate::broker::now_secs().to_string()) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't ask for it: {e}")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct KeepOut {
+    code: String,
+    #[serde(default)]
+    id: serde_json::Value,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    why: String,
+    /// By their address too.
+    #[serde(default)]
+    ip: bool,
+    /// (Letting back: the key as the console shows it.)
+    #[serde(default)]
+    key: String,
+    /// The village's name as the host has it (to send them home from it).
+    #[serde(default)]
+    slot: String,
+}
+
+/// A player kept out of one village the host keeps (sent home from it, if
+/// they're there): the rest of the relay stays theirs.
+async fn keep_out(State(app): State<App>, Json(k): Json<KeepOut>) -> Response {
+    let Some(id) = id_of(&k.id).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    if crate::broker::norm_code(&k.code).len() != 12 {
+        return (StatusCode::BAD_REQUEST, "not a village's code").into_response();
+    }
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.keep_out(&k.code, id, &k.name, &k.why, k.ip);
+        if !k.slot.is_empty() {
+            b.host_cmd(json!({ "kick": { "slot": k.slot, "id": id } }));
+        }
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn let_back(State(app): State<App>, Json(k): Json<KeepOut>) -> Response {
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).let_back(&k.code, &k.key);
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// The squares' and server villages' settings: only those the game knows.
@@ -465,7 +581,7 @@ const PAGE: &str = r##"<!doctype html>
     <p class="note">The relay's own host keeps the squares and the server villages open, the same for everyone, all the time. It runs beside the relay (see DEPLOY.md) and signs in with HOST_TOKEN.</p>
   </section>
   <section><h2>IN THE VILLAGES THE HOST KEEPS</h2>
-    <p class="note">Who's in each, and what's been said there lately (kept in memory only, the last 50 lines). Mute: their talk isn't shown to others there. Kick: sent home from that village. Ban: kept off the relay.</p>
+    <p class="note">Who's in each (with the address and the version they're connected with), and what's been said there lately (kept in memory only, the last 50 lines). Mute: their talk isn't shown to others there. Kick: sent home from that village (they can come back). Ban here: kept out of that village only. Ban: kept off the relay. Block address: nothing connects from that address again (the one that stops a bot, which can make itself a new id each time).</p>
     <div id="slots"></div>
   </section>
   <section><h2>ANNOUNCE</h2>
@@ -486,7 +602,18 @@ const PAGE: &str = r##"<!doctype html>
     <p><button id="savepub">save the public list</button> <span id="pubmsg"></span></p>
     <div id="listings"></div>
   </section>
-  <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>address</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div></section>
+  <section><h2>VILLAGES OPEN RIGHT NOW</h2>
+    <p class="note">Every village in use on the relay, the fullest first: the host's own and the listed ones by name; a private one only as a number, with how many are in it and from where (what's said in it is sealed: the relay can't read it, or tell who's hosting).</p>
+    <div class="wrap"><table><thead><tr><th>village</th><th>in it</th><th>from</th></tr></thead><tbody id="villages"></tbody></table></div>
+  </section>
+  <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>address (country)</th><th>version</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div>
+    <p class="note" id="versions"></p>
+  </section>
+  <section><h2>UPDATE</h2>
+    <p id="updnow"></p>
+    <p><button id="update">update the relay and its host now</button> <span class="note">pulls the newest images and starts them again; players are dropped for a few seconds and come straight back</span></p>
+    <p class="note" id="updst"></p>
+  </section>
   <section><h2>LIMITS</h2>
     <div class="grid" id="limits"></div>
     <p><button id="save">save limits</button> <span id="msg"></span></p>
@@ -504,6 +631,8 @@ const PAGE: &str = r##"<!doctype html>
     <table><tbody id="vbans"></tbody></table>
     <p>players: <input id="banpid" placeholder="id (8 hex digits)" style="width:160px"> <input id="banpwhy" placeholder="why (for you)" style="width:220px"> <button id="banp" class="bad">ban</button></p>
     <table><tbody id="pbans"></tbody></table>
+    <p>kept out of one village only (ban here, beside a player in a village the host keeps):</p>
+    <table><tbody id="kouts"></tbody></table>
     <p class="note">A banned village can't be used on the relay and leaves the public list; a banned player (by the id their game has) can't connect. Someone can always start afresh with a new id or address: bans slow them down, they don't make them impossible.</p>
   </section>
   <section><h2>KEPT MESSAGES</h2>
@@ -531,7 +660,11 @@ async function refresh() {
     $("bans").innerHTML = r.bans.map((ip) => `<tr><td>${esc(ip)}</td><td><button data-unban="${esc(ip)}">unban</button></td></tr>`).join("") || `<tr><td class="note">nobody</td></tr>`;
     if (!editing) { limits = r.limits; drawLimits(); }
     const cs = await (await fetch("api/conns")).json();
-    $("conns").innerHTML = cs.map((c) => `<tr><td>${c.id}</td><td>${esc(c.ip)}</td><td>${esc(c.client)}</td><td>${ago(c.secs)}</td><td>${c.subs}</td><td>${c.sent}</td><td>${c.got}</td><td>${c.dropped}</td><td><button data-kick="${c.id}">kick</button> <button class="bad" data-ban="${esc(c.ip)}">ban</button></td></tr>`).join("") || `<tr><td colspan="9" class="note">nobody right now</td></tr>`;
+    const what = (c) => c.host ? "the relay's host" + (c.agent ? " · " + c.agent : "") : c.agent || "an older app";
+    $("conns").innerHTML = cs.map((c) => `<tr><td>${c.id}</td><td>${esc(c.ip)}${c.country ? ` <span class="note">${esc(c.country)}</span>` : ""}</td><td>${esc(what(c))}</td><td>${esc(c.client)}</td><td>${ago(c.secs)}</td><td>${c.subs}</td><td>${c.sent}</td><td>${c.got}</td><td>${c.dropped}</td><td><button data-kick="${c.id}">kick</button> ${c.host ? "" : `<button class="bad" data-ban="${esc(c.ip)}">block address</button>`}</td></tr>`).join("") || `<tr><td colspan="10" class="note">nobody right now</td></tr>`;
+    const tally = {};
+    cs.filter((c) => !c.host).forEach((c) => { const k = c.agent || "an older app"; tally[k] = (tally[k] || 0) + 1; });
+    $("versions").textContent = Object.keys(tally).length ? "by version: " + Object.entries(tally).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + " × " + n).join(" · ") : "";
   } catch (e) { $("msg").textContent = "can't reach the relay: " + e; }
 }
 function drawLimits() {
@@ -547,12 +680,12 @@ $("save").onclick = async () => {
   $("msg").textContent = r.ok ? "saved" : "couldn't save (" + r.status + ")";
   editing = false; refresh();
 };
-$("ban").onclick = async () => { const ip = $("banip").value.trim(); if (ip) { await call("api/ban", { ip }); $("banip").value = ""; refresh(); } };
+$("ban").onclick = async () => { const ip = $("banip").value.trim(); if (ip) { const r = await call("api/ban", { ip }); if (r.ok) $("banip").value = ""; else alert(await r.text()); refresh(); } };
 $("clear").onclick = async () => { const p = $("prefix").value.trim(); if (p && confirm("Forget every kept message under " + p + "?")) { const r = await (await call("api/clear", { prefix: p })).json(); $("msg").textContent = "forgot " + r.cleared; refresh(); } };
 document.addEventListener("click", async (e) => {
   const t = e.target;
   if (t.dataset.kick) { await call("api/kick", { id: Number(t.dataset.kick) }); refresh(); }
-  else if (t.dataset.ban && confirm("Ban " + t.dataset.ban + "?")) { await call("api/ban", { ip: t.dataset.ban }); refresh(); }
+  else if (t.dataset.ban && confirm("Block " + t.dataset.ban + "? Nothing connects from that address again until it's unblocked.")) { const r = await call("api/ban", { ip: t.dataset.ban }); if (!r.ok) alert(await r.text()); refresh(); }
   else if (t.dataset.unban) { await call("api/unban", { ip: t.dataset.unban }); refresh(); }
 });
 const TIMES = ["", "auto", "night", "dawn", "morning", "noon", "afternoon", "dusk"];
@@ -590,7 +723,7 @@ async function loadState() {
   const slots = Object.entries(st.reports).sort((a, b) => a[0].localeCompare(b[0]));
   $("slots").innerHTML = slots.filter(([k]) => k !== "_public").map(([slot, r]) => {
     const muted = st.muted[slot] || [];
-    const ps = (r.players || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="note">${p.id.toString(16).padStart(8, "0")}</td><td>${muted.includes(p.id) ? `<button class="small" data-act="unmute" data-slot="${esc(slot)}" data-id="${p.id}">unmute</button>` : `<button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${p.id}">mute</button>`} <button class="small" data-act="kick" data-slot="${esc(slot)}" data-id="${p.id}">kick</button> <button class="small bad" data-pban="${p.id}" data-name="${esc(p.name)}">ban</button></td></tr>`).join("") || `<tr><td class="note">nobody there</td></tr>`;
+    const ps = (r.players || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="note">${p.id.toString(16).padStart(8, "0")}</td><td class="note">${esc(p.ip || "")}${p.country ? " " + esc(p.country) : ""}</td><td class="note">${esc(p.agent || "")}</td><td>${muted.includes(p.id) ? `<button class="small" data-act="unmute" data-slot="${esc(slot)}" data-id="${p.id}">unmute</button>` : `<button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${p.id}">mute</button>`} <button class="small" data-act="kick" data-slot="${esc(slot)}" data-id="${p.id}">kick</button> <button class="small bad" data-kout="${p.id}" data-code="${esc(r.code || "")}" data-slot="${esc(slot)}" data-name="${esc(p.name)}">ban here</button> <button class="small bad" data-pban="${p.id}" data-name="${esc(p.name)}">ban</button>${p.ip ? ` <button class="small bad" data-ban="${esc(p.ip)}">block address</button>` : ""}</td></tr>`).join("") || `<tr><td class="note">nobody there</td></tr>`;
     const chat = (r.chat || []).slice(-50).map((c) => `<div><span class="note">${new Date(c.at * 1000).toLocaleTimeString()}</span> <b>${esc(c.name)}</b>: ${esc(c.text)} <button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${c.id}">mute</button></div>`).join("") || `<div class="note">nothing said lately</div>`;
     const stale = r.age > 30 ? ` <span class="warn">(not heard from for ${ago(r.age)})</span>` : "";
     return `<div class="slot"><h3>${esc(r.name || slot)} · ${esc(r.kind || "")}${r.public === false ? " · private" : ""} · ${r.n ?? 0} of ${r.limit ?? "?"}${stale}</h3><table><tbody>${ps}</tbody></table><div class="chat">${chat}</div></div>`;
@@ -604,6 +737,17 @@ async function loadState() {
   if (document.activeElement.tagName !== "TEXTAREA") { $("featured").value = st.featured.join("\n"); $("order").value = st.order.join("\n"); $("words").value = st.words.join("\n"); }
   $("vbans").innerHTML = st.village_bans.map((b) => `<tr><td>${esc(b.name || "(a village)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-vunban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no villages</td></tr>`;
   $("pbans").innerHTML = st.player_bans.map((b) => `<tr><td>${esc(b.name || "(a player)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-punban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no players</td></tr>`;
+  const vname = (code) => { const e = Object.entries(st.reports).find(([, r]) => r.code && r.code.replace(/[^A-Za-z0-9]/g, "").toUpperCase() === code); return e ? (e[1].name || e[0]) : code; };
+  $("kouts").innerHTML = Object.entries(st.keepouts || {}).flatMap(([code, list]) => list.map((b) => `<tr><td>${esc(b.name || "(a player)")}</td><td class="note">${esc(b.key)}</td><td>${esc(vname(code))}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-kback="${esc(b.key)}" data-code="${esc(code)}">let back</button></td></tr>`)).join("") || `<tr><td class="note">nobody</td></tr>`;
+  $("villages").innerHTML = (st.villages || []).map((v) => {
+    const from = v.who.map((w) => w.host ? "the relay's host" : esc(w.ip) + (w.country ? " " + esc(w.country) : "") + (w.agent ? ` <span class="note">${esc(w.agent)}</span>` : "")).join(", ");
+    const name = v.name ? `${esc(v.name)} <span class="note">${esc(v.kind)}</span>` : `<span class="note">a private village · ${esc(v.topic)}</span>`;
+    return `<tr><td>${name}</td><td>${v.who.filter((w) => !w.host).length}</td><td>${from}</td></tr>`;
+  }).join("") || `<tr><td colspan="3" class="note">none right now</td></tr>`;
+  const u = st.update || {};
+  $("updnow").textContent = "relay " + (u.relay || "?") + (st.host_here ? " · its host connected" : " · its host not connected");
+  $("update").disabled = !u.alive || u.asked || (u.status && (u.status.state === "pulling" || u.status.state === "restarting"));
+  $("updst").innerHTML = !u.alive ? `<span class="warn">○ no updater beside the relay</span>: updates are by hand (docker compose pull, then up -d), or turn the updater on (DEPLOY.md)` : u.asked ? "asked for: starting in a moment…" : u.status ? `${esc(u.status.state)}${u.status.at ? " · " + when(u.status.at) : ""}${u.status.detail ? " · " + esc(u.status.detail) : ""}` : "ready";
   if (!editSrv) { srvs = st.servers.map((v) => ({ ...v, welcome: st.welcome[v.name] || "" })); drawServers(); }
   if (!editSched) { scheds = st.schedules.slice(); drawSched(); }
 }
@@ -667,10 +811,26 @@ document.addEventListener("click", async (e) => {
   else if (d.vban && confirm("Ban the village " + (d.name || d.vban) + "?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-village", { code: d.vban, name: d.name || "", why }); loadState(); }
   else if (d.vunban) { await call("api/unban-village", { code: d.vunban }); loadState(); }
   else if (d.punban) { await call("api/unban-player", { id: d.punban }); loadState(); }
+  else if (d.kout) {
+    if (!d.code) { alert("The host hasn't said this village's code yet: try again in a moment."); return; }
+    if (!confirm("Keep " + (d.name || "this player") + " out of " + d.slot + " (only there)?")) return;
+    const ip = confirm("By their address too? (OK: yes. Cancel: just their id and tag.)");
+    const why = prompt("Why (just for you)?") || "";
+    const r = await call("api/keep-out", { code: d.code, slot: d.slot, id: Number(d.kout), name: d.name || "", why, ip });
+    if (!r.ok) alert(await r.text());
+    loadState();
+  }
+  else if (d.kback) { await call("api/let-back", { code: d.code, key: d.kback }); loadState(); }
   else if (d.feature) { const f = lines("featured"); if (!f.includes(d.feature)) f.push(d.feature); $("featured").value = f.join("\n"); $("savepub").click(); }
   else if (d.srvdel && confirm("Close and remove this server village?")) { editSrv = true; srvs.splice(Number(d.srvdel), 1); drawServers(); }
   else if (d.scdel) { editSched = true; scheds.splice(Number(d.scdel), 1); drawSched(); }
 });
+$("update").onclick = async () => {
+  if (!confirm("Update the relay and its host now? Everyone's dropped for a few seconds and comes straight back.")) return;
+  const r = await call("api/update", {});
+  if (!r.ok) alert(await r.text());
+  loadState();
+};
 loadSquares();
 loadState(); setInterval(loadState, 4000);
 refresh(); setInterval(refresh, 3000);

@@ -87,6 +87,9 @@ pub struct Kept {
     pub welcome: BTreeMap<String, String>,
     /// Announcements to come.
     pub schedules: Vec<Schedule>,
+    /// Players kept out of one village (by the village's code): by their
+    /// id, their tag, or their address ("ip:…").
+    pub keepouts: BTreeMap<String, Vec<Ban>>,
 }
 
 impl Default for Kept {
@@ -105,6 +108,7 @@ impl Default for Kept {
             muted: BTreeMap::new(),
             welcome: BTreeMap::new(),
             schedules: vec![],
+            keepouts: BTreeMap::new(),
         }
     }
 }
@@ -154,6 +158,12 @@ pub struct Conn {
     pub client: String,
     /// The relay's own host (signed in with its token).
     pub host: bool,
+    /// What it said it is (the app's version and system; "web": a
+    /// browser), for the console.
+    pub agent: String,
+    /// The country its address is in, as Cloudflare has it (two letters),
+    /// for the console.
+    pub country: String,
     pub since: Instant,
     tx: Sender<Vec<u8>>,
     will: Option<(String, Vec<u8>, bool)>,
@@ -215,6 +225,26 @@ pub fn topic_of(kind: &str, code: &str) -> String {
     format!("xmas-tui/1/{kind}/{hex}")
 }
 
+/// A village's code as typed, tidied (letters and numbers, capitals).
+pub fn norm_code(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).take(32).collect()
+}
+
+/// Is this connection one of those kept out (by its player id, its tag,
+/// or its address)? (Never the relay's own host.)
+fn kept_out_of(keys: &HashSet<String>, c: &Conn) -> bool {
+    if c.host {
+        return false;
+    }
+    if keys.contains(&format!("ip:{}", c.ip)) {
+        return true;
+    }
+    if player_of(&c.client).is_some_and(|id| keys.contains(&format!("{id:08x}"))) {
+        return true;
+    }
+    tag_of(&c.client).is_some_and(|t| keys.contains(&format!("tag:{}", t.to_ascii_lowercase())))
+}
+
 /// The player id in a client's name ("xt" and eight hex digits), if any.
 pub fn player_of(client: &str) -> Option<u32> {
     client.strip_prefix("xt").and_then(|r| r.get(..8)).and_then(|h| u32::from_str_radix(h, 16).ok())
@@ -273,6 +303,8 @@ pub struct Broker {
     bans: HashSet<IpAddr>,
     /// Topics of the villages kept out.
     blocked: HashSet<String>,
+    /// Topics of the villages some players are kept out of, and who.
+    kept_out: HashMap<String, HashSet<String>>,
     /// The host's last word on each village it keeps (when, what).
     pub reports: BTreeMap<String, (Instant, serde_json::Value)>,
 }
@@ -280,9 +312,26 @@ pub struct Broker {
 impl Broker {
     pub fn new(kept: Kept) -> Self {
         let bans = kept.bans.iter().filter_map(|b| b.parse().ok()).collect();
-        let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), reports: BTreeMap::new() };
+        let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), kept_out: HashMap::new(), reports: BTreeMap::new() };
         b.reblock();
+        b.rekeep();
         b
+    }
+
+    /// The topics of the villages some players are kept out of (the
+    /// village's own, and its official twin), from their codes.
+    fn rekeep(&mut self) {
+        self.kept_out.clear();
+        for (code, bans) in &self.kept.keepouts {
+            let keys: HashSet<String> = bans.iter().map(|b| b.key.clone()).collect();
+            if keys.is_empty() {
+                continue;
+            }
+            let v = topic_of("village", code);
+            let twin = format!("{ADMIN_V}{}", v.rsplit('/').next().unwrap_or(""));
+            self.kept_out.insert(v, keys.clone());
+            self.kept_out.insert(twin, keys);
+        }
     }
 
     /// The banned villages' topics, from their codes.
@@ -350,7 +399,7 @@ impl Broker {
         // (a will is published by the relay itself: never on its own topics)
         let will = will.filter(|(t, p, _)| ok_topic(t) && !t.starts_with(ADMIN) && p.len() <= self.kept.limits.max_payload);
         let burst = self.kept.limits.burst;
-        self.conns.insert(id, Conn { ip, client, host, since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
+        self.conns.insert(id, Conn { ip, client, host, agent: String::new(), country: String::new(), since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
         (id, old)
     }
 
@@ -389,6 +438,10 @@ impl Broker {
         let now = Instant::now();
         c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
         c.tokens_at = now;
+        // kept out of this village: not heard there
+        if self.kept_out.get(topic).is_some_and(|keys| kept_out_of(keys, c)) {
+            return Ok(());
+        }
         // the relay's own topics: only its host speaks there, and only in
         // its villages (`v/`) and to the relay (`report/`)
         if topic.starts_with(ADMIN) {
@@ -448,9 +501,15 @@ impl Broker {
         let bytes = codec::publish(topic, payload, false);
         let mut slow = vec![];
         let only_host = host_only(topic);
+        // (someone kept out of this village hears nothing of it, however
+        // they're listening)
+        let outs = self.kept_out.get(topic).cloned();
         for id in to {
             if let Some(c) = self.conns.get_mut(&id) {
                 if only_host && !c.host {
+                    continue;
+                }
+                if outs.as_ref().is_some_and(|keys| kept_out_of(keys, c)) {
                     continue;
                 }
                 if c.tx.try_send(bytes.clone()).is_ok() {
@@ -505,7 +564,7 @@ impl Broker {
         let Some(c) = self.conns.get_mut(&id) else { return vec![0x80; filters.len()] };
         let host = c.host;
         for f in filters {
-            if !ok_filter(f) || (c.subs.len() >= max && !c.subs.contains(f)) || (host_only(f) && !host) {
+            if !ok_filter(f) || (c.subs.len() >= max && !c.subs.contains(f)) || (host_only(f) && !host) || self.kept_out.get(f).is_some_and(|keys| kept_out_of(keys, c)) {
                 granted.push(0x80);
                 continue;
             }
@@ -521,7 +580,8 @@ impl Broker {
         for f in &fresh {
             if f.contains(['+', '#']) {
                 for (t, k) in &self.retained {
-                    if codec::matches(f, t) && (host || !host_only(t)) {
+                    let kept_out = self.kept_out.get(t).is_some_and(|keys| self.conns.get(&id).is_some_and(|c| kept_out_of(keys, c)));
+                    if codec::matches(f, t) && (host || !host_only(t)) && !kept_out {
                         out.push(codec::publish(t, &k.payload, true));
                     }
                 }
@@ -584,9 +644,11 @@ impl Broker {
     }
 
     /// The connections, for the console: (id, address, client, seconds
-    /// connected, subscriptions, sent, received, dropped).
-    pub fn conns(&self) -> Vec<(u64, String, String, u64, usize, u64, u64, u64)> {
-        let mut v: Vec<_> = self.conns.iter().map(|(&id, c)| (id, c.ip.to_string(), c.client.clone(), c.since.elapsed().as_secs(), c.subs.len(), c.sent, c.got, c.dropped)).collect();
+    /// connected, subscriptions, sent, received, dropped, what it said it
+    /// is, the relay's own host or not).
+    #[allow(clippy::type_complexity)]
+    pub fn conns(&self) -> Vec<(u64, String, String, u64, usize, u64, u64, u64, String, bool, String)> {
+        let mut v: Vec<_> = self.conns.iter().map(|(&id, c)| (id, c.ip.to_string(), c.client.clone(), c.since.elapsed().as_secs(), c.subs.len(), c.sent, c.got, c.dropped, c.agent.clone(), c.host, c.country.clone())).collect();
         v.sort_by_key(|c| c.0);
         v
     }
@@ -617,6 +679,87 @@ impl Broker {
     pub fn unban(&mut self, ip: IpAddr) {
         self.bans.remove(&ip);
         self.kept.bans.retain(|b| *b != ip.to_string());
+    }
+
+    /// What a connection said it is (the app's version and system), for
+    /// the console.
+    pub fn set_agent(&mut self, id: u64, agent: &str, country: &str) {
+        if let Some(c) = self.conns.get_mut(&id) {
+            c.agent = agent.chars().filter(|ch| !ch.is_control()).take(48).collect();
+            c.country = country.chars().filter(|ch| ch.is_ascii_alphanumeric()).take(2).collect();
+        }
+    }
+
+    /// Where a player's connected from (address, country), and with what
+    /// (for the console).
+    pub fn where_from(&self, player: u32) -> Option<(String, String, String)> {
+        self.conns.values().find(|c| !c.host && player_of(&c.client) == Some(player)).map(|c| (c.ip.to_string(), c.country.clone(), c.agent.clone()))
+    }
+
+    /// The villages in use right now, by their topic: who's listening on
+    /// each (address, client, what it is, the relay's own host or not,
+    /// country), the fullest first. A private village shows only as its topic: the
+    /// relay can't tell more about it.
+    #[allow(clippy::type_complexity)]
+    pub fn villages(&self) -> Vec<(String, Vec<(String, String, String, bool, String)>)> {
+        let mut v: Vec<(String, Vec<(String, String, String, bool, String)>)> = self
+            .exact
+            .iter()
+            .filter(|(t, _)| t.starts_with("xmas-tui/1/village/"))
+            .map(|(t, ids)| {
+                let mut who: Vec<(String, String, String, bool, String)> = ids.iter().filter_map(|id| self.conns.get(id)).map(|c| (c.ip.to_string(), c.client.clone(), c.agent.clone(), c.host, c.country.clone())).collect();
+                who.sort();
+                (t.clone(), who)
+            })
+            .filter(|(_, who)| !who.is_empty())
+            .collect();
+        v.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        v
+    }
+
+    /// A player kept out of one village (by its code): by their id, by
+    /// their tag if they're connected (the same next time they come), and
+    /// by their address too if asked (never one on the relay's own
+    /// network: that would be the host, or a proxy with everyone behind
+    /// it). What's said there no longer reaches them, nor what they say
+    /// anyone there; the rest of the relay is theirs as before.
+    pub fn keep_out(&mut self, code: &str, id: u32, name: &str, why: &str, with_ip: bool) {
+        let code = norm_code(code);
+        if code.is_empty() {
+            return;
+        }
+        let mut keys = vec![format!("{id:08x}")];
+        for c in self.conns.values().filter(|c| !c.host && player_of(&c.client) == Some(id)) {
+            if let Some(t) = tag_of(&c.client).map(|t| format!("tag:{}", t.to_ascii_lowercase())) {
+                if !keys.contains(&t) {
+                    keys.push(t);
+                }
+            }
+            let k = format!("ip:{}", c.ip);
+            if with_ip && !internal(c.ip) && !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        let at = now_secs();
+        let list = self.kept.keepouts.entry(code).or_default();
+        for key in keys {
+            if !list.iter().any(|b| b.key == key) && list.len() < 500 {
+                list.push(Ban { key, name: name.chars().take(60).collect(), why: why.chars().take(200).collect(), at });
+            }
+        }
+        self.rekeep();
+    }
+
+    /// Let back into a village: one key, as the console shows it.
+    pub fn let_back(&mut self, code: &str, key: &str) {
+        let code = norm_code(code);
+        if let Some(list) = self.kept.keepouts.get_mut(&code) {
+            list.retain(|b| b.key != key);
+            if list.is_empty() {
+                self.kept.keepouts.remove(&code);
+            }
+        }
+        self.rekeep();
     }
 
     /// Forget kept messages whose topic starts with `prefix`: how many.
@@ -992,6 +1135,62 @@ mod tests {
 
     /// Announcements: said when due, once or again and again; one missed
     /// by a long way (the relay was down) isn't said late.
+    /// A player kept out of one village: nothing said there reaches them
+    /// and nothing they say reaches it, by id, by tag when they come back
+    /// under another id, and by address if asked; elsewhere they're as
+    /// anyone; let back, they hear it again. The host is never kept out,
+    /// and nor is an address on the relay's own network.
+    #[test]
+    fn a_player_kept_out_of_one_village_only() {
+        let mut b = Broker::new(Kept::default());
+        let code = "ABCD-EFGH-JKLM";
+        let (v, other) = (topic_of("village", code), topic_of("village", "ZZZZ-ZZZZ-ZZZZ"));
+        let (ta, mut ra) = channel(64);
+        let (tb, mut rb) = channel(64);
+        let (a, _) = b.join(ip(1), "xt00002001aaaaaaaa0001".into(), None, ta);
+        let (bad, _) = b.join(ip(2), "xt00002002bbbbbbbb0001".into(), None, tb);
+        for id in [a, bad] {
+            assert_eq!(b.subscribe(id, &[v.clone(), other.clone()]), vec![0, 0]);
+        }
+        b.keep_out(code, 0x2002, "Bot", "spam", true);
+        assert_eq!(b.kept.keepouts[&norm_code(code)].iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["00002002", "tag:bbbbbbbb", "ip:203.0.113.2"]);
+        (drain(&mut ra), drain(&mut rb));
+        // not heard there, and hears nothing of it
+        b.publish(bad, &v, b"spam", false).unwrap();
+        b.publish(a, &v, b"hello", false).unwrap();
+        assert_eq!(drain(&mut ra).len(), 1, "the spam got through, or hello didn't come back");
+        assert!(drain(&mut rb).is_empty(), "still hearing the village");
+        // elsewhere: as anyone
+        b.publish(bad, &other, b"hi", false).unwrap();
+        assert_eq!((drain(&mut ra).len(), drain(&mut rb).len()), (1, 1));
+        // back under another id, the same tag: still out; and a new tag
+        // from the same address: out too
+        for (n, client) in [(3u8, "xt00002003bbbbbbbb0002"), (2u8, "xt00002004cccccccc0001")] {
+            let (tc, mut rc) = channel(64);
+            let (c, _) = b.join(ip(n), client.into(), None, tc);
+            assert_eq!(b.subscribe(c, &[v.clone()]), vec![0x80], "{client} let back in");
+            b.publish(a, &v, b"hello", false).unwrap();
+            assert!(drain(&mut rc).is_empty());
+            b.leave(c, true);
+        }
+        // let back (each key): hears it again
+        for key in ["00002002", "tag:bbbbbbbb", "ip:203.0.113.2"] {
+            b.let_back(code, key);
+        }
+        assert!(b.kept.keepouts.is_empty());
+        drain(&mut rb);
+        b.publish(a, &v, b"hello", false).unwrap();
+        assert_eq!(drain(&mut rb).len(), 1);
+        // an address on the relay's own network is never one to keep out
+        let (tl, _rl) = channel(64);
+        b.join(IpAddr::from([172, 18, 0, 3]), "xt00002005dddddddd0001".into(), None, tl);
+        b.keep_out(code, 0x2005, "Local", "", true);
+        assert!(b.kept.keepouts[&norm_code(code)].iter().all(|k| !k.key.starts_with("ip:")));
+        // the villages in use: this one and the other, with who's there
+        let vs = b.villages();
+        assert!(vs.iter().any(|(t, who)| *t == v && who.len() == 2), "{vs:?}");
+    }
+
     #[test]
     fn announcements_come_when_due() {
         let mut b = Broker::new(Kept::default());

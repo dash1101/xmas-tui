@@ -116,6 +116,7 @@ async fn preflight(_m: Method) -> Response {
 
 async fn open(headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(st): State<St>) -> Response {
     let ip = client_ip(&headers, addr, st.app.trust_cf, st.app.ip_header.as_deref());
+    let agent = (crate::agent_of(&headers), crate::country_of(&headers, st.app.trust_cf));
     let (max, queue, per_ip, most) = {
         let mut b = st.app.broker.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(why) = b.admit(ip) {
@@ -138,7 +139,7 @@ async fn open(headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, St
     let p = Arc::new(Poll { ip, up: up_tx, down: tokio::sync::Mutex::new(down_rx), last: Mutex::new(Instant::now()) });
     st.polls.0.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), p);
     let app = st.app.clone();
-    tokio::spawn(async move { session(up_rx, down_tx, ip, app, max).await });
+    tokio::spawn(async move { session(up_rx, down_tx, ip, agent, app, max).await });
     cors((StatusCode::OK, [(header::CONTENT_TYPE, "text/plain")], id).into_response())
 }
 

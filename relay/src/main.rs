@@ -203,8 +203,31 @@ pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_cf: bool, ip_heade
     addr.ip()
 }
 
+/// What a client says it is: the app's own name and version (the desktop
+/// and phone apps send "xmas-tui/1.26.0 (linux)"), "web" for a browser
+/// (whatever else its user-agent says isn't kept), nothing for an older
+/// app, which sends none. Only for the console; anyone can say anything.
+pub fn agent_of(headers: &HeaderMap) -> String {
+    match headers.get("user-agent").and_then(|v| v.to_str().ok()) {
+        Some(ua) if ua.starts_with("xmas-tui/") => ua.chars().filter(|c| !c.is_control()).take(48).collect(),
+        Some(_) => "web".into(),
+        None => String::new(),
+    }
+}
+
+/// The country Cloudflare says the client's address is in (two letters:
+/// its CF-IPCountry header), when its headers are believed; else nothing.
+/// Only for the console.
+pub fn country_of(headers: &HeaderMap, trust_cf: bool) -> String {
+    if !trust_cf {
+        return String::new();
+    }
+    headers.get("cf-ipcountry").and_then(|v| v.to_str().ok()).map(|v| v.trim()).filter(|v| v.len() == 2 && v.bytes().all(|b| b.is_ascii_alphanumeric())).map(|v| v.to_ascii_uppercase()).unwrap_or_default()
+}
+
 async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(app): State<App>) -> Response {
     let ip = client_ip(&headers, addr, app.trust_cf, app.ip_header.as_deref());
+    let agent = (agent_of(&headers), country_of(&headers, app.trust_cf));
     let max = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(why) = b.admit(ip) {
@@ -212,14 +235,14 @@ async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): Connect
         }
         b.limits().max_payload
     };
-    ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, app, max))
+    ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, agent, app, max))
 }
 
 /// How often the relay pings each WebSocket.
 const PING_EVERY: Duration = Duration::from_secs(30);
 
 /// A WebSocket client: its frames in and out, through a session.
-async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
+async fn conn(socket: WebSocket, ip: IpAddr, agent: (String, String), app: App, max: usize) {
     let (mut sink, mut stream) = socket.split();
     let queue = app.broker.lock().unwrap_or_else(|e| e.into_inner()).limits().max_queue;
     let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
@@ -258,7 +281,7 @@ async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
         }
         let _ = sink.close().await;
     });
-    session(up_rx, down_tx, ip, app, max).await;
+    session(up_rx, down_tx, ip, agent, app, max).await;
     reader.abort();
     // (what's queued still goes out, then the socket's closed)
     let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
@@ -267,7 +290,7 @@ async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
 /// One client, from its hello to its goodbye, whichever way its bytes come
 /// (a WebSocket, or HTTPS long polling): what it sends arrives on `up` (it's
 /// gone when that closes), and what goes to it is put on `down`.
-pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::sync::mpsc::Sender<Vec<u8>>, ip: IpAddr, app: App, max: usize) {
+pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::sync::mpsc::Sender<Vec<u8>>, ip: IpAddr, agent: (String, String), app: App, max: usize) {
     use codec::In;
     let mut reader = codec::Reader::new(max + 512);
     // the hello first, soon
@@ -301,7 +324,11 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
     };
     let joined = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-        b.may_join(&client, host).is_ok().then(|| b.join_as(ip, client, will, down.clone(), host))
+        let joined = b.may_join(&client, host).is_ok().then(|| b.join_as(ip, client, will, down.clone(), host));
+        if let Some((id, _)) = joined {
+            b.set_agent(id, &agent.0, &agent.1);
+        }
+        joined
     };
     let Some((id, _)) = joined else {
         let _ = down.send(codec::connack(5)).await;
@@ -368,9 +395,31 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::client_ip;
+    use super::{agent_of, client_ip, country_of};
     use axum::http::HeaderMap;
     use std::net::{IpAddr, SocketAddr};
+
+    /// What a client says it is: the app's own line kept (cut short, no
+    /// control characters), a browser's just "web", none nothing.
+    #[test]
+    fn what_a_client_says_it_is() {
+        let with = |ua: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("user-agent", ua.parse().unwrap());
+            agent_of(&h)
+        };
+        assert_eq!(with("xmas-tui/1.26.0 (linux)"), "xmas-tui/1.26.0 (linux)");
+        assert_eq!(with("Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0"), "web");
+        assert_eq!(with(&format!("xmas-tui/{}", "9".repeat(200))).chars().count(), 48);
+        assert_eq!(agent_of(&HeaderMap::new()), "");
+        // the country: Cloudflare's two letters, only when it's believed
+        let mut h = HeaderMap::new();
+        h.insert("cf-ipcountry", "us".parse().unwrap());
+        assert_eq!(country_of(&h, true), "US");
+        assert_eq!(country_of(&h, false), "");
+        h.insert("cf-ipcountry", "<script>".parse().unwrap());
+        assert_eq!(country_of(&h, true), "");
+    }
 
     /// The client's address: Cloudflare's header when trusted; a proxy's
     /// own header only from the proxy beside the relay (its list's last
