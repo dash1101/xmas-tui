@@ -118,6 +118,11 @@ pub struct App {
     /// on it, and a cell's size (px). Open windows (whose tops the villager
     /// can climb onto) are placed on the grid with it.
     pub screen_map: Option<(f32, f32, f32, f32, f32, f32)>,
+    /// Each UI layer's cells as the front-end draws them (bottom to top,
+    /// as `ui_layers`), in the village's cells: whole pixels, so a little
+    /// off the layer's own size, and that adds up down the screen. The
+    /// pointer's found on the layers with these.
+    pub layer_px: Vec<(f32, f32)>,
     /// The open windows (where they show), in cells: menus keep out from
     /// under them.
     window_rects: Vec<(i32, i32, i32, i32)>,
@@ -400,6 +405,7 @@ impl App {
             last_click: None,
             px_map: None,
             screen_map: None,
+            layer_px: vec![],
             window_rects: vec![],
             test_dropped: 0,
             desktop_menu: false,
@@ -476,7 +482,8 @@ impl App {
     /// Where the pointer is in part `p`'s own cells.
     fn part_pt(&self, p: usize) -> (i32, i32) {
         let k = self.part_k[p].max(1.0);
-        ((self.ptr.0 / k).floor() as i32, (self.ptr.1 / k).floor() as i32)
+        let (kx, ky) = self.part_layer[p].and_then(|i| self.layer_px.get(i).copied()).filter(|&(x, y)| x > 0.0 && y > 0.0).unwrap_or((k, k));
+        ((self.ptr.0 / kx).floor() as i32, (self.ptr.1 / ky).floor() as i32)
     }
 
     /// The village's cell under the pointer, through the zoom.
@@ -1218,6 +1225,7 @@ impl App {
         self.wid_wh = grid(ks[WIDGETS]);
         self.btn_wh = grid(ks[BUTTONS]);
         (self.layers, self.part_layer, self.part_k) = (layers, part_layer, ks);
+        self.layer_px.clear();
         self.frame.resize(w, h);
         self.menu = None;
         if remake && changed {
@@ -3273,6 +3281,35 @@ mod tests {
         app.cfg.ui = crate::config::UiCfg::default();
         app.regrid(300, 60, false);
         assert!(app.ui_layers().is_empty() && app.part_layer == [None; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A layer's cells are drawn whole pixels big, a little off its size
+    /// (72 rows of 15 px, the windows at 1.3: 19 px, not 19.5): a click
+    /// finds the row drawn under it, all the way down the screen.
+    #[test]
+    fn a_click_lands_on_the_row_drawn_under_it() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-px-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.ui.scale = 1.3;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 240, 72, true, true, false);
+        app.set_ui_layer_ok(true);
+        app.step();
+        let li = app.part_layer[WINDOWS].expect("the windows on a layer of their own");
+        let (lw, lh) = { let ls = app.ui_layers(); (ls[li].0.w, ls[li].0.h) };
+        // the front-end's cells for it: 8 x 15 px under, whole pixels over
+        let (cw, ch) = (8usize, 15usize);
+        let (ucw, uch) = (240 * cw / lw, 72 * ch / lh);
+        assert_eq!(uch, 19);
+        app.layer_px = vec![(ucw as f32 / cw as f32, uch as f32 / ch as f32)];
+        // row 20 as drawn (380 to 399 px down): row 20 all the way, not 19
+        // at its top half
+        for (px, row) in [(381.0, 20), (386.0, 20), (398.0, 20), (400.0, 21), (12.0, 0)] {
+            app.mouse_at(MouseIn::Move, 100.0 / cw as f32, px / ch as f32);
+            assert_eq!(app.settings.hover.1, row, "{px} px down");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

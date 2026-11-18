@@ -407,7 +407,7 @@ fn fetch_weather(cfg: &WeatherCfg, coords: &mut Option<(f64, f64, String)>) -> W
                 }
             }
         } else {
-            w.status = "set [weather] city in config".into();
+            w.status = "set its city in the menu (Widgets)".into();
             return w;
         }
     }

@@ -324,6 +324,9 @@ impl Runner {
         // the UI's own layers: each one's grid (as the app has it), cells to
         // fit over the village's
         let want: Vec<(usize, usize, usize, usize)> = app.ui_layers().iter().map(|(f, _)| (f.w, f.h, (cols * cw / f.w.max(1)).max(1), (rows * ch / f.h.max(1)).max(1))).collect();
+        // (the app finds the pointer on them by these: whole pixels, a
+        // little off each layer's size)
+        app.layer_px = want.iter().map(|&(_, _, ucw, uch)| (ucw as f32 / cw.max(1) as f32, uch as f32 / ch.max(1) as f32)).collect();
         if want.len() != g.layers.len() || want.iter().zip(&g.layers).any(|(a, l)| *a != l.grid) {
             g.layers = want.iter().map(|&grid| GLayer { grid, raster: Raster::new(grid.2, grid.3), prev: vec![], pics: vec![] }).collect();
             g.force = true;
