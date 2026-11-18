@@ -600,6 +600,14 @@ pub struct Trail {
     /// as a lurch).
     low: f32,
     off: Option<f32>,
+    /// How much later than the quickest their messages come (the most
+    /// lately, fading slowly), and when that was last heard: what the
+    /// delay must cover for them to be in on time.
+    late: f32,
+    late_at: f32,
+    /// How far behind they're drawn now (see `delay`): eased toward what
+    /// `late` needs, never a sudden change.
+    delay: f32,
 }
 
 impl Trail {
@@ -629,6 +637,11 @@ impl Trail {
         }
         let d = now - at;
         self.low = if self.off.is_some() { (self.low + 0.0005).min(d) } else { d };
+        // (how late this one was, against the quickest; the most late,
+        // fading 0.05 s a second)
+        let late = (d - self.low).clamp(0.0, 2.0);
+        self.late = late.max(self.late - 0.05 * (now - self.late_at).max(0.0));
+        self.late_at = now;
         // (far out, their clock jumped, or the first heard: from there)
         if self.off.is_none_or(|o| (self.low - o).abs() > 2.0) {
             self.off = Some(self.low);
@@ -642,9 +655,28 @@ impl Trail {
     /// Each frame: what's drawn by follows their clock, at most a few
     /// hundredths faster or slower than it.
     pub fn tick(&mut self, dt: f32) {
+        let mut moved = 0.0;
         if let Some(o) = &mut self.off {
-            *o += (self.low - *o).clamp(-0.04 * dt, 0.04 * dt);
+            moved = (self.low - *o).clamp(-0.04 * dt, 0.04 * dt);
+            *o += moved;
         }
+        // the delay: a little over how late their messages come, between
+        // the usual 0.2 s (a good link) and 0.8 s (long polling through a
+        // slow network); a little at a time, so they're never seen to jump
+        // (while it grows they walk 5% slower, while it shrinks 3% quicker:
+        // too little to see)
+        // (and with the clock's own following above, never more than 5%
+        // in all)
+        let want = (self.late * 1.15 + 0.05).clamp(TRAIL_DELAY, MAX_DELAY);
+        let now = self.delay.max(TRAIL_DELAY);
+        let step = (want - now).clamp(-0.03 * dt, 0.05 * dt);
+        let step = (moved + step).clamp(-0.05 * dt, 0.05 * dt) - moved;
+        self.delay = (now + step).clamp(TRAIL_DELAY, MAX_DELAY);
+    }
+
+    /// How far behind them to draw them (see `tick`).
+    pub fn delay(&self) -> f32 {
+        self.delay.max(TRAIL_DELAY)
     }
 
     /// Anything heard yet (an older version doesn't say when).
@@ -692,6 +724,8 @@ impl Trail {
 /// How far behind others are drawn: a little over the time between their
 /// messages, so the next is nearly always in by then.
 const TRAIL_DELAY: f32 = 0.2;
+/// The most it grows to, on a link whose messages come very unevenly.
+const MAX_DELAY: f32 = 0.8;
 
 /// A piece of music as it's playing (see `crate::audio::Cue`), and when
 /// that was (milliseconds, the wall clock): a shared village's guests play
@@ -1858,7 +1892,7 @@ impl Online {
                 o.trail.tick(dt);
                 o.trip_trail.tick(dt);
                 o.trip_air.tick(dt);
-                if let Some((tx, ty)) = o.trail.known().then(|| o.trail.at(t, TRAIL_DELAY, 0.3)).flatten() {
+                if let Some((tx, ty)) = o.trail.known().then(|| o.trail.at(t, o.trail.delay(), 0.3)).flatten() {
                     if (tx - o.shown.0).abs() > 0.6 || (ty - o.shown.1).abs() > 0.6 {
                         o.shown = (tx, ty);
                     } else {
@@ -1887,10 +1921,10 @@ impl Online {
     pub fn trip_shown(&self, o: &Other) -> Option<TripAt> {
         let mut at = o.av.trip?;
         if o.trip_trail.known() {
-            if let Some((x, lane)) = o.trip_trail.at(self.t, TRAIL_DELAY, 0.3) {
+            if let Some((x, lane)) = o.trip_trail.at(self.t, o.trip_trail.delay(), 0.3) {
                 (at.x, at.lane) = (x, lane);
             }
-            if let Some((air, _)) = o.trip_air.at(self.t, TRAIL_DELAY, 0.0) {
+            if let Some((air, _)) = o.trip_air.at(self.t, o.trip_trail.delay(), 0.0) {
                 at.air = air.max(0.0);
             }
         }
@@ -1900,7 +1934,7 @@ impl Online {
     /// How someone is where they're drawn (a moment behind: see `Trail`):
     /// up in the air, walking, which way they face.
     pub fn shown_as(&self, o: &Other) -> (bool, bool, f32) {
-        match o.trail.known().then(|| o.trail.how(self.t, TRAIL_DELAY)).flatten() {
+        match o.trail.known().then(|| o.trail.how(self.t, o.trail.delay())).flatten() {
             Some(h) => (h & 1 != 0, h & 2 != 0, if h & 4 != 0 { 1.0 } else { -1.0 }),
             None => (o.av.air, o.av.moving, o.av.dir),
         }
@@ -2808,7 +2842,7 @@ pub(crate) mod tests {
                 next += 1;
             }
             tr.tick(dt);
-            if let Some((x, _)) = tr.at(now, TRAIL_DELAY, 0.3) {
+            if let Some((x, _)) = tr.at(now, tr.delay(), 0.3) {
                 if let Some(l) = last {
                     steps.push(x - l);
                 }
@@ -2821,6 +2855,58 @@ pub(crate) mod tests {
         let (lo, hi) = walking.iter().fold((f32::MAX, f32::MIN), |(a, b), &s| (a.min(s), b.max(s)));
         assert!(lo > dt * 0.92 && hi < dt * 1.08, "uneven: {lo} .. {hi} a frame (want about {dt})");
         sent.clear();
+    }
+
+    /// The same walk heard over long polling through a slow network: the
+    /// messages come in bursts, one a round trip, up to half a second late.
+    /// The delay grows to cover it (no hops, no stops, once it has); on a
+    /// good link it stays at the usual 0.2 s.
+    #[test]
+    fn a_walk_heard_in_long_polling_bursts_is_drawn_evenly() {
+        let walk = |late: &dyn Fn(usize, f32) -> f32| -> (Vec<f32>, f32) {
+            let mut tr = Trail::default();
+            let sent: Vec<(f32, f32)> = (0..160).map(|i| (500.0 + i as f32 * 0.1, i as f32 * 0.1)).collect();
+            let arrive: Vec<f32> = sent.iter().enumerate().map(|(i, (at, _))| at - 500.0 + late(i, at - 500.0)).collect();
+            let (mut next, mut last, mut steps, mut now) = (0, None::<f32>, vec![], 0.0f32);
+            let dt = 1.0 / 60.0;
+            while now < 15.0 {
+                while next < sent.len() && arrive[next] <= now {
+                    tr.heard(now, sent[next].0, sent[next].1, 0.0, 0.6);
+                    next += 1;
+                }
+                tr.tick(dt);
+                if let Some((x, _)) = tr.at(now, tr.delay(), 0.3) {
+                    if let Some(l) = last {
+                        steps.push(x - l);
+                    }
+                    last = Some(x);
+                }
+                now += dt;
+            }
+            (steps, tr.delay())
+        };
+        let dt = 1.0 / 60.0;
+        // bursts: everything sent waits for the next round trip (0.15 to
+        // 0.45 s apart), then comes at once, 40 ms on
+        let trips: Vec<f32> = {
+            let mut v = vec![0.0f32];
+            let gaps = [0.15, 0.3, 0.45, 0.2, 0.4, 0.25, 0.35];
+            for i in 0..200 {
+                let n = v[v.len() - 1] + gaps[i % gaps.len()];
+                v.push(n);
+            }
+            v
+        };
+        let burst = |_: usize, sent: f32| -> f32 { trips.iter().find(|&&r| r >= sent).copied().unwrap_or(sent) - sent + 0.04 };
+        let (steps, delay) = walk(&burst);
+        // (once it's grown: after the first eight seconds)
+        let later: Vec<f32> = steps.iter().copied().skip(8 * 60).take(6 * 60).collect();
+        let (lo, hi) = later.iter().fold((f32::MAX, f32::MIN), |(a, b), &s| (a.min(s), b.max(s)));
+        assert!(lo > dt * 0.85 && hi < dt * 1.15, "uneven over long polling: {lo} .. {hi} a frame (want about {dt}), drawn {delay} s behind");
+        assert!(delay > 0.4 && delay <= MAX_DELAY, "{delay}");
+        // a good link: 60 ms, steady: the usual delay
+        let (_, delay) = walk(&|_, _| 0.06);
+        assert!((delay - TRAIL_DELAY).abs() < 1e-3, "{delay}");
     }
 
     /// A public square's own settings come from the village's own relay

@@ -469,6 +469,19 @@ pub extern "C" fn buttons_k(w: *mut Web) -> f32 {
     unsafe { &*w }.game.buttons_k()
 }
 
+/// A row of the menus and talk, in the canvas's pixels: the page's own
+/// boxes are sized to match.
+#[no_mangle]
+pub extern "C" fn ui_row_px(w: *mut Web) -> f32 {
+    unsafe { &*w }.game.ui_row_px().0
+}
+
+/// The menus' size setting (the row above includes it).
+#[no_mangle]
+pub extern "C" fn ui_menus_k(w: *mut Web) -> f32 {
+    unsafe { &*w }.game.ui_row_px().1
+}
+
 /// What weather to fetch ("city|f" or "city|c"; empty: none): its length.
 #[no_mangle]
 pub extern "C" fn weather_want(w: *mut Web) -> usize {

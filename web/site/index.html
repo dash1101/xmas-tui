@@ -14,8 +14,8 @@
   canvas { position: fixed; left: 0; top: 0; image-rendering: pixelated; image-rendering: crisp-edges; }
   #pad { width: 100vw; height: 100vh; pointer-events: none; }
   body.touch #pad { pointer-events: auto; }
-  .box { position: fixed; background: var(--panel); color: var(--text); border: 1px solid var(--gold); border-radius: 3px; font: 14px/1.45 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace; box-shadow: 0 4px 0 rgba(0,0,0,.35); }
-  #bar { top: 8px; right: 8px; display: flex; gap: 2px; padding: 1px 4px; font-size: calc(14px * var(--btn, 1)); }
+  .box { position: fixed; background: var(--panel); color: var(--text); border: 1px solid var(--gold); border-radius: 3px; font: calc(14px * var(--ui, 1))/1.45 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace; box-shadow: 0 4px 0 rgba(0,0,0,.35); }
+  #bar { top: 8px; right: 8px; display: flex; gap: 2px; padding: 1px 4px; font-size: calc(14px * var(--btn, 1) * var(--unit, 1)); }
   #bar span { cursor: pointer; padding: 0 7px; }
   #bar span:hover { color: var(--gold); }
   #opts { display: none; width: min(94vw, 440px); max-height: min(86vh, 640px); flex-direction: column; }
@@ -43,15 +43,15 @@
   .btn.quiet { background: #24305a; color: var(--text); border: 1px solid var(--gold); }
   .friend { border: 1px solid #3a4470; padding: 4px 8px; margin: 6px 0; }
   .friend .row select { max-width: 92px; }
-  #ask { display: none; left: 50%; bottom: 22%; transform: translateX(-50%); width: min(92vw, 520px); padding: 8px 10px 10px; }
+  #ask { display: none; left: 50%; bottom: 22%; transform: translateX(-50%); width: min(92vw, calc(520px * var(--ui, 1))); padding: 8px 10px 10px; }
   #ask.open { display: block; }
   #ask-q { white-space: pre-line;  color: var(--gold); margin-bottom: 6px; }
   #ask-in { width: 100%; box-sizing: border-box; background: #0b1020; color: var(--text); border: 1px solid var(--gold); font: inherit; padding: 4px 6px; outline: none; }
-  #ask-hint { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  #ask-hint { color: var(--dim); font-size: 0.86em; margin-top: 4px; }
   #ask .btns { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
   #toast { left: 50%; bottom: 18px; transform: translateX(-50%); padding: 3px 12px; display: none; pointer-events: none; }
   #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--gold); font: 18px ui-monospace, monospace; }
-  @media (max-width: 520px) { .box { font-size: 13px; } .row input[type=range] { width: 100px; } }
+  @media (max-width: 520px) { .row input[type=range] { width: 100px; } }
 </style>
 </head>
 <body>

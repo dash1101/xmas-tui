@@ -163,6 +163,7 @@ function save() {
   try { localStorage.setItem(KEY, getText(wasm.save(game))); } catch (e) {}
 }
 
+let barAway = false;
 function frame(now) {
   const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / 30;
   last = now;
@@ -177,6 +178,10 @@ function frame(now) {
     asked(getText(wasm.ask(game)));
     netPump(now);
     feedAudio();
+    // (the menu open: the page's buttons step aside, off its title bar and
+    // its ✕; the menu has its own way back)
+    const menu = !!wasm.panel_open(game);
+    if (menu !== barAway) { barAway = menu; document.getElementById("bar").style.visibility = menu ? "hidden" : ""; }
   }
   if (touchy) drawPad();
   requestAnimationFrame(frame);
@@ -749,6 +754,16 @@ function pickWords(label, k, values, words) {
 function btnScale() { return game ? Math.max(0.6, Math.min(2.5, wasm.buttons_k(game))) : 1; }
 function sizeButtons() {
   document.documentElement.style.setProperty("--btn", btnScale());
+  // the page's own boxes (talk, the buttons, notes) at the size of the
+  // village's menus: letters of 14px sit in about 18 css px of a row
+  // (--ui: with the menus' size setting, for talk and notes; --unit:
+  // without it, for the buttons, which have their own)
+  const dpr = window.devicePixelRatio || 1;
+  const row = game && wasm.ui_row_px ? wasm.ui_row_px(game) * K / dpr : 20;
+  const menus = game && wasm.ui_menus_k ? wasm.ui_menus_k(game) : 1;
+  const r = document.documentElement.style;
+  r.setProperty("--ui", Math.max(0.6, Math.min(3, row / 18)).toFixed(3));
+  r.setProperty("--unit", Math.max(0.6, Math.min(3, row / menus / 18)).toFixed(3));
   if (touchy) drawPad();
 }
 function slide(label, k, min, max, unit, live) {
@@ -995,6 +1010,8 @@ function resized() {
   pad.width = innerWidth; pad.height = innerHeight;
   wasm.resize(game, W, H, cellSize(dpr));
   img = null;
+  // (the page's own boxes, to the new size of the village's)
+  sizeButtons();
 }
 addEventListener("resize", () => { clearTimeout(window._rs); window._rs = setTimeout(resized, 250); });
 document.addEventListener("visibilitychange", () => { if (document.hidden) save(); });

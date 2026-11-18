@@ -924,7 +924,8 @@ impl Game {
     pub fn hover(&mut self, x: f32, y: f32) {
         // the friends widget's row under the pointer, picked out
         if let Some(r) = self.friends_at {
-            let vc = self.cell(x, y);
+            // (on the UI's layer: its cells)
+            let vc = self.ui_cell(x, y);
             self.friends_hover = match (r.contains(vc.0, vc.1), self.scene.friends_view()) {
                 (true, Some(v)) => crate::widgets::face::friends_rows(r, &v).into_iter().find(|(y, _)| *y == vc.1).map(|(_, h)| h),
                 _ => None,
@@ -1035,6 +1036,15 @@ impl Game {
     /// How big the buttons up top are (the page's own bar follows it).
     pub fn buttons_k(&self) -> f32 {
         self.cfg.ui.buttons_k()
+    }
+
+    /// One row of the menus and talk, in the canvas's pixels (with the
+    /// menus' size setting), and that setting: what the web page sizes its
+    /// own boxes by, so they and the village's windows grow and shrink
+    /// together.
+    pub fn ui_row_px(&self) -> (f32, f32) {
+        let ch = self.ui.as_ref().map_or(self.raster.ch, |u| u.ch) as f32;
+        (ch, self.cfg.ui.scale.clamp(1.0, 2.5))
     }
 
     /// The settings as they stand, for the app to keep (TOML).
@@ -1637,35 +1647,6 @@ impl Game {
             let n = note.chars().count() as i32;
             self.frame.text((self.frame.w as i32 - n) / 2, 3, note, crate::color::Rgb::hex(0xbfe4ff), crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.85), 0.0);
         }
-        // the widgets (the web page), on the village's own grid as on the
-        // desktop: down the right-hand side, under the
-        // page's own buttons, where there's room for them
-        self.friends_at = None;
-        if self.widgets && self.frame.w >= 110 && !self.panel.open {
-            use crate::widgets::{face, Rect};
-            let x = self.frame.w as i32 - 64;
-            let mut y = 5;
-            if self.cfg.clock.enabled {
-                y = face::draw_clock(&mut self.frame, x + 2, y, &self.cfg.clock, t) + 1;
-            }
-            if self.cfg.widgets.weather {
-                let r = Rect { x, y, w: 60, h: 8 };
-                face::draw_weather(&mut self.frame, r, &self.weather, t);
-                crate::widgets::looks::apply(&mut self.frame, r, &self.cfg.widgets.looks.weather, face::PANEL, 4);
-                y += 9;
-            }
-            if self.cfg.widgets.friends {
-                if let Some(v) = self.scene.friends_view() {
-                    let r = Rect { x: x + 20, y, w: 40, h: 10 };
-                    if r.y + r.h <= self.frame.h as i32 {
-                        face::draw_friends(&mut self.frame, r, &v, self.friends_hover, t);
-                        crate::widgets::looks::apply(&mut self.frame, r, &self.cfg.widgets.looks.friends, face::PANEL, 4);
-                        self.friends_at = Some(r);
-                    }
-                }
-            }
-        }
-
         let look = self.cfg.ui.look.clone();
         if self.panel.open {
             self.fill_net();
@@ -1689,6 +1670,41 @@ impl Game {
             }
             None => &mut self.frame,
         };
+        // the widgets (the web page): on the UI's layer, as big as the menus
+        // and talk (they grow with the browser's zoom and the menus' size,
+        // as the page's own boxes do), down the right-hand side under the
+        // page's buttons, where there's room
+        self.friends_at = None;
+        if self.widgets && !self.panel.open {
+            use crate::widgets::{face, Rect};
+            // (zoomed right in, not all of them fit: the weather goes
+            // first, then friends; the clock stays)
+            let room = if layered { 66 } else { 110 };
+            if uf.w >= room {
+                let x = uf.w as i32 - 64;
+                let mut y = if layered { 2 } else { 5 };
+                if self.cfg.clock.enabled {
+                    y = face::draw_clock(uf, x + 2, y, &self.cfg.clock, t) + 1;
+                }
+                let friends_room = if self.cfg.widgets.friends { 10 } else { 0 };
+                if self.cfg.widgets.weather && y + 9 + friends_room <= uf.h as i32 {
+                    let r = Rect { x, y, w: 60, h: 8 };
+                    face::draw_weather(uf, r, &self.weather, t);
+                    crate::widgets::looks::apply(uf, r, &self.cfg.widgets.looks.weather, face::PANEL, 4);
+                    y += 9;
+                }
+                if self.cfg.widgets.friends {
+                    if let Some(v) = self.scene.friends_view() {
+                        let r = Rect { x: x + 20, y, w: 40, h: 10 };
+                        if r.y + r.h <= uf.h as i32 {
+                            face::draw_friends(uf, r, &v, self.friends_hover, t);
+                            crate::widgets::looks::apply(uf, r, &self.cfg.widgets.looks.friends, face::PANEL, 4);
+                            self.friends_at = Some(r);
+                        }
+                    }
+                }
+            }
+        }
         if layered {
             self.scene.draw_ui(uf);
         }
@@ -1963,7 +1979,7 @@ impl Game {
         if self.menu_touch(action, uc) {
             return;
         }
-        if self.friends_touch(action, c) {
+        if self.friends_touch(action, uc) {
             return;
         }
         match action {
