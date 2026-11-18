@@ -660,10 +660,10 @@ async function refresh() {
     $("bans").innerHTML = r.bans.map((ip) => `<tr><td>${esc(ip)}</td><td><button data-unban="${esc(ip)}">unban</button></td></tr>`).join("") || `<tr><td class="note">nobody</td></tr>`;
     if (!editing) { limits = r.limits; drawLimits(); }
     const cs = await (await fetch("api/conns")).json();
-    const what = (c) => c.host ? "the relay's host" + (c.agent ? " · " + c.agent : "") : c.agent || "an older app";
+    const what = (c) => c.host ? "the relay's host" + (c.agent ? " · " + c.agent : "") : c.agent || "(doesn't say)";
     $("conns").innerHTML = cs.map((c) => `<tr><td>${c.id}</td><td>${esc(c.ip)}${c.country ? ` <span class="note">${esc(c.country)}</span>` : ""}</td><td>${esc(what(c))}</td><td>${esc(c.client)}</td><td>${ago(c.secs)}</td><td>${c.subs}</td><td>${c.sent}</td><td>${c.got}</td><td>${c.dropped}</td><td><button data-kick="${c.id}">kick</button> ${c.host ? "" : `<button class="bad" data-ban="${esc(c.ip)}">block address</button>`}</td></tr>`).join("") || `<tr><td colspan="10" class="note">nobody right now</td></tr>`;
     const tally = {};
-    cs.filter((c) => !c.host).forEach((c) => { const k = c.agent || "an older app"; tally[k] = (tally[k] || 0) + 1; });
+    cs.filter((c) => !c.host).forEach((c) => { const k = c.agent || "(doesn't say)"; tally[k] = (tally[k] || 0) + 1; });
     $("versions").textContent = Object.keys(tally).length ? "by version: " + Object.entries(tally).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + " × " + n).join(" · ") : "";
   } catch (e) { $("msg").textContent = "can't reach the relay: " + e; }
 }

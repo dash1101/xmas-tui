@@ -204,12 +204,14 @@ pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_cf: bool, ip_heade
 }
 
 /// What a client says it is: the app's own name and version (the desktop
-/// and phone apps send "xmas-tui/1.26.0 (linux)"), "web" for a browser
-/// (whatever else its user-agent says isn't kept), nothing for an older
-/// app, which sends none. Only for the console; anyone can say anything.
+/// and phone apps send "xmas-tui/1.26.0 (linux)"; before 1.25.2, just
+/// "xmas-tui"), "web" for a browser (whatever else its user-agent says
+/// isn't kept), nothing for one that sends none. Only for the console;
+/// anyone can say anything.
 pub fn agent_of(headers: &HeaderMap) -> String {
     match headers.get("user-agent").and_then(|v| v.to_str().ok()) {
         Some(ua) if ua.starts_with("xmas-tui/") => ua.chars().filter(|c| !c.is_control()).take(48).collect(),
+        Some("xmas-tui") => "xmas-tui (1.25.1 or older)".into(),
         Some(_) => "web".into(),
         None => String::new(),
     }
@@ -410,6 +412,7 @@ mod tests {
         };
         assert_eq!(with("xmas-tui/1.26.0 (linux)"), "xmas-tui/1.26.0 (linux)");
         assert_eq!(with("Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0"), "web");
+        assert_eq!(with("xmas-tui"), "xmas-tui (1.25.1 or older)");
         assert_eq!(with(&format!("xmas-tui/{}", "9".repeat(200))).chars().count(), 48);
         assert_eq!(agent_of(&HeaderMap::new()), "");
         // the country: Cloudflare's two letters, only when it's believed

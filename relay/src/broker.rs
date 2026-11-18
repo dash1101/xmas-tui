@@ -438,10 +438,6 @@ impl Broker {
         let now = Instant::now();
         c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
         c.tokens_at = now;
-        // kept out of this village: not heard there
-        if self.kept_out.get(topic).is_some_and(|keys| kept_out_of(keys, c)) {
-            return Ok(());
-        }
         // the relay's own topics: only its host speaks there, and only in
         // its villages (`v/`) and to the relay (`report/`)
         if topic.starts_with(ADMIN) {
@@ -462,11 +458,11 @@ impl Broker {
                 return Ok(());
             }
         }
-        // (a banned village: nothing through)
-        if self.blocked.contains(topic) {
-            return Ok(());
-        }
-        if c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
+        // a banned village, or one this player's kept out of: nothing
+        // through (counted against them like any message turned down, so
+        // one who floods it is still let go)
+        let shut = self.blocked.contains(topic) || self.kept_out.get(topic).is_some_and(|keys| kept_out_of(keys, c));
+        if shut || c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
             c.dropped += 1;
             self.stats.dropped += 1;
             // far over, for long: gone
