@@ -78,8 +78,10 @@ The relay runs on a server the project looks after, behind Cloudflare. Like any 
 - **The IP address** of each connection. It's used to limit how many connections one address can make, and, if the relay is being abused, to block that address.
 - **When** a connection comes and goes, how much it sends, and **which topics** it uses. Topics are long codes made from hashes, which don't say who is talking to whom.
 - **A player tag** (from 1.25.0): a number worked out from the player's friend code by a one-way hash, sent as part of the connection's name. It's the same each time the same player connects, so that if a player is kept out, it holds when they come back. The friend code can't be worked out from it.
+- **The app's version and system** (from 1.25.2): for example "xmas-tui/1.25.2 (linux)", sent by the desktop and phone apps when they connect. The web page sends what every browser sends to every site (its user-agent), and of that the relay keeps only that it's a browser. The admin console shows this beside the connection while it's open, and it isn't written down.
+- **The country** the address is in, as Cloudflare works it out and passes it along (two letters, for example "US"). The console shows it beside the address while the connection is open, and it isn't written down.
 
-The relay doesn't log connections or messages. Its own log has only lines like "started" and "stopping". The project's admin console shows the connections open right now (address, how long connected, how much sent) and totals, and what the relay's own host reports (below). It's protected by a sign-in, and none of it is written down, apart from what's listed under "What the relay keeps".
+The relay doesn't log connections or messages. Its own log has only lines like "started" and "stopping". The project's admin console shows the connections open right now (address, how long connected, how much sent) and totals, and what the relay's own host reports (below). It also shows the villages in use right now and the connections in each (a private village only as part of its topic: the relay can't tell its name, or read what's said there). It's protected by a sign-in, and none of it is written down, apart from what's listed under "What the relay keeps".
 
 ### The relay's own host
 
@@ -92,7 +94,7 @@ In the villages it keeps, the host is there like any other player, so it sees wh
 
 These are held in memory only, replaced as they come, and gone within two minutes once the host stops sending them. They're never written to disk. The host doesn't see friends' messages, and it doesn't keep "just to …" messages.
 
-From the console, the project can quieten someone in those villages (what they say isn't passed on), send someone home, make announcements (now, or at set times), greet newcomers, and keep villages or players out of the relay.
+From the console, the project can quieten someone in those villages (what they say isn't passed on), send someone home, make announcements (now, or at set times), greet newcomers, and keep villages or players out of the relay, or a player out of just one of those villages. Beside each player in those villages, the console shows the address they're connected from (which the relay sees anyway), so that an address can be blocked.
 
 ### What the relay keeps, and for how long
 
@@ -106,6 +108,7 @@ From the console, the project can quieten someone in those villages (what they s
 | Server villages: their names, codes and settings | Until the project removes them |
 | Villages kept out: their codes, the name they were listed under, why, and when | Until lifted |
 | Players kept out: their id and player tag, the name they went by, why, and when | Until lifted |
+| Players kept out of one village the host keeps: their id and player tag (and their address too, if the project chooses), the name they went by, why, and when | Until lifted |
 | Players quietened in a village the host keeps: their id | Until lifted |
 | The welcome said in each village the host keeps, announcements still to come, extra words starred out in public villages, and the public list's order | Until changed |
 

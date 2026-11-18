@@ -90,12 +90,44 @@ sudo docker compose logs --tail 8 xmas-host   # "keeping North Pole Square open"
 
 ## Updating
 
+The images follow `latest` unless a version is set in `.env` (`RELAY_TAG=1.4.0`, `HOST_TAG=1.25.2`).
+By hand:
+
 ```bash
 cd /opt/xmas-relay
-sudo curl -fsSLo compose.yaml https://raw.githubusercontent.com/dash1101/xmas-tui/main/relay/compose.yaml   # the new version's tag
 sudo docker compose pull
 sudo docker compose up -d
 ```
+
+Players are dropped for a few seconds and come straight back.
+
+### From the console (the update button, from relay 1.4.0)
+
+The console's **UPDATE** section does the same from the browser, through a small updater that
+runs beside the relay. It's off until it's set up:
+
+```bash
+cd /opt/xmas-relay
+sudo curl -fsSLo compose.yaml https://raw.githubusercontent.com/dash1101/xmas-tui/main/relay/compose.yaml
+sudo mkdir -p updater
+sudo curl -fsSLo updater/update.sh https://raw.githubusercontent.com/dash1101/xmas-tui/main/relay/updater/update.sh
+# in .env, two more lines:
+#   COMPOSE_PROFILES=updater
+#   PROJECT_DIR=/opt/xmas-relay
+sudo docker compose up -d
+sudo docker compose logs --tail 5 xmas-updater   # "watching /data for requests…"
+```
+
+- The relay can't touch Docker itself. Pressing the button writes a file (`data/update.request`);
+  the updater sees it within a few seconds, runs `docker compose pull` and `up -d` for
+  `xmas-relay` and `xmas-host` only, and writes how it went (`data/update.status`), which the
+  console shows.
+- The updater holds the Docker socket, which is full control of Docker on the machine. So it
+  has no ports and no network, a read-only file system, and never reads what's in the request
+  file. Whoever can press the button (the console's sign-in) can restart the relay with the
+  newest image, and nothing more. Left off, nothing on the machine holds the socket.
+- A request more than ten minutes old is dropped, not acted on late.
+- The updater doesn't update itself. `compose.yaml` and `update.sh` change by hand, as above.
 
 ## Check
 

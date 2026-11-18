@@ -7,7 +7,8 @@
 #   xmas-admin.novalabs.app → http://localhost:8081   (behind Cloudflare Access)
 services:
   xmas-relay:
-    image: ghcr.io/dash1101/xmas-relay:1.3.0
+    # (unset: the newest; RELAY_TAG=1.4.0 in .env keeps it at a version)
+    image: ghcr.io/dash1101/xmas-relay:${RELAY_TAG:-latest}
     container_name: xmas-relay
     restart: unless-stopped
     ports:
@@ -39,7 +40,8 @@ services:
       start_period: 5s
 
   xmas-host:
-    image: ghcr.io/dash1101/xmas-host:1.25.0
+    # (unset: the newest; HOST_TAG=1.25.2 in .env keeps it at a version)
+    image: ghcr.io/dash1101/xmas-host:${HOST_TAG:-latest}
     container_name: xmas-host
     restart: unless-stopped
     depends_on: [xmas-relay]
@@ -52,3 +54,37 @@ services:
     mem_limit: 512m
     cpus: 1
 
+  # The updater, for the console's "update" button. Off unless asked for:
+  # COMPOSE_PROFILES=updater and PROJECT_DIR=<this folder's full path> in
+  # .env, and updater/update.sh beside this file. When the button's pressed
+  # it pulls the newest images for the relay and its host and starts them
+  # again (see updater/update.sh).
+  #
+  # It holds the Docker socket, which is full control of Docker on this
+  # machine. So it has no ports and no network at all, a read-only file
+  # system, and takes requests only as a file from the relay's data folder,
+  # whose content it never reads. Without it, updating is by hand:
+  # docker compose pull && docker compose up -d
+  xmas-updater:
+    profiles: ["updater"]
+    image: docker:27-cli
+    container_name: xmas-updater
+    restart: unless-stopped
+    network_mode: none
+    working_dir: ${PROJECT_DIR:-/opt/xmas-relay}
+    command: ["sh", "updater/update.sh"]
+    environment:
+      PROJECT_DIR: ${PROJECT_DIR:-/opt/xmas-relay}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-xmas-relay}
+      DOCKER_CONFIG: /tmp/.docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # (the same path inside as on the machine, so "./data" means the same)
+      - ${PROJECT_DIR:-/opt/xmas-relay}:${PROJECT_DIR:-/opt/xmas-relay}:ro
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5

@@ -46,8 +46,9 @@ impl Http {
             self.buf.clear();
         }
         let host = if (self.url.tls && self.url.port == 443) || (!self.url.tls && self.url.port == 80) { self.url.host.clone() } else { format!("{}:{}", self.url.host, self.url.port) };
+        let agent = ws::user_agent();
         let head = format!(
-            "POST {}{path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: xmas-tui\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+            "POST {}{path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {agent}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
             self.url.path.trim_end_matches('/'),
             body.len()
         );

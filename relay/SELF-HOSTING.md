@@ -31,6 +31,13 @@ containers, and its players point their game at it.
    console is never to be exposed openly.
 4. `docker compose up -d`, then `docker compose logs --tail 10`.
 
+## Updating
+
+`docker compose pull && docker compose up -d` takes the newest images (or the versions set with
+`RELAY_TAG` and `HOST_TAG` in `.env`). The console can do it too, with its **update** button,
+once the updater beside the relay is turned on: [DEPLOY.md](DEPLOY.md#updating) has the steps,
+and what holding the Docker socket means.
+
 ## Players
 
 In the game: **Menu → Online → Relay**, the address (for example `wss://relay.example.org/mqtt`).
