@@ -2885,6 +2885,37 @@ pub(crate) mod tests {
         assert_eq!(b.headcount().map(|h| h.1), Some(SQUARE_LIMIT));
     }
 
+    /// The real relay, its squares kept by its own host: a player joining
+    /// North Pole Square is a guest there, not its host. Needs only the
+    /// relay (`XMAS_RELAY=wss://xmas-relay.novalabs.app/mqtt cargo test
+    /// --release live_squares -- --ignored`).
+    #[test]
+    #[ignore]
+    fn live_squares_are_kept_by_the_relays_host() {
+        std::env::var("XMAS_RELAY").expect("XMAS_RELAY (the relay, e.g. wss://xmas-relay.novalabs.app/mqtt)");
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Check");
+        let mut la = None;
+        let av = Some(Avatar { x: 1.0, ..Default::default() });
+        let mut t = 0.0;
+        let mut step = |a: &mut Online, n: usize| {
+            for _ in 0..n {
+                tcp::pump(a, &mut la);
+                a.tick(t, av, 1);
+                a.take_events();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                t += 0.05;
+            }
+        };
+        step(&mut a, 100);
+        assert_eq!(a.link(), Link::On, "couldn't reach the relay");
+        a.join_square(0);
+        step(&mut a, 160);
+        assert_eq!(a.square().map(|s| s.1), Some(false), "hosting the square itself (the relay's host isn't there?)");
+        assert!(a.host_id().is_some_and(|h| h < HOST_IDS), "the square's host isn't the relay's: {:?}", a.host_id());
+        a.leave_village();
+        step(&mut a, 10);
+    }
+
     /// The relay's own host keeping the squares (needs a relay and a host
     /// running: XMAS_RELAY, and XMAS_ADMIN for the relay's console, opened
     /// with ADMIN_OPEN=1): players come in as its guests, never hosting;
