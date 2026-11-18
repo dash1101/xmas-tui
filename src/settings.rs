@@ -179,6 +179,8 @@ pub enum Act {
     Restart,
     /// Pause the village, or carry on.
     Pause,
+    /// The privacy page (PRIVACY.md on GitHub), in the browser.
+    Privacy,
     /// The controls card.
     Help,
     /// A setting that's a public square's own (pointed at: says so).
@@ -705,7 +707,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 false
             }
         }
-        Act::Net(_) | Act::Restart | Act::Pause | Act::Help | Act::Locked => false,
+        Act::Net(_) | Act::Restart | Act::Pause | Act::Privacy | Act::Help | Act::Locked => false,
         Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
 }
@@ -767,6 +769,7 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Restart => return Some("Start xmas-tui again (the settings and the village are kept)."),
         Act::Locked => return Some("In a public square this one's the square's own (set by its keeper), the same for everyone there. Snow, wind, glow and the aurora stay yours."),
         Act::Help => return Some("The controls: the keys, and what clicking and dragging do."),
+        Act::Privacy => return Some("What xmas-tui keeps and sends, and to whom (no ads, no tracking): opens PRIVACY.md on GitHub."),
         Act::Pause => return Some("The village stands still and goes quiet; friends, and a village you're hosting, carry on (the others see you greyed). P does it too."),
         Act::Net(NET_ONLINE) => return Some("Online: friends, messages, villages to visit and share. Everything's sealed end to end."),
         Act::Net(NET_COPY) => return Some("Copy your friend code, to give to a friend (they add it, you say yes)."),
@@ -934,6 +937,9 @@ pub fn centre_rect(w: i32) -> Rect {
 pub fn online_rect(w: i32) -> Rect {
     Rect { x: w - 53, y: 0, w: 13, h: 1 }
 }
+
+/// The privacy page (the menu's Upkeep and Online tabs open it).
+pub const PRIVACY_URL: &str = "https://github.com/dash1101/xmas-tui/blob/main/PRIVACY.md";
 
 /// The pause button (⏸, and ▶ to carry on), left of the friends one.
 pub fn pause_rect(w: i32) -> Rect {
@@ -2215,6 +2221,9 @@ impl Settings {
         self.check(f, lx, yy, "Star out strong language", Act::Toggle(F::CleanWords), cfg.scene.clean_words);
         yy += 1;
         f.text(lx, yy, "Links are always hidden, with a button to show each one.", pal::UI_DIM, BG, 0.0);
+        yy += 2;
+        let x = f.text(lx, yy, "Sealed end to end; what's sent, kept and to whom: ", pal::UI_DIM, BG, 0.0);
+        self.button(f, x, yy, "privacy ↗", Act::Privacy);
     }
 
     /// Looking after things: the save, a restart, settings back as they
@@ -2300,6 +2309,11 @@ impl Settings {
             self.button(f, cx + 2, yy, label, a);
         }
         }
+        yy += 2;
+        self.section(f, lx, yy, "PRIVACY");
+        yy += 1;
+        let x = f.text(lx, yy, "No ads, no tracking, nothing sold. What's kept and sent: ", pal::UI_DIM, BG, 0.0);
+        self.button(f, x, yy, "PRIVACY.md ↗", Act::Privacy);
     }
 
     fn tab_sound(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, t: f32) {

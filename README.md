@@ -926,6 +926,10 @@ Measured on a 5120×1440 screen (the size it was designed for; it adapts to any 
 | Live at 30 fps | xmas-tui ~10% of one core, kitty ~10% of one core |
 | Memory | xmas-tui 17 MB, kitty 174 MB |
 
+## 🔒 Privacy
+
+No accounts, no ads, no analytics or tracking, no cookies. The settings and the save stay on the device. Online play is off until it's turned on, and what goes through the relay is sealed end to end. The weather widget asks Open-Meteo, and the desktop app checks GitHub for updates. [PRIVACY.md](PRIVACY.md) sets out everything that's kept and sent, to whom, and for how long (Menu → Upkeep → Privacy links to it too).
+
 ## 📜 License
 Source-available, all rights reserved: see [LICENSE](LICENSE). The code is here to read and learn from, and the
 official releases are free to use for personal, non-commercial use. Copying, redistributing, publishing modified

@@ -262,7 +262,7 @@ impl Scene {
                     _ if p.waiting => ("· asked, no answer yet", pal::UI_DIM),
                     Some(h) if h.village.is_some() => ("· ⌂ their village is open", Rgb::hex(0xffd36b) * 0.85),
                     Some(h) if h.on => ("· ● online", Rgb::hex(0x9be08a)),
-                    _ => ("· ○ offline (it waits for them)", pal::UI_DIM),
+                    _ => ("· ○ offline: lines reach them only while they're online", pal::UI_DIM),
                 };
                 let x = f.text(x + 1, y0 + 3, what, col, bg, 0.0);
                 if here.as_ref().is_some_and(|h| h.village.is_some()) {

@@ -1788,6 +1788,8 @@ impl Online {
     pub fn remove_friend(&mut self, i: usize) {
         if i < self.book.friends.len() {
             let topic = self.live[i].here_topic.clone();
+            // (the chat with them goes too)
+            self.clear_chat(i);
             self.book.friends.remove(i);
             self.dirty = true;
             self.relive();
@@ -1828,6 +1830,15 @@ impl Online {
     /// The chat with friend `i` so far (the latest last).
     pub fn chat(&self, i: usize) -> &[ChatLine] {
         self.book.friends.get(i).and_then(|p| self.book.chats.get(&seal::norm(&p.code))).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// The chat with friend `i`, gone from this device (it's kept nowhere
+    /// else).
+    pub fn clear_chat(&mut self, i: usize) {
+        let Some(code) = self.book.friends.get(i).map(|p| seal::norm(&p.code)) else { return };
+        self.book.chats.remove(&code);
+        self.book.read.remove(&code);
+        self.dirty = true;
     }
 
     /// How many lines from friend `i` haven't been read yet.

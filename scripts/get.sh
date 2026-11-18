@@ -21,8 +21,11 @@ if [[ "${1:-}" == "--remove" ]]; then
   systemctl --user disable --now xmas-tui.service 2>/dev/null || true
   rm -f "$UNIT_DIR/xmas-tui.service"
   systemctl --user daemon-reload || true
-  rm -rf "$DEST"
-  echo "removed xmas-tui (settings in $CONF were kept)"
+  # (the program and its scripts; the save beside them is kept)
+  rm -rf "$DEST/bin" "$DEST/scripts"
+  rm -f "$DEST/config.example.toml"
+  rmdir "$DEST" 2>/dev/null || true
+  echo "removed xmas-tui (kept: the settings in $CONF, the save in $DEST/save.toml)"
   exit 0
 fi
 

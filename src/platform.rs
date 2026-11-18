@@ -58,8 +58,9 @@ pub fn autostart_set(on: bool) {
 /// Take xmas-tui off this computer, as it was installed: Windows, the
 /// installer's own uninstaller (it asks, and takes the program, its
 /// shortcuts and "run at startup" away); Linux, what the installer set up
-/// (the service, the program in ~/.local/share/xmas-tui, its link in
-/// ~/.local/bin). The settings and the save are kept either way. Returns
+/// (the service, the program and its scripts in ~/.local/share/xmas-tui,
+/// its link in ~/.local/bin). The settings and the save are kept either
+/// way. Returns
 /// what was done (or why it couldn't be), and whether the wallpaper should
 /// now quit.
 pub fn uninstall() -> (String, bool) {
@@ -93,14 +94,15 @@ pub fn uninstall() -> (String, bool) {
         }
         let link = home.join(".local/bin/xmas-tui");
         // (in a process of its own: stopping the service stops this one)
+        // (the program and its scripts only: the save beside them stays)
         let script = format!(
-            "sleep 1; systemctl --user disable --now xmas-tui.service; rm -f '{u}'; systemctl --user daemon-reload; rm -rf '{d}'; if [ -L '{l}' ]; then rm -f '{l}'; fi",
+            "sleep 1; systemctl --user disable --now xmas-tui.service; rm -f '{u}'; systemctl --user daemon-reload; rm -rf '{d}/bin' '{d}/scripts'; rm -f '{d}/config.example.toml'; rmdir '{d}' 2>/dev/null; if [ -L '{l}' ]; then rm -f '{l}'; fi",
             u = units.join("xmas-tui.service").display(),
             d = data.display(),
             l = link.display()
         );
         match Command::new("setsid").args(["sh", "-c", &script]).spawn().or_else(|_| Command::new("sh").args(["-c", &script]).spawn()) {
-            Ok(_) => ("taken off this computer (the settings and the save are kept, in ~/.config/xmas-tui)".into(), true),
+            Ok(_) => ("taken off this computer (the settings and the save are kept: ~/.config/xmas-tui, ~/.local/share/xmas-tui/save.toml)".into(), true),
             Err(e) => (format!("couldn't: {e}"), false),
         }
     }
@@ -113,6 +115,22 @@ pub fn log_path() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let p = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state")).join("xmas-tui").join("wallpaper.log");
     p.exists().then_some(p)
+}
+
+/// Open a web page (https only) in the browser.
+pub fn open_url(url: &str) {
+    if !url.starts_with("https://") {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        // (no console window flashing up, as `cmd /c start` would)
+        let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 /// Open the config in the user's text editor (used where we can't take

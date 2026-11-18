@@ -1216,6 +1216,7 @@ impl Game {
             S::Net(n) => self.net_act(n),
             S::Restart => self.asks.push("restart".into()),
             S::Pause => self.toggle_pause(),
+            S::Privacy => self.asks.push(format!("open:{}", crate::settings::PRIVACY_URL)),
             S::Help => {
                 self.close_panel();
                 self.help(self.help_keys);

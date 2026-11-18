@@ -2585,6 +2585,7 @@ impl App {
                     self.settings.help = true;
                 }
                 Act::Pause => self.toggle_pause(),
+                Act::Privacy => platform::open_url(settings::PRIVACY_URL),
                 Act::Net(n) => self.net_act(n),
                 Act::FriendSel(i) => self.settings.friend_sel = if self.settings.friend_sel == Some(i) { None } else { Some(i) },
                 Act::CheckUpdate => crate::update::check_now(),

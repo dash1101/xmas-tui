@@ -241,6 +241,11 @@ function asked(a) {
     const [q, v] = a.slice(5).split("\u0001");
     askFor(q, v || "");
   } else if (a === "restart") { save(); location.reload(); }
+  else if (a.startsWith("open:")) {
+    // a page to read (the privacy page): a tab of its own
+    const u = a.slice(5);
+    if (/^https:\/\/github\.com\//.test(u)) window.open(u, "_blank", "noopener");
+  }
   else if (a === "export") exportSave();
   else if (a === "import") document.getElementById("o-file").click();
   else if (a === "fresh") fresh();

@@ -429,6 +429,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     String q = ask.substring(5);
                     int k = q.indexOf('\u0001');
                     typeLine(k >= 0 ? q.substring(0, k) : q, k >= 0 ? q.substring(k + 1) : "");
+                } else if (ask != null && ask.startsWith("open:https://github.com/")) {
+                    // a page to read (the privacy page): the browser
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(ask.substring(5))));
+                    } catch (Exception ignored) {
+                    }
                 } else if ("restart".equals(ask)) {
                     if (game != 0) Native.save(game);
                     recreate();
