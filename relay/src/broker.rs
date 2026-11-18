@@ -57,7 +57,7 @@ impl Default for Limits {
 }
 
 /// What the relay keeps between restarts (its data file).
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Kept {
     pub limits: Limits,
@@ -67,11 +67,93 @@ pub struct Kept {
     /// as the game has them: time, critters, most_at_once, events,
     /// sleigh_minutes, chattiness, bushes, traffic).
     pub squares: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The relay's own host hosts the public squares (else the first
+    /// player in does, as ever).
+    pub host_squares: bool,
+    /// Villages the relay's own host keeps open (not a player's game).
+    pub servers: Vec<ServerVillage>,
+    /// Villages kept out (by code), and players (by id, as hex).
+    pub village_bans: Vec<Ban>,
+    pub player_bans: Vec<Ban>,
+    /// The public list: first (featured), then in this order (names or
+    /// codes); the rest after, busiest first.
+    pub featured: Vec<String>,
+    pub order: Vec<String>,
+    /// Words starred out in the public villages, on top of the game's own.
+    pub words: Vec<String>,
+    /// Who can't talk in a village the host keeps (by its name).
+    pub muted: BTreeMap<String, Vec<u32>>,
+    /// Said to whoever comes into a village the host keeps (by its name).
+    pub welcome: BTreeMap<String, String>,
+    /// Announcements to come.
+    pub schedules: Vec<Schedule>,
+}
+
+impl Default for Kept {
+    fn default() -> Self {
+        Kept {
+            limits: Limits::default(),
+            bans: vec![],
+            squares: BTreeMap::new(),
+            host_squares: true,
+            servers: vec![],
+            village_bans: vec![],
+            player_bans: vec![],
+            featured: vec![],
+            order: vec![],
+            words: vec![],
+            muted: BTreeMap::new(),
+            welcome: BTreeMap::new(),
+            schedules: vec![],
+        }
+    }
+}
+
+/// A village the relay's own host keeps open: its name, its code (a
+/// private one's is shared by whoever's given it), listed for anyone or
+/// not, the most it takes, its village (seed), and its settings (as the
+/// squares' are).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct ServerVillage {
+    pub name: String,
+    pub code: String,
+    pub public: bool,
+    pub limit: u16,
+    pub seed: u32,
+    pub rules: serde_json::Value,
+}
+
+/// Kept out: what (a village's code, a player's id), who it was (as they
+/// called themselves), why, when.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Ban {
+    pub key: String,
+    pub name: String,
+    pub why: String,
+    pub at: u64,
+}
+
+/// An announcement to come: what, where ("*": every village the host
+/// keeps; else one by name), when (seconds since 1970), and again every
+/// so many seconds (0: once).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Schedule {
+    pub id: u32,
+    pub text: String,
+    pub to: String,
+    pub at: u64,
+    pub every: u64,
+    pub on: bool,
 }
 
 pub struct Conn {
     pub ip: IpAddr,
     pub client: String,
+    /// The relay's own host (signed in with its token).
+    pub host: bool,
     pub since: Instant,
     tx: Sender<Vec<u8>>,
     will: Option<(String, Vec<u8>, bool)>,
@@ -89,7 +171,7 @@ struct Kept1 {
     at: u64,
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -98,6 +180,45 @@ fn now_secs() -> u64 {
 pub const ADMIN: &str = "xmas-tui/1/admin/";
 /// The public squares' settings, from the console.
 pub const ADMIN_SQUARES: &str = "xmas-tui/1/admin/squares";
+/// The public list (its order, what's featured, what's kept out) and the
+/// public villages' extra words, from the console, for everyone.
+pub const ADMIN_PUBLIC: &str = "xmas-tui/1/admin/public";
+/// For the relay's own host only: what it keeps open and how (kept), and
+/// what it's asked to do (kick, mute, announce).
+pub const ADMIN_HOST: &str = "xmas-tui/1/admin/host";
+pub const ADMIN_CMD: &str = "xmas-tui/1/admin/cmd";
+/// From the host only: who's in each village it keeps, what's said there.
+pub const ADMIN_REPORT: &str = "xmas-tui/1/admin/report/";
+/// The host's own word in a village (`…/v/<the village's topic id>`): only
+/// the host may speak there, so nobody can pass for it; anyone listens.
+pub const ADMIN_V: &str = "xmas-tui/1/admin/v/";
+/// Player ids below this are the relay's own host's.
+pub const HOST_IDS: u32 = 0x1000;
+
+/// Topics only the relay's own host may hear.
+pub fn host_only(t: &str) -> bool {
+    t == ADMIN_HOST || t == ADMIN_CMD || t.starts_with(ADMIN_REPORT)
+}
+
+/// A village's topic, as the game makes it from its code (`kind`:
+/// "village", "public"…): to keep a banned one out.
+pub fn topic_of(kind: &str, code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let norm: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect();
+    let mut h = Sha256::new();
+    for p in [&b"xmas-tui topic"[..], kind.as_bytes(), norm.as_bytes()] {
+        h.update((p.len() as u32).to_le_bytes());
+        h.update(p);
+    }
+    let d = h.finalize();
+    let hex: String = d[..12].iter().map(|b| format!("{b:02x}")).collect();
+    format!("xmas-tui/1/{kind}/{hex}")
+}
+
+/// The player id in a client's name ("xt" and eight hex digits), if any.
+pub fn player_of(client: &str) -> Option<u32> {
+    client.strip_prefix("xt").and_then(|r| r.get(..8)).and_then(|h| u32::from_str_radix(h, 16).ok())
+}
 
 /// Counts for the admin console.
 #[derive(Serialize, Default, Clone, Debug)]
@@ -144,12 +265,38 @@ pub struct Broker {
     started: Instant,
     recent: VecDeque<(Instant, u64)>,
     bans: HashSet<IpAddr>,
+    /// Topics of the villages kept out.
+    blocked: HashSet<String>,
+    /// The host's last word on each village it keeps (when, what).
+    pub reports: BTreeMap<String, (Instant, serde_json::Value)>,
 }
 
 impl Broker {
     pub fn new(kept: Kept) -> Self {
         let bans = kept.bans.iter().filter_map(|b| b.parse().ok()).collect();
-        Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans }
+        let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), reports: BTreeMap::new() };
+        b.reblock();
+        b
+    }
+
+    /// The banned villages' topics, from their codes.
+    fn reblock(&mut self) {
+        self.blocked = self.kept.village_bans.iter().flat_map(|v| ["village", "public"].map(|k| topic_of(k, &v.key))).collect();
+        let more: Vec<String> = self.blocked.iter().filter(|t| t.starts_with("xmas-tui/1/village/")).map(|t| format!("{ADMIN_V}{}", t.rsplit('/').next().unwrap_or(""))).collect();
+        self.blocked.extend(more);
+    }
+
+    /// May this client come in (by the player id in its name)? The host's
+    /// ids are the host's alone; a banned player's aren't let in.
+    pub fn may_join(&self, client: &str, host: bool) -> Result<(), &'static str> {
+        let Some(id) = player_of(client) else { return Ok(()) };
+        if id < HOST_IDS && !host {
+            return Err("that id is the relay's own");
+        }
+        if self.kept.player_bans.iter().any(|b| b.key == format!("{id:08x}")) {
+            return Err("banned");
+        }
+        Ok(())
     }
 
     pub fn limits(&self) -> &Limits {
@@ -165,7 +312,7 @@ impl Broker {
             Some("banned")
         } else if self.conns.len() >= l.max_conns {
             Some("full")
-        } else if self.conns.values().filter(|c| c.ip == ip).count() >= l.max_conns_per_ip {
+        } else if !internal(ip) && self.conns.values().filter(|c| c.ip == ip).count() >= l.max_conns_per_ip {
             Some("too many from one address")
         } else {
             None
@@ -182,6 +329,11 @@ impl Broker {
     /// A connection that's said hello: its id. (One already there with the
     /// same client name is let go: MQTT's "take over".)
     pub fn join(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: Sender<Vec<u8>>) -> (u64, Option<u64>) {
+        self.join_as(ip, client, will, tx, false)
+    }
+
+    /// The same, for the relay's own host (`host`: signed in).
+    pub fn join_as(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: Sender<Vec<u8>>, host: bool) -> (u64, Option<u64>) {
         let old = self.conns.iter().find(|(_, c)| c.client == client).map(|(&id, _)| id);
         if let Some(o) = old {
             self.leave(o, false);
@@ -191,7 +343,7 @@ impl Broker {
         // (a will is published by the relay itself: never on its own topics)
         let will = will.filter(|(t, p, _)| ok_topic(t) && !t.starts_with(ADMIN) && p.len() <= self.kept.limits.max_payload);
         let burst = self.kept.limits.burst;
-        self.conns.insert(id, Conn { ip, client, since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
+        self.conns.insert(id, Conn { ip, client, host, since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
         (id, old)
     }
 
@@ -230,7 +382,26 @@ impl Broker {
         let now = Instant::now();
         c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
         c.tokens_at = now;
+        // the relay's own topics: only its host speaks there, and only in
+        // its villages (`v/`) and to the relay (`report/`)
         if topic.starts_with(ADMIN) {
+            if !c.host {
+                return Ok(());
+            }
+            if let Some(slot) = topic.strip_prefix(ADMIN_REPORT) {
+                if payload.len() <= 256 * 1024 && slot.len() <= 64 {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
+                        self.reports.insert(slot.to_string(), (Instant::now(), v));
+                    }
+                }
+                return Ok(());
+            }
+            if !topic.starts_with(ADMIN_V) {
+                return Ok(());
+            }
+        }
+        // (a banned village: nothing through)
+        if self.blocked.contains(topic) {
             return Ok(());
         }
         if c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
@@ -267,8 +438,12 @@ impl Broker {
         to.dedup();
         let bytes = codec::publish(topic, payload, false);
         let mut slow = vec![];
+        let only_host = host_only(topic);
         for id in to {
             if let Some(c) = self.conns.get_mut(&id) {
+                if only_host && !c.host {
+                    continue;
+                }
                 if c.tx.try_send(bytes.clone()).is_ok() {
                     c.got += 1;
                     self.stats.msgs_out += 1;
@@ -319,8 +494,9 @@ impl Broker {
         let mut granted = vec![];
         let mut fresh = vec![];
         let Some(c) = self.conns.get_mut(&id) else { return vec![0x80; filters.len()] };
+        let host = c.host;
         for f in filters {
-            if !ok_filter(f) || (c.subs.len() >= max && !c.subs.contains(f)) {
+            if !ok_filter(f) || (c.subs.len() >= max && !c.subs.contains(f)) || (host_only(f) && !host) {
                 granted.push(0x80);
                 continue;
             }
@@ -336,7 +512,7 @@ impl Broker {
         for f in &fresh {
             if f.contains(['+', '#']) {
                 for (t, k) in &self.retained {
-                    if codec::matches(f, t) {
+                    if codec::matches(f, t) && (host || !host_only(t)) {
                         out.push(codec::publish(t, &k.payload, true));
                     }
                 }
@@ -452,6 +628,98 @@ impl Broker {
         self.route(topic, payload, true);
     }
 
+    /// The public list's order, what's featured and kept out, and the
+    /// extra words: for everyone.
+    pub fn say_public(&mut self) {
+        let k = &self.kept;
+        let banned: Vec<&str> = k.village_bans.iter().map(|b| b.key.as_str()).collect();
+        let json = serde_json::to_vec(&serde_json::json!({ "featured": k.featured, "order": k.order, "banned": banned, "words": k.words })).unwrap_or_default();
+        self.say(ADMIN_PUBLIC, &json);
+    }
+
+    /// For the host: the villages it keeps, who can't talk where, what's
+    /// said to newcomers.
+    pub fn say_host(&mut self) {
+        let k = &self.kept;
+        let json = serde_json::to_vec(&serde_json::json!({ "squares": k.host_squares, "servers": k.servers, "muted": k.muted, "welcome": k.welcome, "square_rules": k.squares })).unwrap_or_default();
+        self.say(ADMIN_HOST, &json);
+    }
+
+    /// Ask the host to do something now (kick, mute, announce…).
+    pub fn host_cmd(&mut self, v: serde_json::Value) {
+        let json = serde_json::to_vec(&v).unwrap_or_default();
+        self.route(ADMIN_CMD, &json, false);
+    }
+
+    /// Is the relay's own host here?
+    pub fn host_here(&self) -> bool {
+        self.conns.values().any(|c| c.host)
+    }
+
+    /// A village kept out (by code): nobody through on its topics, and
+    /// gone from the public list.
+    pub fn ban_village(&mut self, code: &str, name: &str, why: &str) {
+        let key: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect();
+        if key.len() != 12 || self.kept.village_bans.iter().any(|b| b.key == key) {
+            return;
+        }
+        self.kept.village_bans.push(Ban { key: key.clone(), name: name.chars().take(60).collect(), why: why.chars().take(200).collect(), at: now_secs() });
+        self.reblock();
+        // (its listing, kept here, forgotten)
+        let t = topic_of("public", &key);
+        if let Some(k) = self.retained.remove(&t) {
+            self.retained_bytes -= k.payload.len();
+        }
+        self.say_public();
+        self.host_cmd(serde_json::json!({ "close": key }));
+    }
+
+    pub fn unban_village(&mut self, code: &str) {
+        let key: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect();
+        self.kept.village_bans.retain(|b| b.key != key);
+        self.reblock();
+        self.say_public();
+    }
+
+    /// A player kept out (by id): those connected as them let go.
+    pub fn ban_player(&mut self, id: u32, name: &str, why: &str) {
+        let key = format!("{id:08x}");
+        if !self.kept.player_bans.iter().any(|b| b.key == key) {
+            self.kept.player_bans.push(Ban { key, name: name.chars().take(60).collect(), why: why.chars().take(200).collect(), at: now_secs() });
+        }
+        let gone: Vec<u64> = self.conns.iter().filter(|(_, c)| player_of(&c.client) == Some(id)).map(|(&k, _)| k).collect();
+        for k in gone {
+            self.kick(k);
+        }
+    }
+
+    pub fn unban_player(&mut self, id: u32) {
+        let key = format!("{id:08x}");
+        self.kept.player_bans.retain(|b| b.key != key);
+    }
+
+    /// The announcements due now (and when each comes next): what to say,
+    /// where. A missed one isn't said late; a repeating one goes on.
+    pub fn due(&mut self, now: u64) -> Vec<(String, String)> {
+        let mut out = vec![];
+        for s in self.kept.schedules.iter_mut().filter(|s| s.on) {
+            if s.at > now {
+                continue;
+            }
+            if now - s.at < 120 {
+                out.push((s.to.clone(), s.text.clone()));
+            }
+            if s.every >= 60 {
+                while s.at <= now {
+                    s.at += s.every;
+                }
+            } else {
+                s.on = false;
+            }
+        }
+        out
+    }
+
     /// The squares' settings, as they are now, for everyone.
     pub fn say_squares(&mut self) {
         let json = serde_json::to_vec(&self.kept.squares).unwrap_or_default();
@@ -527,6 +795,16 @@ impl Broker {
     }
 }
 
+/// An address on this machine or its own network (the relay's host, in
+/// the next container): not held to the one-address limit. (Everyone else
+/// comes through Cloudflare, by their own address.)
+pub fn internal(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => v.is_loopback() || v.is_private(),
+        IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
 /// A topic the village uses: its prefix, no wildcards, nothing odd.
 pub fn ok_topic(t: &str) -> bool {
     t.starts_with(PREFIX) && t.len() <= 200 && !t.contains(['+', '#', '\0'])
@@ -551,8 +829,10 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc::{channel, Receiver};
 
+    /// (Addresses as players have them: public ones, held to the limits;
+    /// TEST-NET-3.)
     fn ip(n: u8) -> IpAddr {
-        IpAddr::from([10, 0, 0, n])
+        IpAddr::from([203, 0, 113, n])
     }
 
     fn drain(rx: &mut Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -599,6 +879,89 @@ mod tests {
         assert!(c.retained.contains_key("xmas-tui/1/sync/abc/dev1"));
         assert!(!c.retained.contains_key("xmas-tui/1/here/abc"));
         assert!(c.retained.contains_key(ADMIN_SQUARES));
+    }
+
+    /// The relay's own host connects from its own network, many times (a
+    /// connection for each village it keeps): not held to the one-address
+    /// limit, which players still are.
+    #[test]
+    fn the_hosts_own_network_is_not_held_to_the_address_limit() {
+        assert!(internal(IpAddr::from([172, 18, 0, 3])) && internal(IpAddr::from([127, 0, 0, 1])));
+        assert!(!internal(IpAddr::from([203, 0, 113, 9])));
+    }
+
+    /// The relay's own topics: only its host hears what's meant for it
+    /// (not even through a wildcard), only the host speaks for it in a
+    /// village or reports to the relay; its ids are its own; a banned
+    /// village gets nothing through, a banned player is let go and kept out.
+    #[test]
+    fn the_host_alone_speaks_as_the_host_and_bans_hold() {
+        let mut b = Broker::new(Kept::default());
+        let (th, mut rh) = channel(64);
+        let (h, _) = b.join_as(ip(1), "xt00000001aa".into(), None, th, true);
+        let (tp, mut rp) = channel(64);
+        let (p, _) = b.join(ip(2), "xt12345678bb".into(), None, tp);
+        assert_eq!(b.subscribe(p, &[ADMIN_HOST.into(), "xmas-tui/1/#".into()]), vec![0x80, 0]);
+        assert_eq!(b.subscribe(h, &[ADMIN_CMD.into(), ADMIN_HOST.into()]), vec![0, 0]);
+        b.say_host();
+        b.host_cmd(serde_json::json!({ "say": { "to": "*", "text": "hello" } }));
+        let (gh, gp) = (drain(&mut rh), drain(&mut rp));
+        let has = |v: &Vec<Vec<u8>>, t: &str| v.iter().any(|m| m.windows(t.len()).any(|w| w == t.as_bytes()));
+        assert!(has(&gh, ADMIN_CMD) && has(&gh, ADMIN_HOST), "the host didn't hear");
+        assert!(!has(&gp, ADMIN_CMD) && !has(&gp, ADMIN_HOST), "a player heard the host's");
+        // a newcomer's wildcard doesn't pick up what's kept for the host
+        let (tq, mut rq) = channel(64);
+        let (q, _) = b.join(ip(3), "xt22222222cc".into(), None, tq);
+        b.subscribe(q, &["xmas-tui/1/#".into()]);
+        assert!(!has(&drain(&mut rq), ADMIN_HOST));
+        // speaking as the host in a village: the host can, a player can't
+        let v = format!("{ADMIN_V}abc");
+        b.publish(p, &v, b"forged", false).unwrap();
+        assert!(!has(&drain(&mut rq), "forged"));
+        b.publish(h, &v, b"really", false).unwrap();
+        assert!(has(&drain(&mut rq), "really"));
+        // reports: the host's only
+        b.publish(p, &format!("{ADMIN_REPORT}x"), b"{\"n\":9}", false).unwrap();
+        assert!(b.reports.is_empty());
+        b.publish(h, &format!("{ADMIN_REPORT}x"), b"{\"n\":2}", false).unwrap();
+        assert_eq!(b.reports.get("x").map(|r| r.1["n"].clone()), Some(serde_json::json!(2)));
+        // the host's ids are its own
+        assert!(b.may_join("xt00000fffzz", false).is_err());
+        assert!(b.may_join("xt00000fffzz", true).is_ok());
+        assert!(b.may_join("xt00001000zz", false).is_ok());
+        // a banned village: nothing through on its topics
+        b.ban_village("ABCD-EFGH-JKLM", "Grinch's", "spam");
+        let t = topic_of("village", "abcdefghjklm");
+        b.publish(p, &t, b"blocked?", false).unwrap();
+        assert!(!has(&drain(&mut rq), "blocked?"));
+        b.unban_village("ABCDEFGHJKLM");
+        b.publish(p, &t, b"open again", false).unwrap();
+        assert!(has(&drain(&mut rq), "open again"));
+        // a banned player: let go, and kept out
+        b.ban_player(0x1234_5678, "Grinch", "spam");
+        assert!(!b.has(p));
+        assert!(b.may_join("xt12345678dd", false).is_err());
+        b.unban_player(0x1234_5678);
+        assert!(b.may_join("xt12345678dd", false).is_ok());
+    }
+
+    /// Announcements: said when due, once or again and again; one missed
+    /// by a long way (the relay was down) isn't said late.
+    #[test]
+    fn announcements_come_when_due() {
+        let mut b = Broker::new(Kept::default());
+        let now = 1_000_000;
+        b.kept.schedules = vec![
+            Schedule { id: 1, text: "once".into(), to: "*".into(), at: now - 10, every: 0, on: true },
+            Schedule { id: 2, text: "hourly".into(), to: "*".into(), at: now - 10, every: 3600, on: true },
+            Schedule { id: 3, text: "long missed".into(), to: "*".into(), at: now - 3 * 3600, every: 0, on: true },
+            Schedule { id: 4, text: "later".into(), to: "*".into(), at: now + 60, every: 0, on: true },
+        ];
+        let said: Vec<String> = b.due(now).into_iter().map(|d| d.1).collect();
+        assert_eq!(said, vec!["once", "hourly"]);
+        assert!(!b.kept.schedules[0].on && b.kept.schedules[1].on && b.kept.schedules[1].at > now && !b.kept.schedules[2].on);
+        assert!(b.due(now + 30).is_empty());
+        assert_eq!(b.due(now + 61).into_iter().map(|d| d.1).collect::<Vec<_>>(), vec!["later"]);
     }
 
     #[test]

@@ -6,7 +6,9 @@
 /// A packet from a client.
 #[derive(Debug, PartialEq)]
 pub enum In {
-    Connect { client: String, keepalive: u16, will: Option<(String, Vec<u8>, bool)> },
+    /// Hello: who, how often it'll be heard from, its will, and a sign-in
+    /// (user name, password) if it gave one (the relay's own host does).
+    Connect { client: String, keepalive: u16, will: Option<(String, Vec<u8>, bool)>, login: Option<(String, Vec<u8>)> },
     Publish { topic: String, payload: Vec<u8>, retain: bool },
     Subscribe { id: u16, filters: Vec<String> },
     Unsubscribe { id: u16, filters: Vec<String> },
@@ -110,8 +112,15 @@ fn parse(head: u8, b: &[u8]) -> Result<In, Bad> {
             } else {
                 None
             };
-            // (a user name and password, if sent, aren't needed)
-            In::Connect { client, keepalive, will }
+            // a sign-in: only the relay's own host gives one
+            let login = if flags & 0x80 != 0 {
+                let user = str16(b, &mut at)?;
+                let pass = if flags & 0x40 != 0 { bin16(b, &mut at)? } else { vec![] };
+                Some((user, pass))
+            } else {
+                None
+            };
+            In::Connect { client, keepalive, will, login }
         }
         3 => {
             let topic = str16(b, &mut at)?;
@@ -256,7 +265,7 @@ mod tests {
                 got.push(p);
             }
         }
-        assert_eq!(got[0], In::Connect { client: "xt1234".into(), keepalive: 45, will: Some(("xmas-tui/1/here/ab".into(), b"bye".to_vec(), true)) });
+        assert_eq!(got[0], In::Connect { client: "xt1234".into(), keepalive: 45, will: Some(("xmas-tui/1/here/ab".into(), b"bye".to_vec(), true)), login: None });
         assert_eq!(got[1], In::Subscribe { id: 7, filters: vec!["xmas-tui/1/mail/aa".into(), "xmas-tui/1/sync/bb/+".into()] });
         assert_eq!(got[2], In::Publish { topic: "xmas-tui/1/here/ab".into(), payload: vec![9; 300], retain: true });
         assert_eq!(got[3..], [In::Ping, In::Disconnect]);

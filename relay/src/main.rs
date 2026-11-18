@@ -14,6 +14,8 @@
 //! - TRUST_CF (1): take the client's address from Cloudflare's
 //!   CF-Connecting-IP header (behind a Cloudflare Tunnel, every connection
 //!   comes from the tunnel itself).
+//! - HOST_TOKEN: the secret the relay's own host signs in with (user name
+//!   "xmas-host"). Unset, no host is let in.
 
 mod admin;
 mod broker;
@@ -39,6 +41,8 @@ pub struct App {
     pub data: PathBuf,
     pub admin_email: Option<String>,
     pub trust_cf: bool,
+    /// The secret the relay's own host signs in with.
+    pub host_token: Option<String>,
     /// Clients on HTTPS long polling (where WebSockets don't get through).
     pub polls: poll::Polls,
 }
@@ -79,6 +83,7 @@ async fn main() {
         data,
         admin_email: std::env::var("ADMIN_EMAIL").ok().filter(|e| !e.trim().is_empty()).map(|e| e.trim().to_lowercase()),
         trust_cf: env("TRUST_CF", "1") != "0",
+        host_token: std::env::var("HOST_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| t.len() >= 16),
         polls: poll::Polls::default(),
     };
     // what was kept before a restart (linked devices' sides, listings…),
@@ -90,6 +95,27 @@ async fn main() {
             eprintln!("xmas-relay: {n} kept messages back from before");
         }
         b.say_squares();
+        b.say_public();
+        b.say_host();
+    }
+    // announcements, when they're due
+    {
+        let a = app.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut b = a.broker.lock().unwrap_or_else(|e| e.into_inner());
+                let due = b.due(broker::now_secs());
+                let changed = !due.is_empty();
+                for (to, text) in due {
+                    b.host_cmd(serde_json::json!({ "say": { "to": to, "text": text } }));
+                }
+                drop(b);
+                if changed {
+                    a.save();
+                }
+            }
+        });
     }
     // now and then: kept messages more than a week old forgotten (a linked
     // device's side: longer), and what's kept written out
@@ -241,9 +267,32 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
         None
     })
     .await;
-    let Ok(Some(In::Connect { client, keepalive, will })) = hello else { return };
+    let Ok(Some(In::Connect { client, keepalive, will, login })) = hello else { return };
     let client: String = client.chars().take(64).collect();
-    let (id, _) = app.broker.lock().unwrap_or_else(|e| e.into_inner()).join(ip, client, will, down.clone());
+    // the relay's own host signs in; anyone else signing in as it is
+    // turned away, and so is a player using its ids, or one banned
+    let host = match (&login, &app.host_token) {
+        (Some((user, pass)), Some(token)) if user == "xmas-host" => {
+            if !same(pass, token.as_bytes()) {
+                let _ = down.send(codec::connack(4)).await;
+                return;
+            }
+            true
+        }
+        (Some((user, _)), None) if user == "xmas-host" => {
+            let _ = down.send(codec::connack(5)).await;
+            return;
+        }
+        _ => false,
+    };
+    let joined = {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.may_join(&client, host).is_ok().then(|| b.join_as(ip, client, will, down.clone(), host))
+    };
+    let Some((id, _)) = joined else {
+        let _ = down.send(codec::connack(5)).await;
+        return;
+    };
     if down.send(codec::connack(0)).await.is_err() {
         app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, false);
         return;
@@ -295,4 +344,10 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
         }
     }
     app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, clean);
+}
+
+/// The same bytes, compared in the same time whatever they are (a guess
+/// at the host's token learns nothing from how long the answer took).
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }

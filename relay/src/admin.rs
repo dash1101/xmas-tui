@@ -3,7 +3,7 @@
 //! (and, with ADMIN_EMAIL set, only as that address); changes need a header
 //! a page elsewhere can't send, so another site can't make them.
 
-use crate::broker::Limits;
+use crate::broker::{Limits, Schedule, ServerVillage};
 use crate::App;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -25,6 +25,17 @@ pub fn router(app: App) -> Router {
         .route("/api/unban", post(unban))
         .route("/api/clear", post(clear))
         .route("/api/squares", get(squares).post(set_squares))
+        .route("/api/state", get(state))
+        .route("/api/servers", post(set_servers))
+        .route("/api/public", post(set_public))
+        .route("/api/ban-village", post(ban_village))
+        .route("/api/unban-village", post(unban_village))
+        .route("/api/ban-player", post(ban_player))
+        .route("/api/unban-player", post(unban_player))
+        .route("/api/moderate", post(moderate))
+        .route("/api/say", post(say))
+        .route("/api/welcome", post(set_welcome))
+        .route("/api/schedules", post(set_schedules))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
@@ -148,6 +159,255 @@ async fn set_squares(State(app): State<App>, Json(v): Json<std::collections::BTr
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Everything the console shows beyond the counts: the host and what it
+/// reports, the server villages, the public list, bans, announcements.
+async fn state(State(app): State<App>) -> Json<serde_json::Value> {
+    let b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+    let k = &b.kept;
+    let reports: serde_json::Map<String, serde_json::Value> = b
+        .reports
+        .iter()
+        .map(|(slot, (at, v))| {
+            let mut v = v.clone();
+            v["age"] = json!(at.elapsed().as_secs());
+            (slot.clone(), v)
+        })
+        .collect();
+    Json(json!({
+        "host_here": b.host_here(),
+        "host_token": app.host_token.is_some(),
+        "host_squares": k.host_squares,
+        "servers": k.servers,
+        "village_bans": k.village_bans,
+        "player_bans": k.player_bans,
+        "featured": k.featured,
+        "order": k.order,
+        "words": k.words,
+        "muted": k.muted,
+        "welcome": k.welcome,
+        "schedules": k.schedules,
+        "reports": reports,
+        "now": crate::broker::now_secs(),
+    }))
+}
+
+/// The squares' and server villages' settings: only those the game knows.
+const KEYS: [&str; 8] = ["time", "critters", "most_at_once", "events", "sleigh_minutes", "chattiness", "bushes", "traffic"];
+
+fn clean_rules(v: &serde_json::Value) -> serde_json::Value {
+    let m: serde_json::Map<String, serde_json::Value> = v.as_object().map(|o| o.iter().filter(|(k, _)| KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+    serde_json::Value::Object(m)
+}
+
+/// Twelve letters and digits nobody can guess (a private village's code).
+fn new_code() -> String {
+    const ABC: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut raw = [0u8; 12];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut raw)).is_err() {
+        // (no /dev/urandom: the clock, stirred)
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        for (i, r) in raw.iter_mut().enumerate() {
+            *r = (n >> ((i * 7) % 96)) as u8 ^ (i as u8).wrapping_mul(97);
+        }
+    }
+    raw.iter().map(|b| ABC[(*b as usize) % ABC.len()] as char).collect()
+}
+
+fn norm(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+fn seed() -> u32 {
+    let c = new_code();
+    c.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619)).max(1)
+}
+
+/// The server villages, as the console has them: named, coded (a new
+/// one's code made here), each within bounds; out to the host at once.
+async fn set_servers(State(app): State<App>, Json(list): Json<Vec<ServerVillage>>) -> Response {
+    let squares: Vec<String> = SQUARES.iter().map(|s| s.to_lowercase()).collect();
+    let mut names = std::collections::HashSet::new();
+    let mut out = vec![];
+    for v in list.into_iter().take(32) {
+        let name: String = v.name.trim().chars().filter(|c| !c.is_control()).take(40).collect();
+        if name.is_empty() || squares.contains(&name.to_lowercase()) || !names.insert(name.to_lowercase()) {
+            continue;
+        }
+        let code = norm(&v.code);
+        let code = if code.len() == 12 { code } else { new_code() };
+        out.push(ServerVillage { name, code, public: v.public, limit: v.limit.clamp(2, 48), seed: if v.seed == 0 { seed() } else { v.seed }, rules: clean_rules(&v.rules) });
+    }
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.kept.servers = out;
+        b.say_host();
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct Public {
+    featured: Vec<String>,
+    order: Vec<String>,
+    words: Vec<String>,
+    host_squares: bool,
+}
+
+fn list_of(v: Vec<String>, n: usize, len: usize) -> Vec<String> {
+    v.into_iter().map(|s| s.trim().chars().filter(|c| !c.is_control()).take(len).collect::<String>()).filter(|s| !s.is_empty()).take(n).collect()
+}
+
+/// The public list's order and featured places, the extra words, and
+/// whether the host keeps the squares: out to everyone at once.
+async fn set_public(State(app): State<App>, Json(p): Json<Public>) -> Response {
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.kept.featured = list_of(p.featured, 20, 60);
+        b.kept.order = list_of(p.order, 60, 60);
+        b.kept.words = list_of(p.words, 200, 40).into_iter().map(|w| w.to_lowercase()).collect();
+        b.kept.host_squares = p.host_squares;
+        b.say_public();
+        b.say_host();
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct BanOf {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    id: serde_json::Value,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    why: String,
+}
+
+/// A player's id from the console: a number, or eight hex digits.
+fn id_of(v: &serde_json::Value) -> Option<u32> {
+    match v {
+        serde_json::Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+        serde_json::Value::String(s) => u32::from_str_radix(s.trim().trim_start_matches("xt"), 16).ok(),
+        _ => None,
+    }
+}
+
+async fn ban_village(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
+    if norm(&b.code).len() != 12 {
+        return (StatusCode::BAD_REQUEST, "a village code is twelve letters and digits").into_response();
+    }
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).ban_village(&b.code, &b.name, &b.why);
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn unban_village(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).unban_village(&b.code);
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn ban_player(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
+    let Some(id) = id_of(&b.id).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    {
+        let mut br = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        br.ban_player(id, &b.name, &b.why);
+        br.host_cmd(json!({ "kick": { "slot": "*", "id": id } }));
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn unban_player(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
+    let Some(id) = id_of(&b.id) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).unban_player(id);
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct Moderate {
+    slot: String,
+    id: serde_json::Value,
+    action: String,
+}
+
+/// In a village the host keeps: someone sent home (kick), or kept from
+/// talking (mute) or let talk again.
+async fn moderate(State(app): State<App>, Json(m): Json<Moderate>) -> Response {
+    let Some(id) = id_of(&m.id).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    let slot: String = m.slot.chars().take(64).collect();
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        match m.action.as_str() {
+            "kick" => b.host_cmd(json!({ "kick": { "slot": slot, "id": id } })),
+            "mute" => {
+                let v = b.kept.muted.entry(slot).or_default();
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+                b.say_host();
+            }
+            "unmute" => {
+                if let Some(v) = b.kept.muted.get_mut(&slot) {
+                    v.retain(|&i| i != id);
+                }
+                b.kept.muted.retain(|_, v| !v.is_empty());
+                b.say_host();
+            }
+            _ => return (StatusCode::BAD_REQUEST, "kick, mute or unmute").into_response(),
+        }
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct Say {
+    to: String,
+    text: String,
+}
+
+/// An announcement, now: in one village the host keeps, or all ("*").
+async fn say(State(app): State<App>, Json(s): Json<Say>) -> Response {
+    let text: String = s.text.trim().chars().filter(|c| !c.is_control()).take(200).collect();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "nothing to say").into_response();
+    }
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).host_cmd(json!({ "say": { "to": s.to.chars().take(64).collect::<String>(), "text": text } }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// What's said to whoever comes into each village the host keeps.
+async fn set_welcome(State(app): State<App>, Json(w): Json<std::collections::BTreeMap<String, String>>) -> Response {
+    let clean: std::collections::BTreeMap<String, String> = w.into_iter().take(64).map(|(k, v)| (k.chars().take(64).collect(), v.trim().chars().filter(|c| !c.is_control()).take(200).collect::<String>())).filter(|(_, v): &(String, String)| !v.is_empty()).collect();
+    {
+        let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
+        b.kept.welcome = clean;
+        b.say_host();
+    }
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The announcements to come (each numbered; a past one-off dropped).
+async fn set_schedules(State(app): State<App>, Json(list): Json<Vec<Schedule>>) -> Response {
+    let now = crate::broker::now_secs();
+    let out: Vec<Schedule> = list
+        .into_iter()
+        .take(100)
+        .enumerate()
+        .map(|(i, s)| Schedule { id: i as u32 + 1, text: s.text.trim().chars().filter(|c| !c.is_control()).take(200).collect(), to: s.to.chars().take(64).collect(), at: s.at, every: if s.every == 0 { 0 } else { s.every.clamp(60, 30 * 86400) }, on: s.on })
+        .filter(|s| !s.text.is_empty() && (s.every > 0 || s.at + 120 > now))
+        .collect();
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).kept.schedules = out;
+    app.save();
+    StatusCode::NO_CONTENT.into_response()
+}
+
 const PAGE: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Village relay</title>
@@ -177,10 +437,45 @@ const PAGE: &str = r##"<!doctype html>
   .grid label { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .note { color: var(--dim); font-size: 12px; }
   #msg { color: var(--gold); min-height: 1.2em; }
+  .ok { color: #9be08a; } .warn { color: var(--bad); }
+  .chat { max-height: 220px; overflow-y: auto; border: 1px solid var(--line); padding: 4px 6px; font-size: 12px; }
+  .chat div { white-space: pre-wrap; }
+  .slot { border: 1px solid var(--line); padding: 8px 10px; margin: 8px 0; }
+  .slot h3 { margin: 0 0 6px; font-size: 13px; font-weight: normal; color: var(--text); }
+  textarea { font: inherit; background: #0b1020; color: var(--text); border: 1px solid #4a5480; padding: 4px 6px; width: 100%; }
+  select { font: inherit; background: #0b1020; color: var(--text); border: 1px solid #4a5480; }
+  button.small { padding: 0 6px; font-size: 12px; }
 </style></head><body>
 <header><b>❄ Village relay</b><span id="ver"></span><span id="up"></span></header>
 <main>
   <section><h2>NOW</h2><div class="cards" id="cards"></div><div class="note" id="kinds"></div></section>
+  <section><h2>HOST</h2>
+    <p id="host"></p>
+    <p><label><input type="checkbox" id="hostsq" style="width:auto"> the host keeps the public squares (else the first player in hosts each, as before)</label></p>
+    <p class="note">The relay's own host keeps the squares and the server villages open, the same for everyone, all the time. It runs beside the relay (see DEPLOY.md) and signs in with HOST_TOKEN.</p>
+  </section>
+  <section><h2>IN THE VILLAGES THE HOST KEEPS</h2>
+    <p class="note">Who's in each, and what's been said there lately (kept in memory only, the last 50 lines). Mute: their talk isn't shown to others there. Kick: sent home from that village. Ban: kept off the relay.</p>
+    <div id="slots"></div>
+  </section>
+  <section><h2>ANNOUNCE</h2>
+    <p><select id="sayto"></select> <input id="saytext" placeholder="what to say (200 letters at most)" style="width:min(520px,70%)"> <button id="saynow">say it now</button> <span id="saymsg"></span></p>
+    <h2 style="margin-top:12px">SCHEDULED</h2>
+    <p class="note">Said by the host at the time given (this browser's time), once or again every so many minutes. One missed while the relay was down isn't said late.</p>
+    <div class="wrap"><table><thead><tr><th>on</th><th>what</th><th>where</th><th>first at</th><th>every (min, 0: once)</th><th></th></tr></thead><tbody id="sched"></tbody></table></div>
+    <p><button id="addsched">+ add</button> <button id="savesched">save announcements</button> <span id="schedmsg"></span></p>
+  </section>
+  <section><h2>SERVER VILLAGES</h2>
+    <p class="note">Villages the host keeps open, not a player's game. Private: only those given the code can come in. Listed: in everyone's Public villages. A code left blank is made for it.</p>
+    <div class="wrap"><table><thead><tr><th>name</th><th>code</th><th>listed</th><th>most at once</th><th>time of day</th><th>folk &amp; animals</th><th>surprises</th><th>welcome</th><th></th></tr></thead><tbody id="servers"></tbody></table></div>
+    <p><button id="addsrv">+ a village</button> <button id="savesrv">save server villages</button> <span id="srvmsg"></span></p>
+  </section>
+  <section><h2>PUBLIC LIST</h2>
+    <p class="note">Featured first, then in this order (names or codes, one a line), then the rest, busiest first. Extra words are starred out in every public village.</p>
+    <div class="grid"><label>featured <textarea id="featured" rows="3"></textarea></label><label>order <textarea id="order" rows="3"></textarea></label><label>extra words <textarea id="words" rows="3"></textarea></label></div>
+    <p><button id="savepub">save the public list</button> <span id="pubmsg"></span></p>
+    <div id="listings"></div>
+  </section>
   <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>address</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div></section>
   <section><h2>LIMITS</h2>
     <div class="grid" id="limits"></div>
@@ -193,8 +488,13 @@ const PAGE: &str = r##"<!doctype html>
     <p><button id="savesq">save squares</button> <span id="sqmsg"></span></p>
   </section>
   <section><h2>BANS</h2>
-    <p><input id="banip" placeholder="address" style="width:220px"> <button id="ban" class="bad">ban</button></p>
+    <p>addresses: <input id="banip" placeholder="address" style="width:220px"> <button id="ban" class="bad">ban</button></p>
     <table><tbody id="bans"></tbody></table>
+    <p>villages: <input id="banvcode" placeholder="its code" style="width:160px"> <input id="banvwhy" placeholder="why (for you)" style="width:220px"> <button id="banv" class="bad">ban</button></p>
+    <table><tbody id="vbans"></tbody></table>
+    <p>players: <input id="banpid" placeholder="id (8 hex digits)" style="width:160px"> <input id="banpwhy" placeholder="why (for you)" style="width:220px"> <button id="banp" class="bad">ban</button></p>
+    <table><tbody id="pbans"></tbody></table>
+    <p class="note">A banned village can't be used on the relay and leaves the public list; a banned player (by the id their game has) can't connect. Someone can always start afresh with a new id or address: bans slow them down, they don't make them impossible.</p>
   </section>
   <section><h2>KEPT MESSAGES</h2>
     <p class="note">Messages the relay keeps for whoever comes next ("here I am", a shared village's state). Forget all under a prefix, e.g. xmas-tui/1/here/</p>
@@ -268,6 +568,100 @@ $("savesq").onclick = async () => {
   $("sqmsg").textContent = r.ok ? "saved: everyone in the squares has them now" : "couldn't save (" + r.status + ")";
   loadSquares();
 };
+// ---- the host, its villages, the public list, announcements, bans
+let st = null, srvs = [], scheds = [], editSrv = false, editSched = false;
+const when = (t) => { const d = new Date(t * 1000); return d.toLocaleString(); };
+const local = (t) => { const d = new Date(t * 1000 - new Date().getTimezoneOffset() * 60000); return d.toISOString().slice(0, 16); };
+const fromLocal = (s) => Math.floor(new Date(s).getTime() / 1000);
+async function loadState() {
+  try { st = await (await fetch("api/state")).json(); } catch (e) { return; }
+  $("host").innerHTML = st.host_here ? `<span class="ok">● the host is connected</span>` : st.host_token ? `<span class="warn">○ the host isn't connected</span> (squares fall back to their players)` : `<span class="warn">○ no HOST_TOKEN set</span>: no host can sign in`;
+  $("hostsq").checked = st.host_squares;
+  const slots = Object.entries(st.reports).sort((a, b) => a[0].localeCompare(b[0]));
+  $("slots").innerHTML = slots.filter(([k]) => k !== "_public").map(([slot, r]) => {
+    const muted = st.muted[slot] || [];
+    const ps = (r.players || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="note">${p.id.toString(16).padStart(8, "0")}</td><td>${muted.includes(p.id) ? `<button class="small" data-act="unmute" data-slot="${esc(slot)}" data-id="${p.id}">unmute</button>` : `<button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${p.id}">mute</button>`} <button class="small" data-act="kick" data-slot="${esc(slot)}" data-id="${p.id}">kick</button> <button class="small bad" data-pban="${p.id}" data-name="${esc(p.name)}">ban</button></td></tr>`).join("") || `<tr><td class="note">nobody there</td></tr>`;
+    const chat = (r.chat || []).slice(-50).map((c) => `<div><span class="note">${new Date(c.at * 1000).toLocaleTimeString()}</span> <b>${esc(c.name)}</b>: ${esc(c.text)} <button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${c.id}">mute</button></div>`).join("") || `<div class="note">nothing said lately</div>`;
+    const stale = r.age > 30 ? ` <span class="warn">(not heard from for ${ago(r.age)})</span>` : "";
+    return `<div class="slot"><h3>${esc(r.name || slot)} · ${esc(r.kind || "")}${r.public === false ? " · private" : ""} · ${r.n ?? 0} of ${r.limit ?? "?"}${stale}</h3><table><tbody>${ps}</tbody></table><div class="chat">${chat}</div></div>`;
+  }).join("") || `<p class="note">nothing yet: the host reports every few seconds once it's connected</p>`;
+  const to = ["*"].concat(slots.filter(([k]) => k !== "_public").map(([k]) => k));
+  const keep = $("sayto").value;
+  $("sayto").innerHTML = to.map((t) => `<option value="${esc(t)}">${t === "*" ? "every village the host keeps" : esc(t)}</option>`).join("");
+  if (keep) $("sayto").value = keep;
+  const pub = (st.reports._public || {}).listings || [];
+  $("listings").innerHTML = pub.length ? `<table><thead><tr><th>listed now</th><th>code</th><th>here</th><th></th></tr></thead><tbody>${pub.map((l) => `<tr><td>${esc(l.name)}</td><td class="note">${esc(l.code)}</td><td>${l.n} of ${l.limit}</td><td><button class="small" data-feature="${esc(l.code)}">feature</button> <button class="small bad" data-vban="${esc(l.code)}" data-name="${esc(l.name)}">ban</button></td></tr>`).join("")}</tbody></table>` : `<p class="note">(the villages listed right now show here once the host's connected)</p>`;
+  if (document.activeElement.tagName !== "TEXTAREA") { $("featured").value = st.featured.join("\n"); $("order").value = st.order.join("\n"); $("words").value = st.words.join("\n"); }
+  $("vbans").innerHTML = st.village_bans.map((b) => `<tr><td>${esc(b.name || "(a village)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-vunban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no villages</td></tr>`;
+  $("pbans").innerHTML = st.player_bans.map((b) => `<tr><td>${esc(b.name || "(a player)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-punban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no players</td></tr>`;
+  if (!editSrv) { srvs = st.servers.map((v) => ({ ...v, welcome: st.welcome[v.name] || "" })); drawServers(); }
+  if (!editSched) { scheds = st.schedules.slice(); drawSched(); }
+}
+const SEL = (vals, cur, attrs) => `<select ${attrs}>${vals.map((v) => `<option value="${v}" ${String(cur) === String(v) ? "selected" : ""}>${v === "" ? "(usual)" : v}</option>`).join("")}</select>`;
+function drawServers() {
+  $("servers").innerHTML = srvs.map((v, i) => `<tr>
+    <td><input data-s="${i}" data-k="name" value="${esc(v.name)}" style="width:150px"></td>
+    <td><input data-s="${i}" data-k="code" value="${esc(v.code)}" placeholder="(made for it)" style="width:130px"></td>
+    <td><input data-s="${i}" data-k="public" type="checkbox" ${v.public ? "checked" : ""} style="width:auto"></td>
+    <td><input data-s="${i}" data-k="limit" type="number" min="2" max="48" value="${v.limit || 8}" style="width:60px"></td>
+    <td>${SEL(TIMES, (v.rules || {}).time ?? "", `data-s="${i}" data-r="time"`)}</td>
+    <td><input data-s="${i}" data-r="critters" type="number" step="0.25" min="0" value="${(v.rules || {}).critters ?? ""}" style="width:60px"></td>
+    <td><input data-s="${i}" data-r="events" type="number" step="0.25" min="0" value="${(v.rules || {}).events ?? ""}" style="width:60px"></td>
+    <td><input data-s="${i}" data-k="welcome" value="${esc(v.welcome || "")}" style="width:200px"></td>
+    <td><button class="small bad" data-srvdel="${i}">remove</button></td></tr>`).join("") || `<tr><td class="note" colspan="9">none yet</td></tr>`;
+  document.querySelectorAll("#servers [data-s]").forEach((el) => el.oninput = () => {
+    editSrv = true;
+    const v = srvs[el.dataset.s];
+    if (el.dataset.r) { v.rules = v.rules || {}; const x = el.value.trim(); if (x === "") delete v.rules[el.dataset.r]; else v.rules[el.dataset.r] = el.dataset.r === "time" ? x : Number(x); }
+    else v[el.dataset.k] = el.type === "checkbox" ? el.checked : el.dataset.k === "limit" ? Number(el.value) : el.value;
+  });
+}
+function drawSched() {
+  const to = ["*"].concat(Object.keys((st && st.reports) || {}).filter((k) => k !== "_public"));
+  $("sched").innerHTML = scheds.map((s, i) => `<tr>
+    <td><input data-c="${i}" data-k="on" type="checkbox" ${s.on ? "checked" : ""} style="width:auto"></td>
+    <td><input data-c="${i}" data-k="text" value="${esc(s.text)}" style="width:280px"></td>
+    <td>${SEL(Array.from(new Set(to.concat([s.to || "*"]))), s.to || "*", `data-c="${i}" data-k="to"`)}</td>
+    <td><input data-c="${i}" data-k="at" type="datetime-local" value="${local(s.at || st.now + 3600)}"></td>
+    <td><input data-c="${i}" data-k="every" type="number" min="0" value="${Math.round((s.every || 0) / 60)}" style="width:70px"></td>
+    <td><button class="small bad" data-scdel="${i}">remove</button></td></tr>`).join("") || `<tr><td class="note" colspan="6">none</td></tr>`;
+  document.querySelectorAll("#sched [data-c]").forEach((el) => el.oninput = () => {
+    editSched = true;
+    const s = scheds[el.dataset.c], k = el.dataset.k;
+    s[k] = k === "on" ? el.checked : k === "at" ? fromLocal(el.value) : k === "every" ? Number(el.value) * 60 : el.value;
+  });
+}
+$("addsrv").onclick = () => { editSrv = true; srvs.push({ name: "", code: "", public: false, limit: 8, rules: {}, welcome: "" }); drawServers(); };
+$("savesrv").onclick = async () => {
+  const list = srvs.map((v) => ({ name: v.name, code: v.code, public: !!v.public, limit: v.limit || 8, seed: v.seed || 0, rules: v.rules || {} }));
+  const r = await call("api/servers", list);
+  const welcome = {};
+  for (const [k, v] of Object.entries(st.welcome)) if (!srvs.some((s) => s.name === k)) welcome[k] = v;
+  srvs.forEach((v) => { if (v.welcome) welcome[v.name] = v.welcome; });
+  const w = await call("api/welcome", welcome);
+  $("srvmsg").textContent = r.ok && w.ok ? "saved: the host opens, changes or closes them now" : "couldn't save (" + r.status + ")";
+  editSrv = false; loadState();
+};
+$("addsched").onclick = () => { editSched = true; scheds.push({ text: "", to: "*", at: st.now + 3600, every: 0, on: true }); drawSched(); };
+$("savesched").onclick = async () => { const r = await call("api/schedules", scheds); $("schedmsg").textContent = r.ok ? "saved" : "couldn't save (" + r.status + ")"; editSched = false; loadState(); };
+$("saynow").onclick = async () => { const text = $("saytext").value.trim(); if (!text) return; const r = await call("api/say", { to: $("sayto").value, text }); $("saymsg").textContent = r.ok ? (st.host_here ? "said" : "sent, but the host isn't connected") : "couldn't (" + r.status + ")"; if (r.ok) $("saytext").value = ""; };
+const lines = (id) => $(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
+$("savepub").onclick = async () => { const r = await call("api/public", { featured: lines("featured"), order: lines("order"), words: lines("words"), host_squares: $("hostsq").checked }); $("pubmsg").textContent = r.ok ? "saved: everyone's list follows it now" : "couldn't save (" + r.status + ")"; loadState(); };
+$("hostsq").onchange = () => $("savepub").click();
+$("banv").onclick = async () => { const code = $("banvcode").value.trim(); if (!code) return; const r = await call("api/ban-village", { code, why: $("banvwhy").value }); if (r.ok) { $("banvcode").value = ""; $("banvwhy").value = ""; } else alert(await r.text()); loadState(); };
+$("banp").onclick = async () => { const id = $("banpid").value.trim(); if (!id) return; const r = await call("api/ban-player", { id, why: $("banpwhy").value }); if (r.ok) { $("banpid").value = ""; $("banpwhy").value = ""; } else alert(await r.text()); loadState(); };
+document.addEventListener("click", async (e) => {
+  const t = e.target, d = t.dataset;
+  if (d.act) { await call("api/moderate", { slot: d.slot, id: Number(d.id), action: d.act }); loadState(); }
+  else if (d.pban && confirm("Ban " + (d.name || "this player") + " from the relay?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-player", { id: Number(d.pban), name: d.name || "", why }); loadState(); }
+  else if (d.vban && confirm("Ban the village " + (d.name || d.vban) + "?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-village", { code: d.vban, name: d.name || "", why }); loadState(); }
+  else if (d.vunban) { await call("api/unban-village", { code: d.vunban }); loadState(); }
+  else if (d.punban) { await call("api/unban-player", { id: d.punban }); loadState(); }
+  else if (d.feature) { const f = lines("featured"); if (!f.includes(d.feature)) f.push(d.feature); $("featured").value = f.join("\n"); $("savepub").click(); }
+  else if (d.srvdel && confirm("Close and remove this server village?")) { editSrv = true; srvs.splice(Number(d.srvdel), 1); drawServers(); }
+  else if (d.scdel) { editSched = true; scheds.splice(Number(d.scdel), 1); drawSched(); }
+});
 loadSquares();
+loadState(); setInterval(loadState, 4000);
 refresh(); setInterval(refresh, 3000);
 </script></body></html>"##;
