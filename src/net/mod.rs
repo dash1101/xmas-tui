@@ -110,7 +110,22 @@ pub struct PublicRules {
     pub featured: Vec<String>,
     pub order: Vec<String>,
     pub banned: Vec<String>,
+    /// Banned villages by their topic (what's after `village/`): a private
+    /// village's code is never sent out, only this.
+    #[serde(default)]
+    pub banned_ids: Vec<String>,
     pub words: Vec<String>,
+}
+
+impl PublicRules {
+    /// Is the village with this code kept out by the relay?
+    pub fn is_banned(&self, code: &str) -> bool {
+        let code = seal::norm(code);
+        self.banned.contains(&code) || {
+            let t = seal::topic("village", &code);
+            self.banned_ids.iter().any(|b| t.rsplit('/').next() == Some(b.as_str()))
+        }
+    }
 }
 
 /// Kept in the save: online or not, this villager's friend code, friends.
@@ -388,6 +403,9 @@ enum Msg {
         at: i64,
         #[serde(default)]
         card: Option<Card>,
+        /// What they're playing on ("linux", "windows", "android", "web").
+        #[serde(default)]
+        os: String,
     },
     /// On a linked device's own topic (see `sync_on`): its side of the
     /// villager (see `crate::sync`), when.
@@ -689,6 +707,18 @@ pub struct Here {
     pub on: bool,
     pub village: Option<String>,
     pub card: Option<Card>,
+    /// What they're playing on, if they said ("linux", "windows",
+    /// "android", "macos", "web").
+    pub os: Option<String>,
+}
+
+/// What this is playing on, as friends are told.
+pub fn platform() -> &'static str {
+    if cfg!(target_arch = "wasm32") {
+        "web"
+    } else {
+        std::env::consts::OS
+    }
 }
 
 /// Linked devices: their topics (one each, under the link code's).
@@ -746,6 +776,9 @@ pub const ADMIN_REPORT: &str = "xmas-tui/1/admin/report/";
 /// A village's official word, from the relay's own host (only it may
 /// speak there, the relay sees to that): `…/v/<the village topic's id>`.
 pub const ADMIN_V: &str = "xmas-tui/1/admin/v/";
+/// The relay's host hears village messages here instead, with the
+/// connection each came from (`ADMIN_VIA/<connection>/<village>`).
+pub const ADMIN_VIA: &str = "xmas-tui/1/admin/via";
 /// Ids below this are the relay's own host's: from anyone else, ignored.
 pub const HOST_IDS: u32 = 0x1000;
 
@@ -773,6 +806,11 @@ pub struct Online {
     /// The relay's own host: what's been said in its village lately (when,
     /// who, their name, what).
     pub said_here: std::collections::VecDeque<(i64, u32, String, String)>,
+    /// The relay's own host: which connection each player id has come
+    /// from (as the relay tells it, see `ADMIN_VIA`), and the other way:
+    /// one connection, one id, so nobody can speak as somebody else.
+    owners: HashMap<u32, u64>,
+    conn_ids: HashMap<u64, u32>,
     square_rules: HashMap<String, String>,
     /// This side's clock (minutes into the day, sunrise, sunset), sent to
     /// the guests while hosting (see `set_clock`).
@@ -866,6 +904,8 @@ impl Online {
             public_rules: PublicRules::default(),
             admin_in: vec![],
             said_here: std::collections::VecDeque::new(),
+            owners: HashMap::new(),
+            conn_ids: HashMap::new(),
             trusted: false,
             square_rules: HashMap::new(),
             my_clock: [720.0, 450.0, 1020.0],
@@ -1085,7 +1125,7 @@ impl Online {
     fn here_msg(&self, on: bool) -> Msg {
         let village = self.village.as_ref().filter(|v| v.host).map(|v| v.code.clone());
         let card = (!self.card.name.is_empty() || !self.card.motto.is_empty()).then(|| self.card.clone());
-        Msg::Here { name: self.name.clone(), on, village, at: now(), card }
+        Msg::Here { name: self.name.clone(), on, village, at: now(), card, os: platform().into() }
     }
 
     /// To everyone in the shared village.
@@ -1124,7 +1164,7 @@ impl Online {
         }
         // the relay's own host: what it's to keep open, and do
         if self.server {
-            self.subscribe(vec![ADMIN_HOST.to_string(), ADMIN_CMD.to_string()]);
+            self.subscribe(vec![ADMIN_HOST.to_string(), ADMIN_CMD.to_string(), ADMIN_VIA.to_string()]);
         }
         // back (perhaps after a blip): where this villager is, at once
         self.next_me = 0.0;
@@ -1193,11 +1233,27 @@ impl Online {
     }
 
     fn got(&mut self, topic: &str, payload: &[u8]) {
+        // (the relay's own host: a village message, with the connection it
+        // came from)
+        let mut via = None;
+        let rewritten;
+        let topic = match topic.strip_prefix(ADMIN_VIA).and_then(|r| r.strip_prefix('/')).and_then(|r| r.split_once('/')) {
+            // (only the relay's own host listens there, and only its relay
+            // can send there: nobody else can subscribe to it)
+            Some((conn, hash)) if self.server => {
+                let Ok(conn) = u64::from_str_radix(conn, 16) else { return };
+                via = Some(conn);
+                rewritten = format!("xmas-tui/1/village/{hash}");
+                rewritten.as_str()
+            }
+            Some(_) => return,
+            None => topic,
+        };
         // the public squares' settings, from the village's own relay
         if topic == ADMIN_PUBLIC {
             if self.trusted && payload.len() <= 64 * 1024 {
                 if let Ok(r) = serde_json::from_slice::<PublicRules>(payload) {
-                    self.public_rules = PublicRules { banned: r.banned.iter().map(|c| seal::norm(c)).collect(), words: r.words.iter().take(400).map(|w| w.to_lowercase()).collect(), ..r };
+                    self.public_rules = PublicRules { banned: r.banned.iter().map(|c| seal::norm(c)).collect(), banned_ids: r.banned_ids.iter().take(2000).map(|b| b.to_lowercase()).collect(), words: r.words.iter().take(400).map(|w| w.to_lowercase()).collect(), ..r };
                 }
             }
             return;
@@ -1265,14 +1321,15 @@ impl Online {
             return;
         }
         if let Some(i) = self.live.iter().position(|l| l.here_topic == topic) {
-            if let Some(Msg::Here { name, on, village, at, card }) = parse(&self.live[i].seal) {
+            if let Some(Msg::Here { name, on, village, at, card, os }) = parse(&self.live[i].seal) {
                 let name = clean(&name, 32);
                 let village = village.map(|v| seal::norm(&v)).filter(|v| v.len() == 12);
                 let card = card.map(Card::cleaned);
                 let fresh = now() - at < 180;
                 let was_on = self.live[i].here.as_ref().is_some_and(|h| h.on);
                 let on = on && fresh;
-                self.live[i].here = Some(Here { on, village: village.filter(|_| on), card });
+                let os = Some(os.as_str()).filter(|o| matches!(*o, "linux" | "windows" | "android" | "macos" | "web")).map(String::from);
+                self.live[i].here = Some(Here { on, village: village.filter(|_| on), card, os });
                 if let Some(p) = self.book.friends.get_mut(i) {
                     if !name.is_empty() && p.name != name {
                         p.name = name.clone();
@@ -1325,21 +1382,59 @@ impl Online {
         let t = self.t;
         let me = self.id;
         // (one sender flooding the village is shrugged off)
-        let sender = match &m {
-            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Go { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
-            Msg::Village { host, .. } => *host,
-            Msg::Crowd { id, .. } | Msg::Full { id, .. } | Msg::Kick { id, .. } | Msg::Notice { id, .. } => *id,
-            _ => 0,
+        let said_by = match &m {
+            Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Go { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => Some(*id),
+            Msg::Village { host, .. } => Some(*host),
+            Msg::Crowd { id, .. } | Msg::Full { id, .. } | Msg::Kick { id, .. } | Msg::Notice { id, .. } => Some(*id),
+            _ => None,
         };
-        // the relay's own host's ids: only on its official topic
-        if sender != 0 && sender < HOST_IDS && !from_host {
+        // the relay's own host's ids: only on its official topic (and 0 is
+        // nobody's)
+        if said_by.is_some_and(|id| id == 0 || (id < HOST_IDS && !from_host)) {
             return;
+        }
+        let sender = said_by.unwrap_or(0);
+        // once the relay's own host keeps this village, the host's word
+        // (who's host, who's sent home, notices, who's about) is only its
+        // own, from its official topic
+        let hosts_word = matches!(m, Msg::Village { .. } | Msg::Crowd { .. } | Msg::Full { .. } | Msg::Kick { .. } | Msg::Notice { .. });
+        if hosts_word && !from_host && v.host_id.is_some_and(|h| h < HOST_IDS) {
+            return;
+        }
+        // the relay's own host: each id from one connection only, and each
+        // connection with one id (the relay says which sent what)
+        if let (Some(conn), Some(id)) = (via, said_by) {
+            match (self.owners.get(&id), self.conn_ids.get(&conn)) {
+                (Some(c), _) if *c != conn => return,
+                (None, Some(other)) if *other != id => return,
+                (None, _) => {
+                    if self.owners.len() < 4096 {
+                        self.owners.insert(id, conn);
+                        self.conn_ids.insert(conn, id);
+                    }
+                }
+                _ => {}
+            }
+            if let Msg::Bye { .. } = m {
+                self.owners.remove(&id);
+                self.conn_ids.remove(&conn);
+            }
         }
         if sender != me && !self.not_flooded(sender, 60) {
             return;
         }
         let admins_here = self.admins.clone();
+        let server = self.server;
         let v = self.village.as_mut().unwrap();
+        // the relay's own host, on its official topic: the host, whoever
+        // was taken for it before (a player hosting the square till now
+        // steps down; one that only claimed it is forgotten)
+        if let Msg::Village { host, .. } = &m {
+            if from_host && *host != me && v.host_id != Some(*host) && !server {
+                v.host = false;
+                v.host_id = None;
+            }
+        }
         match m {
             // full (the host turns them away; anyone else just doesn't take
             // in more than the most there's ever room for)
@@ -1461,7 +1556,7 @@ impl Online {
             }
             // a square with two hosts (both came in at once): the lower id
             // keeps it, the other steps down
-            Msg::Village { host, .. } if host != me && v.square.is_some() && v.host && host < me => {
+            Msg::Village { host, .. } if host != me && v.square.is_some() && v.host && host < me && !server => {
                 v.host = false;
                 v.host_id = Some(host);
                 v.host_seen = t;
@@ -1775,7 +1870,7 @@ impl Online {
             self.book.friends.push(Pal { name: name.to_string(), code, waiting: false, quiet: false });
             self.relive();
             if let Some(l) = self.live.last_mut() {
-                l.here = Some(Here { on: *on, village: village.then(|| "ABCD-EFGH-JKLM".into()), card: None });
+                l.here = Some(Here { on: *on, village: village.then(|| "ABCD-EFGH-JKLM".into()), card: None, os: Some(["linux", "android", "windows", "web"][i % 4].into()) });
             }
         }
     }
@@ -2058,7 +2153,7 @@ impl Online {
         if code.len() != 12 {
             return Err("a village code is twelve letters and numbers");
         }
-        if self.public_rules.banned.contains(&code) {
+        if self.public_rules.is_banned(&code) {
             return Err("that village has been closed by the relay");
         }
         if self.link != Link::On {
@@ -2199,8 +2294,8 @@ impl Online {
     pub fn listings(&self) -> Vec<Listing> {
         let fresh = now() - 60;
         let own = self.village.as_ref().map(|v| v.code.clone());
-        let banned = &self.public_rules.banned;
-        let mut v: Vec<Listing> = self.public.values().filter(|l| !l.square && l.at >= fresh && Some(&l.code) != own.as_ref() && !banned.contains(&l.code)).cloned().collect();
+        let rules = &self.public_rules;
+        let mut v: Vec<Listing> = self.public.values().filter(|l| !l.square && l.at >= fresh && Some(&l.code) != own.as_ref() && !rules.is_banned(&l.code)).cloned().collect();
         // (featured first, then as the relay orders them, then the busiest)
         v.sort_by(|a, b| self.rank(a).cmp(&self.rank(b)).then(b.n.cmp(&a.n)).then(a.name.cmp(&b.name)));
         v.truncate(30);
@@ -2281,6 +2376,12 @@ impl Online {
     }
 
     /// Who's in the village (id, name).
+    /// The relay's host: the connection a player id has come from (as the
+    /// relay said), for its reports.
+    pub fn conn_of(&self, id: u32) -> Option<u64> {
+        self.owners.get(&id).copied()
+    }
+
     pub fn players(&self) -> Vec<(u32, String)> {
         self.others().into_iter().map(|(id, o)| (id, o.name.clone())).collect()
     }
@@ -2931,7 +3032,7 @@ pub(crate) mod tests {
             let u = super::ws::parse(&admin.replace("http://", "ws://")).unwrap();
             let mut s = std::net::TcpStream::connect((u.host.as_str(), u.port)).unwrap();
             let b = body.to_string();
-            write!(s, "POST {path} HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\nx-relay-admin: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}", b.len()).unwrap();
+            write!(s, "POST {path} HTTP/1.1\r\nHost: localhost\r\ncontent-type: application/json\r\nx-relay-admin: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}", b.len()).unwrap();
             let mut r = String::new();
             let _ = s.read_to_string(&mut r);
             r.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)

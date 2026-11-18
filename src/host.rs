@@ -234,7 +234,9 @@ fn report(control: &mut Online, kept: &mut BTreeMap<String, Kept>) {
     for (name, k) in kept.iter_mut() {
         let o = &k.scene.online;
         let muted = o.muted_here();
-        let players: Vec<serde_json::Value> = o.players().into_iter().map(|(id, n)| serde_json::json!({ "id": id, "name": n, "muted": muted.contains(&id) })).collect();
+        // (with the connection the relay says each came from: what the
+        // console acts on, not the id a player claims)
+        let players: Vec<serde_json::Value> = o.players().into_iter().map(|(id, n)| serde_json::json!({ "id": id, "name": n, "muted": muted.contains(&id), "conn": o.conn_of(id) })).collect();
         let chat: Vec<serde_json::Value> = o.said_here.iter().map(|(at, id, n, text)| serde_json::json!({ "at": at, "id": id, "name": n, "text": text })).collect();
         let (code, square, limit, listed, ..) = &k.what;
         let v = serde_json::json!({

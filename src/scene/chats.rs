@@ -589,7 +589,17 @@ impl Scene {
                 let (what, col) = match here {
                     _ if p.waiting => ("· asked, no answer yet", pal::UI_DIM),
                     Some(h) if h.village.is_some() => ("· ⌂ their village is open", Rgb::hex(0xffd36b) * 0.85),
-                    Some(h) if h.on => ("· ● online", Rgb::hex(0x9be08a)),
+                    Some(h) if h.on => (
+                        match h.os.as_deref() {
+                            Some("android") => "· ● online · on a phone",
+                            Some("windows") => "· ● online · on Windows",
+                            Some("linux") => "· ● online · on Linux",
+                            Some("macos") => "· ● online · on a Mac",
+                            Some("web") => "· ● online · in a browser",
+                            _ => "· ● online",
+                        },
+                        Rgb::hex(0x9be08a),
+                    ),
                     _ => ("· ○ offline: lines reach them only while they're online", pal::UI_DIM),
                 };
                 let x = f.text(x + 1, y0 + 3, what, col, bg, 0.0);

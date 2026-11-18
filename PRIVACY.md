@@ -60,7 +60,7 @@ Everything goes through the relay sealed with ChaCha20-Poly1305. The key comes f
 
 | What | Sent when | Who can read it |
 |---|---|---|
-| The villager's name, look, profile card (the line on it, the pet, games won, best ski score and so on), and whether they're online | Online, now and then | Friends (those with the friend code) |
+| The villager's name, look, profile card (the line on it, the pet, games won, best ski score and so on), whether they're online, and what they're playing on (Windows, Linux, a phone, a browser; from 1.25.3) | Online, now and then | Friends (those with the friend code) |
 | Direct messages to a friend | When written | The friend. **Note:** a message is sealed with the receiver's friend code, which the receiver's other friends also have. A modified app in one of their hands could read it. Nothing secret belongs in a chat. |
 | Where the villager is and what they're doing (walking, jumping, paused, their pets), what's said aloud, waves, games, snowballs, shooting stars, and the host's village settings, clock and music | In a shared village | Everyone in that village (those with its code) |
 | "Just to …" messages inside a village | When written | Meant for one person, but sealed with the village's code: a modified app in the same village could read them |
@@ -89,12 +89,12 @@ Alongside the relay runs its own host: a copy of the game with no window, signed
 
 In the villages it keeps, the host is there like any other player, so it sees what everyone there sees. It doesn't keep what it sees, except for these, which it sends to the admin console every few seconds:
 
-- who's in each of those villages right now (the id the game picked for them, and the name they gave);
+- who's in each of those villages right now (the id the game picked for them, and the name they gave), and, from relay 1.5.0, which of the relay's connections each one's messages came from (the relay tells the host, so nobody can speak as somebody else, and the console acts on the right connection);
 - the last 60 lines said aloud in each (who said it, and when).
 
 These are held in memory only, replaced as they come, and gone within two minutes once the host stops sending them. They're never written to disk. The host doesn't see friends' messages, and it doesn't keep "just to …" messages.
 
-From the console, the project can quieten someone in those villages (what they say isn't passed on), send someone home, make announcements (now, or at set times), greet newcomers, and keep villages or players out of the relay, or a player out of just one of those villages. Beside each player in those villages, the console shows the address they're connected from (which the relay sees anyway), so that an address can be blocked.
+From the console, the project can quieten someone in those villages (what they say isn't passed on), send someone home, make announcements (now, or at set times), greet newcomers, and keep villages or players out of the relay, or a player out of just one of those villages. Beside each player in those villages, the console shows the address they're connected from, its country and the app's version (which the relay sees anyway), so that an address can be blocked; and in its list of connections, the name of whoever's in one of those villages. Outside those villages, the console has no names: a private village, a friend's chat or a player's presence is sealed, and the relay can't read who's in it or what's said. It also counts the players online and what they're playing on.
 
 ### What the relay keeps, and for how long
 
@@ -163,8 +163,9 @@ If a child has shared something they shouldn't have, a parent or guardian can co
 
 - What goes through the relay is sealed end to end with ChaCha20-Poly1305.
 - The connections to the relay use TLS (wss:// and https://).
-- The relay limits connections and message sizes, and the topics it keeps are restricted to the village's own.
-- Only the relay's own host can speak for the relay (its settings, its public list, its announcements): it signs in with a secret, the relay refuses a wrong one, and what anyone else sends on the relay's own topics is dropped.
+- The relay limits connections (counted from the moment they open), messages, and what may wait for each connection; only the village's own topics are accepted, nobody can list the topics in use, and what's kept is limited per address.
+- Only the relay's own host can speak for the relay (its settings, its public list, its announcements): it signs in with a secret, only from the relay's own network, the relay refuses a wrong one, and what anyone else sends on the relay's own topics is dropped.
+- The admin console checks Cloudflare Access's signed sign-in token, and its page can't run any script but its own.
 - No system is perfectly secure, and this is a hobby project. Anything that must stay secret belongs somewhere else.
 - Security problems can be reported as described under "Who runs it".
 
