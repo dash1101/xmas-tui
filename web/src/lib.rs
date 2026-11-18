@@ -433,6 +433,18 @@ pub extern "C" fn toggle_sound(w: *mut Web) {
     unsafe { &mut *w }.game.toggle_sound();
 }
 
+/// Pause the village, or carry on (the page's ⏸, P).
+#[no_mangle]
+pub extern "C" fn toggle_pause(w: *mut Web) {
+    unsafe { &mut *w }.game.toggle_pause();
+}
+
+/// Paused (1) or not (0).
+#[no_mangle]
+pub extern "C" fn paused(w: *mut Web) -> i32 {
+    unsafe { &*w }.game.paused() as i32
+}
+
 /// How big the page's own buttons should be (the settings' buttons size).
 #[no_mangle]
 pub extern "C" fn buttons_k(w: *mut Web) -> f32 {

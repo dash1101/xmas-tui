@@ -217,6 +217,9 @@ setInterval(() => {
   const p = getText(wasm.place(game));
   const t = p ? "Village · " + p : "Village";
   if (document.title !== t) document.title = t;
+  // (paused from the ☰ menu or the home page too: the bar's button follows)
+  const b = document.getElementById("b-pause"), ch = wasm.paused(game) ? "▶" : "⏸";
+  if (b.textContent !== ch) b.textContent = ch;
 }, 1500);
 
 // what the village asks of the page: the settings, a line typed (a
@@ -500,6 +503,7 @@ addEventListener("keydown", (e) => {
     case "KeyQ": wasm.button(game, BTN.HELD); break;
     case "KeyC": wasm.button(game, BTN.CENTRE); break;
     case "KeyZ": wasm.button(game, BTN.REST); break;
+    case "KeyP": togglePause(); break;
     case "KeyT": if (menu) wasm.back(game); else wasm.todo(game); break;
     case "KeyO": if (menu) wasm.back(game); else wasm.online(game); break;
     case "Slash": wasm.chat(game); break;
@@ -511,7 +515,7 @@ addEventListener("keydown", (e) => {
       else if (e.key === "/") { wasm.chat(game); e.preventDefault(); }
   }
   steer();
-  if (/^(Key[WASDEFRZTQICOYN]|Arrow|Space|Enter|Digit|Escape|Slash)/.test(e.code)) e.preventDefault();
+  if (/^(Key[WASDEFRZTQICOYNP]|Arrow|Space|Enter|Digit|Escape|Slash)/.test(e.code)) e.preventDefault();
 });
 addEventListener("keyup", (e) => {
   if (!game) return;
@@ -935,6 +939,17 @@ function fresh() {
 document.getElementById("b-todo").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.todo(game); };
 document.getElementById("b-more").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.more(game); };
 document.getElementById("b-centre").onclick = () => game && wasm.button(game, BTN.CENTRE);
+// pause (the village stands still and quiet; online goes on)
+function togglePause() {
+  if (!game) return;
+  wasm.toggle_pause(game);
+  const p = !!wasm.paused(game);
+  const b = document.getElementById("b-pause");
+  b.textContent = p ? "▶" : "⏸";
+  b.title = p ? "carry on (P)" : "pause the village (P)";
+  toast(p ? "⏸ paused" : "▶ carrying on");
+}
+document.getElementById("b-pause").onclick = togglePause;
 document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.online(game); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
 sizeButtons();

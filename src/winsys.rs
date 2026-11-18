@@ -863,6 +863,20 @@ fn fullscreen_over(fg: HWND, own: HWND) -> bool {
     }
 }
 
+/// The desktop (or the village itself) has the focus: someone's looking at
+/// it, so it doesn't rest for a game running in the background.
+pub fn desktop_has_focus(own: HWND) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() || fg == own {
+            return true;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut pid);
+        pid == std::process::id() || matches!(class_of(fg).as_str(), "Progman" | "WorkerW")
+    }
+}
+
 /// True while a fullscreen game / presentation covers `own`'s monitor
 /// (used by the window-snow overlay, which hides itself then).
 pub fn fullscreen_app(own: HWND) -> bool {

@@ -48,6 +48,8 @@ pub enum F {
     Units,
     Locked,
     WinSnow,
+    /// The wallpaper rests while a game runs or the computer's busy.
+    RestForGames,
     WinLights,
     Sound,
     SoundMaster,
@@ -175,6 +177,8 @@ pub enum Act {
     Net(u8),
     /// Start the app again.
     Restart,
+    /// Pause the village, or carry on.
+    Pause,
     /// The controls card.
     Help,
     /// A setting that's a public square's own (pointed at: says so).
@@ -285,6 +289,9 @@ pub struct Settings {
     pub tab: usize,
     /// Sound is currently faded out for other media.
     pub media_quiet: bool,
+    /// Resting (the village standing still): "" paused by hand, else why
+    /// the wallpaper rests (shown by the ⏸ button).
+    pub resting: Option<String>,
     /// Where the panel was dragged to (top-left), and the grab offset while
     /// it's being dragged by its title bar.
     pub pos: Option<(i32, i32)>,
@@ -572,6 +579,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Weather => cfg.widgets.weather ^= true,
                 F::Locked => cfg.layout.locked ^= true,
                 F::WinSnow => cfg.windows.snow ^= true,
+                F::RestForGames => cfg.rest_for_games ^= true,
                 F::WinLights => cfg.windows.lights ^= true,
                 F::Sound => cfg.sound.enabled ^= true,
                 F::SoundCursor => cfg.sound.cursor ^= true,
@@ -697,7 +705,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 false
             }
         }
-        Act::Net(_) | Act::Restart | Act::Help | Act::Locked => false,
+        Act::Net(_) | Act::Restart | Act::Pause | Act::Help | Act::Locked => false,
         Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
 }
@@ -759,6 +767,7 @@ fn tip(a: Act) -> Option<&'static str> {
         Act::Restart => return Some("Start xmas-tui again (the settings and the village are kept)."),
         Act::Locked => return Some("In a public square this one's the square's own (set by its keeper), the same for everyone there. Snow, wind, glow and the aurora stay yours."),
         Act::Help => return Some("The controls: the keys, and what clicking and dragging do."),
+        Act::Pause => return Some("The village stands still and goes quiet; friends, and a village you're hosting, carry on (the others see you greyed). P does it too."),
         Act::Net(NET_ONLINE) => return Some("Online: friends, messages, villages to visit and share. Everything's sealed end to end."),
         Act::Net(NET_COPY) => return Some("Copy your friend code, to give to a friend (they add it, you say yes)."),
         Act::Net(NET_FRIENDS) => return Some("Friends & online: who's about, messages, visiting, groups."),
@@ -868,6 +877,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::UpdCheck => "Look for new versions now and then.",
         F::UpdAuto => "Install new versions without asking.",
         F::WinSnow => "Snow settles on top of open windows.",
+        F::RestForGames => "While a game runs, or the computer's working hard, the village stands still (the widgets and online carry on). A click on the desktop wakes it.",
         F::WinFront => "The snow falls in front of windows too.",
         F::WinBrush => "Moving the pointer through the snow sweeps it away.",
         F::WinDocks => "Snow on the taskbar.",
@@ -925,6 +935,11 @@ pub fn online_rect(w: i32) -> Rect {
     Rect { x: w - 53, y: 0, w: 13, h: 1 }
 }
 
+/// The pause button (⏸, and ▶ to carry on), left of the friends one.
+pub fn pause_rect(w: i32) -> Rect {
+    Rect { x: w - 58, y: 0, w: 4, h: 1 }
+}
+
 /// The zoom buttons (out, in), left of the re-centre one.
 pub fn zoom_rects(w: i32) -> (Rect, Rect) {
     (Rect { x: w - 39, y: 0, w: 3, h: 1 }, Rect { x: w - 36, y: 0, w: 3, h: 1 })
@@ -951,6 +966,7 @@ fn controls(k: &crate::config::KeysCfg) -> Vec<(String, &'static str, Option<usi
         (key(4), "your pockets, scorecard and Christmas list", Some(4)),
         ("↑ ↓ Enter".into(), "choose in menus and conversations", None),
         ("Esc".into(), "close what's open · else the settings", None),
+        (key(11), "pause the village (again: carry on)", Some(11)),
         (key(6), "the view back on the villager", Some(6)),
         ("F11".into(), "full screen / back to the wallpaper", None),
         ("Ctrl + / -, Ctrl wheel".into(), "zoom in / out, or pinch (Ctrl 0: back)", None),
@@ -1202,6 +1218,21 @@ impl Settings {
     /// The settings button (always showing, so the panel's always one
     /// click away — right-click isn't available everywhere).
     pub fn draw_gear(&self, f: &mut Frame, t: f32) {
+        // pause / carry on, and while resting, why
+        let r = pause_rect(f.w as i32);
+        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
+        let paused = self.resting.as_deref() == Some("");
+        let bg = Bg::Mix(pal::UI_PANEL, if hot || paused { 0.9 } else { 0.62 });
+        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
+        let (ch, c) = if paused { ('▶', Rgb::hex(0x9be08a) * (1.0 + 0.15 * (t * 3.0).sin())) } else { ('⏸', Rgb::hex(0xbfe4ff) * if hot { 1.2 } else { 0.85 }) };
+        f.put_g(r.x + 1, r.y, Glyph::new(ch, c).bg(bg).lit(0.0));
+        f.put_g(r.x + 2, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        f.put_g(r.x + 3, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        if let Some(why) = &self.resting {
+            let note = if why.is_empty() { " paused · ▶ or P to carry on ".to_string() } else { format!(" resting: {why} ") };
+            let n = note.chars().count() as i32;
+            f.text(r.x - 1 - n, r.y, &note, Rgb::hex(0xbfe4ff), Bg::Mix(pal::UI_PANEL, 0.8), 0.0);
+        }
         // zoom out / in
         let (zo, zi) = zoom_rects(f.w as i32);
         for (r, ch) in [(zo, '−'), (zi, '+')] {
@@ -1895,6 +1926,12 @@ impl Settings {
                 }
             }
         }
+        self.check(f, lx, yy, "Rest while a game runs or the computer's busy", Act::Toggle(F::RestForGames), cfg.rest_for_games);
+        yy += 1;
+        if let Some(why) = self.resting.as_deref().filter(|w| !w.is_empty()) {
+            f.text(lx + 4, yy, &clip(&format!("⏸ resting now: {why}")), pal::UI_DIM, BG, 0.0);
+            yy += 1;
+        }
         let mut cx = lx;
         if let Some(on) = self.autostart {
             cx = self.check(f, lx, yy, "Run at startup", Act::Autostart, on) + 4;
@@ -1998,6 +2035,7 @@ impl Settings {
         yy += 13;
         let mut x = self.check(f, lx, yy, "Autopilot", Act::Toggle(F::Autopilot), cfg.scene.autopilot) + 3;
         x = self.check(f, x, yy, "Sound", Act::Toggle(F::Sound), cfg.sound.enabled) + 3;
+        x = self.check(f, x, yy, "Paused", Act::Pause, self.resting.as_deref() == Some("")) + 3;
         let (zf, z) = if self.kind == Kind::Desktop { (F::Zoom, cfg.zoom) } else { (F::View, view_of(cfg)) };
         let r = Rect { x, y: yy, w: 4, h: 1 };
         f.text(x, yy, "Zoom", pal::UI_TEXT, BG, 0.0);

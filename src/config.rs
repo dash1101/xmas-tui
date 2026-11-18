@@ -13,6 +13,10 @@ pub struct Config {
     pub zoom: f32,
     /// 0: the save file's village (a new one the first time).
     pub seed: u64,
+    /// The desktop wallpaper rests (the village stands still, the widgets
+    /// and online go on) while a game runs or the computer's busy, unless
+    /// the desktop itself has the focus.
+    pub rest_for_games: bool,
     pub scene: SceneCfg,
     pub clock: ClockCfg,
     pub widgets: WidgetCfg,
@@ -46,18 +50,19 @@ pub struct KeysCfg {
     pub todo: String,
     pub online: String,
     pub chat: String,
+    pub pause: String,
 }
 
 impl Default for KeysCfg {
     fn default() -> Self {
         let k = |s: &str| s.to_string();
-        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t"), online: k("o"), chat: k("/") }
+        KeysCfg { interact: k("e"), jump: k("space"), snowball: k("r"), invite: k("f"), pockets: k("i"), held: k("q"), centre: k("c"), rest: k("z"), todo: k("t"), online: k("o"), chat: k("/"), pause: k("p") }
     }
 }
 
 /// What each key does, in the order the settings list them: (name, what
 /// it does).
-pub const KEY_ACTIONS: [(&str, &str); 11] = [
+pub const KEY_ACTIONS: [(&str, &str); 12] = [
     ("interact", "talk, use, pick up, help build"),
     ("jump", "jump (hold: higher), leap up onto things"),
     ("snowball", "scoop a snowball, then throw it"),
@@ -69,11 +74,12 @@ pub const KEY_ACTIONS: [(&str, &str); 11] = [
     ("todo", "things to do here"),
     ("online", "friends & online"),
     ("chat", "talk (@name: to one person, @group: to a group)"),
+    ("pause", "pause the village (and carry on)"),
 ];
 
 impl KeysCfg {
     pub fn get(&self, i: usize) -> &str {
-        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo, &self.online, &self.chat][i.min(10)]
+        [&self.interact, &self.jump, &self.snowball, &self.invite, &self.pockets, &self.held, &self.centre, &self.rest, &self.todo, &self.online, &self.chat, &self.pause][i.min(11)]
     }
 
     pub fn set(&mut self, i: usize, v: String) {
@@ -88,7 +94,8 @@ impl KeysCfg {
             7 => &mut self.rest,
             8 => &mut self.todo,
             9 => &mut self.online,
-            _ => &mut self.chat,
+            10 => &mut self.chat,
+            _ => &mut self.pause,
         };
         *slot = v;
     }
@@ -762,6 +769,7 @@ impl Default for Config {
             scale: 1.0,
             zoom: 1.0,
             seed: 0,
+            rest_for_games: true,
             scene: SceneCfg::default(),
             clock: ClockCfg::default(),
             widgets: WidgetCfg::default(),

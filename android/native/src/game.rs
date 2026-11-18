@@ -127,6 +127,10 @@ pub struct Game {
     panel_press: Option<(i32, i32, i32)>,
     size: f32,
     cfg_dirty: bool,
+    /// Paused (the ☰ menu's ⏸, the page's button, P): the village stands
+    /// still and quiet while online goes on; its picture as it stood.
+    paused: bool,
+    rest_base: Option<Frame>,
     /// A field of the menu's being typed in (by the app's own box).
     editing: Option<crate::settings::Field>,
     /// The widgets the web page shows (the clock, the weather, the
@@ -154,6 +158,8 @@ enum Act {
     Ask(&'static str),
     /// Friends & online.
     Online,
+    /// Pause the village (or carry on).
+    Pause,
     /// The menu.
     Panel,
 }
@@ -478,6 +484,8 @@ impl Game {
             panel_press: None,
             size,
             cfg_dirty: false,
+            paused: false,
+            rest_base: None,
             editing: None,
             widgets: cfg!(target_arch = "wasm32"),
             weather: crate::widgets::face::Weather { status: "the weather: set its city in the menu (Widgets)".into(), ..Default::default() },
@@ -793,13 +801,37 @@ impl Game {
                 self.open(m.x, m.y, title, Self::scene_items(items));
             }
             Act::Panel => self.open_panel(),
+            Act::Pause => self.toggle_pause(),
         }
+    }
+
+    /// Pause the village (it stands still and goes quiet; friends and a
+    /// village hosted here go on, and the others see this villager
+    /// greyed), or carry on.
+    pub fn toggle_pause(&mut self) {
+        self.paused ^= true;
+        self.menu = None;
+        let mut snd = self.cfg.sound.clone();
+        snd.enabled &= !self.paused;
+        if let Some(p) = &mut self.pull {
+            p.configure(&snd);
+        }
+        if self.paused {
+            self.audio = None;
+        } else if self.audio.is_none() && self.cfg.sound.enabled && !cfg!(target_arch = "wasm32") {
+            self.audio = Audio::start(&self.cfg.sound);
+        }
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     /// The ☰ menu: the other things the keys do, and the app's own
     /// (`phone`: the Android app, which can be the wallpaper).
     pub fn more(&mut self, phone: bool) {
         let mut items = vec![
+            (if self.paused { "▶ carry on (paused)" } else { "⏸ pause the village" }.to_string(), Act::Pause),
             ("pockets, scorecard & Christmas list".to_string(), Act::Button(BTN_POCKETS)),
             ("invite along / say goodbye".to_string(), Act::Button(BTN_INVITE)),
             ("what's in hand (berries, cocoa…)".to_string(), Act::Button(BTN_HELD)),
@@ -1144,6 +1176,7 @@ impl Game {
             }
             S::Net(n) => self.net_act(n),
             S::Restart => self.asks.push("restart".into()),
+            S::Pause => self.toggle_pause(),
             S::Help => {
                 self.close_panel();
                 self.help(self.help_keys);
@@ -1421,7 +1454,18 @@ impl Game {
             let time = self.rules_on.as_ref().map(|r| r.time.clone()).unwrap_or_else(|| self.cfg.scene.time.clone());
             self.scene.set_daylight(daylight::compute(&time, mins, rise, set));
         }
-        self.scene.update(dt, t);
+        // paused: only the online side goes on (the village held as it
+        // was, its picture kept)
+        if self.paused != self.scene.resting() {
+            self.scene.set_resting(self.paused);
+            self.rest_base = None;
+        }
+        self.panel.resting = self.paused.then(String::new);
+        if self.paused {
+            self.scene.rest_tick(dt);
+        } else {
+            self.scene.update(dt, t);
+        }
         // the pet named (or recoloured) in the village: kept, and saved
         if let Some(p) = self.scene.take_pet_change() {
             self.cfg.scene.pet = p;
@@ -1456,7 +1500,20 @@ impl Game {
         // (the scene's own panels go on the UI's layer, when it has one)
         self.scene.ui_wh = self.ui.as_ref().map(|u| (u.frame.w as i32, u.frame.h as i32));
         self.scene.ui_k = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw.max(1) as f32).unwrap_or(1.0);
-        self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+        match self.rest_base.as_ref().filter(|b| self.paused && (b.w, b.h) == (self.frame.w, self.frame.h)) {
+            Some(b) => self.frame.clone_from(b),
+            None => {
+                self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+                if self.paused {
+                    self.rest_base = Some(self.frame.clone());
+                }
+            }
+        }
+        if self.paused {
+            let note = " ⏸ paused · ☰ ▶ carry on ";
+            let n = note.chars().count() as i32;
+            self.frame.text((self.frame.w as i32 - n) / 2, 3, note, crate::color::Rgb::hex(0xbfe4ff), crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.85), 0.0);
+        }
         // the widgets (the web page), on the village's own grid as on the
         // desktop: down the right-hand side, under the
         // page's own buttons, where there's room for them

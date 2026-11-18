@@ -385,6 +385,10 @@ pub struct Critters {
     /// anything here but what's heard. Where each is headed.
     pub puppets: bool,
     pup_to: std::collections::HashMap<u64, (f32, f32)>,
+    /// Puppets: where each's been heard and when (the host's clock), and
+    /// this side's own clock for them: drawn a moment behind, between two.
+    pup_trail: std::collections::HashMap<u64, crate::net::Trail>,
+    pup_clock: f32,
     /// The big tree (its column, how far its presents spread), and the
     /// presents put under it since the scene last asked (by whom, where).
     pub tree: Option<(f32, f32)>,
@@ -485,6 +489,8 @@ impl Critters {
             placed: vec![],
             
             pup_to: Default::default(),
+            pup_trail: Default::default(),
+            pup_clock: 0.0,
             doors: vec![],
             forced: None,
             tctx: TalkCtx::default(),
@@ -767,12 +773,13 @@ impl Critters {
     /// A guest: everyone out in the village as the host has them (`from`:
     /// the village's units → world position). Those not heard of any more
     /// have gone; new ones step in where they are.
-    pub fn set_crowd(&mut self, pups: &[Pup], from: impl Fn(f32, f32) -> (f32, f32), t: f32) {
+    pub fn set_crowd(&mut self, pups: &[Pup], from: impl Fn(f32, f32) -> (f32, f32), t: f32, at: f32) {
         self.puppets = true;
         let ids: std::collections::HashSet<u64> = pups.iter().map(|p| p.id).collect();
         let held = self.held;
         self.list.retain(|c| ids.contains(&c.id) || Some(c.id) == held);
         self.pup_to.retain(|id, _| ids.contains(id));
+        self.pup_trail.retain(|id, _| ids.contains(id));
         for p in pups.iter().take(48) {
             let (x, y) = from(p.x as f32 / 100.0, p.y as f32 / 100.0);
             if !x.is_finite() || !y.is_finite() {
@@ -808,6 +815,9 @@ impl Critters {
                 VPet { kind, body: Rgb::hex(b), marks: Rgb::hex(m), name: "", x: x - dir * 3.0, y, dir, walking: false, happy_until: 0.0 }
             });
             self.pup_to.insert(p.id, (x, y));
+            if at > 0.0 {
+                self.pup_trail.entry(p.id).or_default().heard(self.pup_clock, at, x, y, 12.0);
+            }
             if let Some(c) = self.list.iter_mut().find(|c| c.id == p.id) {
                 if Some(c.id) == held {
                     continue;
@@ -887,19 +897,33 @@ impl Critters {
         if self.puppets {
             self.puppets = false;
             self.pup_to.clear();
+            self.pup_trail.clear();
             self.list.clear();
         }
     }
 
     /// Puppets (see `puppets`): each walks on to where the host has them.
     fn update_puppets(&mut self, dt: f32) {
-        let k = 1.0 - (-dt * 6.0).exp();
+        self.pup_clock += dt;
+        for tr in self.pup_trail.values_mut() {
+            tr.tick(dt);
+        }
         let held = self.held;
         for c in &mut self.list {
             if Some(c.id) == held {
                 continue;
             }
-            let Some(&(tx, ty)) = self.pup_to.get(&c.id) else { continue };
+            // drawn a moment behind the host (a little over the time between
+            // its messages), between two places heard; an older host's:
+            // eased toward the last
+            let trail = self.pup_trail.get(&c.id).filter(|tr| tr.known()).and_then(|tr| tr.at(self.pup_clock, 0.45, 0.4));
+            let (k, (tx, ty)) = match trail {
+                Some(to) => (1.0 - (-dt * 20.0).exp(), to),
+                None => {
+                    let Some(&to) = self.pup_to.get(&c.id) else { continue };
+                    (1.0 - (-dt * 6.0).exp(), to)
+                }
+            };
             let (dx, dy) = (tx - c.x, ty - c.y);
             c.x += dx * k;
             c.y += dy * k;

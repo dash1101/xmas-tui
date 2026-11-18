@@ -2120,7 +2120,7 @@ impl Scene {
 
     /// Current scene time (see `REBASE_AT`). All `t` arguments the app passes
     /// in are ignored in favour of this.
-    fn now(&self) -> f32 {
+    pub(crate) fn now(&self) -> f32 {
         (self.clock - self.epoch) as f32
     }
 
@@ -6187,6 +6187,55 @@ mod tests {
         let sb = b.table.as_ref().unwrap().state_json();
         assert!(b.table.as_ref().unwrap().net.as_ref().unwrap().seq == 1, "the move never came: {sb}");
         assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
+    }
+
+    /// Paused (the button, or the wallpaper resting for a game): the
+    /// village stands still, but online goes on: the other villager still
+    /// sees this one, greyed, long past the time a quiet one is let go; and
+    /// carrying on, they're themselves again.
+    #[test]
+    fn a_paused_villager_stays_in_the_shared_village_greyed() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        for _ in 0..(4.0 / DT) as usize {
+            a.update(DT, 0.0);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        let ia = a.online.my_id();
+        assert!(b.online.other(ia).is_some_and(|o| !o.av.rest), "not in the village together");
+        // the host pauses for 20 s (a quiet villager's let go after 12)
+        a.set_resting(true);
+        let t0 = a.now();
+        for _ in 0..(20.0 / DT) as usize {
+            a.rest_tick(DT);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        assert_eq!(a.now(), t0, "the village went on while paused");
+        assert!(a.online.village().is_some_and(|(_, host)| host), "the village closed");
+        let o = b.online.other(ia).expect("the paused host was let go");
+        assert!(o.av.rest, "not shown as paused");
+        a.set_resting(false);
+        for _ in 0..(1.0 / DT) as usize {
+            a.update(DT, 0.0);
+            b.update(DT, 0.0);
+            relay.pump(&mut [&mut a.online, &mut b.online]);
+        }
+        assert!(b.online.other(ia).is_some_and(|o| !o.av.rest), "still shown as paused");
     }
 
     /// On autopilot, a knock at a neighbour's: in, a game with whoever's

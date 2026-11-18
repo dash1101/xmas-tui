@@ -16,6 +16,7 @@ mod linwall;
 mod net;
 mod platform;
 mod raster;
+mod rest;
 mod rng;
 mod save;
 mod scene;
@@ -529,6 +530,11 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
         tray::spawn(path.to_path_buf());
     }
     let mut was_paused = false;
+    // the wallpaper rests while a game runs or the computer's busy, unless
+    // it has the focus itself (a click on the desktop)
+    let watch = wallpaper.then(rest::spawn);
+    let mut focused = false;
+    let mut was_resting = false;
     let mut term = Term::new();
     let mut pointer = "";
     let mut next = Instant::now();
@@ -604,22 +610,43 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                 }
                 Event::Resize(_, _) => term.invalidate(),
                 // releases can go missing while unfocused: let go of everything
-                Event::FocusLost => app.release_all(),
+                Event::FocusLost => {
+                    focused = false;
+                    app.release_all();
+                }
+                Event::FocusGained => focused = true,
                 _ => {}
             }
         }
         if app.quit || STOP.load(std::sync::atomic::Ordering::SeqCst) || tray::quit_requested() || update::restart_requested() || app::RESTART_FOR_SCALE.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
-        // tray "Pause effects": hold the last frame, hide window snow/lights
-        // (the same while the village is popped out into a window)
-        let paused = tray::paused() || app.popped_out();
-        if paused != was_paused {
-            was_paused = paused;
+        // popped out into a window of its own (another copy, online in its
+        // place): hold the last frame, nothing else
+        let popped = app.popped_out();
+        // resting: the tray's "Pause effects", or a game / the computer
+        // busy while the desktop isn't what has the focus; the village
+        // stands still, the widgets and online go on
+        let why = if tray::paused() {
+            Some("paused from the tray".to_string())
+        } else if app.rest_for_games() && !focused {
+            watch.as_ref().and_then(|w| w.why())
+        } else {
+            None
+        };
+        if why.is_some() != was_resting {
+            was_resting = why.is_some();
+            eprintln!("xmas-tui: {}", why.as_deref().map(|w| format!("resting ({w})")).unwrap_or_else(|| "carrying on".into()));
+        }
+        app.set_rest(why);
+        // (the window snow and lights stop while it rests, or it's away)
+        let quiet = popped || app.resting();
+        if quiet != was_paused {
+            was_paused = quiet;
             #[cfg(target_os = "linux")]
             if let Some(fx) = &fx_handle {
                 let mut c = app.fx_cfg();
-                if paused {
+                if quiet {
                     (c.snow, c.lights) = (false, false);
                 }
                 if let Ok(mut f) = fx.lock() {
@@ -627,7 +654,7 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
                 }
             }
         }
-        if paused {
+        if popped {
             std::thread::sleep(Duration::from_millis(100));
             next = Instant::now();
             continue;

@@ -123,6 +123,15 @@ pub struct App {
     /// off the layer's own size, and that adds up down the screen. The
     /// pointer's found on the layers with these.
     pub layer_px: Vec<(f32, f32)>,
+    /// Why the desktop wallpaper rests (a game in front, the computer busy,
+    /// locked), as the front end sees it: the village stands still, the
+    /// widgets and online go on.
+    rest_why: Option<String>,
+    /// Paused by hand (the ⏸ button, or P).
+    paused: bool,
+    /// Resting: the village's picture as it stood, put back under the
+    /// widgets each time.
+    rest_base: Option<Frame>,
     /// The open windows (where they show), in cells: menus keep out from
     /// under them.
     window_rects: Vec<(i32, i32, i32, i32)>,
@@ -406,6 +415,9 @@ impl App {
             px_map: None,
             screen_map: None,
             layer_px: vec![],
+            rest_why: None,
+            paused: false,
+            rest_base: None,
             window_rects: vec![],
             test_dropped: 0,
             desktop_menu: false,
@@ -1179,8 +1191,35 @@ impl App {
     }
 
     pub fn frame_dt(&self) -> Duration {
+        // resting: twice a second is plenty (the clock, online)
+        if self.resting() {
+            return Duration::from_millis(500);
+        }
         // clean_fps: NaN.clamp() is NaN, and from_secs_f32(NaN) panics
         Duration::from_secs_f32(1.0 / config::clean_fps(self.fps_override.unwrap_or(self.cfg.fps)))
+    }
+
+    /// Resting (paused by hand, or the wallpaper resting): the village
+    /// stands still and goes quiet; the widgets, the menus and online go on.
+    pub fn resting(&self) -> bool {
+        self.paused || self.rest_why.is_some()
+    }
+
+    /// The front end's verdict on resting (`None`: carry on).
+    pub fn set_rest(&mut self, why: Option<String>) {
+        self.rest_why = why;
+    }
+
+    /// The wallpaper may rest while a game runs or the computer's busy
+    /// (the menu's setting).
+    pub fn rest_for_games(&self) -> bool {
+        self.cfg.rest_for_games
+    }
+
+    /// The ⏸ button (or P): pause, or carry on.
+    pub fn toggle_pause(&mut self) {
+        self.paused ^= true;
+        self.ui_sounds.push(SoundEvent { sfx: Sfx::Click, pan: 0.5, gain: 0.6 });
     }
 
     pub fn resize(&mut self, w: usize, h: usize) {
@@ -1319,6 +1358,8 @@ impl App {
                     if !self.settings.help_click(x, y, w, h, &self.cfg.keys) {
                         self.settings.help = false;
                     }
+                } else if settings::pause_rect(bw).contains(bx, by) {
+                    self.toggle_pause();
                 } else if settings::zoom_rects(bw).0.contains(bx, by) {
                     self.zoom_step(-1);
                 } else if settings::zoom_rects(bw).1.contains(bx, by) {
@@ -1815,6 +1856,7 @@ impl App {
                 Some(8) => self.open_todo(),
                 Some(9) => self.open_online(),
                 Some(10) => self.scene.open_chat(),
+                Some(11) => self.toggle_pause(),
                 _ => {
                     if let KeyIn::Char(c @ '1'..='5') = k {
                         self.scene.number(c as usize - '0' as usize);
@@ -1879,7 +1921,7 @@ impl App {
             }
         } else if {
             let ((bx, by), bw) = (self.settings.btn_hover, self.btn_wh.0 as i32);
-            settings::online_rect(bw).contains(bx, by) || settings::gear_rect(bw).contains(bx, by) || settings::help_rect(bw).contains(bx, by) || settings::centre_rect(bw).contains(bx, by) || settings::zoom_rects(bw).0.contains(bx, by) || settings::zoom_rects(bw).1.contains(bx, by)
+            settings::online_rect(bw).contains(bx, by) || settings::pause_rect(bw).contains(bx, by) || settings::gear_rect(bw).contains(bx, by) || settings::help_rect(bw).contains(bx, by) || settings::centre_rect(bw).contains(bx, by) || settings::zoom_rects(bw).0.contains(bx, by) || settings::zoom_rects(bw).1.contains(bx, by)
         } || self.scene.post_click(hx, hy)
         {
             "pointer"
@@ -2494,6 +2536,7 @@ impl App {
                     self.settings.open = false;
                     self.settings.help = true;
                 }
+                Act::Pause => self.toggle_pause(),
                 Act::Net(n) => self.net_act(n),
                 Act::FriendSel(i) => self.settings.friend_sel = if self.settings.friend_sel == Some(i) { None } else { Some(i) },
                 Act::CheckUpdate => crate::update::check_now(),
@@ -2740,7 +2783,19 @@ impl App {
             let time = self.rules_on.as_ref().map(|r| r.time.as_str()).unwrap_or(self.cfg.scene.time.as_str());
             self.scene.set_daylight(crate::scene::daylight::compute(time, mins, rise, set));
         }
-        self.scene.update(dt, t);
+        // resting: only the online side goes on (the village held as it
+        // was, its picture kept); back again, it carries on from there
+        let resting = self.resting();
+        if resting != self.scene.resting() {
+            self.scene.set_resting(resting);
+            self.rest_base = None;
+        }
+        self.settings.resting = resting.then(|| if self.paused { String::new() } else { self.rest_why.clone().unwrap_or_default() });
+        if resting {
+            self.scene.rest_tick(dt);
+        } else {
+            self.scene.update(dt, t);
+        }
         let mut sounds = self.scene.take_sounds();
         let mut ui = std::mem::take(&mut self.ui_sounds);
         if let Some(a) = &self.audio {
@@ -2764,7 +2819,7 @@ impl App {
             }
             self.settings.media_quiet = self.media_quiet;
             let mut want = self.cfg.sound.clone();
-            if self.media_quiet || self.hushed {
+            if self.media_quiet || self.hushed || resting {
                 want.enabled = false;
             }
             if want != self.sound_sent && a.config(&want) {
@@ -2792,7 +2847,16 @@ impl App {
         let windows_apart = self.part_layer[WINDOWS].is_some();
         self.scene.ui_wh = windows_apart.then_some((self.w as i32, self.h as i32));
         self.scene.ui_k = self.ui_k;
-        self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
+        match self.rest_base.as_ref().filter(|b| resting && (b.w, b.h) == (self.frame.w, self.frame.h)) {
+            // resting: the village's picture as it stood
+            Some(b) => self.frame.clone_from(b),
+            None => {
+                self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.zoom_now, Some(f));
+                if resting {
+                    self.rest_base = Some(self.frame.clone());
+                }
+            }
+        }
         // the UI from here: each part on its own layer at its own size, if
         // it has one (bottom to top: the widgets, the buttons, the windows)
         let (aspect, safe) = (self.frame.cell_aspect, self.safe_bottom());
@@ -3310,6 +3374,51 @@ mod tests {
             app.mouse_at(MouseIn::Move, 100.0 / cw as f32, px / ch as f32);
             assert_eq!(app.settings.hover.1, row, "{px} px down");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Paused (⏸ or P), or resting for a game: the village stands still,
+    /// drawn twice a second from the picture it stood at; carrying on, it
+    /// moves again. The ⏸ button up top does it too.
+    #[test]
+    fn pausing_holds_the_village_still() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-pause-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.widgets.weather = false;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 240, 60, true, true, false);
+        for _ in 0..10 {
+            app.step();
+        }
+        let fast = app.frame_dt();
+        let p = settings::pause_rect(app.w as i32);
+        app.mouse(MouseIn::Down(Btn::Left), p.x + 1, p.y);
+        app.mouse(MouseIn::Up(Btn::Left), p.x + 1, p.y);
+        assert!(app.resting(), "the ⏸ button didn't pause");
+        app.step();
+        let t0 = app.scene.now();
+        let px0 = app.frame.px.clone();
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.step();
+        }
+        assert_eq!(app.scene.now(), t0, "the village moved while paused");
+        assert!(app.frame.px == px0, "the picture changed while paused");
+        assert!(app.frame_dt() > fast * 4, "still drawn as often");
+        assert!(app.settings.resting.as_deref() == Some(""));
+        // P carries on (the key as set)
+        app.key(KeyIn::Char('p'));
+        assert!(!app.resting());
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.step();
+        }
+        assert!(app.scene.now() > t0, "it didn't carry on");
+        // the wallpaper resting (a game): the same, with the reason up top
+        app.set_rest(Some("a game is running".into()));
+        app.step();
+        assert_eq!(app.settings.resting.as_deref(), Some("a game is running"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

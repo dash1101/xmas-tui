@@ -455,6 +455,8 @@ impl Default for Cell {
     }
 }
 
+/// (Cloned to hold a picture still: see `App`'s resting.)
+#[derive(Clone)]
 pub struct Frame {
     pub w: usize,
     pub h: usize,

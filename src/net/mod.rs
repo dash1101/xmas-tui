@@ -215,6 +215,14 @@ pub struct Avatar {
     /// not sat down).
     pub room: u32,
     pub seat: i8,
+    /// Paused (the pause button, or the wallpaper resting while a game
+    /// runs): still here, standing still; the others show them greyed.
+    pub rest: bool,
+    /// When this was sent: seconds on the sender's own clock (0: an older
+    /// version, which doesn't say). The others draw them a moment behind,
+    /// between the places heard, so walking reads smooth however the
+    /// messages arrive.
+    pub at: f32,
 }
 
 /// Where someone is on a trip (the train, the ski lodge, the slope), for
@@ -486,9 +494,107 @@ pub struct Other {
     pub wave: (f32, u8),
     /// How fast they're going (village units a second), from the last few
     /// places heard: where they're drawn runs on ahead between messages,
-    /// so walking reads smooth, not in hops.
+    /// so walking reads smooth, not in hops (an older version, which
+    /// doesn't say when it sent; see `trail`).
     pub vel: (f32, f32),
+    /// Where they've been heard, and when (they're drawn a moment behind,
+    /// between two of those).
+    pub trail: Trail,
 }
+
+/// The places someone's been heard at (the sender's clock, x, y), oldest
+/// first: drawn a moment behind, between two of them, so walking reads
+/// smooth however unevenly the messages arrive (`at`).
+#[derive(Clone, Debug, Default)]
+pub struct Trail {
+    pts: std::collections::VecDeque<(f32, f32, f32)>,
+    /// Their clock against ours: the least (ours - theirs) seen, the
+    /// quickest a message has come, creeping up slowly after it so a drift
+    /// in either clock isn't left behind (`low`); and what's drawn by,
+    /// following it a little each frame (`tick`: a sudden change would show
+    /// as a lurch).
+    low: f32,
+    off: Option<f32>,
+}
+
+impl Trail {
+    /// Heard at (x, y), sent at `at` on their clock (`now` on ours); a step
+    /// further than `jump` is a leap (a door, a teleport): no gliding there.
+    pub fn heard(&mut self, now: f32, at: f32, x: f32, y: f32, jump: f32) {
+        if ![now, at, x, y].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        if let Some(&(last, lx, ly)) = self.pts.back() {
+            if at <= last {
+                // (late, and out of turn: dropped; their clock started again: afresh)
+                if at > last - 5.0 {
+                    return;
+                }
+                self.pts.clear();
+                self.off = None;
+            } else if (x - lx).abs() > jump || (y - ly).abs() > jump {
+                self.pts.clear();
+            }
+        }
+        let d = now - at;
+        self.low = if self.off.is_some() { (self.low + 0.0005).min(d) } else { d };
+        // (far out, their clock jumped, or the first heard: from there)
+        if self.off.is_none_or(|o| (self.low - o).abs() > 2.0) {
+            self.off = Some(self.low);
+        }
+        self.pts.push_back((at, x, y));
+        while self.pts.len() > 12 {
+            self.pts.pop_front();
+        }
+    }
+
+    /// Each frame: what's drawn by follows their clock, at most a few
+    /// hundredths faster or slower than it.
+    pub fn tick(&mut self, dt: f32) {
+        if let Some(o) = &mut self.off {
+            *o += (self.low - *o).clamp(-0.04 * dt, 0.04 * dt);
+        }
+    }
+
+    /// Anything heard yet (an older version doesn't say when).
+    pub fn known(&self) -> bool {
+        self.off.is_some() && !self.pts.is_empty()
+    }
+
+    /// Where to draw them at `now` (ours), `delay` behind; past the last
+    /// heard, on the way they were going for `coast` seconds at most.
+    pub fn at(&self, now: f32, delay: f32, coast: f32) -> Option<(f32, f32)> {
+        let rt = now - self.off? - delay;
+        let (first, last) = (*self.pts.front()?, *self.pts.back()?);
+        if rt <= first.0 {
+            return Some((first.1, first.2));
+        }
+        if rt >= last.0 {
+            let n = self.pts.len();
+            if n >= 2 {
+                let p = self.pts[n - 2];
+                let gap = last.0 - p.0;
+                if gap > 0.0 && gap < 1.0 {
+                    let ahead = (rt - last.0).min(coast);
+                    return Some((last.1 + (last.1 - p.1) / gap * ahead, last.2 + (last.2 - p.2) / gap * ahead));
+                }
+            }
+            return Some((last.1, last.2));
+        }
+        let i = self.pts.iter().position(|p| p.0 > rt)?.max(1);
+        let (a, b) = (self.pts[i - 1], self.pts[i]);
+        let k = ((rt - a.0) / (b.0 - a.0).max(1e-4)).clamp(0.0, 1.0);
+        Some((a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k))
+    }
+
+    pub fn clear(&mut self) {
+        self.pts.clear();
+    }
+}
+
+/// How far behind others are drawn: a little over the time between their
+/// messages, so the next is nearly always in by then.
+const TRAIL_DELAY: f32 = 0.2;
 
 /// A friend's last "here I am".
 #[derive(Clone, Debug, Default)]
@@ -1061,7 +1167,14 @@ impl Online {
                 let av = av.cleaned();
                 let new = !v.others.contains_key(&id);
                 let host = v.host_id == Some(id);
-                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host, card: None, wave: (0.0, 0), vel: (0.0, 0.0) });
+                let o = v.others.entry(id).or_insert(Other { name: name.clone(), av, shown: (av.x, av.y), seen: t, host, card: None, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default() });
+                // (going in or out, off on a trip: a leap, not a walk)
+                if o.av.away != av.away {
+                    o.trail.clear();
+                }
+                if av.at > 0.0 {
+                    o.trail.heard(t, av.at, av.x, av.y, 0.6);
+                }
                 // (their speed: from where they were to where they are now)
                 let gap = (t - o.seen).max(0.05);
                 let v = ((av.x - o.av.x) / gap, (av.y - o.av.y) / gap);
@@ -1305,9 +1418,11 @@ impl Online {
         }
         // where this villager is: often while it changes, now and then if not
         if let Some(av) = me {
-            let changed = self.last_me.is_none_or(|l| (l.x - av.x).abs() > 0.004 || (l.y - av.y).abs() > 0.004 || l.dir != av.dir || l.moving != av.moving || l.away != av.away);
+            let changed = self.last_me.is_none_or(|l| (l.x - av.x).abs() > 0.004 || (l.y - av.y).abs() > 0.004 || l.dir != av.dir || l.moving != av.moving || l.away != av.away || l.rest != av.rest);
             if t >= self.next_me && (changed || t >= self.next_me + 1.0) {
                 self.next_me = t + 0.12;
+                let mut av = av;
+                av.at = t;
                 self.last_me = Some(av);
                 let m = Msg::Me { id: self.id, name: self.name.clone(), av };
                 self.send(&topic, &seal, &m, false);
@@ -1345,9 +1460,22 @@ impl Online {
         let t = self.t;
         if let Some(v) = &mut self.village {
             let k = 1.0 - (-dt * 12.0).exp();
+            let kt = 1.0 - (-dt * 25.0).exp();
             for o in v.others.values_mut() {
-                // where they'll be by now, going on as they were (for a
-                // moment at most: a message late isn't a walk off forever)
+                // drawn a moment behind, between the places heard (only a
+                // light easing on top, for a message that changes course)
+                o.trail.tick(dt);
+                if let Some((tx, ty)) = o.trail.known().then(|| o.trail.at(t, TRAIL_DELAY, 0.3)).flatten() {
+                    if (tx - o.shown.0).abs() > 0.6 || (ty - o.shown.1).abs() > 0.6 {
+                        o.shown = (tx, ty);
+                    } else {
+                        o.shown.0 += (tx - o.shown.0) * kt;
+                        o.shown.1 += (ty - o.shown.1) * kt;
+                    }
+                    continue;
+                }
+                // (an older version: where they'll be by now, going on as
+                // they were, for a moment at most)
                 let ahead = (t - o.seen).clamp(0.0, 0.3);
                 let (tx, ty) = (o.av.x + o.vel.0 * ahead, o.av.y + o.vel.1 * ahead);
                 let far = (tx - o.shown.0).abs() > 0.5 || (ty - o.shown.1).abs() > 0.5;
@@ -1376,7 +1504,7 @@ impl Online {
         let code = seal::new_code();
         let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT, clock: None };
         for (id, name, av, card) in others {
-            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0) });
+            v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default() });
         }
         self.village = Some(v);
     }
@@ -2053,6 +2181,42 @@ pub(crate) mod tests {
             relay.pump(all);
             *t += 0.1;
         }
+    }
+
+    /// Someone walking at an even pace, heard every 0.12 s but with the
+    /// messages arriving unevenly (up to 150 ms late, in bunches): drawn
+    /// at an even pace too, no hops, no stops.
+    #[test]
+    fn a_walk_heard_unevenly_is_drawn_evenly() {
+        let mut tr = Trail::default();
+        // (their clock runs 1000 s ahead of ours: only the differences count)
+        let mut sent: Vec<(f32, f32)> = (0..60).map(|i| (1000.0 + i as f32 * 0.12, i as f32 * 0.12)).collect();
+        // arrival times: a fixed 60 ms, plus a jitter that comes in bunches
+        let arrive: Vec<f32> = sent.iter().enumerate().map(|(i, (at, _))| at - 1000.0 + 0.06 + [0.0, 0.15, 0.02, 0.12, 0.0, 0.09, 0.15, 0.01][i % 8]).collect();
+        let mut next = 0;
+        let (mut last, mut steps) = (None::<f32>, vec![]);
+        let dt = 1.0 / 60.0;
+        let mut now = 0.0f32;
+        while now < 6.5 {
+            while next < sent.len() && arrive[next] <= now {
+                let (at, x) = sent[next];
+                tr.heard(now, at, x, 0.0, 0.6);
+                next += 1;
+            }
+            tr.tick(dt);
+            if let Some((x, _)) = tr.at(now, TRAIL_DELAY, 0.3) {
+                if let Some(l) = last {
+                    steps.push(x - l);
+                }
+                last = Some(x);
+            }
+            now += dt;
+        }
+        // the walk's speed is 1 a second: each frame a sixtieth, give or take a little
+        let walking: Vec<f32> = steps.iter().copied().skip(30).take(250).collect();
+        let (lo, hi) = walking.iter().fold((f32::MAX, f32::MIN), |(a, b), &s| (a.min(s), b.max(s)));
+        assert!(lo > dt * 0.92 && hi < dt * 1.08, "uneven: {lo} .. {hi} a frame (want about {dt})");
+        sent.clear();
     }
 
     /// A public square's own settings come from the village's own relay

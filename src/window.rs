@@ -148,6 +148,16 @@ struct Runner {
     /// Since when there's been a reason to rest (see `pause_reason`).
     #[cfg(windows)]
     rest_since: Option<Instant>,
+    /// Resting, why (the village stands still and the widgets and online
+    /// go on: drawn twice a second); popped out into a window of its own
+    /// (another copy's online then: nothing drawn here at all).
+    #[cfg(windows)]
+    rest_why: Option<String>,
+    #[cfg(windows)]
+    popped: bool,
+    /// A game running, the computer busy (see `crate::rest`).
+    #[cfg(windows)]
+    watch: Option<crate::rest::Watch>,
     /// When we attached (the layout is logged again a few seconds later,
     /// once everything has settled).
     #[cfg(windows)]
@@ -981,6 +991,21 @@ impl ApplicationHandler for Runner {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // resting: still drawn (twice a second), the village
+                // standing still, the widgets and online going on; popped
+                // out: nothing here at all
+                #[cfg(windows)]
+                {
+                    if self.popped && self.paused {
+                        return;
+                    }
+                    let why = if self.paused { Some(self.rest_why.clone().unwrap_or_else(|| "nobody can see it".into())) } else { None };
+                    if let Some(app) = self.app.as_mut() {
+                        app.set_rest(why);
+                    }
+                    self.draw();
+                }
+                #[cfg(not(windows))]
                 if !self.paused {
                     self.draw();
                 }
@@ -1176,6 +1201,7 @@ impl ApplicationHandler for Runner {
                 let own = self.gfx.as_ref().map(|g| g.hwnd).unwrap_or(0);
                 // (also while the village is popped out into a window of its own)
                 let popped = self.app.as_mut().is_some_and(|a| a.popped_out());
+                self.popped = popped;
                 let why = if self.wall_full {
                     None
                 } else if popped {
@@ -1183,6 +1209,18 @@ impl ApplicationHandler for Runner {
                 } else {
                     crate::winsys::pause_reason(own as windows_sys::Win32::Foundation::HWND)
                 };
+                // a game running, or the computer busy, while the desktop
+                // (or the village itself) isn't what has the focus
+                let games = self.app.as_ref().is_some_and(|a| a.rest_for_games());
+                if games && self.watch.is_none() {
+                    self.watch = Some(crate::rest::spawn());
+                }
+                let why = why.or_else(|| {
+                    if !games || self.wall_full || crate::winsys::desktop_has_focus(own as windows_sys::Win32::Foundation::HWND) {
+                        return None;
+                    }
+                    self.watch.as_ref().and_then(|w| w.why()).map(|w| (w, 0.0))
+                });
                 // a reason has to hold for its delay before the wallpaper
                 // rests (a flickering fullscreen verdict mustn't make it stutter)
                 let why = match why {
@@ -1196,6 +1234,7 @@ impl ApplicationHandler for Runner {
                     }
                 };
                 self.paused = why.is_some();
+                self.rest_why = why.clone();
                 if was != self.paused && self.gfx.is_some() {
                     // in the log, so a wallpaper that keeps stopping can be
                     // explained (the first 40 changes, then every 200th)
@@ -1281,6 +1320,12 @@ pub fn run(cfg: Config, seed: u32, path: PathBuf, opts: Opts) -> Result<(), Box<
         pause_changes: 0,
         #[cfg(windows)]
         rest_since: None,
+        #[cfg(windows)]
+        rest_why: None,
+        #[cfg(windows)]
+        popped: false,
+        #[cfg(windows)]
+        watch: None,
         #[cfg(windows)]
         logged_at: None,
         #[cfg(windows)]

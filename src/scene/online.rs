@@ -390,6 +390,13 @@ pub struct NetFight {
 /// being looked at, what the front end's been asked to do.
 #[derive(Default)]
 pub struct Social {
+    /// Paused (the pause button, or the wallpaper resting while a game
+    /// runs): the village stands still, online goes on (`rest_tick`), and
+    /// the others see this villager greyed.
+    pub resting: bool,
+    /// (Tests, whose online side keeps to the village's clock: the seconds
+    /// spent resting, which that clock doesn't count.)
+    pub rested: f32,
     /// The online side's own clock: real seconds since it started (the
     /// village's clock is held back while it's out of sight or resting;
     /// pings and who's been heard from mustn't be), from the wall clock at
@@ -457,6 +464,9 @@ pub struct Social {
 struct Crowd {
     folk: Vec<critters::Pup>,
     said: Vec<(u64, String, f32)>,
+    /// When the host sent it (its online clock, seconds; 0: an older
+    /// version): guests draw everyone a moment behind, between two of these.
+    at: f32,
 }
 
 /// What's asked, in words ("a game of chess").
@@ -643,7 +653,29 @@ impl Scene {
                 (Some(_), Some(_), Some(n)) if !n.seats.is_empty() => n.seat as i8,
                 _ => -1,
             },
+            rest: self.social.resting,
+            // (stamped as it's sent)
+            at: 0.0,
         })
+    }
+
+    /// Paused (the pause button, the wallpaper resting): the village
+    /// stands still while only the online side goes on (see `rest_tick`).
+    pub fn set_resting(&mut self, on: bool) {
+        self.social.resting = on;
+    }
+
+    pub fn resting(&self) -> bool {
+        self.social.resting
+    }
+
+    /// Resting: the online side alone goes on (friends' messages, a village
+    /// hosted here kept open, this villager still about for the others, if
+    /// standing still), the village itself held as it was.
+    pub fn rest_tick(&mut self, dt: f32) {
+        let t = self.now();
+        self.social.rested += dt;
+        self.update_online(dt, t);
     }
 
     /// This villager's profile card, as friends see it.
@@ -701,7 +733,7 @@ impl Scene {
         };
         // (tests run the village's clock fast: the online side keeps to it)
         #[cfg(test)]
-        let real = t;
+        let real = t + self.social.rested;
         #[cfg(not(test))]
         let real = {
             let ms = crate::clock::now().timestamp_millis();
@@ -724,7 +756,7 @@ impl Scene {
                 let (ax, ay, u) = self.anchor;
                 let folk = self.critters.crowd(t, |x, y| ((x - ax) / u, (y - ay) / u));
                 let said = self.director.fresh_said(t);
-                if let Ok(data) = serde_json::to_string(&Crowd { folk, said }) {
+                if let Ok(data) = serde_json::to_string(&Crowd { folk, said, at: real }) {
                     self.online.crowd(data);
                 }
             }
@@ -1004,7 +1036,7 @@ impl Scene {
                 if let Ok(c) = serde_json::from_str::<Crowd>(&data) {
                     self.social.crowd_at = t;
                     let (ax, ay, u) = self.anchor;
-                    self.critters.set_crowd(&c.folk, |x, y| (ax + x * u, ay + y * u), t);
+                    self.critters.set_crowd(&c.folk, |x, y| (ax + x * u, ay + y * u), t, c.at);
                     // what they said, over their heads
                     for (id, text, life) in c.said.iter().take(8) {
                         if let Some((x, y)) = self.critters.where_is(*id) {
@@ -1704,8 +1736,11 @@ impl Scene {
                 Some(v) => (v.x(wx), v.y(wy + 1.0) - 1.0, sprite_k(self.h) * v.z),
                 None => (wx, wy, sprite_k(self.h)),
             };
-            let look = look_of(&o.av, id);
-            let pose = if o.av.air {
+            // (paused at their end: greyed, standing still)
+            let look = if o.av.rest { greyed(look_of(&o.av, id)) } else { look_of(&o.av, id) };
+            let pose = if o.av.rest {
+                sprites::Pose::Stand
+            } else if o.av.air {
                 sprites::Pose::Jump
             } else if o.av.moving {
                 sprites::Pose::Walk(((t * 6.0) as i32 % 2) as u8)
@@ -1718,11 +1753,12 @@ impl Scene {
             let rows = sprites::rows_of(&pic, k);
             f.sprite(x, y + 1.0, rows, pic);
             // the name, over their head ("it" at tag)
-            let mark = if it == Some(id) { " ⚑ it!" } else { "" };
+            let mark = if it == Some(id) { " ⚑ it!" } else if o.av.rest { " ⏸" } else { "" };
             let name = format!(" {}{mark} ", o.name);
             let n = name.chars().count() as i32;
             let top = (y + 1.0 - rows).floor() as i32 - 1;
-            f.text(x.round() as i32 - n / 2, top, &name, Rgb::hex(0xffe9a8), crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.7), 0.0);
+            let c = if o.av.rest { Rgb::hex(0xa8a8b0) } else { Rgb::hex(0xffe9a8) };
+            f.text(x.round() as i32 - n / 2, top, &name, c, crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.7), 0.0);
         }
         // the villager "it" at tag: marked too
         if let (Some(g), Some(p)) = (self.social.tag, self.player.as_ref()) {
@@ -2538,6 +2574,16 @@ pub(super) fn look_of(av: &Avatar, id: u32) -> sprites::Look {
     };
     let hat = (av.hat != 0).then(|| hex(av.hat));
     sprites::Look { kid: false, coat: hex(av.coat), hat, hair, scarf, skin, mittens: scarf.or(hat).unwrap_or(hex(av.coat) * 0.7), holding: None, lantern: false }
+}
+
+/// A look greyed (someone paused at their end): most of the colour gone,
+/// a little darker.
+fn greyed(l: sprites::Look) -> sprites::Look {
+    let g = |c: Rgb| {
+        let y = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
+        Rgb { r: (c.r * 0.2 + y * 0.8) * 0.8, g: (c.g * 0.2 + y * 0.8) * 0.8, b: (c.b * 0.2 + y * 0.8) * 0.85 }
+    };
+    sprites::Look { coat: g(l.coat), hat: l.hat.map(g), hair: g(l.hair), scarf: l.scarf.map(g), skin: g(l.skin), mittens: g(l.mittens), ..l }
 }
 
 fn ago_short(s: i64) -> String {
