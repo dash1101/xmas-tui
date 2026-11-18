@@ -283,6 +283,12 @@ impl Table {
         tb
     }
 
+    /// On its "✕ leave" (up from the table, as Esc).
+    pub fn on_leave(&self, x: i32, y: i32) -> bool {
+        let (x0, y0, w) = self.at.get();
+        y == y0 && x >= x0 + w - 13 && x < x0 + w - 4
+    }
+
     /// Everyone's at the table (or the wait's over): off it goes.
     pub fn all_sat(&mut self) {
         if self.to_sit.take().is_some() {
@@ -612,7 +618,7 @@ impl Table {
     /// On its title bar (picked up there, and moved).
     pub fn on_title(&self, x: i32, y: i32) -> bool {
         let (x0, y0, w) = self.at.get();
-        y == y0 && x >= x0 && x < x0 + w
+        y == y0 && x >= x0 && x < x0 + w && !self.on_leave(x, y)
     }
 
     /// On the table's panel anywhere (clicks there are the game's).
@@ -780,7 +786,7 @@ impl Table {
         let them = and(&self.names[1..]);
         let title: String = format!(" {} {} with {}{} ", self.kind.icon(), self.kind.name(), if them.is_empty() { "…" } else { &them }, if self.net.is_some() { " (online)" } else { "" }).chars().take((w - 18) as usize).collect();
         f.text(x0 + 2, y0, &title, pal::UI_TITLE, bg, 0.0);
-        f.text(x0 + w - 13, y0, " Esc: leave ", pal::UI_DIM, bg, 0.0);
+        f.text(x0 + w - 13, y0, " ✕ leave ", pal::UI_TITLE, Bg::Mix(Rgb::hex(0x3a4a7a), 0.9), 0.0);
         f.text(x0 + w - 16, y0, "⠿", pal::UI_DIM, bg, 0.0);
         let (bx, by) = (x0 + 2, y0 + 2);
         self.origin.set((bx, by));

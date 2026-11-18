@@ -160,7 +160,8 @@ impl Pockets {
 }
 
 /// The stats card: what the player's been up to, and the Christmas list.
-pub fn draw_stats(f: &mut Frame, p: &Pockets) {
+/// The scorecard; where it went (its top-right corner, for a ✕).
+pub fn draw_stats(f: &mut Frame, p: &Pockets) -> (i32, i32) {
     let w = 58;
     let h = GOALS.len() as i32 + 13;
     let (x0, y0) = (3, (f.h as i32 - h - 4).max(0));
@@ -213,7 +214,8 @@ pub fn draw_stats(f: &mut Frame, p: &Pockets) {
         let right = if done { format!("+{reward} ✦") } else if need > 1 { format!("{cur}/{need}  +{reward} ✦") } else { format!("+{reward} ✦") };
         f.text(x0 + w - 2 - right.chars().count() as i32, y, &right, if done { Rgb::hex(0x5adf8a) } else { pal::UI_DIM }, bg, 0.0);
     }
-    f.text(x0 + 2, y0 + h - 1, " Esc or right-click to close ", pal::UI_DIM, bg, 0.0);
+    f.text(x0 + 2, y0 + h - 1, " Esc, right-click or ✕ to close ", pal::UI_DIM, bg, 0.0);
+    (x0 + w - 1, y0)
 }
 
 impl Pockets {
@@ -446,7 +448,8 @@ impl Shop {
 }
 
 /// The pockets panel (I), bottom-left of the screen.
-pub fn draw_pockets(f: &mut Frame, p: &Pockets) {
+/// The pockets; where they went (the top-right corner, for a ✕).
+pub fn draw_pockets(f: &mut Frame, p: &Pockets) -> (i32, i32) {
     let w = 44;
     let h = ITEMS.len() as i32 + 3;
     let (x0, y0) = (3, f.h as i32 - h - 4);
@@ -480,5 +483,6 @@ pub fn draw_pockets(f: &mut Frame, p: &Pockets) {
         f.text(x0 + 6, y, &format!("{label} ×{n}"), fg, bg, 0.0);
         f.text(x0 + 21, y, it.hint(), pal::UI_DIM, bg, 0.0);
     }
-    f.text(x0 + 2, y0 + h - 1, " 1-5 use · I close ", pal::UI_DIM, bg, 0.0);
+    f.text(x0 + 2, y0 + h - 1, " 1-5 use · I or ✕ to close ", pal::UI_DIM, bg, 0.0);
+    (x0 + w - 1, y0)
 }

@@ -459,6 +459,10 @@ impl Scene {
 
     pub fn table_click(&mut self, x: i32, y: i32) {
         let t = self.now();
+        // its ✕ leave: up from the table, as Esc
+        if self.table.as_ref().is_some_and(|tb| tb.on_leave(x, y)) {
+            return self.table_key(None);
+        }
         if let Some(tb) = &mut self.table {
             tb.click(x, y, t);
         }

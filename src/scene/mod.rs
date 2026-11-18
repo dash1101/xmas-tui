@@ -239,6 +239,8 @@ pub struct Scene {
     /// More pets coming along (each a step further behind), and their
     /// config as last applied.
     more_pets: Vec<pets::MyPet>,
+    /// The ✕ (and ⌂) buttons last drawn over the village: (x, y, width).
+    closers: std::cell::RefCell<Vec<(i32, i32, i32)>>,
     more_pet_cfg: Vec<crate::config::PetCfg>,
     /// Watching the television (indoors), and where the set's drawn.
     tv: Option<tv::Tv>,
@@ -773,6 +775,7 @@ impl Scene {
             pet_cfg: cfg.pet.clone(),
             pet_change: None,
             more_pets: vec![],
+            closers: Default::default(),
             more_pet_cfg: vec![],
             tv: None,
             tv_at: std::cell::Cell::new(None),
@@ -1985,6 +1988,19 @@ impl Scene {
     }
 
     /// Esc: close the shop / pockets first. True if something closed.
+    /// A button that does what Esc does (for a screen with no Esc key):
+    /// drawn at (x, y), kept for a tap.
+    fn closer(&self, f: &mut Frame, x: i32, y: i32, label: &str) {
+        let end = f.text(x, y, label, crate::color::pal::UI_TITLE, crate::frame::Bg::Mix(Rgb::hex(0x3a4a7a), 0.92), 0.0);
+        self.closers.borrow_mut().push((x, y, end - x));
+    }
+
+    /// A tap (or click) on one of the ✕ (or ⌂) buttons: done as Esc is.
+    pub fn close_click(&mut self, x: i32, y: i32) -> bool {
+        let hit = self.closers.borrow().iter().any(|&(bx, by, bw)| y == by && x >= bx && x < bx + bw);
+        hit && self.close_panels()
+    }
+
     pub fn close_panels(&mut self) -> bool {
         if self.close_card() {
             return true;
@@ -5027,12 +5043,14 @@ impl Scene {
         let t = self.now();
         f.ox = 0;
         f.oy = 0;
+        self.closers.borrow_mut().clear();
         // away on a trip: its keys, caption, [E] and scores, clear of the
-        // widgets
+        // widgets; and a way home with no Esc key (a phone)
         if let Some(tr) = &self.trip {
             let k = self.ui_k.max(1.0);
             let avoid: Vec<(i32, i32, i32, i32)> = self.widget_ledges.iter().map(|&(_, x, y, w, h)| ((x as f32 / k) as i32, (y as f32 / k) as i32, (w as f32 / k).ceil() as i32, (h as f32 / k).ceil() as i32)).collect();
             tr.draw_ui(f, t, &avoid);
+            self.closer(f, 1, 1, if tr.at == trips::Where::Drive { " ⌂ home " } else { " ⌂ back to the village " });
         }
         if self.inside.is_some() && self.look.is_none() {
             if let Some(c) = &self.convo {
@@ -5044,9 +5062,11 @@ impl Scene {
             c.draw(f, self.convo_hover, self.ui_look);
         }
         if self.show_stats {
-            shop::draw_stats(f, &self.pockets);
+            let (x, y) = shop::draw_stats(f, &self.pockets);
+            self.closer(f, x - 4, y, " ✕ ");
         } else if self.show_pockets {
-            shop::draw_pockets(f, &self.pockets);
+            let (x, y) = shop::draw_pockets(f, &self.pockets);
+            self.closer(f, x - 4, y, " ✕ ");
         }
 
         // in hand (Q to change)
@@ -6196,6 +6216,30 @@ mod tests {
         let sb = b.table.as_ref().unwrap().state_json();
         assert!(b.table.as_ref().unwrap().net.as_ref().unwrap().seq == 1, "the move never came: {sb}");
         assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
+    }
+
+    /// No Esc key (a phone): the pockets have a ✕ that closes them, and a
+    /// trip a ⌂ that heads back, as Esc does.
+    #[test]
+    fn panels_close_with_a_tap() {
+        let mut s = walker_scene();
+        for _ in 0..30 {
+            s.update(DT, 0.0);
+        }
+        s.toggle_pockets();
+        assert!(s.pockets_shown());
+        let mut f = Frame::new(s.w, s.h);
+        s.draw_ui(&mut f);
+        let (x, y, w) = s.closers.borrow()[0];
+        assert!(!s.close_click(x - 2, y), "a tap beside it closed them");
+        assert!(s.close_click(x + w / 2, y));
+        assert!(!s.pockets_shown());
+        s.preview_perch("trip-lodge");
+        let mut f = Frame::new(s.w, s.h);
+        s.draw_ui(&mut f);
+        let (x, y, _) = s.closers.borrow()[0];
+        assert!(s.close_click(x + 2, y));
+        assert!(s.trip.as_ref().is_some_and(|tr| tr.done.is_some()), "not heading back");
     }
 
     /// A race down the mountain: whoever's up the chairlift first waits at

@@ -1904,6 +1904,11 @@ impl Game {
             0 => {
                 self.moved = false;
                 self.carrying = false;
+                // a ✕ (or ⌂) button: as Esc, which a phone hasn't got
+                if self.scene.close_click(uc.0, uc.1) {
+                    self.press = None;
+                    return;
+                }
                 // friends & chats: a friend picked, their ⋯, a line to
                 // write (a drag goes down the friends)
                 if self.scene.on_chats(uc.0, uc.1) {

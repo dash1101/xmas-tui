@@ -1396,6 +1396,8 @@ impl App {
                     // (the buttons up there always answer: a game, a
                     // conversation or a card open doesn't take them)
                     self.settings.open = true;
+                } else if self.scene.close_click(x, y) {
+                    // (a ✕ or ⌂ button: as Esc)
                 } else if self.scene.on_chats(x, y) {
                     // friends & chats: a friend picked, their ⋯, a line to write…
                     let d = self.scene.chats_click(x, y);
