@@ -1,7 +1,7 @@
 # xmas-relay: the village's own relay for online play.
 # Build from the relay/ folder:  docker build -t xmas-relay .
 FROM rust:1-alpine AS build
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev gcc
 WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src

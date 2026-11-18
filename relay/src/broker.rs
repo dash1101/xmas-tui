@@ -8,6 +8,8 @@
 
 use crate::codec;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::time::Instant;
@@ -50,9 +52,110 @@ impl Default for Limits {
             max_retained: 30_000,
             max_retained_payload: 32 * 1024,
             max_retained_bytes: 96 * 1024 * 1024,
-            max_queue: 2048,
+            max_queue: 256,
             closed: false,
         }
+    }
+}
+
+/// What's waiting to go out to every connection, in all (bytes).
+static QUEUED: AtomicUsize = AtomicUsize::new(0);
+/// What may wait for one connection (bytes): past it, it's too slow to
+/// keep up and is let go.
+pub const QUEUE_BYTES: usize = 2 << 20;
+/// With this much waiting in all, a connection with more than
+/// `SLOW_BYTES` waiting is let go (it's the one not reading)...
+const ALL_SOFT: usize = 96 << 20;
+const SLOW_BYTES: usize = 256 << 10;
+/// ...and past this, nothing more is queued for anyone until it drains:
+/// the relay stays well inside its memory, whatever's sent.
+const ALL_HARD: usize = 192 << 20;
+/// What one address may have kept on the relay (topics, bytes): plenty for
+/// a household's players (here, linked devices, a listing).
+const KEPT_PER_ADDR: usize = 300;
+const KEPT_BYTES_PER_ADDR: usize = 4 << 20;
+
+/// What's waiting to go out to every connection right now (bytes).
+pub fn queued_all() -> usize {
+    QUEUED.load(Ordering::Relaxed)
+}
+
+/// Bytes waiting to go out to one connection. What it counts is given back
+/// when it's sent, or dropped with the connection: so the counts can't
+/// drift, however a connection ends.
+pub struct Q {
+    bytes: Vec<u8>,
+    n: usize,
+    conn: Arc<AtomicUsize>,
+}
+
+impl Q {
+    pub fn take(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Drop for Q {
+    fn drop(&mut self) {
+        self.conn.fetch_sub(self.n, Ordering::Relaxed);
+        QUEUED.fetch_sub(self.n, Ordering::Relaxed);
+    }
+}
+
+/// The way to one connection: its queue, and how much is waiting in it.
+#[derive(Clone)]
+pub struct Down {
+    tx: Sender<Q>,
+    queued: Arc<AtomicUsize>,
+}
+
+/// How a push went.
+#[derive(Debug, PartialEq)]
+pub enum Push {
+    Ok,
+    /// Too much waiting for it already: let it go.
+    Slow,
+    /// Too much waiting for everyone: this one's dropped.
+    Dropped,
+}
+
+impl From<Sender<Q>> for Down {
+    fn from(tx: Sender<Q>) -> Down {
+        Down { tx, queued: Arc::new(AtomicUsize::new(0)) }
+    }
+}
+
+impl Down {
+    fn q(&self, bytes: Vec<u8>) -> Q {
+        let n = bytes.len();
+        self.queued.fetch_add(n, Ordering::Relaxed);
+        QUEUED.fetch_add(n, Ordering::Relaxed);
+        Q { bytes, n, conn: self.queued.clone() }
+    }
+
+    /// What's waiting for it now (bytes).
+    pub fn queued(&self) -> usize {
+        self.queued.load(Ordering::Relaxed)
+    }
+
+    /// Queued, if there's room (never waits).
+    pub fn push(&self, bytes: Vec<u8>) -> Push {
+        let (all, mine) = (QUEUED.load(Ordering::Relaxed), self.queued());
+        if mine + bytes.len() > QUEUE_BYTES || (all > ALL_SOFT && mine > SLOW_BYTES) {
+            return Push::Slow;
+        }
+        if all + bytes.len() > ALL_HARD {
+            return Push::Dropped;
+        }
+        match self.tx.try_send(self.q(bytes)) {
+            Ok(()) => Push::Ok,
+            Err(_) => Push::Slow,
+        }
+    }
+
+    /// Queued, waiting for room (the hello's answer).
+    pub async fn send(&self, bytes: Vec<u8>) -> bool {
+        self.tx.send(self.q(bytes)).await.is_ok()
     }
 }
 
@@ -165,7 +268,10 @@ pub struct Conn {
     /// for the console.
     pub country: String,
     pub since: Instant,
-    tx: Sender<Vec<u8>>,
+    tx: Down,
+    /// The relay's host, told who sent each village message (see
+    /// `ADMIN_VIA`).
+    via: bool,
     will: Option<(String, Vec<u8>, bool)>,
     subs: HashSet<String>,
     tokens: f32,
@@ -179,6 +285,11 @@ struct Kept1 {
     payload: Vec<u8>,
     /// When it was kept (seconds since 1970: it outlasts a restart).
     at: u64,
+    /// Whose (the address that kept it; none: the relay's, or its host's).
+    owner: Option<IpAddr>,
+    /// Which keeping this is (an old place in the queue to let go is
+    /// skipped once it's been kept again).
+    seq: u64,
 }
 
 pub fn now_secs() -> u64 {
@@ -205,9 +316,50 @@ pub const ADMIN_V: &str = "xmas-tui/1/admin/v/";
 /// Player ids below this are the relay's own host's.
 pub const HOST_IDS: u32 = 0x1000;
 
+/// The relay's host listens here to be told who sent each village message:
+/// they come to it on `ADMIN_VIA/<connection>/<village>` instead, so a
+/// player can't speak as another (the relay knows which connection sent
+/// what; the message's own id is only what the sender says).
+pub const ADMIN_VIA: &str = "xmas-tui/1/admin/via";
+
 /// Topics only the relay's own host may hear.
 pub fn host_only(t: &str) -> bool {
-    t == ADMIN_HOST || t == ADMIN_CMD || t.starts_with(ADMIN_REPORT)
+    t == ADMIN_HOST || t == ADMIN_CMD || t.starts_with(ADMIN_REPORT) || t == ADMIN_VIA || t.starts_with(&format!("{ADMIN_VIA}/"))
+}
+
+/// The kinds of topic the village uses (`xmas-tui/1/<kind>/…`).
+const KINDS: [&str; 8] = ["here", "mail", "sync", "public", "listed", "village", "group", "admin"];
+
+/// A topic's kind.
+fn kind_of(t: &str) -> &str {
+    t.strip_prefix("xmas-tui/1/").and_then(|r| r.split('/').next()).unwrap_or("")
+}
+
+/// The kinds the village keeps on the relay for whoever comes next; on any
+/// other topic a message is passed on, never kept.
+fn keepable(t: &str) -> bool {
+    matches!(kind_of(t), "here" | "sync" | "public" | "listed" | "admin")
+}
+
+/// Where a subscription is filed: exact topics by themselves, `<parent>/+`
+/// by the parent (so passing a message on is two lookups, however many
+/// listen).
+fn sub_key(f: &str) -> (bool, &str) {
+    match f.strip_suffix("/+") {
+        Some(parent) => (true, parent),
+        None => (false, f),
+    }
+}
+
+/// An IPv6 address's /48 (one site), for a looser limit than its /64's.
+fn site_of(ip: IpAddr) -> Option<[u16; 3]> {
+    match ip {
+        IpAddr::V6(v) if v.to_ipv4_mapped().is_none() => {
+            let s = v.segments();
+            Some([s[0], s[1], s[2]])
+        }
+        _ => None,
+    }
 }
 
 /// A village's topic, as the game makes it from its code (`kind`:
@@ -223,6 +375,19 @@ pub fn topic_of(kind: &str, code: &str) -> String {
     let d = h.finalize();
     let hex: String = d[..12].iter().map(|b| format!("{b:02x}")).collect();
     format!("xmas-tui/1/{kind}/{hex}")
+}
+
+/// What a connection's playing on, from what it said it is ("linux",
+/// "windows", "android", "macos", "web"; "older app": one from before
+/// 1.25.2, which doesn't say).
+pub fn platform_of(agent: &str) -> &str {
+    if agent == "web" {
+        return "web";
+    }
+    match agent.rsplit_once('(').map(|(_, os)| os.trim_end_matches(')')) {
+        Some(os @ ("linux" | "windows" | "android" | "macos")) => os,
+        _ => "older app",
+    }
 }
 
 /// A village's code as typed, tidied (letters and numbers, capitals).
@@ -276,6 +441,12 @@ pub struct Stats {
     pub uptime_s: u64,
     /// Kept messages by kind (`xmas-tui/1/<kind>/…`): here, mail, village…
     pub kinds: BTreeMap<String, usize>,
+    /// Waiting to go out to every connection, in all (bytes).
+    pub queued_bytes: usize,
+    /// Connections that aren't the relay's own host (players' devices).
+    pub players: usize,
+    /// Those by what they're playing on.
+    pub platforms: BTreeMap<String, usize>,
 }
 
 /// Why a connection is to be let go.
@@ -294,9 +465,16 @@ pub struct Broker {
     /// Subscriptions: exact topics (most), and filters with wildcards.
     exact: HashMap<String, HashSet<u64>>,
     wild: HashMap<String, HashSet<u64>>,
-    retained: HashMap<String, Kept1>,
+    retained: BTreeMap<String, Kept1>,
     retained_bytes: usize,
-    order: VecDeque<String>,
+    order: VecDeque<(String, u64)>,
+    seq: u64,
+    /// What each address has kept (topics, bytes).
+    owned: HashMap<IpAddr, (usize, usize)>,
+    /// Connections let in but not yet said hello (by address block), and
+    /// in all: they count against the limits from the moment they open.
+    pending: HashMap<IpAddr, usize>,
+    pending_all: usize,
     stats: Stats,
     started: Instant,
     recent: VecDeque<(Instant, u64)>,
@@ -312,7 +490,7 @@ pub struct Broker {
 impl Broker {
     pub fn new(kept: Kept) -> Self {
         let bans = kept.bans.iter().filter_map(|b| b.parse().ok()).map(block_of).collect();
-        let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), kept_out: HashMap::new(), reports: BTreeMap::new() };
+        let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: BTreeMap::new(), retained_bytes: 0, order: VecDeque::new(), seq: 0, owned: HashMap::new(), pending: HashMap::new(), pending_all: 0, stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), kept_out: HashMap::new(), reports: BTreeMap::new() };
         b.reblock();
         b.rekeep();
         b
@@ -362,14 +540,22 @@ impl Broker {
     /// May a connection from `ip` come in?
     pub fn admit(&mut self, ip: IpAddr) -> Result<(), &'static str> {
         let l = &self.kept.limits;
+        let block = block_of(ip);
+        let from_block = self.conns.values().filter(|c| block_of(c.ip) == block).count() + self.pending.get(&block).copied().unwrap_or(0);
+        let site = site_of(ip);
+        let from_site = || self.conns.values().filter(|c| site_of(c.ip) == site).count() + self.pending.iter().filter(|(b, _)| site_of(**b) == site).map(|(_, n)| n).sum::<usize>();
+        // (the relay's own network, its host: never shut out by the limits)
+        let outside = !internal(ip);
         let why = if l.closed {
             Some("closed")
-        } else if self.bans.contains(&block_of(ip)) {
+        } else if self.bans.contains(&block) {
             Some("banned")
-        } else if self.conns.len() >= l.max_conns {
+        } else if outside && self.conns.len() + self.pending_all >= l.max_conns {
             Some("full")
-        } else if !internal(ip) && self.conns.values().filter(|c| block_of(c.ip) == block_of(ip)).count() >= l.max_conns_per_ip {
+        } else if outside && from_block >= l.max_conns_per_ip {
             Some("too many from one address")
+        } else if outside && site.is_some() && from_site() >= l.max_conns_per_ip * 4 {
+            Some("too many from one network")
         } else {
             None
         };
@@ -378,18 +564,42 @@ impl Broker {
                 self.stats.refused += 1;
                 Err(w)
             }
-            None => Ok(()),
+            None => {
+                *self.pending.entry(block).or_default() += 1;
+                self.pending_all += 1;
+                Ok(())
+            }
         }
+    }
+
+    /// A connection let in by `admit` has gone, or said hello (and now
+    /// counts as itself).
+    pub fn unpend(&mut self, ip: IpAddr) {
+        let block = block_of(ip);
+        if let Some(n) = self.pending.get_mut(&block) {
+            *n -= 1;
+            self.pending_all = self.pending_all.saturating_sub(1);
+            if *n == 0 {
+                self.pending.remove(&block);
+            }
+        }
+    }
+
+    /// May a connection from `ip` still join (not blocked since it came,
+    /// nor the relay closed)?
+    pub fn ip_ok(&self, ip: IpAddr) -> bool {
+        !self.kept.limits.closed && !self.bans.contains(&block_of(ip))
     }
 
     /// A connection that's said hello: its id. (One already there with the
     /// same client name is let go: MQTT's "take over".)
-    pub fn join(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: Sender<Vec<u8>>) -> (u64, Option<u64>) {
+    pub fn join(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: impl Into<Down>) -> (u64, Option<u64>) {
         self.join_as(ip, client, will, tx, false)
     }
 
     /// The same, for the relay's own host (`host`: signed in).
-    pub fn join_as(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: Sender<Vec<u8>>, host: bool) -> (u64, Option<u64>) {
+    pub fn join_as(&mut self, ip: IpAddr, client: String, will: Option<(String, Vec<u8>, bool)>, tx: impl Into<Down>, host: bool) -> (u64, Option<u64>) {
+        self.unpend(ip);
         let old = self.conns.iter().find(|(_, c)| c.client == client).map(|(&id, _)| id);
         if let Some(o) = old {
             self.leave(o, false);
@@ -397,9 +607,10 @@ impl Broker {
         let id = self.next_id;
         self.next_id += 1;
         // (a will is published by the relay itself: never on its own topics)
-        let will = will.filter(|(t, p, _)| ok_topic(t) && !t.starts_with(ADMIN) && p.len() <= self.kept.limits.max_payload);
+        // (a little: the village's is a sealed "gone")
+        let will = will.filter(|(t, p, _)| ok_topic(t) && !t.starts_with(ADMIN) && p.len() <= 4096);
         let burst = self.kept.limits.burst;
-        self.conns.insert(id, Conn { ip, client, host, agent: String::new(), country: String::new(), since: Instant::now(), tx, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
+        self.conns.insert(id, Conn { ip, client, host, agent: String::new(), country: String::new(), since: Instant::now(), tx: tx.into(), via: false, will, subs: HashSet::new(), tokens: burst, tokens_at: Instant::now(), sent: 0, got: 0, dropped: 0 });
         (id, old)
     }
 
@@ -408,21 +619,15 @@ impl Broker {
     pub fn leave(&mut self, id: u64, clean: bool) {
         let Some(c) = self.conns.remove(&id) else { return };
         for f in &c.subs {
-            for map in [&mut self.exact, &mut self.wild] {
-                if let Some(s) = map.get_mut(f) {
-                    s.remove(&id);
-                    if s.is_empty() {
-                        map.remove(f);
-                    }
-                }
-            }
+            self.unfile(f, id);
         }
         if !clean {
             // (their last word: not into a banned village, nor one they're
             // kept out of, whenever that came about)
             let shut = c.will.as_ref().is_some_and(|(t, ..)| self.blocked.contains(t) || self.kept_out.get(t).is_some_and(|keys| kept_out_of(keys, &c)));
             if let Some((t, p, retain)) = c.will.clone().filter(|_| !shut) {
-                self.route(&t, &p, retain);
+                let owner = (!c.host).then(|| block_of(c.ip));
+                self.route(&t, &p, retain, None, owner);
             }
         }
     }
@@ -437,10 +642,7 @@ impl Broker {
     pub fn publish(&mut self, id: u64, topic: &str, payload: &[u8], retain: bool) -> Result<(), Bye> {
         let l = self.kept.limits.clone();
         let Some(c) = self.conns.get_mut(&id) else { return Ok(()) };
-        // (a bucket of tokens, refilled at the rate allowed)
-        let now = Instant::now();
-        c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
-        c.tokens_at = now;
+        refill(c, &l);
         // the relay's own topics: only its host speaks there, and only in
         // its villages (`v/`) and to the relay (`report/`)
         if topic.starts_with(ADMIN) {
@@ -464,7 +666,9 @@ impl Broker {
         // a banned village: nothing through (counted against the sender
         // like any message turned down, so one who floods it is let go)
         let shut = self.blocked.contains(topic);
-        if shut || c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
+        // (a village's listing: only from the player whose it is)
+        let not_theirs = kind_of(topic) == "listed" && topic.rsplit('/').next().and_then(|h| u32::from_str_radix(h, 16).ok()) != player_of(&c.client);
+        if shut || not_theirs || c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
             c.dropped += 1;
             self.stats.dropped += 1;
             // far over, for long: gone
@@ -483,27 +687,34 @@ impl Broker {
             return Ok(());
         }
         c.sent += 1;
+        let owner = (!c.host).then(|| block_of(c.ip));
         self.stats.msgs_in += 1;
         self.stats.bytes_in += payload.len() as u64;
-        self.route(topic, payload, retain);
+        self.route(topic, payload, retain, Some(id), owner);
         Ok(())
     }
 
     /// On to whoever listens; any that can't keep up (their queue full) are
     /// let go rather than kept in memory.
-    fn route(&mut self, topic: &str, payload: &[u8], retain: bool) {
-        if retain {
-            self.keep(topic, payload);
+    /// Passed on to everyone listening (kept too, if asked and it's a kind
+    /// the village keeps). `from`: the connection it came from; `owner`:
+    /// the address it counts against, for what's kept.
+    fn route(&mut self, topic: &str, payload: &[u8], retain: bool, from: Option<u64>, owner: Option<IpAddr>) {
+        if retain && keepable(topic) {
+            self.keep(topic, payload, owner);
         }
         let mut to: Vec<u64> = self.exact.get(topic).map(|s| s.iter().copied().collect()).unwrap_or_default();
-        for (f, s) in &self.wild {
-            if codec::matches(f, topic) {
+        if let Some((parent, _)) = topic.rsplit_once('/') {
+            if let Some(s) = self.wild.get(parent) {
                 to.extend(s.iter().copied());
             }
         }
         to.sort_unstable();
         to.dedup();
         let bytes = codec::publish(topic, payload, false);
+        // (to the relay's host, a village message says which connection
+        // it came from)
+        let via = from.filter(|_| kind_of(topic) == "village").map(|f| codec::publish(&format!("{ADMIN_VIA}/{f:x}/{}", topic.rsplit('/').next().unwrap_or("")), payload, false));
         let mut slow = vec![];
         let only_host = host_only(topic);
         // (someone kept out of this village hears nothing of it, however
@@ -517,12 +728,22 @@ impl Broker {
                 if outs.as_ref().is_some_and(|keys| kept_out_of(keys, c)) {
                     continue;
                 }
-                if c.tx.try_send(bytes.clone()).is_ok() {
-                    c.got += 1;
-                    self.stats.msgs_out += 1;
-                    self.stats.bytes_out += bytes.len() as u64;
-                } else {
-                    slow.push(id);
+                let b = match &via {
+                    Some(v) if c.host && c.via => v.clone(),
+                    _ => bytes.clone(),
+                };
+                let n = b.len();
+                match c.tx.push(b) {
+                    Push::Ok => {
+                        c.got += 1;
+                        self.stats.msgs_out += 1;
+                        self.stats.bytes_out += n as u64;
+                    }
+                    Push::Slow => slow.push(id),
+                    Push::Dropped => {
+                        c.dropped += 1;
+                        self.stats.dropped += 1;
+                    }
                 }
             }
         }
@@ -536,67 +757,132 @@ impl Broker {
         }
     }
 
-    fn keep(&mut self, topic: &str, payload: &[u8]) {
-        if let Some(old) = self.retained.remove(topic) {
-            self.retained_bytes -= old.payload.len();
-        }
-        let l = &self.kept.limits;
-        if payload.is_empty() || payload.len() > l.max_retained_payload {
+    /// Kept for whoever comes next (an empty one: forgotten). Each address
+    /// may keep so much; the oldest go when the relay's full, never the
+    /// relay's own.
+    fn keep(&mut self, topic: &str, payload: &[u8], owner: Option<IpAddr>) {
+        self.unkeep(topic);
+        let (most, most_bytes, biggest) = (self.kept.limits.max_retained, self.kept.limits.max_retained_bytes, self.kept.limits.max_retained_payload);
+        if payload.is_empty() || payload.len() > biggest {
             return;
         }
+        if let Some(o) = owner {
+            let (n, b) = self.owned.get(&o).copied().unwrap_or((0, 0));
+            if n >= KEPT_PER_ADDR || b + payload.len() > KEPT_BYTES_PER_ADDR {
+                self.stats.dropped += 1;
+                return;
+            }
+            let e = self.owned.entry(o).or_default();
+            e.0 += 1;
+            e.1 += payload.len();
+        }
+        self.seq += 1;
+        let seq = self.seq;
         self.retained_bytes += payload.len();
-        self.retained.insert(topic.to_string(), Kept1 { payload: payload.to_vec(), at: now_secs() });
-        self.order.push_back(topic.to_string());
+        self.retained.insert(topic.to_string(), Kept1 { payload: payload.to_vec(), at: now_secs(), owner, seq });
+        // (the relay's own are never let go to make room)
+        if !topic.starts_with(ADMIN) {
+            self.order.push_back((topic.to_string(), seq));
+        }
         // the oldest let go when there's too much
-        while self.retained.len() > l.max_retained || self.retained_bytes > l.max_retained_bytes {
-            let Some(t) = self.order.pop_front() else { break };
-            if let Some(k) = self.retained.remove(&t) {
-                self.retained_bytes -= k.payload.len();
+        while self.retained.len() > most || self.retained_bytes > most_bytes {
+            let Some((t, s)) = self.order.pop_front() else { break };
+            if self.retained.get(&t).is_some_and(|k| k.seq == s) {
+                self.unkeep(&t);
             }
         }
         if self.order.len() > self.retained.len() * 2 + 64 {
             let r = &self.retained;
-            self.order.retain(|t| r.contains_key(t));
+            self.order.retain(|(t, s)| r.get(t).is_some_and(|k| k.seq == *s));
+        }
+    }
+
+    /// Forgotten (what it counted, given back).
+    fn unkeep(&mut self, topic: &str) -> Option<Kept1> {
+        let k = self.retained.remove(topic)?;
+        self.retained_bytes -= k.payload.len();
+        if let Some(o) = k.owner {
+            if let Some(e) = self.owned.get_mut(&o) {
+                e.0 = e.0.saturating_sub(1);
+                e.1 = e.1.saturating_sub(k.payload.len());
+                if e.0 == 0 {
+                    self.owned.remove(&o);
+                }
+            }
+        }
+        Some(k)
+    }
+
+    /// A subscription forgotten (by connection).
+    fn unfile(&mut self, f: &str, id: u64) {
+        let (wild, key) = sub_key(f);
+        let map = if wild { &mut self.wild } else { &mut self.exact };
+        if let Some(s) = map.get_mut(key) {
+            s.remove(&id);
+            if s.is_empty() {
+                map.remove(key);
+            }
         }
     }
 
     /// Listen to `filters`; the kept messages for them go out at once. Each
     /// filter's granted QoS (0), or 0x80 for one refused.
     pub fn subscribe(&mut self, id: u64, filters: &[String]) -> Vec<u8> {
-        let max = self.kept.limits.max_subs;
+        let l = self.kept.limits.clone();
         let mut granted = vec![];
         let mut fresh = vec![];
         let Some(c) = self.conns.get_mut(&id) else { return vec![0x80; filters.len()] };
         let host = c.host;
+        // (listening costs from the same allowance as talking, a little)
+        refill(c, &l);
         for f in filters {
-            if !ok_filter(f) || (c.subs.len() >= max && !c.subs.contains(f)) || (host_only(f) && !host) || self.kept_out.get(f).is_some_and(|keys| kept_out_of(keys, c)) {
+            let paid = c.tokens >= SUB_COST;
+            if paid {
+                c.tokens -= SUB_COST;
+            } else {
+                c.dropped += 1;
+                self.stats.dropped += 1;
+            }
+            let shut = self.blocked.contains(f) || self.kept_out.get(f).is_some_and(|keys| kept_out_of(keys, c));
+            if !paid || !ok_filter(f) || (c.subs.len() >= l.max_subs && !c.subs.contains(f)) || (host_only(f) && !host) || shut {
                 granted.push(0x80);
                 continue;
             }
             granted.push(0);
+            if f == ADMIN_VIA {
+                c.via = true;
+            }
             if c.subs.insert(f.clone()) {
-                let map = if f.contains(['+', '#']) { &mut self.wild } else { &mut self.exact };
-                map.entry(f.clone()).or_default().insert(id);
+                let (wild, key) = sub_key(f);
+                let map = if wild { &mut self.wild } else { &mut self.exact };
+                map.entry(key.to_string()).or_default().insert(id);
                 fresh.push(f.clone());
             }
         }
-        // what's kept, for what's newly listened to
+        // what's kept, for what's newly listened to: straight to it, until
+        // its queue's full (never more than it can take)
         let mut out = vec![];
         for f in &fresh {
-            if f.contains(['+', '#']) {
-                for (t, k) in &self.retained {
-                    let kept_out = self.kept_out.get(t).is_some_and(|keys| self.conns.get(&id).is_some_and(|c| kept_out_of(keys, c)));
-                    if codec::matches(f, t) && (host || !host_only(t)) && !kept_out {
-                        out.push(codec::publish(t, &k.payload, true));
+            match sub_key(f) {
+                (true, parent) => {
+                    let p = format!("{parent}/");
+                    for (t, k) in self.retained.range(p.clone()..).take_while(|(t, _)| t.starts_with(&p)).filter(|(t, _)| !t[p.len()..].contains('/')).take(1024) {
+                        out.push((t.clone(), k.payload.clone()));
                     }
                 }
-            } else if let Some(k) = self.retained.get(f) {
-                out.push(codec::publish(f, &k.payload, true));
+                (false, t) => {
+                    if let Some(k) = self.retained.get(t) {
+                        out.push((t.to_string(), k.payload.clone()));
+                    }
+                }
             }
         }
-        if let Some(c) = self.conns.get_mut(&id) {
-            for b in out {
-                if c.tx.try_send(b).is_err() {
+        if let Some(c) = self.conns.get(&id) {
+            for (t, payload) in out {
+                if (host_only(&t) && !host) || self.kept_out.get(&t).is_some_and(|keys| kept_out_of(keys, c)) {
+                    continue;
+                }
+                if c.tx.push(codec::publish(&t, &payload, true)) != Push::Ok {
                     break;
                 }
             }
@@ -605,28 +891,31 @@ impl Broker {
     }
 
     pub fn unsubscribe(&mut self, id: u64, filters: &[String]) {
+        let l = self.kept.limits.clone();
         let Some(c) = self.conns.get_mut(&id) else { return };
+        refill(c, &l);
+        let mut gone = vec![];
         for f in filters {
-            if c.subs.remove(f) {
-                for map in [&mut self.exact, &mut self.wild] {
-                    if let Some(s) = map.get_mut(f) {
-                        s.remove(&id);
-                        if s.is_empty() {
-                            map.remove(f);
-                        }
-                    }
-                }
+            if c.tokens < SUB_COST {
+                break;
             }
+            c.tokens -= SUB_COST;
+            if c.subs.remove(f) {
+                gone.push(f.clone());
+            }
+        }
+        for f in gone {
+            self.unfile(&f, id);
         }
     }
 
     /// Something straight back to one connection (an ack, a pong).
     pub fn reply(&mut self, id: u64, bytes: Vec<u8>) -> Result<(), Bye> {
         let Some(c) = self.conns.get_mut(&id) else { return Ok(()) };
-        if c.tx.try_send(bytes).is_err() {
-            return Err(Bye::Slow);
+        match c.tx.push(bytes) {
+            Push::Ok | Push::Dropped => Ok(()),
+            Push::Slow => Err(Bye::Slow),
         }
-        Ok(())
     }
 
     // ---------------- the admin console
@@ -638,6 +927,11 @@ impl Broker {
         s.subs = self.conns.values().map(|c| c.subs.len()).sum();
         s.retained = self.retained.len();
         s.retained_bytes = self.retained_bytes;
+        s.queued_bytes = queued_all();
+        for c in self.conns.values().filter(|c| !c.host) {
+            s.players += 1;
+            *s.platforms.entry(platform_of(&c.agent).to_string()).or_default() += 1;
+        }
         s.uptime_s = self.started.elapsed().as_secs();
         let span = self.recent.front().map(|(t, _)| t.elapsed().as_secs_f32()).unwrap_or(0.0).max(1.0);
         s.rate = self.recent.len() as f32 / span;
@@ -698,6 +992,12 @@ impl Broker {
             c.agent = agent.chars().filter(|ch| !ch.is_control()).take(48).collect();
             c.country = country.chars().filter(|ch| ch.is_ascii_alphanumeric()).take(2).collect();
         }
+    }
+
+    /// One connection, as the console shows it: (address, country, what it
+    /// said it is, its client id).
+    pub fn conn_info(&self, conn: u64) -> Option<(String, String, String, String)> {
+        self.conns.get(&conn).filter(|c| !c.host).map(|c| (c.ip.to_string(), c.country.clone(), c.agent.clone(), c.client.clone()))
     }
 
     /// Where a player's connected from (address, country), and with what
@@ -782,9 +1082,7 @@ impl Broker {
     pub fn clear_retained(&mut self, prefix: &str) -> usize {
         let gone: Vec<String> = self.retained.keys().filter(|t| t.starts_with(prefix)).cloned().collect();
         for t in &gone {
-            if let Some(k) = self.retained.remove(t) {
-                self.retained_bytes -= k.payload.len();
-            }
+            self.unkeep(t);
         }
         gone.len()
     }
@@ -792,16 +1090,19 @@ impl Broker {
     /// The relay's own message (the squares' settings): kept, and on to
     /// whoever listens.
     pub fn say(&mut self, topic: &str, payload: &[u8]) {
-        self.keep(topic, payload);
-        self.route(topic, payload, true);
+        self.route(topic, payload, true, None, None);
     }
 
     /// The public list's order, what's featured and kept out, and the
     /// extra words: for everyone.
     pub fn say_public(&mut self) {
         let k = &self.kept;
-        let banned: Vec<&str> = k.village_bans.iter().map(|b| b.key.as_str()).collect();
-        let json = serde_json::to_vec(&serde_json::json!({ "featured": k.featured, "order": k.order, "banned": banned, "words": k.words })).unwrap_or_default();
+        // (a village's code is its key: only those that were listed, whose
+        // codes were public anyway, go out as codes; every banned one goes
+        // out as its topic, which can't be turned back into the code)
+        let banned: Vec<&str> = k.village_bans.iter().filter(|b| !b.name.is_empty()).map(|b| b.key.as_str()).collect();
+        let banned_ids: Vec<String> = k.village_bans.iter().map(|b| topic_of("village", &b.key).rsplit('/').next().unwrap_or("").to_string()).collect();
+        let json = serde_json::to_vec(&serde_json::json!({ "featured": k.featured, "order": k.order, "banned": banned, "banned_ids": banned_ids, "words": k.words })).unwrap_or_default();
         self.say(ADMIN_PUBLIC, &json);
     }
 
@@ -816,7 +1117,7 @@ impl Broker {
     /// Ask the host to do something now (kick, mute, announce…).
     pub fn host_cmd(&mut self, v: serde_json::Value) {
         let json = serde_json::to_vec(&v).unwrap_or_default();
-        self.route(ADMIN_CMD, &json, false);
+        self.route(ADMIN_CMD, &json, false, None, None);
     }
 
     /// Is the relay's own host here?
@@ -835,9 +1136,7 @@ impl Broker {
         self.reblock();
         // (its listing, kept here, forgotten)
         let t = topic_of("public", &key);
-        if let Some(k) = self.retained.remove(&t) {
-            self.retained_bytes -= k.payload.len();
-        }
+        self.unkeep(&t);
         self.say_public();
         self.host_cmd(serde_json::json!({ "close": key }));
     }
@@ -952,10 +1251,10 @@ impl Broker {
             let Some(at) = take(&mut r, 8).map(|v| u64::from_le_bytes(v.try_into().unwrap_or([0; 8]))) else { break };
             let Some(pl) = take(&mut r, 4).map(|v| u32::from_le_bytes(v.try_into().unwrap_or([0; 4])) as usize) else { break };
             let Some(payload) = take(&mut r, pl) else { break };
-            if !ok_topic(&topic) {
+            if !ok_topic(&topic) || !keepable(&topic) {
                 continue;
             }
-            self.keep(&topic, &payload);
+            self.keep(&topic, &payload, None);
             if let Some(k) = self.retained.get_mut(&topic) {
                 k.at = at;
             }
@@ -980,9 +1279,7 @@ impl Broker {
             .map(|(t, _)| t.clone())
             .collect();
         for t in old {
-            if let Some(k) = self.retained.remove(&t) {
-                self.retained_bytes -= k.payload.len();
-            }
+            self.unkeep(&t);
         }
     }
 }
@@ -1016,21 +1313,33 @@ pub fn internal(ip: IpAddr) -> bool {
 
 /// A topic the village uses: its prefix, no wildcards, nothing odd.
 pub fn ok_topic(t: &str) -> bool {
-    t.starts_with(PREFIX) && t.len() <= 200 && !t.contains(['+', '#', '\0'])
+    t.len() <= 200 && !t.contains(['+', '#', '\0']) && t.strip_prefix("xmas-tui/1/").and_then(|r| r.split_once('/')).is_some_and(|(k, rest)| KINDS.contains(&k) && !rest.is_empty())
 }
 
 /// A subscription the village makes: its prefix, wildcards only as whole
 /// levels (`#` last).
 pub fn ok_filter(f: &str) -> bool {
-    if !f.starts_with(PREFIX) || f.len() > 200 || f.contains('\0') {
-        return false;
+    // (a topic itself, or the two wildcards the village uses: the public
+    // listings, and one's own linked devices. Nothing that lists topics
+    // nobody's told the listener: a private village, a mailbox, a linked
+    // device can't be found, only known.)
+    if !f.contains(['+', '#']) {
+        return ok_topic(f);
     }
-    let levels: Vec<&str> = f.split('/').collect();
-    levels.iter().enumerate().all(|(i, l)| match *l {
-        "+" => true,
-        "#" => i == levels.len() - 1,
-        l => !l.contains(['+', '#']),
-    })
+    if f == "xmas-tui/1/listed/+" {
+        return true;
+    }
+    f.strip_prefix("xmas-tui/1/sync/").and_then(|r| r.strip_suffix("/+")).is_some_and(|h| h.len() == 24 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// What subscribing to one filter costs from the allowance of messages.
+const SUB_COST: f32 = 0.25;
+
+/// A connection's allowance of messages, topped up for the time gone by.
+fn refill(c: &mut Conn, l: &Limits) {
+    let now = Instant::now();
+    c.tokens = (c.tokens + now.duration_since(c.tokens_at).as_secs_f32() * l.msgs_per_sec).min(l.burst);
+    c.tokens_at = now;
 }
 
 #[cfg(test)]
@@ -1044,10 +1353,10 @@ mod tests {
         IpAddr::from([203, 0, 113, n])
     }
 
-    fn drain(rx: &mut Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+    fn drain(rx: &mut Receiver<Q>) -> Vec<Vec<u8>> {
         let mut v = vec![];
-        while let Ok(b) = rx.try_recv() {
-            v.push(b);
+        while let Ok(q) = rx.try_recv() {
+            v.push(q.take());
         }
         v
     }
@@ -1075,7 +1384,9 @@ mod tests {
         assert_eq!(c.restore(b"not a snapshot"), 0);
         let (tb, mut rb) = channel(64);
         let (bb, _) = c.join(ip(2), "b".into(), None, tb);
-        c.subscribe(bb, &["xmas-tui/1/#".into()]);
+        // (a wildcard over everything: refused; the topics themselves: fine)
+        assert_eq!(c.subscribe(bb, &["xmas-tui/1/#".into()]), vec![0x80]);
+        c.subscribe(bb, &["xmas-tui/1/sync/abc/dev1".into(), "xmas-tui/1/here/abc".into(), ADMIN_SQUARES.into()]);
         let got = drain(&mut rb);
         let has = |t: &str| got.iter().any(|m| m.windows(t.len()).any(|w| w == t.as_bytes()));
         assert!(has("xmas-tui/1/sync/abc/dev1") && has("xmas-tui/1/here/abc"));
@@ -1110,7 +1421,7 @@ mod tests {
         let (h, _) = b.join_as(ip(1), "xt00000001aa".into(), None, th, true);
         let (tp, mut rp) = channel(64);
         let (p, _) = b.join(ip(2), "xt12345678bb".into(), None, tp);
-        assert_eq!(b.subscribe(p, &[ADMIN_HOST.into(), "xmas-tui/1/#".into()]), vec![0x80, 0]);
+        assert_eq!(b.subscribe(p, &[ADMIN_HOST.into(), "xmas-tui/1/#".into()]), vec![0x80, 0x80]);
         assert_eq!(b.subscribe(h, &[ADMIN_CMD.into(), ADMIN_HOST.into()]), vec![0, 0]);
         b.say_host();
         b.host_cmd(serde_json::json!({ "say": { "to": "*", "text": "hello" } }));
@@ -1125,6 +1436,7 @@ mod tests {
         assert!(!has(&drain(&mut rq), ADMIN_HOST));
         // speaking as the host in a village: the host can, a player can't
         let v = format!("{ADMIN_V}abc");
+        b.subscribe(q, &[v.clone()]);
         b.publish(p, &v, b"forged", false).unwrap();
         assert!(!has(&drain(&mut rq), "forged"));
         b.publish(h, &v, b"really", false).unwrap();
@@ -1145,10 +1457,13 @@ mod tests {
         assert!(b.may_join("xt00000fffzz", true).is_ok());
         assert!(b.may_join("xt00001000zz", false).is_ok());
         // a banned village: nothing through on its topics
-        b.ban_village("ABCD-EFGH-JKLM", "Grinch's", "spam");
         let t = topic_of("village", "abcdefghjklm");
+        b.subscribe(q, &[t.clone()]);
+        b.ban_village("ABCD-EFGH-JKLM", "Grinch's", "spam");
         b.publish(p, &t, b"blocked?", false).unwrap();
         assert!(!has(&drain(&mut rq), "blocked?"));
+        // (nor can anyone start listening to it)
+        assert_eq!(b.subscribe(p, &[t.clone()]), vec![0x80]);
         b.unban_village("ABCDEFGHJKLM");
         b.publish(p, &t, b"open again", false).unwrap();
         assert!(has(&drain(&mut rq), "open again"));
@@ -1309,7 +1624,7 @@ mod tests {
         let (tb, mut rb) = channel(64);
         let (a, _) = b.join(ip(1), "a".into(), Some(("xmas-tui/1/here/a".into(), b"gone".to_vec(), true)), ta);
         let (bb, _) = b.join(ip(2), "b".into(), None, tb);
-        assert_eq!(b.subscribe(bb, &["xmas-tui/1/mail/b".into(), "xmas-tui/1/here/+".into(), "nope/x".into()]), vec![0, 0, 0x80]);
+        assert_eq!(b.subscribe(bb, &["xmas-tui/1/mail/b".into(), "xmas-tui/1/here/a".into(), "xmas-tui/1/here/+".into(), "nope/x".into()]), vec![0, 0, 0x80, 0x80]);
         b.publish(a, "xmas-tui/1/mail/b", b"hi", false).unwrap();
         b.publish(a, "xmas-tui/1/here/a", b"on", true).unwrap();
         assert_eq!(drain(&mut rb), vec![codec::publish("xmas-tui/1/mail/b", b"hi", false), codec::publish("xmas-tui/1/here/a", b"on", false)]);
@@ -1343,7 +1658,7 @@ mod tests {
         assert!(b.admit(ip(2)).is_ok());
         // a flood: past the burst, dropped (not passed on)
         for _ in 0..20 {
-            b.publish(a, "xmas-tui/1/x", b"x", false).unwrap();
+            b.publish(a, "xmas-tui/1/mail/x", b"x", false).unwrap();
         }
         assert_eq!(b.stats().msgs_in, 5);
         // off-limits topics never pass
@@ -1366,9 +1681,9 @@ mod tests {
         let (tb, _rb) = channel(2);
         let (a, _) = b.join(ip(1), "a".into(), None, ta);
         let (bb, _) = b.join(ip(2), "b".into(), None, tb);
-        b.subscribe(bb, &["xmas-tui/1/t".into()]);
+        b.subscribe(bb, &["xmas-tui/1/mail/t".into()]);
         for _ in 0..5 {
-            b.publish(a, "xmas-tui/1/t", b"x", false).unwrap();
+            b.publish(a, "xmas-tui/1/mail/t", b"x", false).unwrap();
         }
         assert!(!b.has(bb), "the slow one's gone");
         assert!(b.has(a), "not the one sending");
@@ -1393,8 +1708,141 @@ mod tests {
 
     #[test]
     fn filters_and_topics_are_checked() {
-        assert!(ok_filter("xmas-tui/1/sync/ab/+") && ok_filter("xmas-tui/#"));
+        // only the wildcards the village uses
+        assert!(ok_filter("xmas-tui/1/sync/0123456789abcdef01234567/+") && ok_filter("xmas-tui/1/listed/+") && ok_filter("xmas-tui/1/here/abc"));
+        assert!(!ok_filter("xmas-tui/1/sync/ab/+") && !ok_filter("xmas-tui/#") && !ok_filter("xmas-tui/1/here/+") && !ok_filter("xmas-tui/1/+/x"));
         assert!(!ok_filter("#") && !ok_filter("xmas-tui/1/#/x") && !ok_filter("xmas-tui/1/a+b"));
+        // only the kinds the village uses
         assert!(ok_topic("xmas-tui/1/here/x") && !ok_topic("xmas-tui/1/here/+") && !ok_topic("other/x"));
+        assert!(!ok_topic("xmas-tui/1/x") && !ok_topic("xmas-tui/1/made-up/x") && !ok_topic("xmas-tui/1/here/"));
+    }
+
+    /// What waits for a connection is held to so many bytes, not just so
+    /// many messages: one that stops reading is let go once it's past it,
+    /// and what was waiting for it is given back when it goes.
+    #[test]
+    fn a_connection_that_stops_reading_is_held_to_its_bytes() {
+        let mut b = Broker::new(Kept::default());
+        b.kept.limits.burst = 1e9;
+        b.kept.limits.msgs_per_sec = 1e9;
+        let (ta, _ra) = channel(10_000);
+        let (tb, rb) = channel(10_000);
+        let (a, _) = b.join(ip(1), "a".into(), None, ta);
+        let down: Down = tb.into();
+        let (bb, _) = b.join(ip(2), "b".into(), None, down.clone());
+        b.subscribe(bb, &["xmas-tui/1/mail/t".into()]);
+        let big = vec![7u8; 100_000];
+        let mut sent = 0;
+        while b.has(bb) && sent < 100 {
+            b.publish(a, "xmas-tui/1/mail/t", &big, false).unwrap();
+            sent += 1;
+        }
+        assert!(!b.has(bb), "still there with {} bytes waiting", down.queued());
+        assert!(sent * 100_000 <= QUEUE_BYTES + 200_000, "let go only after {sent} messages");
+        assert!(down.queued() <= QUEUE_BYTES);
+        drop(rb);
+        assert_eq!(down.queued(), 0, "what was waiting wasn't given back");
+    }
+
+    /// Connections count from the moment they're let in, not from their
+    /// hello: opening many and saying hello later doesn't get past the
+    /// limit; one that goes without a hello gives its place back.
+    #[test]
+    fn connections_count_before_their_hello() {
+        let mut k = Kept::default();
+        k.limits.max_conns_per_ip = 3;
+        let mut b = Broker::new(k);
+        for _ in 0..3 {
+            assert!(b.admit(ip(1)).is_ok());
+        }
+        assert_eq!(b.admit(ip(1)), Err("too many from one address"));
+        b.unpend(ip(1));
+        assert!(b.admit(ip(1)).is_ok(), "a place given back");
+        // saying hello turns a waiting place into the connection itself
+        let (t, _r) = channel(8);
+        b.join(ip(1), "x".into(), None, t);
+        assert_eq!(b.admit(ip(1)), Err("too many from one address"));
+        // the relay's own network: never shut out
+        assert!(b.admit(IpAddr::from([172, 18, 0, 2])).is_ok());
+        // a whole IPv6 site: four times the one-address limit
+        let v6 = |n: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 7, n, 0, 0, 0, 1));
+        for n in 0..12 {
+            assert!(b.admit(v6(n)).is_ok());
+        }
+        assert_eq!(b.admit(v6(99)), Err("too many from one network"));
+    }
+
+    /// What's kept: only the kinds the village keeps; each address only
+    /// so much; the relay's own never pushed out; a listing only by the
+    /// player whose it is; a kept message handed to a newcomer only up to
+    /// what its queue can take.
+    #[test]
+    fn what_is_kept_is_bounded_and_owned() {
+        let mut k = Kept::default();
+        k.limits.max_retained = 50;
+        let mut b = Broker::new(k);
+        b.kept.limits.burst = 1e9;
+        b.kept.limits.msgs_per_sec = 1e9;
+        b.say_squares();
+        let (t, _r) = channel(64);
+        let (a, _) = b.join(ip(1), "xt00002001aaaaaaaa0001".into(), None, t);
+        // a village message with the keep flag: passed on, not kept
+        b.publish(a, &topic_of("village", "ABCDEFGHJKLM"), b"x", true).unwrap();
+        assert_eq!(b.retained.len(), 1);
+        // one address's share
+        for i in 0..400 {
+            b.publish(a, &format!("xmas-tui/1/here/{i}"), b"x", true).unwrap();
+        }
+        assert!(b.retained.len() <= 51 && b.retained.contains_key(ADMIN_SQUARES), "the relay's own pushed out, or too many kept");
+        assert!(b.owned.get(&ip(1)).is_some_and(|o| o.0 <= KEPT_PER_ADDR));
+        // a listing: only the player whose id it carries
+        b.publish(a, "xmas-tui/1/listed/00002001", b"mine", true).unwrap();
+        b.publish(a, "xmas-tui/1/listed/00000001", b"the host's", true).unwrap();
+        assert!(b.retained.contains_key("xmas-tui/1/listed/00002001"));
+        assert!(!b.retained.contains_key("xmas-tui/1/listed/00000001"), "a listing kept for someone else");
+        // a newcomer to the listings gets them through its own queue only
+        let (tn, mut rn) = channel(4);
+        let (n, _) = b.join(ip(2), "n".into(), None, tn);
+        b.publish(a, "xmas-tui/1/listed/00002001", b"mine again", true).unwrap();
+        assert_eq!(b.subscribe(n, &["xmas-tui/1/listed/+".into()]), vec![0]);
+        assert_eq!(drain(&mut rn).len(), 1);
+    }
+
+    /// The relay's host, listening on `ADMIN_VIA`, hears each village
+    /// message with the connection it came from; nobody else can listen
+    /// there, and others hear the village as ever.
+    #[test]
+    fn the_host_is_told_who_sent_what() {
+        let mut b = Broker::new(Kept::default());
+        let v = topic_of("village", "ABCDEFGHJKLM");
+        let (th, mut rh) = channel(64);
+        let (h, _) = b.join_as(IpAddr::from([172, 18, 0, 3]), "xt00000002aa".into(), None, th, true);
+        let (tp, mut rp) = channel(64);
+        let (p, _) = b.join(ip(2), "xt00002002bbbbbbbb0001".into(), None, tp);
+        let (tq, mut rq) = channel(64);
+        let (q, _) = b.join(ip(3), "xt00002003cccccccc0001".into(), None, tq);
+        assert_eq!(b.subscribe(h, &[v.clone(), ADMIN_VIA.into()]), vec![0, 0]);
+        assert_eq!(b.subscribe(p, &[ADMIN_VIA.into(), format!("{ADMIN_VIA}/1/x")]), vec![0x80, 0x80]);
+        b.subscribe(q, &[v.clone()]);
+        b.publish(p, &v, b"hello", false).unwrap();
+        let hash = v.rsplit('/').next().unwrap();
+        assert_eq!(drain(&mut rh), vec![codec::publish(&format!("{ADMIN_VIA}/{p:x}/{hash}"), b"hello", false)]);
+        assert_eq!(drain(&mut rq), vec![codec::publish(&v, b"hello", false)]);
+        assert!(drain(&mut rp).is_empty());
+    }
+
+    /// Subscribing costs from the allowance too: a flood of subscriptions
+    /// is refused, not served.
+    #[test]
+    fn subscribing_is_held_to_the_allowance() {
+        let mut k = Kept::default();
+        k.limits.burst = 2.0;
+        k.limits.msgs_per_sec = 0.001;
+        let mut b = Broker::new(k);
+        let (t, _r) = channel(64);
+        let (a, _) = b.join(ip(1), "a".into(), None, t);
+        let filters: Vec<String> = (0..20).map(|i| format!("xmas-tui/1/here/{i}")).collect();
+        let granted = b.subscribe(a, &filters);
+        assert_eq!(granted.iter().filter(|g| **g == 0).count(), 8, "{granted:?}");
     }
 }

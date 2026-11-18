@@ -17,6 +17,13 @@ game is already at xmas.novalabs.app (its DNS is done).
   in them, what's said, mute, kick, ban), server villages (private or listed), the public list's order and featured
   places, extra words, announcements (now and scheduled), welcomes, and bans of villages and players. **It needs one
   new setting on the server: `HOST_TOKEN` (see Steps).**
+- 1.4.0: per-village bans, addresses, countries and versions in the console, the villages in use, the update button.
+- 1.5.0 (after a security audit): what waits for each connection is held to bytes, not just messages, and connections
+  count from the moment they open; only the topics and wildcards the game uses are accepted, and only four kinds are
+  kept, with a share per address; the relay's own settings are never pushed out; the host is told which connection
+  sent each village message (so nobody can speak, or be banned, as someone else); the console checks Cloudflare
+  Access's signed token (`ACCESS_TEAM`, `ACCESS_AUD`) and sends a strict content policy; the host signs in only from
+  the relay's own network. **Two new settings, recommended: `ACCESS_TEAM` and `ACCESS_AUD` (see Environment).**
 - Before 1.3.0, none of these changed anything on the server's side.
 - Built for linux/amd64 by the repo's `relay` workflow from `relay/`, whenever it changes.
 - Runs as a non-root user (uid 10001).
@@ -75,14 +82,23 @@ sudo docker compose logs --tail 8 xmas-host   # "keeping North Pole Square open"
 
 ## Environment
 
-- `ADMIN_EMAIL` (in `.env`): the owner's Access login. The console then answers only requests
-  Cloudflare Access signed in as exactly that address (it reads the
-  `Cf-Access-Authenticated-User-Email` header Access adds). Unset, any Access sign-in gets in.
-  There's no other admin secret.
+- `ADMIN_EMAIL` (in `.env`): the owner's Access login. The console answers only requests
+  Cloudflare Access signed in as exactly that address. Unset (and without `ADMIN_OPEN=1`), the
+  console answers nobody.
+- `ACCESS_TEAM` and `ACCESS_AUD` (in `.env`, from relay 1.5.0; recommended): the Access team
+  (`dash-project-nova`) and the console application's **Application Audience (AUD) tag**
+  (Cloudflare dashboard → Zero Trust → Access → Applications → the admin application →
+  Overview). Set, the relay checks the signed token Access puts on every request against the
+  team's keys, so nothing that reaches port 8081 some other way (another container, another
+  program on the server) can pretend to be signed in. Unset, it believes Access's email header,
+  as before. The relay fetches the team's keys from Cloudflare every hour; if it can't, the
+  console turns everyone away until it can (and says so in its log).
 - `TRUST_CF=1` (set in the compose file): client addresses come from `CF-Connecting-IP`, for
   the per-address limits and bans.
 - `HOST_TOKEN` (in `.env`, read by both containers): the secret the relay's own host signs in
   with (at least 16 letters; `openssl rand -hex 24` makes one). Keep it out of anything shared.
+  It's accepted only from the relay's own network (the host's container), unless
+  `HOST_ANYWHERE=1`.
 - Optional: `RELAY_PORT`, `ADMIN_PORT`, `RELAY_DATA` (defaults 8080, 8081, `/data`).
 - The console's settings (server villages and their codes, bans, the public list, mutes,
   welcomes, announcements) are kept in `data/relay.json`, which is in Nova's backups. A private
@@ -90,8 +106,8 @@ sudo docker compose logs --tail 8 xmas-host   # "keeping North Pole Square open"
 
 ## Updating
 
-The images follow `latest` unless a version is set in `.env` (`RELAY_TAG=1.4.0`, `HOST_TAG=1.25.2`).
-By hand:
+The images follow `latest` unless a version is set in `.env` (`RELAY_TAG=1.5.0`, `HOST_TAG=1.25.3`).
+With the updater on (below), this all happens by itself. By hand:
 
 ```bash
 cd /opt/xmas-relay
@@ -129,6 +145,45 @@ sudo docker compose logs --tail 5 xmas-updater   # "watching /data for requests�
 - A request more than ten minutes old is dropped, not acted on late.
 - The updater doesn't update itself. `compose.yaml` and `update.sh` change by hand, as above.
 
+### By itself (the updater, from relay 1.5.0)
+
+With the updater on, it also:
+- updates every day at `AUTO_UPDATE` (UTC; `09:30` by default, 4:30 in the morning in New York
+  in winter; set it empty in `.env` for none). Compose starts a service again only when there's a
+  newer image, so on most days nothing happens;
+- clears away old images of the relay and its host afterwards;
+- starts the relay again if it stops answering its health check for three minutes running.
+
+Each shows in the console's UPDATE section.
+
+## After a power cut or a reboot
+
+Everything comes back by itself, as long as:
+- Docker starts at boot: `systemctl is-enabled docker` says `enabled` (`sudo systemctl enable docker` if not);
+- the containers have `restart: unless-stopped` (they do), and weren't stopped by hand
+  (`docker compose stop` is remembered; `docker compose up -d` undoes it);
+- the Cloudflare tunnel starts at boot too: `systemctl is-enabled cloudflared` (or its container's
+  restart policy).
+
+What's kept comes back with it: `data/kept.bin` (written every minute) and `data/relay.json`.
+The host reconnects on its own and takes the squares back.
+
+## Keeping the machine itself up to date
+
+The containers update themselves (above); Debian's own packages can too, with a reboot when one
+needs it, at a quiet hour:
+
+```bash
+sudo apt install unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades       # "Yes"
+# /etc/apt/apt.conf.d/52xmas-relay (a file of its own, so upgrades don't overwrite it):
+#   Unattended-Upgrade::Automatic-Reboot "true";
+#   Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+systemctl status unattended-upgrades.service
+```
+
+A reboot drops everyone for a minute or two, then the relay and host come back as above.
+
 ## Check
 
 - `curl -s https://xmas-relay.novalabs.app/health` gives `ok`.
@@ -137,7 +192,9 @@ sudo docker compose logs --tail 5 xmas-updater   # "watching /data for requests�
 - https://xmas-admin.novalabs.app shows "❄ Village relay" after the Access sign-in, and is
   refused without it.
 - `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/` on the server gives
-  `403`: no Access header means no console, even locally.
+  `403`: no Access sign-in means no console, even locally. With `ACCESS_AUD` set,
+  `curl -s -o /dev/null -w '%{http_code}\n' -H 'Cf-Access-Authenticated-User-Email: <the admin>' http://127.0.0.1:8081/api/state`
+  gives `403` too: the header alone isn't believed.
 - The console's HOST section says "● the host is connected", and IN THE VILLAGES THE HOST KEEPS
   lists the four squares.
 

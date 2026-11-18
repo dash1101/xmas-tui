@@ -22,6 +22,9 @@ pub enum In {
 /// aren't MQTT, is an error (the connection is dropped).
 pub struct Reader {
     buf: Vec<u8>,
+    /// How far into `buf` has been read (what's before it is let go of
+    /// once, when the rest runs out, not packet by packet).
+    pos: usize,
     max: usize,
 }
 
@@ -33,10 +36,11 @@ pub enum Bad {
 
 impl Reader {
     pub fn new(max: usize) -> Self {
-        Reader { buf: Vec::new(), max }
+        Reader { buf: Vec::new(), pos: 0, max }
     }
 
     pub fn feed(&mut self, b: &[u8]) -> Result<(), Bad> {
+        self.compact();
         if self.buf.len() + b.len() > self.max + 8 {
             return Err(Bad::TooBig);
         }
@@ -44,13 +48,24 @@ impl Reader {
         Ok(())
     }
 
+    /// What's been read, let go of (all at once: reading packet by packet
+    /// stays cheap however many come together).
+    fn compact(&mut self) {
+        if self.pos > 0 {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
+        }
+    }
+
     pub fn next(&mut self) -> Result<Option<In>, Bad> {
-        if self.buf.len() < 2 {
+        let rest = &self.buf[self.pos..];
+        if rest.len() < 2 {
+            self.compact();
             return Ok(None);
         }
         let (mut len, mut mul, mut i) = (0usize, 1usize, 1usize);
         loop {
-            let Some(&b) = self.buf.get(i) else { return Ok(None) };
+            let Some(&b) = rest.get(i) else { return Ok(None) };
             len += (b & 0x7f) as usize * mul;
             mul *= 128;
             i += 1;
@@ -64,13 +79,13 @@ impl Reader {
         if len > self.max {
             return Err(Bad::TooBig);
         }
-        if self.buf.len() < i + len {
+        if rest.len() < i + len {
             return Ok(None);
         }
-        let head = self.buf[0];
-        let body: Vec<u8> = self.buf[i..i + len].to_vec();
-        self.buf.drain(..i + len);
-        parse(head, &body).map(Some)
+        let head = rest[0];
+        let out = parse(head, &rest[i..i + len]);
+        self.pos += i + len;
+        out.map(Some)
     }
 }
 
@@ -203,6 +218,7 @@ pub fn publish(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
 
 /// Does `topic` match the subscription `filter` (`+` one level, `#` the
 /// rest)?
+#[allow(dead_code)]
 pub fn matches(filter: &str, topic: &str) -> bool {
     let mut f = filter.split('/');
     let mut t = topic.split('/');
@@ -291,5 +307,26 @@ mod tests {
         assert!(matches("xmas-tui/1/here/x", "xmas-tui/1/here/x"));
         assert!(!matches("xmas-tui/1/here/x", "xmas-tui/1/here/y"));
         assert!(!matches("xmas-tui/1/here", "xmas-tui/1/here/y"));
+    }
+
+    /// Many tiny packets together are read in a moment, however many (each
+    /// one doesn't move all the rest along).
+    #[test]
+    fn many_small_packets_are_read_quickly() {
+        let mut r = Reader::new(1 << 20);
+        let bytes: Vec<u8> = std::iter::repeat([0xf0u8, 0x00]).take(400_000).flatten().collect();
+        let t = std::time::Instant::now();
+        r.feed(&bytes).unwrap();
+        let mut n = 0;
+        while let Ok(Some(_)) = r.next() {
+            n += 1;
+        }
+        assert_eq!(n, 400_000);
+        assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
+        // and what's left after is kept for the next bytes
+        r.feed(&[0xc0]).unwrap();
+        assert_eq!(r.next(), Ok(None));
+        r.feed(&[0x00]).unwrap();
+        assert_eq!(r.next(), Ok(Some(In::Ping)));
     }
 }

@@ -13,12 +13,23 @@
 # That's why it is opt-in, has no ports and no network, and only ever names
 # the two services below.
 #
+# Besides being asked, it looks after things by itself:
+# * every day at AUTO_UPDATE (for example 04:30, the container's own time:
+#   TZ), it does the same update. Compose only starts a service again when
+#   its image has changed, so on a day with nothing new nobody notices.
+# * old images of the relay and its host are cleared away after an update.
+# * if the relay stops answering its health check (three looks in a row, a
+#   minute apart), it's started again.
+#
 # Settings: PROJECT_DIR (the folder compose.yaml is in, mounted at the same
 # path as on the machine), DATA (the relay's data folder: /data), EVERY
-# (seconds between looks: 5).
+# (seconds between looks: 5), AUTO_UPDATE (HH:MM, or empty for none).
 set -u
 DATA="${DATA:-/data}"
 EVERY="${EVERY:-5}"
+AUTO_UPDATE="${AUTO_UPDATE:-}"
+WATCH_EVERY="${WATCH_EVERY:-60}"
+case "$AUTO_UPDATE" in '' | [0-2][0-9]:[0-5][0-9]) ;; *) echo "xmas-updater: AUTO_UPDATE isn't HH:MM, so there's no daily update" >&2; AUTO_UPDATE="" ;; esac
 SERVICES="xmas-relay xmas-host"
 : "${PROJECT_DIR:?PROJECT_DIR is not set (the folder compose.yaml is in)}"
 case "$DATA" in /?*) ;; *) echo "xmas-updater: DATA must be a full path" >&2; exit 1 ;; esac
@@ -79,7 +90,9 @@ run_update() {
     fi
     # shellcheck disable=SC2086
     imgs=$(docker inspect --format '{{.Name}} {{.Config.Image}} {{.Image}}' $SERVICES 2>/dev/null | sed 's#^/##; s#sha256:\([0-9a-f]\{12\}\)[0-9a-f]*#\1#' | tr '\n' ';')
-    status done "running: ${imgs:-the two services}"
+    # (old images of these two, no longer used: cleared away)
+    timeout 120 docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/dash1101/xmas-tui" >/dev/null 2>&1
+    status done "${1:-}running: ${imgs:-the two services}"
     return 0
 }
 
@@ -90,7 +103,7 @@ update() {
         sleep 5
     done) &
     keeper=$!
-    run_update
+    run_update "${1:-}"
     kill "$keeper" 2>/dev/null
     wait "$keeper" 2>/dev/null
     return 0
@@ -99,9 +112,35 @@ update() {
 # (Always said afresh: a "pulling" left by an updater stopped halfway would
 # otherwise stand for ever.)
 status idle "ready"
-echo "xmas-updater: watching $DATA for requests, for $SERVICES in $PROJECT_DIR"
+echo "xmas-updater: watching $DATA for requests, for $SERVICES in $PROJECT_DIR${AUTO_UPDATE:+; updating every day at $AUTO_UPDATE}"
+last_daily=""
+sick=0
+looked=0
 while :; do
     put update.alive "$(now)"
+    # the daily update, once a day
+    if [ -n "$AUTO_UPDATE" ] && [ "$(date +%H:%M)" = "$AUTO_UPDATE" ] && [ "$(date +%F)" != "$last_daily" ]; then
+        last_daily=$(date +%F)
+        update "the daily update: "
+    fi
+    # the relay answering its health check, once a minute
+    if [ $(($(now) - looked)) -ge "$WATCH_EVERY" ]; then
+        looked=$(now)
+        health=$(timeout 30 docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' xmas-relay 2>/dev/null)
+        if [ "$health" = "unhealthy" ]; then
+            sick=$((sick + 1))
+        else
+            sick=0
+        fi
+        if [ "$sick" -ge 3 ]; then
+            sick=0
+            if timeout 120 docker compose restart xmas-relay >/dev/null 2>&1; then
+                status done "the relay stopped answering, so it was started again"
+            else
+                status failed "the relay stopped answering, and couldn't be started again"
+            fi
+        fi
+    fi
     r="$DATA/update.request"
     if [ -e "$r" ] || [ -L "$r" ]; then
         fresh=0

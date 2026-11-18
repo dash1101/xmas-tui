@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -33,9 +33,8 @@ pub const WAIT: Duration = Duration::from_secs(20);
 pub const FORGET: Duration = Duration::from_secs(45);
 
 pub struct Poll {
-    ip: IpAddr,
     up: mpsc::Sender<Vec<u8>>,
-    down: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
+    down: tokio::sync::Mutex<mpsc::Receiver<crate::broker::Q>>,
     last: Mutex<Instant>,
 }
 
@@ -44,9 +43,7 @@ pub struct Polls(Arc<Mutex<HashMap<String, Arc<Poll>>>>);
 
 impl Polls {
     fn get(&self, id: &str) -> Option<Arc<Poll>> {
-        let p = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()?;
-        *p.last.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-        Some(p)
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
 
     fn remove(&self, id: &str) {
@@ -117,29 +114,25 @@ async fn preflight(_m: Method) -> Response {
 async fn open(headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(st): State<St>) -> Response {
     let ip = client_ip(&headers, addr, st.app.trust_cf, st.app.ip_header.as_deref());
     let agent = (crate::agent_of(&headers), crate::country_of(&headers, st.app.trust_cf));
-    let (max, queue, per_ip, most) = {
+    let (max, queue) = {
         let mut b = st.app.broker.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(why) = b.admit(ip) {
             return cors((StatusCode::SERVICE_UNAVAILABLE, why).into_response());
         }
         let l = b.limits();
-        (l.max_payload, l.max_queue, l.max_conns_per_ip, l.max_conns)
+        (l.max_payload, l.max_queue)
     };
+    // (counted against the limits from now, by the broker, until it's
+    // joined or gone)
+    let slot = crate::Slot::new(&st.app, ip);
     st.polls.sweep();
-    {
-        // sessions not yet said hello count too
-        let m = st.polls.0.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() >= most || m.values().filter(|p| crate::broker::block_of(p.ip) == crate::broker::block_of(ip)).count() >= per_ip {
-            return cors((StatusCode::SERVICE_UNAVAILABLE, "too many").into_response());
-        }
-    }
     let (up_tx, up_rx) = mpsc::channel::<Vec<u8>>(64);
-    let (down_tx, down_rx) = mpsc::channel::<Vec<u8>>(queue.max(16));
+    let (down_tx, down_rx) = mpsc::channel::<crate::broker::Q>(queue.max(16));
     let id = new_id();
-    let p = Arc::new(Poll { ip, up: up_tx, down: tokio::sync::Mutex::new(down_rx), last: Mutex::new(Instant::now()) });
+    let p = Arc::new(Poll { up: up_tx, down: tokio::sync::Mutex::new(down_rx), last: Mutex::new(Instant::now()) });
     st.polls.0.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), p);
     let app = st.app.clone();
-    tokio::spawn(async move { session(up_rx, down_tx, ip, agent, app, max).await });
+    tokio::spawn(async move { session(up_rx, down_tx.into(), ip, agent, app, max, slot).await });
     cors((StatusCode::OK, [(header::CONTENT_TYPE, "text/plain")], id).into_response())
 }
 
@@ -163,7 +156,7 @@ async fn down(Path(id): Path<String>, State(st): State<St>) -> Response {
     let Ok(mut rx) = p.down.try_lock() else { return cors(StatusCode::CONFLICT.into_response()) };
     let mut out = Vec::new();
     match tokio::time::timeout(WAIT, rx.recv()).await {
-        Ok(Some(b)) => out.extend(b),
+        Ok(Some(q)) => out.extend(q.take()),
         Ok(None) => {
             drop(rx);
             st.polls.remove(&id);
@@ -174,7 +167,7 @@ async fn down(Path(id): Path<String>, State(st): State<St>) -> Response {
     // and whatever else is ready, together
     while out.len() < 512 * 1024 {
         match rx.try_recv() {
-            Ok(b) => out.extend(b),
+            Ok(q) => out.extend(q.take()),
             Err(_) => break,
         }
     }
@@ -200,7 +193,7 @@ mod tests {
         let polls = Polls::default();
         let (up, up_rx) = mpsc::channel(1);
         let (_down_tx, down) = mpsc::channel(1);
-        let p = Arc::new(Poll { ip: "127.0.0.1".parse().unwrap(), up, down: tokio::sync::Mutex::new(down), last: Mutex::new(Instant::now()) });
+        let p = Arc::new(Poll { up, down: tokio::sync::Mutex::new(down), last: Mutex::new(Instant::now()) });
         polls.0.lock().unwrap().insert(a.clone(), p.clone());
         polls.sweep();
         assert_eq!(polls.len(), 1, "a live session stays");

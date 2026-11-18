@@ -19,7 +19,13 @@
 //!   X-Forwarded-For, whose last address is taken). Believed only from a
 //!   connection on this machine or its own network: the proxy beside it.
 //! - HOST_TOKEN: the secret the relay's own host signs in with (user name
-//!   "xmas-host"). Unset, no host is let in.
+//!   "xmas-host"). Unset, no host is let in. It's taken only from the
+//!   relay's own network, unless HOST_ANYWHERE=1.
+//! - ACCESS_TEAM, ACCESS_AUD: the Cloudflare Access team ("<team>" or
+//!   "<team>.cloudflareaccess.com") and the console application's AUD tag.
+//!   Set, each console request must carry Access's signed token, checked
+//!   against the team's keys (fetched every hour); the email header alone
+//!   isn't believed.
 
 mod admin;
 mod broker;
@@ -46,10 +52,16 @@ pub struct App {
     pub admin_email: Option<String>,
     pub trust_cf: bool,
     pub ip_header: Option<String>,
+    /// The host may sign in from outside the relay's own network (a
+    /// self-hoster's host elsewhere: HOST_ANYWHERE=1).
+    pub host_anywhere: bool,
     /// The secret the relay's own host signs in with.
     pub host_token: Option<String>,
     /// Clients on HTTPS long polling (where WebSockets don't get through).
     pub polls: poll::Polls,
+    /// Cloudflare Access, checked properly: its signed token on each of the
+    /// console's requests (ACCESS_TEAM and ACCESS_AUD).
+    pub access: Option<Arc<admin::Access>>,
 }
 
 impl App {
@@ -88,9 +100,11 @@ async fn main() {
         data,
         admin_email: std::env::var("ADMIN_EMAIL").ok().filter(|e| !e.trim().is_empty()).map(|e| e.trim().to_lowercase()),
         trust_cf: env("TRUST_CF", "1") != "0",
+        host_anywhere: env("HOST_ANYWHERE", "0") == "1",
         ip_header: std::env::var("IP_HEADER").ok().map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()),
         host_token: std::env::var("HOST_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| t.len() >= 16),
         polls: poll::Polls::default(),
+        access: admin::Access::from_env(),
     };
     // what was kept before a restart (linked devices' sides, listings…),
     // and the squares' settings, out again
@@ -117,6 +131,8 @@ async fn main() {
                     b.host_cmd(serde_json::json!({ "say": { "to": to, "text": text } }));
                 }
                 drop(b);
+                // (long-polling sessions gone or not asked after: let go)
+                a.polls.sweep();
                 if changed {
                     a.save();
                 }
@@ -237,18 +253,46 @@ async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): Connect
         }
         b.limits().max_payload
     };
-    ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, agent, app, max))
+    // (counted from now: given back if it never gets going)
+    let slot = Slot::new(&app, ip);
+    ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, agent, app, max, slot))
 }
 
 /// How often the relay pings each WebSocket.
 const PING_EVERY: Duration = Duration::from_secs(30);
 
+/// A connection let in, counted against the limits until it's joined (it
+/// then counts as itself) or gone.
+pub struct Slot {
+    app: App,
+    ip: IpAddr,
+    live: bool,
+}
+
+impl Slot {
+    pub fn new(app: &App, ip: IpAddr) -> Slot {
+        Slot { app: app.clone(), ip, live: true }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.live {
+            self.app.broker.lock().unwrap_or_else(|e| e.into_inner()).unpend(self.ip);
+        }
+    }
+}
+
+/// How long one frame may take to go out before the connection's taken
+/// as gone (a client that stops reading).
+const SEND_WAIT: Duration = Duration::from_secs(10);
+
 /// A WebSocket client: its frames in and out, through a session.
-async fn conn(socket: WebSocket, ip: IpAddr, agent: (String, String), app: App, max: usize) {
+async fn conn(socket: WebSocket, ip: IpAddr, agent: (String, String), app: App, max: usize, slot: Slot) {
     let (mut sink, mut stream) = socket.split();
     let queue = app.broker.lock().unwrap_or_else(|e| e.into_inner()).limits().max_queue;
     let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    let (down_tx, mut down_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(queue.max(16));
+    let (down_tx, mut down_rx) = tokio::sync::mpsc::channel::<broker::Q>(queue.max(16));
     let reader = tokio::spawn(async move {
         while let Some(Ok(m)) = stream.next().await {
             match m {
@@ -272,27 +316,35 @@ async fn conn(socket: WebSocket, ip: IpAddr, agent: (String, String), app: App, 
         loop {
             let m = tokio::select! {
                 b = down_rx.recv() => match b {
-                    Some(b) => Message::Binary(b),
+                    Some(q) => Message::Binary(q.take()),
                     None => break,
                 },
                 _ = ping.tick() => Message::Ping(Vec::new()),
             };
-            if sink.send(m).await.is_err() {
+            if !matches!(tokio::time::timeout(SEND_WAIT, sink.send(m)).await, Ok(Ok(()))) {
                 break;
             }
         }
-        let _ = sink.close().await;
+        let _ = tokio::time::timeout(SEND_WAIT, sink.close()).await;
     });
-    session(up_rx, down_tx, ip, agent, app, max).await;
+    session(up_rx, down_tx.into(), ip, agent, app, max, slot).await;
     reader.abort();
-    // (what's queued still goes out, then the socket's closed)
-    let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+    // (what's queued still goes out, then the socket's closed; one that
+    // won't take it is let go, and what was waiting for it with it)
+    let mut writer = writer;
+    if tokio::time::timeout(Duration::from_secs(2), &mut writer).await.is_err() {
+        writer.abort();
+    }
 }
+
+/// Packets other than messages (pings, acks, subscriptions) one connection
+/// may send in a second, before it's let go: the village sends a handful.
+const PACKETS_PER_SEC: u32 = 200;
 
 /// One client, from its hello to its goodbye, whichever way its bytes come
 /// (a WebSocket, or HTTPS long polling): what it sends arrives on `up` (it's
 /// gone when that closes), and what goes to it is put on `down`.
-pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::sync::mpsc::Sender<Vec<u8>>, ip: IpAddr, agent: (String, String), app: App, max: usize) {
+pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: broker::Down, ip: IpAddr, agent: (String, String), app: App, max: usize, mut slot: Slot) {
     use codec::In;
     let mut reader = codec::Reader::new(max + 512);
     // the hello first, soon
@@ -312,7 +364,9 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
     // turned away, and so is a player using its ids, or one banned
     let host = match (&login, &app.host_token) {
         (Some((user, pass)), Some(token)) if user == "xmas-host" => {
-            if !same(pass, token.as_bytes()) {
+            // (and only from beside the relay, unless it's said otherwise:
+            // a token that leaks is no use from outside)
+            if !same(pass, token.as_bytes()) || !(broker::internal(ip) || app.host_anywhere) {
                 let _ = down.send(codec::connack(4)).await;
                 return;
             }
@@ -326,7 +380,9 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
     };
     let joined = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-        let joined = b.may_join(&client, host).is_ok().then(|| b.join_as(ip, client, will, down.clone(), host));
+        let joined = (b.ip_ok(ip) && b.may_join(&client, host).is_ok()).then(|| b.join_as(ip, client, will, down.clone(), host));
+        // (joined: it counts as itself now)
+        slot.live &= joined.is_none();
         if let Some((id, _)) = joined {
             b.set_agent(id, &agent.0, &agent.1);
         }
@@ -336,7 +392,7 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
         let _ = down.send(codec::connack(5)).await;
         return;
     };
-    if down.send(codec::connack(0)).await.is_err() {
+    if !down.send(codec::connack(0)).await {
         app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, false);
         return;
     }
@@ -344,6 +400,9 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
     // (silent past one and a half times its keep-alive: gone)
     let idle = Duration::from_secs((keepalive.clamp(10, 600) as u64 * 3) / 2);
     let mut clean = false;
+    // (packets other than messages, this second)
+    let (mut spent, mut since) = (0u32, std::time::Instant::now());
+    let mut n = 0u32;
     'conn: loop {
         let bytes = match tokio::time::timeout(idle, up.recv()).await {
             Ok(Some(b)) => b,
@@ -358,6 +417,16 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
                 Ok(None) => break,
                 Err(_) => break 'conn,
             };
+            if !matches!(p, In::Publish { .. }) {
+                if since.elapsed() >= Duration::from_secs(1) {
+                    (spent, since) = (0, std::time::Instant::now());
+                }
+                spent += 1;
+                if spent > PACKETS_PER_SEC {
+                    break 'conn;
+                }
+            }
+            let ok = {
             let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
             if !b.has(id) {
                 // (let go: kicked, banned, or taken over)
@@ -381,8 +450,15 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: tokio::
                 In::Connect { .. } => false,
                 In::Other(_) => true,
             };
+            ok
+            };
             if !ok {
                 break 'conn;
+            }
+            // (others get a turn: one connection can't hold the relay)
+            n = n.wrapping_add(1);
+            if n % 64 == 0 {
+                tokio::task::yield_now().await;
             }
         }
     }

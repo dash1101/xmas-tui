@@ -5,6 +5,14 @@
 # this compose's own network, and signs in with HOST_TOKEN (in .env).
 #   xmas-relay.novalabs.app → http://localhost:8080   (public: the game's WebSocket at /mqtt, long polling at /poll)
 #   xmas-admin.novalabs.app → http://localhost:8081   (behind Cloudflare Access)
+
+# (every service's log kept to 30 MB: the disk can't fill up with it)
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   xmas-relay:
     # (unset: the newest; RELAY_TAG=1.4.0 in .env keeps it at a version)
@@ -24,6 +32,12 @@ services:
       IP_HEADER: ${IP_HEADER:-}
       # the secret the relay's own host signs in with (in .env; unset: no host)
       HOST_TOKEN: ${HOST_TOKEN:-}
+      # the console checks Cloudflare Access's signed token, not just its
+      # email header: the team (e.g. "dash-project-nova") and the console
+      # application's AUD tag (Zero Trust → Access → Applications)
+      ACCESS_TEAM: ${ACCESS_TEAM:-}
+      ACCESS_AUD: ${ACCESS_AUD:-}
+    logging: *logging
     volumes:
       # limits and bans (owned by uid 10001, the container's user)
       - ./data:/data
@@ -48,17 +62,19 @@ services:
     environment:
       XMAS_RELAY: ws://xmas-relay:8080/mqtt
       HOST_TOKEN: ${HOST_TOKEN:-}
+    logging: *logging
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     cpus: 1
 
-  # The updater, for the console's "update" button. Off unless asked for:
-  # COMPOSE_PROFILES=updater and PROJECT_DIR=<this folder's full path> in
-  # .env, and updater/update.sh beside this file. When the button's pressed
-  # it pulls the newest images for the relay and its host and starts them
-  # again (see updater/update.sh).
+  # The updater, for the console's "update" button and for looking after
+  # things by itself: an update every day at AUTO_UPDATE (UTC; it only
+  # starts a service again when there's a newer image), old images cleared
+  # away, and the relay started again if it stops answering. Off unless
+  # asked for: COMPOSE_PROFILES=updater and PROJECT_DIR=<this folder's full
+  # path> in .env, and updater/update.sh beside this file.
   #
   # It holds the Docker socket, which is full control of Docker on this
   # machine. So it has no ports and no network at all, a read-only file
@@ -78,6 +94,10 @@ services:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-xmas-relay}
       # (no settings of its own to read or write: the images are public)
       DOCKER_CONFIG: /nonexistent
+      # the daily update, in UTC ("09:30" is 4:30 in the morning in New
+      # York in winter); empty: none
+      AUTO_UPDATE: ${AUTO_UPDATE-09:30}
+    logging: *logging
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # (the same path inside as on the machine, so "./data" means the same)

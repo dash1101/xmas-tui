@@ -16,7 +16,7 @@ use serde_json::json;
 
 pub fn router(app: App) -> Router {
     Router::new()
-        .route("/", get(|| async { Html(PAGE) }))
+        .route("/", get(page))
         .route("/api/stats", get(stats))
         .route("/api/conns", get(conns))
         .route("/api/limits", post(limits))
@@ -43,24 +43,134 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// Who's asking: signed in through Cloudflare Access (as the admin, if one's
-/// set); and for a change, the console's own header.
+/// Cloudflare Access, checked properly: the signed token it puts on every
+/// request it lets through, against the team's own keys.
+pub struct Access {
+    /// The team's domain ("<team>.cloudflareaccess.com").
+    team: String,
+    /// The console application's AUD tag.
+    aud: String,
+    keys: std::sync::RwLock<Option<jsonwebtoken::jwk::JwkSet>>,
+}
+
+#[derive(Deserialize)]
+struct Claims {
+    #[serde(default)]
+    email: Option<String>,
+}
+
+impl Access {
+    pub fn from_env() -> Option<std::sync::Arc<Access>> {
+        let team = std::env::var("ACCESS_TEAM").ok().map(|t| t.trim().trim_start_matches("https://").trim_end_matches('/').to_lowercase()).filter(|t| !t.is_empty())?;
+        let aud = std::env::var("ACCESS_AUD").ok().map(|a| a.trim().to_string()).filter(|a| !a.is_empty())?;
+        let team = if team.contains('.') { team } else { format!("{team}.cloudflareaccess.com") };
+        let a = std::sync::Arc::new(Access { team, aud, keys: std::sync::RwLock::new(None) });
+        // the team's keys: now, and every hour (Cloudflare turns them over)
+        let w = a.clone();
+        tokio::spawn(async move {
+            loop {
+                let url = format!("https://{}/cdn-cgi/access/certs", w.team);
+                let got = tokio::task::spawn_blocking(move || ureq::get(&url).timeout(std::time::Duration::from_secs(15)).call().ok()?.into_string().ok().and_then(|t| serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(&t).ok())).await.ok().flatten();
+                match got {
+                    Some(k) => *w.keys.write().unwrap_or_else(|e| e.into_inner()) = Some(k),
+                    None => eprintln!("xmas-relay: couldn't fetch Cloudflare Access's keys from {} (the console turns everyone away until it can)", w.team),
+                }
+                let wait = if w.keys.read().unwrap_or_else(|e| e.into_inner()).is_some() { 3600 } else { 60 };
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+        });
+        Some(a)
+    }
+
+    /// The token, signed by the team's keys, for this application, from
+    /// this team, not out of date: whose (their email), or nobody's.
+    fn who(&self, token: &str) -> Option<String> {
+        let kid = jsonwebtoken::decode_header(token).ok()?.kid?;
+        let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        let jwk = keys.as_ref()?.find(&kid)?;
+        let key = jsonwebtoken::DecodingKey::from_jwk(jwk).ok()?;
+        let mut v = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        v.set_audience(&[self.aud.as_str()]);
+        v.set_issuer(&[format!("https://{}", self.team)]);
+        let data = jsonwebtoken::decode::<Claims>(token, &key, &v).ok()?;
+        Some(data.claims.email.unwrap_or_default().trim().to_lowercase())
+    }
+}
+
+/// Access's token on a request: its header, or its cookie.
+fn token_of(headers: &HeaderMap) -> Option<String> {
+    if let Some(t) = headers.get("cf-access-jwt-assertion").and_then(|v| v.to_str().ok()) {
+        return Some(t.trim().to_string());
+    }
+    headers.get_all("cookie").iter().filter_map(|v| v.to_str().ok()).flat_map(|c| c.split(';')).find_map(|kv| kv.trim().strip_prefix("CF_Authorization=").map(|t| t.to_string()))
+}
+
+/// The host a request was sent to, without its port.
+fn host_of(headers: &HeaderMap) -> String {
+    let h = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_lowercase();
+    if let Some(rest) = h.strip_prefix('[') {
+        return format!("[{}]", rest.split(']').next().unwrap_or(""));
+    }
+    h.split(':').next().unwrap_or("").to_string()
+}
+
+/// Who's asking: signed in through Cloudflare Access (its signed token,
+/// when ACCESS_TEAM and ACCESS_AUD are set; else its email header) as the
+/// admin; or, with ADMIN_OPEN=1 (an SSH tunnel), asked for at localhost
+/// itself. A change also needs the console's own header, and mustn't come
+/// from another site's page.
 async fn guard(State(app): State<App>, headers: HeaderMap, req: Request, next: Next) -> Response {
-    let who = headers.get("cf-access-authenticated-user-email").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_lowercase());
     let open = std::env::var("ADMIN_OPEN").is_ok_and(|v| v == "1");
-    let ok = open
-        || match (&app.admin_email, &who) {
-            (Some(want), Some(got)) => want == got,
-            (None, Some(_)) => true,
-            _ => false,
-        };
+    let ok = if open {
+        // (a page elsewhere can't reach it by pointing its own name here)
+        matches!(host_of(&headers).as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    } else if let Some(acc) = &app.access {
+        match (token_of(&headers).and_then(|t| acc.who(&t)), &app.admin_email) {
+            (Some(got), Some(want)) => &got == want,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    } else {
+        // (the email header alone: only with the admin's address set)
+        let who = headers.get("cf-access-authenticated-user-email").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_lowercase());
+        matches!((&app.admin_email, &who), (Some(want), Some(got)) if want == got)
+    };
     if !ok {
         return (StatusCode::FORBIDDEN, "sign in through Cloudflare Access (as the relay's admin)\n").into_response();
     }
-    if req.method() != axum::http::Method::GET && headers.get("x-relay-admin").is_none() {
-        return (StatusCode::FORBIDDEN, "changes come from the console\n").into_response();
+    if req.method() != axum::http::Method::GET {
+        let cross = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "cross-site");
+        let origin_elsewhere = headers.get("origin").and_then(|v| v.to_str().ok()).is_some_and(|o| {
+            let o = o.trim().to_lowercase();
+            let o = o.split("://").nth(1).unwrap_or(&o).to_string();
+            let oh = if o.starts_with('[') { format!("[{}]", o[1..].split(']').next().unwrap_or("")) } else { o.split(':').next().unwrap_or("").to_string() };
+            oh != host_of(&headers)
+        });
+        if headers.get("x-relay-admin").is_none() || cross || origin_elsewhere {
+            return (StatusCode::FORBIDDEN, "changes come from the console\n").into_response();
+        }
     }
     next.run(req).await
+}
+
+/// The console's page: its script allowed by a one-time mark, nothing
+/// else (no other site's script, no framing, no sending elsewhere).
+async fn page() -> Response {
+    let mut b = [0u8; 16];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
+    let nonce: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let html = PAGE.replacen("<script>", &format!("<script nonce=\"{nonce}\">"), 1);
+    let csp = format!("default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    (
+        [
+            (axum::http::header::CONTENT_SECURITY_POLICY, csp),
+            (axum::http::header::X_FRAME_OPTIONS, "DENY".to_string()),
+            (axum::http::header::REFERRER_POLICY, "no-referrer".to_string()),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Html(html),
+    )
+        .into_response()
 }
 
 async fn stats(State(app): State<App>) -> Json<serde_json::Value> {
@@ -70,7 +180,23 @@ async fn stats(State(app): State<App>) -> Json<serde_json::Value> {
 
 async fn conns(State(app): State<App>) -> Json<serde_json::Value> {
     let b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-    let list: Vec<serde_json::Value> = b.conns().into_iter().map(|(id, ip, client, secs, subs, sent, got, dropped, agent, host, country)| json!({ "id": id, "ip": ip, "client": client, "secs": secs, "subs": subs, "sent": sent, "got": got, "dropped": dropped, "agent": agent, "host": host, "country": country })).collect();
+    // (who each is, where the relay's host knows: the villages it keeps)
+    let mut known: std::collections::HashMap<u64, (String, String)> = std::collections::HashMap::new();
+    for (slot, (_, r)) in b.reports.iter() {
+        for p in r.get("players").and_then(|p| p.as_array()).into_iter().flatten() {
+            if let Some(conn) = p.get("conn").and_then(|c| c.as_u64()) {
+                known.insert(conn, (p.get("name").and_then(|n| n.as_str()).unwrap_or("").chars().take(40).collect(), r.get("name").and_then(|n| n.as_str()).unwrap_or(slot).chars().take(60).collect()));
+            }
+        }
+    }
+    let list: Vec<serde_json::Value> = b
+        .conns()
+        .into_iter()
+        .map(|(id, ip, client, secs, subs, sent, got, dropped, agent, host, country)| {
+            let (name, village) = known.get(&id).cloned().unwrap_or_default();
+            json!({ "id": id, "ip": ip, "client": client, "secs": secs, "subs": subs, "sent": sent, "got": got, "dropped": dropped, "platform": crate::broker::platform_of(&agent), "agent": agent, "host": host, "country": country, "name": name, "village": village })
+        })
+        .collect();
     Json(json!(list))
 }
 
@@ -133,7 +259,12 @@ async fn unban(State(app): State<App>, Json(Ip { ip }): Json<Ip>) -> Response {
 }
 
 async fn clear(State(app): State<App>, Json(Prefix { prefix }): Json<Prefix>) -> Json<serde_json::Value> {
-    let n = if prefix.starts_with(crate::broker::PREFIX) { app.broker.lock().unwrap_or_else(|e| e.into_inner()).clear_retained(&prefix) } else { 0 };
+    // (never the relay's own: its settings, its public list, the host's)
+    let n = if prefix.starts_with(crate::broker::PREFIX) && !prefix.starts_with(crate::broker::ADMIN) && !crate::broker::ADMIN.starts_with(&prefix) {
+        app.broker.lock().unwrap_or_else(|e| e.into_inner()).clear_retained(&prefix)
+    } else {
+        0
+    };
     Json(json!({ "cleared": n }))
 }
 
@@ -176,7 +307,7 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
     let reports: serde_json::Map<String, serde_json::Value> = b
         .reports
         .iter()
-        .filter(|(_, (at, _))| at.elapsed().as_secs() < 120)
+        .filter(|(_, (at, v))| at.elapsed().as_secs() < 120 && v.is_object())
         .map(|(slot, (at, v))| {
             let mut v = v.clone();
             v["age"] = json!(at.elapsed().as_secs());
@@ -187,12 +318,25 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
     let mut reports = reports;
     for (_, r) in reports.iter_mut() {
         if let Some(ps) = r.get_mut("players").and_then(|p| p.as_array_mut()) {
-            for p in ps {
-                let from = p["id"].as_u64().and_then(|id| b.where_from(id as u32));
-                if let Some((ip, country, agent)) = from {
-                    p["ip"] = json!(ip);
-                    p["country"] = json!(country);
-                    p["agent"] = json!(agent);
+            for p in ps.iter_mut().filter(|p| p.is_object()) {
+                // the connection the relay said this player's messages came
+                // from (a host from 1.25.3 on); an older host's report has
+                // only the id the player gave, so it's marked as such
+                let from = match p.get("conn") {
+                    Some(c) => c.as_u64().and_then(|c| b.conn_info(c)).map(|(ip, country, agent, _)| (ip, country, agent)),
+                    None => {
+                        p["claimed"] = json!(true);
+                        p["id"].as_u64().and_then(|id| b.where_from(id as u32))
+                    }
+                };
+                match from {
+                    Some((ip, country, agent)) => {
+                        p["ip"] = json!(ip);
+                        p["country"] = json!(country);
+                        p["platform"] = json!(crate::broker::platform_of(&agent));
+                        p["agent"] = json!(agent);
+                    }
+                    None => p["unverified"] = json!(true),
                 }
             }
         }
@@ -281,6 +425,9 @@ struct KeepOut {
     /// (Letting back: the key as the console shows it.)
     #[serde(default)]
     key: String,
+    /// The connection to act on (the relay's word), over the id given.
+    #[serde(default)]
+    conn: Option<u64>,
     /// The village's name as the host has it (to send them home from it).
     #[serde(default)]
     slot: String,
@@ -288,8 +435,15 @@ struct KeepOut {
 
 /// A player kept out of one village the host keeps (sent home from it, if
 /// they're there): the rest of the relay stays theirs.
+/// The player id a connection gave the relay (in its client id), when the
+/// console names a connection: the one the relay saw send what was said.
+fn by_conn(app: &App, conn: Option<u64>) -> Option<u32> {
+    let (.., client) = app.broker.lock().unwrap_or_else(|e| e.into_inner()).conn_info(conn?)?;
+    crate::broker::player_of(&client)
+}
+
 async fn keep_out(State(app): State<App>, Json(k): Json<KeepOut>) -> Response {
-    let Some(id) = id_of(&k.id).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    let Some(id) = by_conn(&app, k.conn).or(id_of(&k.id)).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
     if crate::broker::norm_code(&k.code).len() != 12 {
         return (StatusCode::BAD_REQUEST, "not a village's code").into_response();
     }
@@ -398,6 +552,9 @@ async fn set_public(State(app): State<App>, Json(p): Json<Public>) -> Response {
 
 #[derive(Deserialize)]
 struct BanOf {
+    /// The connection to act on (the relay's word), over the id given.
+    #[serde(default)]
+    conn: Option<u64>,
     #[serde(default)]
     code: String,
     #[serde(default)]
@@ -433,7 +590,7 @@ async fn unban_village(State(app): State<App>, Json(b): Json<BanOf>) -> Response
 }
 
 async fn ban_player(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
-    let Some(id) = id_of(&b.id).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
+    let Some(id) = by_conn(&app, b.conn).or(id_of(&b.id)).filter(|&i| i >= crate::broker::HOST_IDS) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
     {
         let mut br = app.broker.lock().unwrap_or_else(|e| e.into_inner());
         br.ban_player(id, &b.name, &b.why);
@@ -609,7 +766,7 @@ const PAGE: &str = r##"<!doctype html>
     <p class="note">Every village in use on the relay, the fullest first: the host's own and the listed ones by name; a private one only as a number, with how many are in it and from where (what's said in it is sealed: the relay can't read it, or tell who's hosting).</p>
     <div class="wrap"><table><thead><tr><th>village</th><th>in it</th><th>from</th></tr></thead><tbody id="villages"></tbody></table></div>
   </section>
-  <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>address (country)</th><th>version</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div>
+  <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>who (where the host knows)</th><th>address (country)</th><th>version</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div>
     <p class="note" id="versions"></p>
   </section>
   <section><h2>UPDATE</h2>
@@ -641,7 +798,7 @@ const PAGE: &str = r##"<!doctype html>
   </section>
   <section><h2>KEPT MESSAGES</h2>
     <p class="note">Messages the relay keeps for whoever comes next ("here I am", a shared village's state). Forget all under a prefix, e.g. xmas-tui/1/here/</p>
-    <p><input id="prefix" value="xmas-tui/1/" style="width:260px"> <button id="clear" class="bad">forget them</button></p>
+    <p><input id="prefix" value="xmas-tui/1/here/" style="width:260px"> <button id="clear" class="bad">forget them</button></p>
   </section>
 </main>
 <script>
@@ -651,6 +808,8 @@ const $ = (id) => document.getElementById(id);
 const call = (path, body) => fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-relay-admin": "1" }, body: JSON.stringify(body) });
 const ago = (s) => s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : Math.floor(s / 3600) + "h" + String(Math.floor(s % 3600 / 60)).padStart(2, "0");
 const size = (b) => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB";
+const ICONS = { linux: "🐧", windows: "🪟", android: "🤖", macos: "🍎", web: "🌐" };
+const icon = (p) => `<span title="${esc(p || "older app (doesn't say)")}">${ICONS[p] || "❔"}</span>`;
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 async function refresh() {
   try {
@@ -658,14 +817,15 @@ async function refresh() {
     const s = r.stats;
     $("ver").textContent = "v" + r.version;
     $("up").textContent = "up " + ago(s.uptime_s);
-    const cards = [["connected", s.conns], ["by long polling", r.polling], ["addresses", s.ips], ["messages/s", s.rate.toFixed(1)], ["in", s.msgs_in + " · " + size(s.bytes_in)], ["out", s.msgs_out + " · " + size(s.bytes_out)], ["kept", s.retained + " · " + size(s.retained_bytes)], ["refused", s.refused], ["dropped", s.dropped], ["let go", s.kicked]];
+    const plats = Object.entries(s.platforms || {}).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${ICONS[k] || "❔"} ${n}`).join("  ");
+    const cards = [["players online", Number(s.players) || 0], ["on", plats || "–"], ["connected", s.conns], ["by long polling", r.polling], ["addresses", s.ips], ["messages/s", s.rate.toFixed(1)], ["in", s.msgs_in + " · " + size(s.bytes_in)], ["out", s.msgs_out + " · " + size(s.bytes_out)], ["kept", s.retained + " · " + size(s.retained_bytes)], ["waiting to go out", size(Number(s.queued_bytes) || 0)], ["refused", s.refused], ["dropped", s.dropped], ["let go", s.kicked]];
     $("cards").innerHTML = cards.map(([k, v]) => `<div class="card"><i>${k}</i><b>${esc(v)}</b></div>`).join("");
     $("kinds").textContent = "kept by kind: " + (Object.entries(s.kinds).map(([k, n]) => k + " " + n).join(" · ") || "none");
     $("bans").innerHTML = r.bans.map((ip) => `<tr><td>${esc(ip)}</td><td><button data-unban="${esc(ip)}">unban</button></td></tr>`).join("") || `<tr><td class="note">nobody</td></tr>`;
     if (!editing) { limits = r.limits; drawLimits(); }
     const cs = await (await fetch("api/conns")).json();
     const what = (c) => c.host ? "the relay's host" + (c.agent ? " · " + c.agent : "") : c.agent || "(doesn't say)";
-    $("conns").innerHTML = cs.map((c) => `<tr><td>${c.id}</td><td>${esc(c.ip)}${c.country ? ` <span class="note">${esc(c.country)}</span>` : ""}</td><td>${esc(what(c))}</td><td>${esc(c.client)}</td><td>${ago(c.secs)}</td><td>${c.subs}</td><td>${c.sent}</td><td>${c.got}</td><td>${c.dropped}</td><td><button data-kick="${c.id}">kick</button> ${c.host ? "" : `<button class="bad" data-ban="${esc(c.ip)}">block address</button>`}</td></tr>`).join("") || `<tr><td colspan="10" class="note">nobody right now</td></tr>`;
+    $("conns").innerHTML = cs.map((c) => `<tr><td>${Number(c.id)}</td><td>${c.host ? "🏠" : icon(c.platform)} ${c.name ? `<b>${esc(c.name)}</b> <span class="note">in ${esc(c.village)}</span>` : ""}</td><td>${esc(c.ip)}${c.country ? ` <span class="note">${esc(c.country)}</span>` : ""}</td><td>${esc(what(c))}</td><td>${esc(c.client)}</td><td>${ago(Number(c.secs))}</td><td>${Number(c.subs)}</td><td>${Number(c.sent)}</td><td>${Number(c.got)}</td><td>${Number(c.dropped)}</td><td><button data-kick="${Number(c.id)}">kick</button> ${c.host ? "" : `<button class="bad" data-ban="${esc(c.ip)}">block address</button>`}</td></tr>`).join("") || `<tr><td colspan="11" class="note">nobody right now</td></tr>`;
     const tally = {};
     cs.filter((c) => !c.host).forEach((c) => { const k = c.agent || "(doesn't say)"; tally[k] = (tally[k] || 0) + 1; });
     $("versions").textContent = Object.keys(tally).length ? "by version: " + Object.entries(tally).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + " × " + n).join(" · ") : "";
@@ -727,17 +887,21 @@ async function loadState() {
   const slots = Object.entries(st.reports).sort((a, b) => a[0].localeCompare(b[0]));
   $("slots").innerHTML = slots.filter(([k]) => k !== "_public").map(([slot, r]) => {
     const muted = st.muted[slot] || [];
-    const ps = (r.players || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="note">${p.id.toString(16).padStart(8, "0")}</td><td class="note">${esc(p.ip || "")}${p.country ? " " + esc(p.country) : ""}</td><td class="note">${esc(p.agent || "")}</td><td>${muted.includes(p.id) ? `<button class="small" data-act="unmute" data-slot="${esc(slot)}" data-id="${p.id}">unmute</button>` : `<button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${p.id}">mute</button>`} <button class="small" data-act="kick" data-slot="${esc(slot)}" data-id="${p.id}">kick</button> <button class="small bad" data-kout="${p.id}" data-code="${esc(r.code || "")}" data-slot="${esc(slot)}" data-name="${esc(p.name)}">ban here</button> <button class="small bad" data-pban="${p.id}" data-name="${esc(p.name)}">ban</button>${p.ip ? ` <button class="small bad" data-ban="${esc(p.ip)}">block address</button>` : ""}</td></tr>`).join("") || `<tr><td class="note">nobody there</td></tr>`;
-    const chat = (r.chat || []).slice(-50).map((c) => `<div><span class="note">${new Date(c.at * 1000).toLocaleTimeString()}</span> <b>${esc(c.name)}</b>: ${esc(c.text)} <button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${c.id}">mute</button></div>`).join("") || `<div class="note">nothing said lately</div>`;
+    const ps = (r.players || []).map((p) => {
+      const pid = Number(p.id) >>> 0, conn = p.conn == null ? "" : Number(p.conn), sl = esc(slot);
+      const from = p.unverified ? `<span class="warn" title="the relay can't say which connection this is">not matched to a connection</span>` : `${esc(p.ip || "")}${p.country ? " " + esc(p.country) : ""}${p.claimed ? ` <span class="note" title="an older host: matched by the id the player gave, which a modified game can fake">(by id)</span>` : ""}`;
+      return `<tr><td>${icon(p.platform)} ${esc(p.name)}</td><td class="note">${pid.toString(16).padStart(8, "0")}</td><td class="note">${from}</td><td class="note">${esc(p.agent || "")}</td><td>${muted.includes(pid) ? `<button class="small" data-act="unmute" data-slot="${sl}" data-id="${pid}">unmute</button>` : `<button class="small" data-act="mute" data-slot="${sl}" data-id="${pid}">mute</button>`} <button class="small" data-act="kick" data-slot="${sl}" data-id="${pid}">kick</button> <button class="small bad" data-kout="${pid}" data-conn="${conn}" data-code="${esc(r.code || "")}" data-slot="${sl}" data-name="${esc(p.name)}">ban here</button> <button class="small bad" data-pban="${pid}" data-conn="${conn}" data-name="${esc(p.name)}">ban</button>${p.ip && !p.unverified ? ` <button class="small bad" data-ban="${esc(p.ip)}">block address</button>` : ""}</td></tr>`;
+    }).join("") || `<tr><td class="note">nobody there</td></tr>`;
+    const chat = (r.chat || []).slice(-50).map((c) => `<div><span class="note">${new Date(c.at * 1000).toLocaleTimeString()}</span> <b>${esc(c.name)}</b>: ${esc(c.text)} <button class="small" data-act="mute" data-slot="${esc(slot)}" data-id="${Number(c.id) >>> 0}">mute</button></div>`).join("") || `<div class="note">nothing said lately</div>`;
     const stale = r.age > 30 ? ` <span class="warn">(not heard from for ${ago(r.age)})</span>` : "";
-    return `<div class="slot"><h3>${esc(r.name || slot)} · ${esc(r.kind || "")}${r.public === false ? " · private" : ""} · ${r.n ?? 0} of ${r.limit ?? "?"}${stale}</h3><table><tbody>${ps}</tbody></table><div class="chat">${chat}</div></div>`;
+    return `<div class="slot"><h3>${esc(r.name || slot)} · ${esc(r.kind || "")}${r.public === false ? " · private" : ""} · ${Number(r.n) || 0} of ${Number(r.limit) || "?"}${stale}</h3><table><tbody>${ps}</tbody></table><div class="chat">${chat}</div></div>`;
   }).join("") || `<p class="note">nothing yet: the host reports every few seconds once it's connected</p>`;
   const to = ["*"].concat(slots.filter(([k]) => k !== "_public").map(([k]) => k));
   const keep = $("sayto").value;
   $("sayto").innerHTML = to.map((t) => `<option value="${esc(t)}">${t === "*" ? "every village the host keeps" : esc(t)}</option>`).join("");
   if (keep) $("sayto").value = keep;
   const pub = (st.reports._public || {}).listings || [];
-  $("listings").innerHTML = pub.length ? `<table><thead><tr><th>listed now</th><th>code</th><th>here</th><th></th></tr></thead><tbody>${pub.map((l) => `<tr><td>${esc(l.name)}</td><td class="note">${esc(l.code)}</td><td>${l.n} of ${l.limit}</td><td><button class="small" data-feature="${esc(l.code)}">feature</button> <button class="small bad" data-vban="${esc(l.code)}" data-name="${esc(l.name)}">ban</button></td></tr>`).join("")}</tbody></table>` : `<p class="note">(the villages listed right now show here once the host's connected)</p>`;
+  $("listings").innerHTML = pub.length ? `<table><thead><tr><th>listed now</th><th>code</th><th>here</th><th></th></tr></thead><tbody>${pub.map((l) => `<tr><td>${esc(l.name)}</td><td class="note">${esc(l.code)}</td><td>${Number(l.n) || 0} of ${Number(l.limit) || 0}</td><td><button class="small" data-feature="${esc(l.code)}">feature</button> <button class="small bad" data-vban="${esc(l.code)}" data-name="${esc(l.name)}">ban</button></td></tr>`).join("")}</tbody></table>` : `<p class="note">(the villages listed right now show here once the host's connected)</p>`;
   if (document.activeElement.tagName !== "TEXTAREA") { $("featured").value = st.featured.join("\n"); $("order").value = st.order.join("\n"); $("words").value = st.words.join("\n"); }
   $("vbans").innerHTML = st.village_bans.map((b) => `<tr><td>${esc(b.name || "(a village)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-vunban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no villages</td></tr>`;
   $("pbans").innerHTML = st.player_bans.map((b) => `<tr><td>${esc(b.name || "(a player)")}</td><td class="note">${esc(b.key)}</td><td class="note">${esc(b.why)}</td><td class="note">${when(b.at)}</td><td><button class="small" data-punban="${esc(b.key)}">unban</button></td></tr>`).join("") || `<tr><td class="note">no players</td></tr>`;
@@ -755,7 +919,7 @@ async function loadState() {
   if (!editSrv) { srvs = st.servers.map((v) => ({ ...v, welcome: st.welcome[v.name] || "" })); drawServers(); }
   if (!editSched) { scheds = st.schedules.slice(); drawSched(); }
 }
-const SEL = (vals, cur, attrs) => `<select ${attrs}>${vals.map((v) => `<option value="${v}" ${String(cur) === String(v) ? "selected" : ""}>${v === "" ? "(usual)" : v}</option>`).join("")}</select>`;
+const SEL = (vals, cur, attrs) => `<select ${attrs}>${vals.map((v) => `<option value="${esc(v)}" ${String(cur) === String(v) ? "selected" : ""}>${v === "" ? "(usual)" : esc(v)}</option>`).join("")}</select>`;
 function drawServers() {
   $("servers").innerHTML = srvs.map((v, i) => `<tr>
     <td><input data-s="${i}" data-k="name" value="${esc(v.name)}" style="width:150px"></td>
@@ -811,7 +975,7 @@ $("banp").onclick = async () => { const id = $("banpid").value.trim(); if (!id) 
 document.addEventListener("click", async (e) => {
   const t = e.target, d = t.dataset;
   if (d.act) { await call("api/moderate", { slot: d.slot, id: Number(d.id), action: d.act }); loadState(); }
-  else if (d.pban && confirm("Ban " + (d.name || "this player") + " from the relay?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-player", { id: Number(d.pban), name: d.name || "", why }); loadState(); }
+  else if (d.pban && confirm("Ban " + (d.name || "this player") + " from the relay?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-player", { id: Number(d.pban), conn: d.conn ? Number(d.conn) : null, name: d.name || "", why }); loadState(); }
   else if (d.vban && confirm("Ban the village " + (d.name || d.vban) + "?")) { const why = prompt("Why (just for you)?") || ""; await call("api/ban-village", { code: d.vban, name: d.name || "", why }); loadState(); }
   else if (d.vunban) { await call("api/unban-village", { code: d.vunban }); loadState(); }
   else if (d.punban) { await call("api/unban-player", { id: d.punban }); loadState(); }
@@ -820,7 +984,7 @@ document.addEventListener("click", async (e) => {
     if (!confirm("Keep " + (d.name || "this player") + " out of " + d.slot + " (only there)?")) return;
     const ip = confirm("By their address too? (OK: yes. Cancel: just their id and tag.)");
     const why = prompt("Why (just for you)?") || "";
-    const r = await call("api/keep-out", { code: d.code, slot: d.slot, id: Number(d.kout), name: d.name || "", why, ip });
+    const r = await call("api/keep-out", { code: d.code, slot: d.slot, id: Number(d.kout), conn: d.conn ? Number(d.conn) : null, name: d.name || "", why, ip });
     if (!r.ok) alert(await r.text());
     else if (!(await r.json()).found) alert("No connection was found under that id (they've gone, or their game isn't the usual one), so only the id was noted, and that changes each time a game starts. To stop them for good, find their connection under VILLAGES OPEN RIGHT NOW or CONNECTED and block the address.");
     loadState();
@@ -840,3 +1004,56 @@ loadSquares();
 loadState(); setInterval(loadState, 4000);
 refresh(); setInterval(refresh, 3000);
 </script></body></html>"##;
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key made for this test only (not used anywhere else).
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCt0ARPW2ufp8HJ\nzK/j2fBNCmbnyR8XKF6WHyXtgos+vamQ6eUN0XRinCkm3xUzuDG+s/psuFGEBFhc\n3he2hECHABmSKuitPG0ZeRgrPMIBGu68wbuNf9DsGrrB+Wr1Do/a3ZHNOtby8ygl\nZFx+vO9AieYpdSFYQhd/9FW5iPy7ovcyTN1wC9oNbtdbKPo/9yudXv3skfl1EEaG\nrsdpGt42DIIm/uRRsBtWLMHH8w61On7YEu1SB8eW4j82JZN0v69c+0FuQPxdyCFs\nWPBqGPyAN5GYCCPujHyNkW8lCLPvxyPPYQYpc6n8BeQb8uohwazz0jtHCgPcq/Hv\nS9B1ChPJAgMBAAECggEABzuYmlF0ao85Y142/t/NqJ8OBjIv2YUECUeK4AB72ToH\nlDCvfUI3OiKZHHV8X+EX14GMzQ5kfKkOS5sFrezV9JLeqDRMkhI+0Khh3EFp1KWc\nGVMPLMW3WhkzUVQW4n4JzXKamR7hh/hHYOWgFbljVAezrLZOPhUjU4nwMUl6iYzz\nyXMbumPTIoDwK8oDanepmiFoVcZ0VNVSo7JacLONquLhnU3HKq6tz/5BGgwLUDYq\nLXCh6pbn7P7g8ziGoG0pzn221FvwxS0HWPfsCqKeK3yJaoQd8ebC3Jl1qrbtwzXI\ni0WGZUiyP+gWmDY+8jAEtAqDYlXfQU/0RwRUfEV20wKBgQDazmMI1tNdFYSvwGpf\nJbwxMjvlDIXLYVwedssSizpswy+AO5iQpb6O31F3DRV3E9I/AXGh3apSMkG4o1ek\n+TA9fP9POecKYMkSx8vHghBg3tyqHboAtVl548yyTsMwXDn7DwIg8ZPCt1UH+MNC\nuD9Yz1zYwbBqNmTFC5vBKUMYuwKBgQDLW62klYIAfzDKlsTgPWChGsyBSev4813Y\nZUfmdNYhNfvcBoXOtURPvs1L3AD2lm0sHaUoK3XNA71tXCSSkowHKUN9/HUfzTw2\nJZUHP52FK3tEb4nPvV1uRGvFQNow6RggQEM0HllSTVeW0TyX3gFodbLYe7BH6wi2\nPXLvLs6vSwKBgGOyKDOt1o6SMGv4Cz+hLPdpgRrjMs8xZEzJKcwgPhWydaFDBkfa\nDVKB9Fd/Ual5EZH9sW3kVyeumH1th5C2rcFGg/nwUxJKeTOib3pPC/FnejnU45xR\nBRzhq7IO6ybMzupSs1CZYg8Vg5vnP+jVlJ99lDt7PUuXzyBtIqHHkDfjAoGAeH2e\nmikXuRGjqDXC+xaC3ZISX/ybu4r/LMt92ZealFz3GPwoZjzS9+kWnP8C9xhUIVKD\nXBS8HLg9kcGJzerU2x1g5xIhl7E0HuUPsxbHT3Ne+0KXRiZuaHpT3LE7VsWVzO4m\no4fj5rb60dqx603YSbuLN2e6IDKrm8c3BW8XeZcCgYAswF7qBrWk4bBlj+p5qVZO\nLtpcOMBHRgl1Q05MqO756gOqa7s95wDxEAmUguFN4RybcuBF4MkEOauX2BeFaCXc\n9sq8EJb9aga/uSymNBzvLtcIRv7CU+vEBOpgl9O+vJC/zgQipPISk3qK+qc5DdT+\nbTcgVftfWbiHoGHOc5FMgw==\n-----END PRIVATE KEY-----";
+
+    fn access() -> Access {
+        let set = serde_json::json!({ "keys": [{ "kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig", "n": "rdAET1trn6fBycyv49nwTQpm58kfFyhelh8l7YKLPr2pkOnlDdF0YpwpJt8VM7gxvrP6bLhRhARYXN4XtoRAhwAZkirorTxtGXkYKzzCARruvMG7jX_Q7Bq6wflq9Q6P2t2RzTrW8vMoJWRcfrzvQInmKXUhWEIXf_RVuYj8u6L3MkzdcAvaDW7XWyj6P_crnV797JH5dRBGhq7HaRreNgyCJv7kUbAbVizBx_MOtTp-2BLtUgfHluI_NiWTdL-vXPtBbkD8XcghbFjwahj8gDeRmAgj7ox8jZFvJQiz78cjz2EGKXOp_AXkG_LqIcGs89I7RwoD3Kvx70vQdQoTyQ", "e": "AQAB" }] });
+        Access { team: "team.cloudflareaccess.com".into(), aud: "the-aud".into(), keys: std::sync::RwLock::new(serde_json::from_value(set).ok()) }
+    }
+
+    fn token(aud: &str, iss: &str, email: &str, exp: i64) -> String {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        h.kid = Some("k1".into());
+        let claims = serde_json::json!({ "aud": [aud], "iss": iss, "email": email, "exp": exp, "iat": exp - 3600 });
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_rsa_pem(TEST_KEY.as_bytes()).unwrap()).unwrap()
+    }
+
+    /// Access's token is believed only when it's signed by the team's key,
+    /// for this console, from this team, and not out of date.
+    #[test]
+    fn only_a_real_access_token_gets_in() {
+        let a = access();
+        let soon = crate::broker::now_secs() as i64 + 600;
+        let iss = "https://team.cloudflareaccess.com";
+        assert_eq!(a.who(&token("the-aud", iss, "Admin@Example.org", soon)).as_deref(), Some("admin@example.org"));
+        assert_eq!(a.who(&token("another-app", iss, "admin@example.org", soon)), None, "another application's token");
+        assert_eq!(a.who(&token("the-aud", "https://other.cloudflareaccess.com", "admin@example.org", soon)), None, "another team's");
+        assert_eq!(a.who(&token("the-aud", iss, "admin@example.org", soon - 7200)), None, "out of date");
+        assert_eq!(a.who("not.a.token"), None);
+        // (a token signed with no key at all)
+        let mut forged = token("the-aud", iss, "admin@example.org", soon);
+        forged.truncate(forged.rfind('.').unwrap() + 1);
+        assert_eq!(a.who(&forged), None, "unsigned");
+    }
+
+    /// The host a request was sent to, and where its token is.
+    #[test]
+    fn hosts_and_tokens_are_read() {
+        let mut h = HeaderMap::new();
+        h.insert("host", "LocalHost:8081".parse().unwrap());
+        assert_eq!(host_of(&h), "localhost");
+        h.insert("host", "[::1]:8081".parse().unwrap());
+        assert_eq!(host_of(&h), "[::1]");
+        h.insert("cookie", "a=b; CF_Authorization=tok; c=d".parse().unwrap());
+        assert_eq!(token_of(&h).as_deref(), Some("tok"));
+        h.insert("cf-access-jwt-assertion", "hdr".parse().unwrap());
+        assert_eq!(token_of(&h).as_deref(), Some("hdr"));
+    }
+}

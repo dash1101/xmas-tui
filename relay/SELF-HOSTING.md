@@ -27,8 +27,13 @@ containers, and its players point their game at it.
    same machine or network, which is where the proxy is.
 3. The admin console (port 8081) answers only requests signed in through Cloudflare Access.
    Behind anything else, it needs a sign-in of its own in front of it; or it can be reached over
-   an SSH tunnel, with the relay run with `ADMIN_OPEN=1` and the port left on 127.0.0.1. The
-   console is never to be exposed openly.
+   an SSH tunnel, with the relay run with `ADMIN_OPEN=1` and the port left on 127.0.0.1 (it then
+   answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, so a web page elsewhere
+   can't reach it by pointing its own name at the tunnel). The console is never to be exposed
+   openly. Behind Cloudflare Access, set `ACCESS_TEAM` and `ACCESS_AUD` too, so the relay checks
+   Access's signed token rather than its email header (see [DEPLOY.md](DEPLOY.md#environment)).
+   The host signs in only from the relay's own network; if it runs elsewhere, set
+   `HOST_ANYWHERE=1`.
 4. `docker compose up -d`, then `docker compose logs --tail 10`.
 
 ## Updating
