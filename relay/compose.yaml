@@ -5,7 +5,7 @@
 #   xmas-admin.novalabs.app → http://localhost:8081   (behind Cloudflare Access)
 services:
   xmas-relay:
-    image: ghcr.io/dash1101/xmas-relay:1.2.1
+    image: ghcr.io/dash1101/xmas-relay:1.2.2
     container_name: xmas-relay
     restart: unless-stopped
     ports:

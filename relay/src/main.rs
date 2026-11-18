@@ -175,6 +175,9 @@ async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): Connect
     ws.protocols(["mqtt"]).max_message_size(max + 1024).max_frame_size(max + 1024).on_upgrade(move |socket| conn(socket, ip, app, max))
 }
 
+/// How often the relay pings each WebSocket.
+const PING_EVERY: Duration = Duration::from_secs(30);
+
 /// A WebSocket client: its frames in and out, through a session.
 async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
     let (mut sink, mut stream) = socket.split();
@@ -195,8 +198,21 @@ async fn conn(socket: WebSocket, ip: IpAddr, app: App, max: usize) {
         }
     });
     let writer = tokio::spawn(async move {
-        while let Some(b) = down_rx.recv().await {
-            if sink.send(Message::Binary(b)).await.is_err() {
+        // A ping every 30 seconds, whatever else is going: a proxy in the
+        // way (Cloudflare closes a connection after 100 seconds without a
+        // frame) then never sees the line go quiet. Clients answer it
+        // themselves (browsers do so on their own).
+        let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let m = tokio::select! {
+                b = down_rx.recv() => match b {
+                    Some(b) => Message::Binary(b),
+                    None => break,
+                },
+                _ = ping.tick() => Message::Ping(Vec::new()),
+            };
+            if sink.send(m).await.is_err() {
                 break;
             }
         }
