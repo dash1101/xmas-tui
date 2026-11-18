@@ -131,11 +131,11 @@ const SCRIPTS: &[Script] = &[
     // ---- small talk, any time
     s(Any, Adults, &[(0, "{b}! merry Christmas!"), (1, "and to you, {a}! ready for the big day?"), (0, "almost. just the wrapping left"), (1, "ha, I always leave that till last too")]),
     s(Any, Adults, &[(0, "how's the family, {b}?"), (1, "all home for the holidays. house is full!"), (0, "full houses are the best kind"), (1, "tell that to my sofa")]),
-    s(Any, Adults, &[(0, "finished the shopping, {b}?"), (1, "one present left. for my brother"), (0, "what do you get the man who has everything?"), (1, "socks. you always get him socks")]),
+    s(Any, Adults, &[(0, "finished your shopping, {b}?"), (1, "one present left. for my brother"), (0, "what are you getting him?"), (1, "socks. I always get him socks, and he always loves them")]),
     s(Any, Adults, &[(0, "going to the carols on Sunday?"), (1, "wouldn't miss them. are you singing?"), (0, "only if I can stand at the back"), (1, "we'll find you a spot behind the tenors")]),
     s(Any, Adults, &[(0, "{b}, tried the cocoa at the cabin yet?"), (1, "twice today already"), (0, "is it really that good?"), (1, "the marshmallows are the size of my fist")]),
-    s(Any, Adults, &[(0, "my cat climbed the tree again last night"), (1, "oh no — the ornaments?"), (0, "all fine. she's an ornament now"), (1, "a very festive cat")]),
-    s(Any, Adults, &[(0, "I tried to knit a scarf this year"), (1, "how did it turn out?"), (0, "it's a very long sock now"), (1, "well, socks are always useful")]),
+    s(Any, Adults, &[(0, "my cat climbed the Christmas tree again"), (1, "oh no — the ornaments?"), (0, "all fine. but she won't come down. she thinks she's the star"), (1, "a very festive cat")]),
+    s(Any, Adults, &[(0, "I tried to knit a scarf this year"), (1, "how did it turn out?"), (0, "it's more of a sock, really. a very long sock"), (1, "well, socks are always useful")]),
     s(Any, Adults, &[(0, "who built that snowman, {b}?"), (1, "nobody knows. it was just there one morning"), (0, "I think it waved at me yesterday"), (1, "…let's not talk about that")]),
     s(Any, Adults, &[(0, "the bakery's out of mince pies again"), (1, "already? I only wanted two"), (0, "they're baking more at nine"), (1, "then I'll be first in line")]),
     s(Any, Adults, &[(0, "what are you hoping Santa brings, {b}?"), (1, "a quiet morning and a hot cup of tea"), (0, "that's not a toy, {b}"), (1, "I'm not seven anymore, {a}")]),
@@ -148,7 +148,7 @@ const SCRIPTS: &[Script] = &[
     s(Day, Adults, &[(0, "the sun's actually warm today"), (1, "the icicles are dripping on my porch"), (0, "don't let the snowman hear"), (1, "ha! he'll be fine in the shade")]),
     s(Evening, Adults, &[(0, "evening, {b}. heading home?"), (1, "just as the lights come on — my favourite time"), (0, "the whole village glows"), (1, "I could watch it for hours")]),
     s(Evening, Adults, &[(0, "look, the sky's going pink"), (1, "sunset already? the days are so short"), (0, "more time for lights, though"), (1, "and cocoa. always more cocoa")]),
-    s(Night, Adults, &[(0, "the stars are out tonight, {b}"), (1, "you can see the aurora, too"), (0, "it looks like ribbons"), (1, "Christmas ribbons for the whole sky")]),
+    s(Night, Adults, &[(0, "the stars are out tonight, {b}"), (1, "not a cloud in the sky"), (0, "you can see every last one of them"), (1, "makes you feel very small. in a nice way")]),
     s(Night, Adults, &[(0, "still out this late, {b}?"), (1, "couldn't sleep. the snow's too pretty"), (0, "same. the quiet's the best part"), (1, "shh — listen. not a sound")]),
     // ---- weather and goings-on
     s(Snowy, Adults, &[(0, "it's really coming down now!"), (1, "we'll be digging out the door tomorrow"), (0, "the kids will be thrilled"), (1, "the kids don't do the digging")]),
@@ -164,7 +164,7 @@ const SCRIPTS: &[Script] = &[
     s(Sleigh, Adults, &[(0, "{b}! did you see that, past the moon?"), (1, "sleigh bells… was that…?"), (0, "it had reindeer, I'm sure of it"), (1, "then we'd better be on the nice list")]),
     s(Soon, Adults, &[(0, "only {days} days to go, {b}!"), (1, "don't remind me — nothing's wrapped"), (0, "I'll lend you my tape"), (1, "you're a lifesaver, {a}")]),
     s(Eve, Adults, &[(0, "Christmas Eve at last!"), (1, "the kids will never sleep tonight"), (0, "neither will I, honestly"), (1, "keep an eye on the sky later")]),
-    s(Xmas, Adults, &[(0, "merry Christmas, {b}!"), (1, "merry Christmas! did Santa find you?"), (0, "he left me a scarf. a very long scarf"), (1, "…was it a sock?")]),
+    s(Xmas, Adults, &[(0, "merry Christmas, {b}!"), (1, "merry Christmas! did Santa find you?"), (0, "he did! a new scarf for me, and coal for my brother"), (1, "ha! he knows your brother, then")]),
     // ---- where they are
     s(Tree, Adults, &[(0, "the big tree looks taller this year"), (1, "they say it grows when nobody's looking"), (0, "trees do that, {b}"), (1, "not this fast, they don't")]),
     s(Tree, Adults, &[(0, "how many lights on it, do you think?"), (1, "I counted two hundred, then lost track"), (0, "there's one star on top, at least"), (1, "that I can count")]),
@@ -199,7 +199,7 @@ const CHIMES: &[(When, &str, &str)] = &[
     (Any, "mind if I join? it's freezing", "the more the merrier, {c}"),
     (Any, "{a}! {b}! merry Christmas!", "merry Christmas, {c}!"),
     (Any, "is that cocoa I smell?", "from the cabin, {c}. go on!"),
-    (Train, "talking about the train? it was packed!", "we were! did your visitors make it?"),
+    (Train, "talking about the train? it was packed!", "we were! half the city's come to visit"),
     (Show, "wasn't the light show something?", "we were just saying!"),
     (Snowy, "you'll freeze standing out here!", "we're going, {c}, we're going"),
     (Blackout, "was it you two who cut the power?", "us? never!"),
@@ -251,22 +251,76 @@ const GREETS: &[(When, &str, &str)] = &[
     (Any, "merry Christmas, {b}!", "and to you, {a}!"),
 ];
 
-/// Chatting with the player: each E is one exchange (player, them).
+/// Things to talk about with the player (what the player says, their
+/// answer), in order: each line follows on from the one before, the last
+/// answer rounds it off, and none of them asks what's always on offer
+/// anyway ("how are you doing?", "what are you up to?"…). The first for
+/// grown-ups and the first for kids are small talk (for any time).
 const CHATS: &[(When, bool, &[(&str, &str)])] = &[
-    (Any, false, &[("lovely village, isn't it?", "forty winters I've lived here. never gets old"), ("forty!", "and forty snowmen, give or take"), ("any tips for a newcomer?", "the cocoa cabin. trust me")]),
-    (Any, false, &[("what's your favourite thing about Christmas?", "the quiet morning before everyone wakes"), ("that sounds lovely", "and the cookies. mostly the cookies"), ("fair enough", "come by for one sometime")]),
-    (Snowy, false, &[("quite the snow today!", "best weather there is, if you ask me"), ("isn't it cold?", "that's what cocoa's for"), ("see you by the fire, then", "save me a seat!")]),
-    (Train, false, &[("did you see the train come in?", "my grandson was on it!"), ("how lovely", "he's off building a snowman already"), ("hope it's a big one", "with his energy? it'll be huge")]),
-    (Show, false, &[("that light show!", "every year they outdo themselves"), ("who runs it?", "the snowman, some say. I don't ask"), ("I'll keep an eye on him", "wise choice")]),
-    (Night, false, &[("still out this late?", "I always walk under the stars before bed"), ("they're bright tonight", "you can even see the aurora"), ("good night, then", "good night! stay warm")]),
-    (Evening, false, &[("the lights are coming on", "my favourite moment of the day"), ("it's like magic", "it IS magic, this time of year"), ("I believe it", "that's the spirit")]),
-    (Soon, false, &[("only {days} days to go!", "and I haven't wrapped a thing"), ("need a hand?", "only if you can wrap a bicycle"), ("…maybe not", "ha! didn't think so")]),
-    (Sleigh, false, &[("did you see the sleigh?!", "I did! I waved and everything"), ("do you think he saw you?", "he jingled, so I'll say yes"), ("then you're on the list", "I've been very good this year")]),
-    (Stars, false, &[("did you see that shooting star?", "I did. I made a wish on it"), ("what for?", "a white Christmas. looks like it worked")]),
-    (Blackout, false, &[("the power's out!", "I heard something sparked by the hills"), ("spooky", "cozy, I'd say. candles everywhere"), ("enjoy the candlelight", "I will!")]),
-    (Any, true, &[("hi! what are you up to?", "making a list for Santa!"), ("what's on it?", "a sled, a puppy and a dinosaur"), ("a real dinosaur?", "a SMALL one")]),
-    (Snowy, true, &[("snowball fight?", "you're ON!"), ("on three?", "THREE!"), ("hey!", "hehehe!")]),
-    (Train, true, &[("did you see the train?", "I waved and the driver waved back!"), ("lucky you", "best. day. ever.")]),
+    (Any, false, &[("lovely village, isn't it?", "I wouldn't live anywhere else. the snow, the lights, the people"), ("the people?", "mostly. there's a man on the hill who plays the bagpipes at dawn")]),
+    (Any, false, &[("what's your favourite thing about Christmas?", "the quiet morning, before anyone else is up"), ("that sounds lovely", "and the cookies. mostly the cookies, if I'm honest")]),
+    (Snowy, false, &[("it's really coming down!", "best weather there is, if you ask me"), ("isn't it cold?", "that's what cocoa's for")]),
+    (Train, false, &[("did you see the train come in?", "my grandson was on it!"), ("how lovely!", "he's already off building a snowman"), ("I hope it's a big one", "with his energy? it'll be enormous")]),
+    (Show, false, &[("did you see the light show?", "every year they outdo themselves"), ("who runs it, anyway?", "the snowman, some say. I don't ask questions"), ("I'll keep an eye on him", "wise. very wise")]),
+    (Night, false, &[("you're out late!", "I always take a walk under the stars before bed"), ("it's a lovely night for it", "clear and still. you can almost hear the snow land")]),
+    (Evening, false, &[("the lights are coming on", "my favourite moment of the day"), ("it's like magic", "it IS magic, this time of year")]),
+    (Soon, false, &[("only {days} days to go!", "don't remind me. I haven't wrapped a thing"), ("need a hand?", "only if you can wrap a bicycle. it's for my nephew"), ("…maybe not", "ha! didn't think so")]),
+    (Eve, false, &[("it's Christmas Eve!", "I know! I've been up since five"), ("excited?", "like a kid. keep an eye on the sky tonight")]),
+    (Xmas, false, &[("merry Christmas!", "merry Christmas! did Santa find you?"), ("he did!", "I knew he would. you're on the list, that's for sure")]),
+    (Sleigh, false, &[("did you see the sleigh?!", "I did! I waved and everything"), ("do you think he saw you?", "he jingled, so I'm saying yes")]),
+    (Stars, false, &[("did you see that shooting star?", "I did! I made a wish on it"), ("what did you wish for?", "if I tell you, it won't come true")]),
+    (Blackout, false, &[("what happened to the lights?", "something sparked up by the hills, I heard"), ("bit spooky, isn't it?", "cozy, I'd say. I've got candles everywhere")]),
+    (Tree, false, &[("the big tree looks wonderful", "I helped put the star up this year. well, I held the ladder")]),
+    (Station, false, &[("waiting for someone?", "my sister, on the next train"), ("how long since you've seen her?", "since last Christmas. I can't wait")]),
+    (Shop, false, &[("have you been to the cocoa cabin?", "twice today already. don't judge me"), ("is it that good?", "the marshmallows are as big as your fist")]),
+    (Any, true, &[("I like your hat!", "my gran knitted it. it's itchy"), ("but warm?", "itchy but WARM. that's what gran says")]),
+    (Any, true, &[("do you like snow?", "I LOVE snow. it's the best thing ever"), ("better than summer?", "summer doesn't have snowmen. so yes")]),
+    (Snowy, true, &[("is it a snow day for you?", "no school all day!"), ("what are you going to do?", "sledging. then more sledging")]),
+    (Train, true, &[("did you see the train?", "I waved and the driver waved back!"), ("lucky you!", "best. day. ever.")]),
+    (Show, true, &[("did you see the tree change colour?", "it went RAINBOW! the purple bit was the best"), ("I liked the purple bit too", "purple's my favourite")]),
+    (Night, true, &[("isn't it past your bedtime?", "…no."), ("are you sure?", "I'm allowed up till the stars come out. …they're out. shh")]),
+    (Sleigh, true, &[("did you hear the sleigh bells?", "it was SANTA! he's checking who's been good")]),
+    (Stars, true, &[("did you see the shooting star?", "I wished on it! I can't tell you what for. it's a secret")]),
+    (Blackout, true, &[("were you scared when the lights went out?", "no! …a bit. it was fun, though")]),
+    (Soon, true, &[("only {days} more sleeps!", "I've been counting since November"), ("since November?", "okay, since July")]),
+    (Eve, true, &[("it's Christmas Eve!", "I'm going to bed REALLY early so it comes faster")]),
+    (Xmas, true, &[("merry Christmas!", "merry Christmas! I had chocolate for breakfast")]),
+    (Tree, true, &[("how tall do you think the tree is?", "a hundred feet. maybe a million")]),
+];
+
+/// A word about what's going on, said to the player after hello again
+/// (statements, so there's nothing left hanging).
+const ASIDES: &[(When, bool, &str)] = &[
+    (Morning, false, "fresh snow overnight. I love it like this"),
+    (Day, false, "lovely bright day for a walk"),
+    (Evening, false, "the lights are just coming on. my favourite time of day"),
+    (Night, false, "lovely night for a walk, under all these stars"),
+    (Snowy, false, "it's wild out here. hold onto your hat!"),
+    (Train, false, "the train's just in. the whole place is buzzing"),
+    (Show, false, "that light show! every year they outdo themselves"),
+    (Blackout, false, "the power going off like that! I nearly dropped my cocoa"),
+    (Sleigh, false, "I'm sure I heard sleigh bells just now"),
+    (Stars, false, "I just saw a shooting star. I made a wish"),
+    (Soon, false, "only {days} days to go now!"),
+    (Eve, false, "Christmas Eve! I can hardly sit still"),
+    (Xmas, false, "I hope Santa found you last night!"),
+    (Tree, false, "the big tree's even bigger up close"),
+    (Church, false, "the bells should ring any minute now"),
+    (Shop, false, "I'm just after a cocoa. best in town"),
+    (Station, false, "I'm meeting someone off the next train"),
+    (Morning, true, "it snowed in the night! look!"),
+    (Evening, true, "the lights are coming on! look!"),
+    (Night, true, "I'm allowed up late tonight!"),
+    (Snowy, true, "it's a BLIZZARD! it's the best!"),
+    (Train, true, "the train went right past me! it was SO loud"),
+    (Show, true, "the tree went RAINBOW!"),
+    (Blackout, true, "the lights went out! it was SO cool"),
+    (Sleigh, true, "I heard SLEIGH BELLS!"),
+    (Stars, true, "I saw a shooting star! I wished for a puppy"),
+    (Soon, true, "{days} more sleeps!"),
+    (Eve, true, "it's Christmas EVE!"),
+    (Xmas, true, "it's CHRISTMAS!"),
+    (Tree, true, "the tree's SO big up close"),
 ];
 
 /// Something happening that people notice and react to.
@@ -446,6 +500,22 @@ impl Talk {
         (fill(GREETS[k].1, &[a, b], ctx.days), fill(GREETS[k].2, &[a, b], ctx.days))
     }
 
+    /// A word about what's going on, to the player (after hello), if
+    /// anything's going on; never about what `topic` (a chat on offer) is
+    /// about.
+    pub fn aside(&mut self, ctx: &TalkCtx, x: f32, kid: bool, topic: Option<usize>) -> Option<String> {
+        let avoid = topic.and_then(|t| CHATS.get(t)).map(|c| c.0);
+        let cands: Vec<(usize, (), u32)> = ASIDES
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.1 == kid && a.0.ok(ctx, x) && Some(a.0) != avoid && !self.recent.contains(&(3000 + i)))
+            .map(|(i, a)| (i, (), a.0.weight()))
+            .collect();
+        let k = cands[self.pick_weighted(&cands)?].0;
+        self.remember(3000 + k);
+        Some(fill(ASIDES[k].2, &[], ctx.days))
+    }
+
     /// Pick a topic for a chat with the player (index into the chats).
     pub fn chat_topic(&mut self, ctx: &TalkCtx, x: f32, kid: bool) -> usize {
         let cands: Vec<(usize, (), u32)> = CHATS
@@ -468,9 +538,11 @@ impl Talk {
 
     /// Something to open with when meeting the player for the first time.
     pub fn intro(&mut self, ctx: &TalkCtx, x: f32, name: &str, kid: bool) -> String {
-        let hello = if kid { format!("hi!! I'm {name}!") } else { format!("hello! I'm {name}.") };
-        let tail = self.remark(ctx, x, kid);
-        format!("{hello} {tail}")
+        let hello = if kid { format!("hi! I'm {name}!") } else { format!("hello! I'm {name}.") };
+        match self.aside(ctx, x, kid, None) {
+            Some(tail) => format!("{hello} {tail}"),
+            None => hello,
+        }
     }
 }
 

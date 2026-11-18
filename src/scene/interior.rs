@@ -3814,7 +3814,7 @@ impl Interior {
     /// Info about someone at home, for a conversation with them.
     pub fn about(&self, i: usize) -> Option<HostInfo> {
         let r = self.residents.get(i)?;
-        let others: Vec<&'static str> = self.residents.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.name).collect();
+        let others: Vec<&'static str> = self.residents.iter().enumerate().filter(|(j, r)| *j != i && !r.guest).map(|(_, r)| r.name).collect();
         Some(HostInfo {
             name: r.name,
             kid: r.kid,

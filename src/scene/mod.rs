@@ -1377,7 +1377,7 @@ impl Scene {
                 pets::PetKind::Bird => "flutters onto your shoulder, chirping",
             };
             let mut v = vec![
-                Opt::new(&format!("give {name} a fuss"), Act::Pet(P::Fuss)),
+                Opt::new(&format!("pet {name}"), Act::Pet(P::Fuss)),
                 Opt::new(&format!("cuddle {name}"), Act::Pet(P::Cuddle)),
                 Opt::new(&format!("feed {name}"), Act::Pet(P::Feed)),
                 Opt::new("play!", Act::Pet(P::Play)),
@@ -1655,7 +1655,8 @@ impl Scene {
         if info.has_piano {
             tasks.push(interior::Task::Tune);
         }
-        let task = if info.church || inn.is_cabin() || inn.task.is_some() { None } else { Some(tasks[(seed as usize) % tasks.len()]) };
+        let cabin = inn.is_cabin();
+        let task = if info.church || cabin || inn.task.is_some() { None } else { Some(tasks[(seed as usize) % tasks.len()]) };
         let mut c = if info.guest {
             // a friend who came in with the villager: a visitor here too
             let mut c = story::Convo::open(id, info.name, info.kid, visits.max(1), &ctx, &mut self.story_talk, 0.0, seed, vec![]);
@@ -1669,9 +1670,10 @@ impl Scene {
                 &["isn't this nice? I've always wanted to see inside", "shh — we're guests. best behaviour!", "what a lovely home they've got"]
             };
             c.line = lines[(seed as usize) % lines.len()].to_string();
+            c.visiting();
             c
         } else {
-            let h = story::HostCtx { theme: info.theme, family: info.family.clone(), pet: info.pet.clone(), years: info.years, church: info.church, piano: info.has_piano, oven: info.has_oven, task };
+            let h = story::HostCtx { theme: info.theme, family: info.family.clone(), pet: info.pet.clone(), years: info.years, church: info.church, piano: info.has_piano, oven: info.has_oven, task, cabin, keeper: cabin && i == 0 };
             let mut c = story::Convo::host(id, info.name, info.kid, info.temper, visits, &ctx, &mut self.story_talk, h, seed);
             c.line = story::by_name(&c.line, &self.you_name, visits == 0, info.kid, seed);
             c
@@ -1706,9 +1708,15 @@ impl Scene {
         c.line = if friend && visits == 0 {
             // friends and family know the villager already
             story::friend_hello(&self.you_name, &name, kid, self.rng.next_u32())
+        } else if first && !friend && !self.you_name.is_empty() {
+            // (the villager's just said who they are)
+            story::met(&c.line, &self.you_name, kid, self.rng.next_u32())
         } else {
             story::by_name(&c.line, &self.you_name, visits == 0, kid, self.rng.next_u32())
         };
+        if self.critters.following(id) {
+            c.walking_along();
+        }
         c.pos = self.convo_pos;
         self.director.say(cx.round() as i32, cy as i32 - 4, &c.line, t, 3.0, 40);
         if friend && visits == 0 {
@@ -5648,7 +5656,7 @@ mod tests {
         let c = s.convo.as_ref().unwrap();
         assert!(c.line.contains("bunny"), "opener: {}", c.line);
         let labels: Vec<&str> = c.opts.iter().map(|o| o.label.as_str()).collect();
-        assert!(labels.iter().any(|l| l.contains("feed")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.contains("my hand")), "{labels:?}");
         // drag it by its title bar
         let (w, h) = (s.w as i32, s.h as i32);
         let (x0, y0) = c.origin(w, h);

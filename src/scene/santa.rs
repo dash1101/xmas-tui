@@ -174,18 +174,18 @@ impl Rounds {
 // Santa stopping for a word with the village (the sleigh was clicked).
 
 const OPEN: &[&str] = &[
-    "ho ho ho! good evening, everyone!",
+    "ho ho ho! hello, everyone!",
     "whoa, Dasher — whoa! … hello down there!",
-    "well now! who's out on a night like this?",
+    "well now! who's this out in the snow?",
     "ho ho! I thought I heard someone waving!",
-    "evening, village! everyone keeping warm?",
+    "hello, village! everyone keeping warm?",
     "a quick stop — Rudolph needs a breather!",
 ];
 
 /// (a kid's line, Santa's answer).
 const KIDS: &[(&str, &str)] = &[
     ("SANTA!! I've been good! …mostly!", "mostly is plenty — ho ho ho!"),
-    ("can I pet Rudolph?", "he'd love that, but he's on duty tonight!"),
+    ("can I pet Rudolph?", "he'd love that, but he's on duty right now!"),
     ("did you get my letter?", "every word — and the drawing too!"),
     ("what do reindeer eat?", "carrots, mostly. and the odd cookie."),
     ("are you REAL?!", "as real as the snow on your hat!"),
@@ -200,16 +200,16 @@ const KIDS: &[(&str, &str)] = &[
 
 /// (a grown-up's line, Santa's answer).
 const ADULTS: &[(&str, &str)] = &[
-    ("evening, Santa! busy night?", "they're all busy this time of year!"),
+    ("hello, Santa! busy?", "always, this time of year!"),
     ("cold enough up there?", "brisk! the reindeer like it this way."),
-    ("out for a practice run?", "every night in December — ho ho!"),
+    ("out for a practice run?", "every day in December. ho ho!"),
     ("give Mrs. Claus our best!", "I will! she sends her cookies."),
     ("need a cocoa for the road?", "never say no to cocoa!"),
     ("the kids won't sleep a wink now!", "ho ho — then I'd better be quick!"),
     ("mind the power lines!", "Rudolph's nose sees them a mile off!"),
     ("how's the workshop?", "noisy, sticky and very, very merry!"),
     ("still on the nice list, am I?", "ho ho — I'll check it twice!"),
-    ("lovely night for flying!", "the best — not a cloud between here and the pole!"),
+    ("lovely weather for flying!", "the best. clear all the way to the North Pole!"),
 ];
 
 const BYE: &[&str] = &["on, Dasher! on, Dancer! ho ho ho!", "merry Christmas, all!", "off we go — be good, now!", "up, up and away! ho ho ho!", "see you on Christmas Eve!"];
@@ -222,5 +222,7 @@ pub const HO_HO: &[&str] = &["HO HO HO!", "ho ho ho!", "HO! HO! HO!", "merry Chr
 pub fn chat(rng: &mut Rng, kid: bool, days: i64) -> [String; 5] {
     let (ask, ans) = *rng.pick(if kid { KIDS } else { ADULTS });
     let ans = if days <= 0 && ans.contains("{days}") { "it is! merry Christmas!".to_string() } else { ans.replace("{days}", &days.to_string()) };
-    [rng.pick(OPEN).to_string(), ask.to_string(), ans, rng.pick(BYE).to_string(), rng.pick(WAVE).to_string()]
+    // ("see you on Christmas Eve!" only while it's still to come)
+    let byes: Vec<&str> = BYE.iter().copied().filter(|b| (2..=330).contains(&days) || !b.contains("Eve")).collect();
+    [rng.pick(OPEN).to_string(), ask.to_string(), ans, rng.pick(&byes).to_string(), rng.pick(WAVE).to_string()]
 }

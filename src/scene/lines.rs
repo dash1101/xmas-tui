@@ -142,13 +142,13 @@ const DROPPED: &[&str] = &[
 const POKED: &[&str] = &[
     "oh! hello there!",
     "merry Christmas to you!",
-    "lovely evening, isn't it?",
+    "lovely out, isn't it?",
     "did you drop this? …no?",
-    "the lights are lovely tonight",
+    "the lights are lovely, aren't they?",
     "happy holidays!",
     "have you seen my mitten?",
     "*waves*",
-    "nice cursor you've got",
+    "oh! you made me jump",
 ];
 const KID_POKED: &[&str] = &["tag, you're it!", "hehe, that tickles!", "wanna build a snowman?", "I'm on the nice list!", "snowball fight?", "Santa's coming soon!"];
 const PET_DEER: &[&str] = &["hello, gentle deer", "what lovely antlers!", "are you one of Santa's?", "soft nose!", "shh, easy now…"];
