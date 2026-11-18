@@ -163,6 +163,14 @@ pub struct Game {
     kb: Option<(u32, u32)>,
     /// A link code this was opened with, waiting on a yes (see `link_offer`).
     link_offer: Option<String>,
+    /// The buttons up top as last drawn, the one pressed, where the
+    /// pointer is (the UI's cells); the page can install it as an app;
+    /// played by touch (the controls card shows the touch ones).
+    bar_at: Vec<(crate::widgets::Rect, BarDo)>,
+    bar_down: Option<BarDo>,
+    bar_hover: (i32, i32),
+    installable: bool,
+    touch: bool,
     /// The villager's own village (the scene may be a friend's).
     own_seed: u32,
     /// Online at all here (not on the wallpaper).
@@ -237,6 +245,87 @@ enum Act {
     /// Linking this device by the code it was opened with (yes), or not.
     LinkYes,
     LinkNo,
+}
+
+/// The buttons up top (the same on the desktop, the web page and the
+/// phone): what each does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BarDo {
+    Todo,
+    More,
+    Centre,
+    Pause,
+    Chat,
+    Friends,
+    Sound,
+    Help,
+    Menu,
+    Install,
+}
+
+/// How the buttons up top stand this frame (see `draw_bar`).
+struct BarState {
+    paused: bool,
+    sound: bool,
+    /// 0 offline, 1 connecting, 2 online; friends about; something new.
+    online: (u8, usize, bool),
+    install: bool,
+    hover: (i32, i32),
+    down: Option<BarDo>,
+}
+
+/// The buttons up top, right along the top row: a picture each, and its
+/// name where there's room. Where each is.
+fn draw_bar(f: &mut Frame, st: &BarState, t: f32) -> Vec<(crate::widgets::Rect, BarDo)> {
+    use crate::color::{pal, Rgb};
+    use crate::frame::{Bg, Glyph};
+    use crate::pixicons::Icon as I;
+    let w = f.w as i32;
+    let wide = w >= 110;
+    let friends = match st.online {
+        (2, n, _) if n > 0 => format!("friends ●{n}"),
+        (2, ..) => "friends ●".to_string(),
+        (1, ..) => "friends ◌".to_string(),
+        _ => "friends ○".to_string(),
+    };
+    let mut items: Vec<(I, String, BarDo)> = vec![
+        (I::Todo, "do".into(), BarDo::Todo),
+        (I::List, "more".into(), BarDo::More),
+        (I::Centre, "centre".into(), BarDo::Centre),
+        (if st.paused { I::Play } else { I::Pause }, if st.paused { "carry on".into() } else { "pause".into() }, BarDo::Pause),
+        (I::Chat, "chat".into(), BarDo::Chat),
+        (I::Friends, friends, BarDo::Friends),
+        (I::Sound, if st.sound { "sound".into() } else { "muted".into() }, BarDo::Sound),
+        (I::Help, "help".into(), BarDo::Help),
+        (I::Menu, "menu".into(), BarDo::Menu),
+    ];
+    if st.install {
+        items.insert(0, (I::Devices, "install".into(), BarDo::Install));
+    }
+    let widths: Vec<i32> = items.iter().map(|(_, l, _)| if wide { 4 + l.chars().count() as i32 } else { 3 }).collect();
+    let total: i32 = widths.iter().sum::<i32>() + 1;
+    let mut x = (w - total - 1).max(0);
+    let mut out = vec![];
+    let panel = Bg::Mix(pal::UI_PANEL, 0.82);
+    f.put_g(x, 0, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(panel).lit(0.0));
+    x += 1;
+    for ((icon, label, d), bw) in items.into_iter().zip(widths) {
+        let r = crate::widgets::Rect { x, y: 0, w: bw, h: 1 };
+        let hot = r.contains(st.hover.0, st.hover.1) || st.down == Some(d);
+        let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { panel };
+        for xx in x..x + bw {
+            f.put_g(xx, 0, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        }
+        crate::pixicons::put(f, x, 0, 2, 1, icon, bg);
+        if wide {
+            // (something new among friends: their name glows)
+            let glow = if d == BarDo::Friends && st.online.2 { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
+            f.text(x + 2, 0, &format!(" {label}"), if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.9 * glow }, bg, 0.0);
+        }
+        out.push((r, d));
+        x += bw;
+    }
+    out
 }
 
 /// Rows a choice takes (room for a finger).
@@ -555,6 +644,11 @@ impl Game {
             asks: vec![],
             kb: None,
             link_offer: None,
+            bar_at: vec![],
+            bar_down: None,
+            bar_hover: (-1, -1),
+            installable: false,
+            touch: !cfg!(target_arch = "wasm32"),
             own_seed: seed,
             online_ok: true,
             rules_on: None,
@@ -1051,6 +1145,7 @@ impl Game {
     /// The pointer over the village (not pressed): over a menu, the choice
     /// under it is picked out.
     pub fn hover(&mut self, x: f32, y: f32) {
+        self.bar_hover = self.ui_cell(x, y);
         // the friends widget's row under the pointer, picked out
         if let Some(r) = self.friends_at {
             // (on the widgets' layer: its cells)
@@ -1329,6 +1424,58 @@ impl Game {
 
     /// A touch on the friends widget (the web page): a friend's menu, the
     /// messages, talking, adding a friend, going online, public villages.
+    /// A press on the buttons up top: done when it's let go on the same one.
+    fn bar_touch(&mut self, action: i32, c: (i32, i32)) -> bool {
+        let at = self.bar_at.iter().find(|(r, _)| r.contains(c.0, c.1)).map(|(_, d)| *d);
+        match action {
+            0 => {
+                self.bar_down = at;
+                at.is_some()
+            }
+            1 => self.bar_down.is_some(),
+            2 => {
+                let Some(d) = self.bar_down.take() else { return false };
+                if at == Some(d) {
+                    self.bar_do(d);
+                }
+                true
+            }
+            _ => self.bar_down.take().is_some(),
+        }
+    }
+
+    fn bar_do(&mut self, d: BarDo) {
+        self.scene.woke();
+        match d {
+            BarDo::Todo => {
+                self.todo();
+            }
+            BarDo::More => self.more(self.touch),
+            BarDo::Centre => self.button(BTN_CENTRE),
+            BarDo::Pause => self.toggle_pause(),
+            BarDo::Chat => self.chat(),
+            BarDo::Friends => self.friends(),
+            BarDo::Sound => {
+                self.toggle_sound();
+                // (the page starts its sound in the tap itself)
+                self.asks.push("sound".into());
+            }
+            BarDo::Help => self.help(!self.touch),
+            BarDo::Menu => self.open_panel(),
+            BarDo::Install => self.asks.push("install".into()),
+        }
+    }
+
+    /// The page can install the village as an app (its button up top).
+    pub fn set_installable(&mut self, on: bool) {
+        self.installable = on;
+    }
+
+    /// Played by touch (the controls card shows the touch controls).
+    pub fn set_touch(&mut self, on: bool) {
+        self.touch = on;
+    }
+
     /// A widget picked up and moved (or by its corner, resized), as on the
     /// desktop: whether the touch was that. (A tap on the friends widget is
     /// still its own: only a drag moves it.)
@@ -1941,7 +2088,7 @@ impl Game {
         let layered = self.ui.is_some();
         // (the widgets start under the page's buttons: their bar is two of
         // the buttons' rows, in the widgets' own rows)
-        let bar_px = 2.0 * self.ui.as_ref().map_or(self.raster.ch, |u| u.ch) as f32 / self.cfg.ui.scale.clamp(crate::config::WINDOWS_MIN, 2.5) * self.cfg.ui.buttons_k().clamp(0.25, 2.5);
+        let bar_px = 1.0 * self.ui.as_ref().map_or(self.raster.ch, |u| u.ch) as f32;
         let wid_top = self.wl.as_ref().or(self.ui.as_ref()).map(|u| ((bar_px - 1.0) / u.ch.max(1) as f32).ceil().max(1.0) as i32);
         let uf = match &mut self.ui {
             Some(u) => {
@@ -2035,6 +2182,20 @@ impl Game {
         if layered {
             self.scene.draw_ui(uf);
         }
+        // the buttons up top (not while the menu's open: it has its own way
+        // out)
+        self.bar_at = if self.panel.open {
+            vec![]
+        } else {
+            let o = &self.scene.online;
+            let online = (match o.link() {
+                _ if !o.wanted() => 0,
+                crate::net::Link::On => 2,
+                _ => 1,
+            }, o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count(), self.scene.unread_any());
+            let st = BarState { paused: self.paused, sound: self.cfg.sound.enabled, online, install: self.installable, hover: self.bar_hover, down: self.bar_down };
+            draw_bar(uf, &st, t)
+        };
         // the menu's pinned tabs, then over them the post, questions,
         // cards, friends & chats
         if let Some(c) = &shown {
@@ -2280,6 +2441,9 @@ impl Game {
             return;
         }
         if self.menu_touch(action, uc) {
+            return;
+        }
+        if self.bar_touch(action, uc) {
             return;
         }
         if self.widget_touch(action, self.wid_cell(x, y)) {

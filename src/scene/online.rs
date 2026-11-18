@@ -653,6 +653,11 @@ impl Scene {
     }
 
     #[allow(dead_code)]
+    /// Something new from friends (a message, someone asking) not seen yet.
+    pub fn unread_any(&self) -> bool {
+        self.social.unread > 0 || !self.online.book.asking.is_empty() || (0..self.online.book.friends.len()).any(|i| self.online.unread(i) > 0)
+    }
+
     /// Something for the front end to do, from the front end itself (a
     /// link offered and said yes to).
     pub fn queue_front(&mut self, f: Front) {

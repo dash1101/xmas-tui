@@ -31,6 +31,8 @@ pub mod net;
 pub mod sync;
 #[path = "../../../src/settings.rs"]
 pub mod settings;
+#[path = "../../../src/pixicons.rs"]
+pub mod pixicons;
 #[path = "stubs.rs"]
 mod stubs;
 pub use stubs::{platform, update};

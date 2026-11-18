@@ -105,6 +105,10 @@ function build() {
   img = null;
   sound();
   sizeButtons();
+  // (the buttons up top are the village's own: the same as on the desktop
+  // and the phone)
+  wasm.set_touch(game, touchy ? 1 : 0);
+  if (installAsk) wasm.set_installable(game, 1);
   // the other villagers kept in this browser (for the menu)
   wasm.set_villagers(game, putText(JSON.stringify(folk().map((v) => v.name || "a villager (no name)"))));
   // a look at something (?preview=chats), once the village has settled
@@ -285,6 +289,13 @@ function asked(a) {
     askFor(a.slice(5));
   } else if (a.startsWith("keyboard:")) {
     keyboardAsk(a.slice(9));
+  } else if (a === "sound") {
+    // (the village's ♪ button up top: the sound started in the tap itself)
+    wake();
+    sound();
+    toast(wasm.sound_on(game) ? "♪ sound on" : "sound off");
+  } else if (a === "install") {
+    installApp();
   } else if (a.startsWith("rules:") && false) {
     // the village's settings, changed by a guest (said yes to): kept
     try {
@@ -804,16 +815,16 @@ let installAsk = null;
 addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();
   installAsk = e;
-  document.getElementById("b-install").style.display = "inline";
+  if (game) wasm.set_installable(game, 1);
 });
-document.getElementById("b-install").onclick = async () => {
+async function installApp() {
   if (!installAsk) return;
   installAsk.prompt();
   try { await installAsk.userChoice; } catch (e) {}
   installAsk = null;
-  document.getElementById("b-install").style.display = "none";
-};
-addEventListener("appinstalled", () => { document.getElementById("b-install").style.display = "none"; });
+  if (game) wasm.set_installable(game, 0);
+}
+addEventListener("appinstalled", () => { installAsk = null; if (game) wasm.set_installable(game, 0); });
 // an iPhone or iPad's Safari has no such offer: how to, said once
 if (!installed && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
   let told = false;

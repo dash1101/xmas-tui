@@ -29,6 +29,8 @@ pub mod net;
 pub mod sync;
 #[path = "../../src/settings.rs"]
 pub mod settings;
+#[path = "../../src/pixicons.rs"]
+pub mod pixicons;
 #[path = "../../android/native/src/stubs.rs"]
 mod stubs;
 pub use stubs::{platform, update};
@@ -318,6 +320,18 @@ pub extern "C" fn link_offer(w: *mut Web, len: usize) {
         std::slice::from_raw_parts(p, len).to_vec()
     };
     unsafe { &mut *w }.game.link_offer(&String::from_utf8_lossy(&bytes));
+}
+
+/// The page can install the village as an app (a button for it up top).
+#[no_mangle]
+pub extern "C" fn set_installable(w: *mut Web, on: u32) {
+    unsafe { &mut *w }.game.set_installable(on != 0);
+}
+
+/// Played by touch (a phone's browser): the touch controls card.
+#[no_mangle]
+pub extern "C" fn set_touch(w: *mut Web, on: u32) {
+    unsafe { &mut *w }.game.set_touch(on != 0);
 }
 
 /// Randomness from the page (its crypto), for codes and sealing.

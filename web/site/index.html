@@ -52,6 +52,9 @@
   .friend .row select { max-width: 92px; }
   #safe { position: fixed; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   #b-install { display: none; }
+  /* (the buttons up top are drawn in the village now, the same on every
+     device; the page's own bar is kept only for its sizes) */
+  #bar { display: none !important; }
   #kb { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0; border: 0; padding: 0; font-size: 16px; pointer-events: none; }
   #ask { display: none; left: 50%; bottom: 22%; transform: translateX(-50%); width: min(92vw, calc(520px * var(--ui, 1))); padding: 8px 10px 10px; }
   #ask.open { display: block; }

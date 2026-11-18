@@ -431,6 +431,57 @@ pub const TAB_UPKEEP: usize = 11;
 const LIGHT_COUNTS: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const AMB_ROWS: [&str; 5] = ["Wind", "Snowfall hiss", "Fireplace", "Wind chimes", "Aurora shimmer"];
 const PANEL_W: i32 = 76;
+
+/// The width of the sections down the menu's left on a screen `w` wide (0:
+/// none, the tabs along the top instead).
+fn side_width(w: i32) -> i32 {
+    if w - PANEL_W >= 20 {
+        18
+    } else if w - PANEL_W >= 8 {
+        7
+    } else {
+        0
+    }
+}
+
+/// A tab's picture.
+fn tab_icon(i: usize, kind: Kind) -> crate::pixicons::Icon {
+    use crate::pixicons::Icon as I;
+    match i {
+        TAB_HOME => I::Home,
+        TAB_YOU => I::You,
+        TAB_PETS => I::Pets,
+        TAB_ONLINE => I::Online,
+        TAB_SOUND => I::Sound,
+        TAB_EFFECTS => I::Effects,
+        TAB_WIDGETS => I::Widgets,
+        TAB_SHELVES => I::Shelves,
+        TAB_WINDOWS => I::Windows,
+        TAB_DESKTOP if kind == Kind::Desktop => I::Screen,
+        TAB_DESKTOP => I::Screen,
+        TAB_UPKEEP => I::Upkeep,
+        _ => I::Village,
+    }
+}
+
+/// What a tab's for, in a line.
+fn tab_about(i: usize, kind: Kind) -> &'static str {
+    match i {
+        TAB_HOME => "everything at a glance: friends, villages, you and the village",
+        TAB_YOU => "your villager: their name, their look, their profile card",
+        TAB_PETS => "the pets that follow you about, and their names",
+        TAB_ONLINE => "going online: who can find you, what others' words show, the relay",
+        TAB_SOUND => "the music, the village's own sounds, and how loud",
+        TAB_EFFECTS => "the glow, the aurora, light shows and sparkle",
+        TAB_WIDGETS => "the clock, the weather, music, the computer's stats and more",
+        TAB_SHELVES => "folders on the desktop, kept on shelves",
+        TAB_WINDOWS => "snow settling on open windows, and lights round them",
+        TAB_DESKTOP if kind == Kind::Desktop => "how it's drawn: graphics, sizes, the frame rate, the desktop",
+        TAB_DESKTOP => "how it's drawn: graphics, sizes, the frame rate",
+        TAB_UPKEEP => "the save, updates, starting afresh",
+        _ => "the village itself: snow, wind, who's about, the sleigh, the time",
+    }
+}
 const PANEL_H: i32 = 30;
 
 const SLEIGH_STEPS: [f32; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 10.0, 15.0, 30.0];
@@ -1403,9 +1454,8 @@ impl Settings {
         let paused = self.resting.as_deref() == Some("");
         let bg = Bg::Mix(pal::UI_PANEL, if hot || paused { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        let (ch, c) = if paused { ('▶', Rgb::hex(0x9be08a) * (1.0 + 0.15 * (t * 3.0).sin())) } else { ('⏸', Rgb::hex(0xbfe4ff) * if hot { 1.2 } else { 0.85 }) };
-        f.put_g(r.x + 1, r.y, Glyph::new(ch, c).bg(bg).lit(0.0));
-        f.put_g(r.x + 2, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        let _ = t;
+        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, if paused { crate::pixicons::Icon::Play } else { crate::pixicons::Icon::Pause }, bg);
         f.put_g(r.x + 3, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
         if let Some(why) = &self.resting {
             let note = if why.is_empty() { " paused · ▶ or P to carry on ".to_string() } else { format!(" resting: {why} ") };
@@ -1426,22 +1476,22 @@ impl Settings {
         let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        f.put_g(r.x + 1, r.y, Glyph::new('⌖', Rgb::hex(0x9be08a) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
-        f.text(r.x + 2, r.y, " centre", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
+        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Centre, bg);
+        f.text(r.x + 3, r.y, "centre", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         // and the controls button beside it
         let r = help_rect(f.w as i32);
         let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.help;
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        f.put_g(r.x + 1, r.y, Glyph::new('?', Rgb::hex(0x8ad0ff) * if hot { 1.2 } else { 0.85 }).bg(bg).lit(0.0));
-        f.text(r.x + 2, r.y, " controls", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
+        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Help, bg);
+        f.text(r.x + 3, r.y, "controls", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
         let r = gear_rect(f.w as i32);
         let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.open;
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-        let (gc, tc) = if hot { (Rgb::hex(0xffd36b) * (1.1 + 0.1 * (t * 5.0).sin()), pal::UI_TITLE) } else { (Rgb::hex(0xffd36b) * 0.8, pal::UI_TEXT * 0.85) };
+        let tc = if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 };
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        f.put_g(r.x + 1, r.y, Glyph::new('❄', gc).bg(bg).lit(0.0));
-        f.text(r.x + 2, r.y, " menu ", tc, bg, 0.0);
+        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Menu, bg);
+        f.text(r.x + 3, r.y, "menu ", tc, bg, 0.0);
     }
 
     /// The friends & online button (`state`: 0 offline, 1 connecting, 2
@@ -1452,8 +1502,8 @@ impl Settings {
         let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
         f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
         let pulse = if waiting { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
-        f.put_g(r.x + 1, r.y, Glyph::new('✉', Rgb::hex(0xffd36b) * if hot { 1.2 } else { 0.85 * pulse }).bg(bg).lit(0.0));
-        let x = f.text(r.x + 2, r.y, " friends", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
+        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Friends, bg);
+        let x = f.text(r.x + 3, r.y, "friends", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 * pulse }, bg, 0.0);
         let (dot, c) = match state {
             2 if about > 0 => (format!(" ●{about}"), Rgb::hex(0x9be08a)),
             2 => (" ●".to_string(), Rgb::hex(0x9be08a)),
@@ -1554,7 +1604,13 @@ impl Settings {
         // at least the usual; taller than the screen, it scrolls
         let full = self.tab_height(cfg, t).max(PANEL_H);
         let room = (f.h as i32).max(14);
-        let (w, h) = (PANEL_W, full.min(room));
+        // the sections down the left, a picture and a name each (only the
+        // pictures, where it's narrow; where it's narrower still, the tabs
+        // along the top as they were)
+        let side = side_width(f.w as i32);
+        let shown = (0..TABS.len()).filter(|&i| self.tab_shown(i)).count() as i32;
+        let full = full.max(if side > 0 { shown.min(12) + 4 } else { 0 });
+        let (w, h) = (PANEL_W + side, full.min(room));
         self.scroll_max = (full - h).max(0);
         self.scroll = self.scroll.clamp(0, self.scroll_max);
         // centred, unless it's been dragged somewhere (kept on screen)
@@ -1590,7 +1646,7 @@ impl Settings {
         // and the footer
         let (top, bottom) = (y + 4, y + h - 3);
         let pics = f.pictures.len();
-        self.tab_body(f, cfg, x, y - self.scroll, w, t);
+        self.tab_body(f, cfg, x + side, y - self.scroll, w - side, t);
         if self.scroll_max > 0 {
             // what's scrolled out of sight: not there, not clickable
             self.regions.retain(|(r, _)| r.y >= top && r.y < bottom);
@@ -1629,6 +1685,12 @@ impl Settings {
         f.text(close.x, y, " ✕ ", if hot { pal::CANDY_RED * 1.3 } else { pal::UI_TEXT }, BG, 0.0);
         self.regions.push((close, Act::Close));
 
+        if side > 0 {
+            self.draw_sections(f, x, y, h, side, t);
+            let (hx, hy) = self.hover;
+            self.footer(f, x + side, y, w - side, h, hx, hy);
+            return;
+        }
         // the tabs, in two rows: the village's and the villager's, then the
         // desktop's own and the upkeep
         for (row, range) in [(0, 0..TAB_WIDGETS), (1, TAB_WIDGETS..TABS.len())] {
@@ -1657,6 +1719,60 @@ impl Settings {
         // what the setting under the pointer does, in place of the tips
         let (hx, hy) = self.hover;
         self.footer(f, x, y, w, h, hx, hy);
+    }
+
+    /// The sections down the left (`side` wide: a picture and a name, or
+    /// just the picture), and over the tab, its picture, name and what
+    /// it's for.
+    fn draw_sections(&mut self, f: &mut Frame, x: i32, y: i32, h: i32, side: i32, t: f32) {
+        let tabs: Vec<usize> = (0..TABS.len()).filter(|&i| self.tab_shown(i)).collect();
+        let n = tabs.len() as i32;
+        // (two rows each where there's room: a bigger picture)
+        let per = if h - 2 >= 2 * n { 2 } else { 1 };
+        let wide = side >= 14;
+        for (k, &i) in tabs.iter().enumerate() {
+            let ry = y + 1 + k as i32 * per;
+            if ry + per > y + h - 1 {
+                break;
+            }
+            let r = Rect { x: x + 1, y: ry, w: side - 2, h: per };
+            let on = i == self.tab;
+            let hot = r.contains(self.hover.0, self.hover.1);
+            let bg = if on {
+                Bg::Solid(Rgb::hex(0x3a2a14))
+            } else if hot {
+                Bg::Mix(Rgb::hex(0x2a2440), 0.95)
+            } else {
+                BG
+            };
+            for yy in ry..ry + per {
+                for xx in x + 1..x + side - 1 {
+                    f.put_g(xx, yy, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+                }
+                // (the one picked: a gold bar down its left)
+                if on {
+                    f.put_g(x + 1, yy, Glyph::new('▌', Rgb::hex(0xffd36b) * (1.0 + 0.1 * (t * 3.0).sin())).bg(bg).lit(0.0));
+                }
+            }
+            let (icw, ich) = if per == 2 { (4, 2) } else { (2, 1) };
+            crate::pixicons::put(f, x + 2, ry, icw, ich, tab_icon(i, self.kind), bg);
+            if wide {
+                let label: String = self.tab_label(i).chars().take((side - icw - 5).max(1) as usize).collect();
+                let fg = if on { Rgb::hex(0xffd36b) * 1.15 } else if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.9 };
+                f.text(x + 3 + icw, ry + (per - 1) / 2, &label, fg, bg, 0.0);
+            }
+            self.regions.push((r, Act::Tab(i as u8)));
+        }
+        // the line between the sections and the tab
+        for yy in y + 1..y + h - 1 {
+            f.put_g(x + side - 1, yy, Glyph::new('│', pal::UI_BORDER * 0.6).bg(BG).lit(0.0));
+        }
+        // the tab's head: its picture, its name, what it's for
+        let cx = x + side + 2;
+        crate::pixicons::put(f, cx, y + 1, 4, 2, tab_icon(self.tab, self.kind), BG);
+        f.text(cx + 5, y + 1, self.tab_label(self.tab), Rgb::hex(0xffd36b) * 1.1, BG, 0.0);
+        let about = tab_about(self.tab, self.kind);
+        f.text(cx + 5, y + 2, about, pal::UI_DIM, BG, 0.0);
     }
 
     /// Which tabs there are here.
@@ -2354,28 +2470,29 @@ impl Settings {
         let wn = when.chars().count() as i32;
         f.text((right - 1 - wn).max(lx + 30), yy, &when, pal::UI_TEXT, BG, 0.0);
         yy += 2;
+        use crate::pixicons::Icon as I;
         let you = if self.kind == Kind::Desktop { "Desktop" } else { "Screen" };
-        let ninth = if self.kind == Kind::Desktop || self.widgets_ok { ('▦', Rgb::hex(0x8ad0ff), "Widgets", Act::Tab(TAB_WIDGETS as u8)) } else { ('⌨', Rgb::hex(0x8ad0ff), "Controls", Act::Help) };
-        let tiles: [(char, Rgb, &str, Act); 12] = [
-            ('▶', Rgb::hex(0x9be08a), "Back to village", Act::Close),
-            ('✉', Rgb::hex(0xffd36b), "Friends & online", Act::Net(NET_FRIENDS)),
-            ('⌂', Rgb::hex(0xff9a6b), "Public villages", Act::Net(NET_PUBLIC)),
-            ('☃', Rgb::hex(0xf2f6ff), "You & your look", Act::Tab(TAB_YOU as u8)),
-            ('♥', Rgb::hex(0xff6b8a), "Pets", Act::Tab(TAB_PETS as u8)),
-            ('❄', Rgb::hex(0xbfe4ff), "The village", Act::Tab(TAB_VILLAGE as u8)),
-            ('◉', Rgb::hex(0x9be08a), "Online settings", Act::Tab(TAB_ONLINE as u8)),
-            ('♪', Rgb::hex(0xffd36b), "Sound", Act::Tab(TAB_SOUND as u8)),
+        let ninth = if self.kind == Kind::Desktop || self.widgets_ok { (I::Widgets, "Widgets", "clock, weather…", Act::Tab(TAB_WIDGETS as u8)) } else { (I::Help, "Controls", "the keys, the buttons", Act::Help) };
+        let tiles: [(I, &str, &str, Act); 12] = [
+            (I::Play, "Back to village", "Esc", Act::Close),
+            (I::Friends, "Friends", "chat and play", Act::Net(NET_FRIENDS)),
+            (I::Home, "Public villages", "drop in anywhere", Act::Net(NET_PUBLIC)),
+            (I::You, "You", "name and look", Act::Tab(TAB_YOU as u8)),
+            (I::Pets, "Pets", "who follows you", Act::Tab(TAB_PETS as u8)),
+            (I::Village, "The village", "snow and folk", Act::Tab(TAB_VILLAGE as u8)),
+            (I::Online, "Online", "who sees you", Act::Tab(TAB_ONLINE as u8)),
+            (I::Sound, "Sound", "music, volume", Act::Tab(TAB_SOUND as u8)),
             ninth,
-            ('▣', Rgb::hex(0xbfe4ff), you, Act::Tab(TAB_DESKTOP as u8)),
-            ('⇩', Rgb::hex(0xff9a6b), "Save & upkeep", Act::Tab(TAB_UPKEEP as u8)),
-            ('↻', Rgb::hex(0x9be08a), "Restart", Act::Restart),
+            (I::Screen, you, "graphics, size", Act::Tab(TAB_DESKTOP as u8)),
+            (I::Upkeep, "Save & upkeep", "saves, updates", Act::Tab(TAB_UPKEEP as u8)),
+            (I::Restart, "Restart", "start it again", Act::Restart),
         ];
         let tw = ((right - lx - 4) / 3).clamp(18, 24);
-        for (k, (icon, col, label, act)) in tiles.into_iter().enumerate() {
-            let (x, y) = (lx + (k % 3) as i32 * (tw + 2), yy + (k / 3) as i32 * 3);
-            self.tile(f, x, y, tw, icon, col, label, act, t);
+        for (k, (icon, label, hint, act)) in tiles.into_iter().enumerate() {
+            let (x, y) = (lx + (k % 3) as i32 * (tw + 2), yy + (k / 3) as i32 * 4);
+            self.tile(f, x, y, tw, icon, label, hint, act, t);
         }
-        yy += 13;
+        yy += 17;
         let mut x = self.check(f, lx, yy, "Autopilot", Act::Toggle(F::Autopilot), cfg.scene.autopilot) + 3;
         x = self.check(f, x, yy, "Sound", Act::Toggle(F::Sound), cfg.sound.enabled) + 3;
         x = self.check(f, x, yy, "Paused", Act::Pause, self.resting.as_deref() == Some("")) + 3;
@@ -2405,15 +2522,15 @@ impl Settings {
     /// what it's for (a candy-cane stripe along the top of the one under
     /// the pointer).
     #[allow(clippy::too_many_arguments)]
-    fn tile(&mut self, f: &mut Frame, x: i32, y: i32, w: i32, icon: char, icol: Rgb, label: &str, act: Act, t: f32) {
-        let r = Rect { x, y, w, h: 3 };
+    fn tile(&mut self, f: &mut Frame, x: i32, y: i32, w: i32, icon: crate::pixicons::Icon, label: &str, hint: &str, act: Act, t: f32) {
+        let r = Rect { x, y, w, h: 4 };
         let hot = r.contains(self.hover.0, self.hover.1);
         let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { Bg::Mix(Rgb::hex(0x1c1a2c), 0.95) };
         let edge = if hot { Rgb::hex(0xffd36b) } else { pal::UI_BORDER * 0.8 };
         let shift = (t * 6.0) as i32;
-        for yy in y..y + 3 {
+        for yy in y..y + 4 {
             for xx in x..x + w {
-                let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + 2) {
+                let ch = match (xx == x, xx == x + w - 1, yy == y, yy == y + 3) {
                     (true, _, true, _) => '╭',
                     (_, true, true, _) => '╮',
                     (true, _, _, true) => '╰',
@@ -2430,9 +2547,12 @@ impl Settings {
                 f.put_g(xx, yy, Glyph::new(ch, c).bg(bg).lit(0.0));
             }
         }
-        f.put_g(x + 2, y + 1, Glyph::new(icon, icol * if hot { 1.25 } else { 1.0 }).bg(bg).lit(0.0));
-        let label: String = label.chars().take((w - 6).max(1) as usize).collect();
-        f.text(x + 4, y + 1, &label, if hot { pal::UI_TITLE } else { pal::UI_TEXT }, bg, 0.0);
+        // its picture, its name, and in a word what's there
+        crate::pixicons::put(f, x + 1, y + 1, 4, 2, icon, bg);
+        let label: String = label.chars().take((w - 7).max(1) as usize).collect();
+        f.text(x + 6, y + 1, &label, if hot { pal::UI_TITLE } else { pal::UI_TEXT }, bg, 0.0);
+        let hint: String = hint.chars().take((w - 7).max(1) as usize).collect();
+        f.text(x + 6, y + 2, &hint, pal::UI_DIM, bg, 0.0);
         self.regions.push((r, act));
     }
 
@@ -2923,10 +3043,14 @@ impl Settings {
         }
         let r = Rect { x, y, w: len, h: 1 };
         let hot = r.contains(self.hover.0, self.hover.1);
-        let box_c = if hot { Rgb::hex(0xffd36b) * 1.2 } else { pal::UI_BORDER };
-        f.text(x, y, "[", box_c, BG, 0.0);
-        f.put_g(x + 1, y, Glyph::new(if on { '✓' } else { ' ' }, pal::PINE * 1.4).bg(BG).lit(0.0));
-        f.text(x + 2, y, "]", box_c, BG, 0.0);
+        // a switch: green, its knob over to the right (on); grey, to the
+        // left (off)
+        let (track, knob) = if on { (Rgb::hex(0x2f8a4c), Rgb::hex(0xf4f0ea)) } else { (Rgb::hex(0x3a3e58), Rgb::hex(0x9a9eb4)) };
+        let track = if hot { track * 1.25 } else { track };
+        for k in 0..3 {
+            let ch = if (on && k == 2) || (!on && k == 0) { '●' } else { ' ' };
+            f.put_g(x + k, y, Glyph::new(ch, knob).bg(Bg::Solid(track)).lit(0.0));
+        }
         let end = f.text(x + 4, y, label, if on { pal::UI_TEXT } else { pal::UI_DIM }, BG, 0.0);
         self.regions.push((r, act));
         end

@@ -28,6 +28,7 @@ mod sync;
 mod term;
 mod tray;
 mod perf;
+mod pixicons;
 mod update;
 mod widgets;
 mod window;
