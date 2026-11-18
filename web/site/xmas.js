@@ -368,6 +368,11 @@ function keyboardAsk(s) {
     kb.focus({ preventScroll: true });
     kb.setSelectionRange(kb.value.length, kb.value.length);
   } else if (what === "set") {
+    // (the village tidied the line, a code's dashes put in: taken only if
+    // it's still what's in the box, give or take those; typed on since,
+    // the village tidies that in its turn)
+    const letters = (s) => (s || "").replace(/[- ]/g, "").toUpperCase();
+    if (letters(a) !== letters(kb.value)) return;
     kb.value = a || "";
     kb.setSelectionRange(kb.value.length, kb.value.length);
   } else if (what === "off") {

@@ -873,6 +873,21 @@ impl Game {
                         l.unfriended(&code);
                     }
                 }
+                Front::LeftGroup(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.left_group(&code, true, crate::clock::now().timestamp());
+                    }
+                }
+                Front::JoinedGroup(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.left_group(&code, false, crate::clock::now().timestamp());
+                    }
+                }
+                Front::ClearedChat(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.cleared_chat(&code, crate::clock::now().timestamp());
+                    }
+                }
                 Front::Villager(i) => match self.save.clone() {
                     Some(p) => {
                         let to = crate::save::villagers(&p).into_iter().nth(i).map(|(_, f)| f);
@@ -1721,6 +1736,9 @@ impl Game {
 
     /// Something for the app itself to do, if anything's asked.
     pub fn take_ask(&mut self) -> Option<String> {
+        // (a line opened by the tap just now: the keyboard asked for in the
+        // same tap, which is the only time a phone's browser brings it up)
+        self.typing_asks();
         (!self.asks.is_empty()).then(|| self.asks.remove(0))
     }
 

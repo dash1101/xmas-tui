@@ -144,6 +144,11 @@ pub enum Front {
     NewVillager(String),
     /// A friend unfriended (their code; linked devices drop them too).
     Unfriended(String),
+    /// A group left, or joined (again); a friend's chat cleared (their
+    /// code): linked devices do the same, not undo it.
+    LeftGroup(String),
+    JoinedGroup(String),
+    ClearedChat(String),
     /// Hosting: one of the village's settings changed by a guest (asked,
     /// and said yes to; or an admin's): its key and value (see `Rules`).
     SetRule(String, String),
@@ -660,6 +665,7 @@ impl Scene {
 
     /// Something for the front end to do, from the front end itself (a
     /// link offered and said yes to).
+    #[allow(dead_code)]
     pub fn queue_front(&mut self, f: Front) {
         self.social.front.push(f);
     }
@@ -2674,8 +2680,9 @@ impl Scene {
                 }
             }
             NetDo::GroupLeave(i) => {
-                let name = self.online.book.groups.get(i as usize).map(|g| g.name.clone()).unwrap_or_default();
+                let (name, code) = self.online.book.groups.get(i as usize).map(|g| (g.name.clone(), g.code.clone())).unwrap_or_default();
                 self.online.leave_group(i as usize);
+                self.social.front.push(Front::LeftGroup(code));
                 self.post(format!("# left {name}"));
             }
             NetDo::Admin(id, on) => {
@@ -2691,8 +2698,10 @@ impl Scene {
             }
             NetDo::PinFriend(i) => self.pin_friend(i as usize),
             NetDo::ClearChat(i) => {
+                let code = self.online.book.friends.get(i as usize).map(|p| p.code.clone()).unwrap_or_default();
                 self.online.clear_chat(i as usize);
-                self.post("⌫ the chat's cleared (from this device)");
+                self.social.front.push(Front::ClearedChat(code));
+                self.post("⌫ the chat's cleared (on linked devices too)");
             }
             NetDo::Quiet(i) => {
                 if let Some(p) = self.online.book.friends.get_mut(i as usize) {
@@ -2810,6 +2819,7 @@ impl Scene {
             TextFor::Chat => self.chat(text, t),
             TextFor::GroupNew => {
                 let code = self.online.new_group(text);
+                self.social.front.push(Front::JoinedGroup(code.clone()));
                 let pretty = crate::net::seal::pretty(&code);
                 self.copy_ask = Some(pretty.clone());
                 let name = self.online.book.groups.last().map(|g| g.name.clone()).unwrap_or_default();
@@ -2821,6 +2831,7 @@ impl Scene {
                 let name: String = words.collect::<Vec<_>>().join(" ");
                 match self.online.join_group(&name, code) {
                     Ok(()) => {
+                        self.social.front.push(Front::JoinedGroup(code.to_string()));
                         let name = self.online.book.groups.last().map(|g| g.name.clone()).unwrap_or_default();
                         self.post(format!("# into {name}: @{} to talk there", name.split_whitespace().next().unwrap_or("")));
                     }

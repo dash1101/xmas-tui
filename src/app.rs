@@ -841,6 +841,21 @@ impl App {
                         l.unfriended(&code);
                     }
                 }
+                Front::LeftGroup(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.left_group(&code, true, crate::clock::now().timestamp());
+                    }
+                }
+                Front::JoinedGroup(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.left_group(&code, false, crate::clock::now().timestamp());
+                    }
+                }
+                Front::ClearedChat(code) => {
+                    if let Some(l) = &mut self.linked {
+                        l.cleared_chat(&code, crate::clock::now().timestamp());
+                    }
+                }
             }
         }
     }

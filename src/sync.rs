@@ -37,8 +37,13 @@ pub struct Linked {
     pub joining: bool,
     /// The others' sides, by device id.
     pub others: BTreeMap<String, Theirs>,
-    /// Friends unfriended (not to come back from the others' lists).
+    /// Friends unfriended (not to come back from the others' lists); groups
+    /// left; chats cleared (each friend's: lines up to then gone).
     pub gone: Vec<String>,
+    /// (each group's last leaving or joining: when, and left; the newest
+    /// on any device wins)
+    pub left: BTreeMap<String, (i64, bool)>,
+    pub cleared: BTreeMap<String, i64>,
     /// The villager as last sent or taken (a difference: changed here).
     pub last_you: Option<You>,
     pub last_seed: u32,
@@ -88,6 +93,8 @@ struct State {
     friends: Vec<Pal>,
     asking: Vec<Pal>,
     gone: Vec<String>,
+    left: BTreeMap<String, (i64, bool)>,
+    cleared: BTreeMap<String, i64>,
     mine: String,
     /// The chats with friends (the latest lines of each, the most lately
     /// talked to first, as many as fit), and the groups.
@@ -292,6 +299,8 @@ impl Linked {
             friends: book.friends.clone(),
             asking: book.asking.clone(),
             gone: self.gone.clone(),
+            left: self.left.clone(),
+            cleared: self.cleared.clone(),
             mine: serde_json::to_string(&share(pockets, &self.others)).unwrap_or_default(),
             chats: chats_to_send(book),
             groups: book.groups.clone(),
@@ -308,6 +317,20 @@ impl Linked {
         if !self.gone.contains(&c) {
             self.gone.push(c);
         }
+    }
+
+    /// A group left here (`left`), or joined (again), `now`: the others do
+    /// the same.
+    pub fn left_group(&mut self, code: &str, left: bool, now: i64) {
+        self.left.insert(crate::net::seal::norm(code), (now, left));
+    }
+
+    /// A friend's chat cleared here, up to `now`: the others' lines up to
+    /// then don't bring it back.
+    pub fn cleared_chat(&mut self, code: &str, now: i64) {
+        let c = crate::net::seal::norm(code);
+        let e = self.cleared.entry(c).or_insert(0);
+        *e = (*e).max(now);
     }
 
     /// Another of this villager's devices open now too: into its village
@@ -392,21 +415,43 @@ impl Linked {
             }
         }
         b.asking.retain(|p| !b.friends.iter().any(|q| norm(&q.code) == norm(&p.code)));
-        // chats: every line either has, once, in order
+        // groups left, chats cleared, on either: so here too
+        for (g, &(at, l)) in &st.left {
+            let e = self.left.entry(norm(g)).or_insert((at, l));
+            if at > e.0 {
+                *e = (at, l);
+            }
+        }
+        for (code, at) in &st.cleared {
+            let e = self.cleared.entry(norm(code)).or_insert(0);
+            *e = (*e).max(*at);
+        }
+        let cleared = &self.cleared;
+        let left: Vec<String> = self.left.iter().filter(|(_, v)| v.1).map(|(k, _)| k.clone()).collect();
+        // chats: every line either has, once, in order (but those cleared)
         for (code, lines) in &st.chats {
             let code = norm(code);
             if code.len() != 12 || gone.contains(&code) {
                 continue;
             }
+            let upto = cleared.get(&code).copied().unwrap_or(i64::MIN);
+            let fresh: Vec<ChatLine> = lines.iter().filter(|l| l.at > upto).cloned().collect();
             let mine = b.chats.entry(code).or_default();
-            merge_chat(mine, lines);
+            merge_chat(mine, &fresh);
         }
-        // groups: any either's in
+        for (code, upto) in cleared {
+            if let Some(v) = b.chats.get_mut(code) {
+                v.retain(|l| l.at > *upto);
+            }
+        }
+        b.chats.retain(|_, v| !v.is_empty());
+        // groups: any either's in (but those left)
         for g in &st.groups {
-            if norm(&g.code).len() == 12 && !b.groups.iter().any(|h| norm(&h.code) == norm(&g.code)) && b.groups.len() < 30 {
+            if norm(&g.code).len() == 12 && !left.contains(&norm(&g.code)) && !b.groups.iter().any(|h| norm(&h.code) == norm(&g.code)) && b.groups.len() < 30 {
                 b.groups.push(Group { name: crate::net::clean(&g.name, 32), code: norm(&g.code) });
             }
         }
+        b.groups.retain(|g| !left.contains(&norm(&g.code)));
         if &b != book {
             out.book = Some(b);
         }
@@ -449,7 +494,19 @@ fn chats_to_send(book: &Book) -> BTreeMap<String, Vec<ChatLine>> {
 fn merge_chat(mine: &mut Vec<ChatLine>, theirs: &[ChatLine]) {
     for l in theirs.iter().take(60) {
         let text = crate::net::clean(&l.text, 300);
-        match mine.iter_mut().find(|m| m.at == l.at && m.mine == l.mine && m.text == text) {
+        // (a line from the friend that both devices heard: the same number
+        // from their side; or, from an older version without one, the same
+        // words within a couple of minutes, each device having stamped it
+        // as it came. This villager's own: the same time, the same words.)
+        let same = |m: &ChatLine| {
+            m.mine == l.mine
+                && if !l.mine && l.n != 0 && m.n != 0 {
+                    m.n == l.n
+                } else {
+                    m.text == text && if l.mine { m.at == l.at } else { (m.at - l.at).abs() <= 120 }
+                }
+        };
+        match mine.iter_mut().find(|m| same(m)) {
             // (got there, as either side knows it)
             Some(m) => {
                 if l.state == crate::net::sent::THERE && m.state != crate::net::sent::THERE {
@@ -505,6 +562,49 @@ mod tests {
         let back = desk.take("phone", now + 5, &sp, now + 5, &you("Robin"), 5, &pk, &bd).book.expect("the book");
         let texts: Vec<&str> = back.chats[&sam].iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, vec!["snowball fight?", "you're on", "see you at the tree"]);
+    }
+
+    /// A group left, a chat cleared, on one device: the other's word
+    /// doesn't bring them back (joining again does); a friend's line both
+    /// devices heard is kept once, though each stamped it as it came.
+    #[test]
+    fn leaving_and_clearing_stick_and_lines_heard_twice_show_once() {
+        let pk = Pockets::default();
+        let mut desk = Linked::new("ABCD-EFGH-JKLM", false);
+        let mut phone = Linked::new("ABCD-EFGH-JKLM", false);
+        (desk.dev, phone.dev) = ("desk".into(), "phone".into());
+        let sam = "SAMSAMSAMSAM".to_string();
+        let carols = Group { name: "carols".into(), code: "CAROLCAROLCA".into() };
+        let mut bd = Book { code: "DESKDESKDESK".into(), ..Default::default() };
+        bd.friends.push(Pal { name: "Sam".into(), code: sam.clone(), ..Default::default() });
+        let mut bp = bd.clone();
+        bp.groups.push(carols.clone());
+        bp.chats.insert(sam.clone(), vec![ChatLine { at: 100, mine: false, text: "hi".into(), n: 7, ..Default::default() }]);
+        // the desk left the group and cleared the chat (it had them too)
+        desk.left_group(&carols.code, true, 200);
+        desk.cleared_chat(&sam, 200);
+        let sp = phone.state(&you("Robin"), 5, &pk, &bp, 300);
+        let got = desk.take("phone", 300, &sp, 300, &you("Robin"), 5, &pk, &bd).book.unwrap_or(bd.clone());
+        assert!(got.groups.is_empty(), "the group came back");
+        assert!(got.chats.get(&sam).is_none_or(|v| v.is_empty()), "the chat came back");
+        // and the phone, hearing the desk, does the same
+        let sd = desk.state(&you("Robin"), 5, &pk, &got, 310);
+        let bp2 = phone.take("desk", 310, &sd, 310, &you("Robin"), 5, &pk, &bp).book.expect("the phone's book");
+        assert!(bp2.groups.is_empty() && bp2.chats.get(&sam).is_none_or(|v| v.is_empty()));
+        // joined again on the phone, later: back on both
+        phone.left_group(&carols.code, false, 400);
+        let mut bp3 = bp2.clone();
+        bp3.groups.push(carols.clone());
+        let sp = phone.state(&you("Robin"), 5, &pk, &bp3, 400);
+        let got = desk.take("phone", 400, &sp, 400, &you("Robin"), 5, &pk, &got).book.expect("the desk's book");
+        assert_eq!(got.groups.len(), 1, "joined again");
+        // a line from Sam both heard, stamped a second apart: once
+        let mut bd = got;
+        bd.chats.insert(sam.clone(), vec![ChatLine { at: 500, mine: false, text: "snow!".into(), n: 9, ..Default::default() }]);
+        bp3.chats.insert(sam.clone(), vec![ChatLine { at: 501, mine: false, text: "snow!".into(), n: 9, ..Default::default() }]);
+        let sp = phone.state(&you("Robin"), 5, &pk, &bp3, 510);
+        let got = desk.take("phone", 510, &sp, 510, &you("Robin"), 5, &pk, &bd).book.unwrap_or(bd.clone());
+        assert_eq!(got.chats[&sam].iter().filter(|l| l.text == "snow!").count(), 1);
     }
 
     #[test]

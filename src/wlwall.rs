@@ -339,12 +339,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     }
                     return;
                 }
-                if st.ctrl {
-                    if let (true, Some(c)) = (down, x.letter(sym)) {
+                // (Ctrl + a letter: the zoom keys and such; a key let go is
+                // let go whatever's held, or it'd stick)
+                if st.ctrl && down {
+                    if let Some(c) = x.letter(sym) {
                         st.input.push(Input::Ctrl(c.to_ascii_lowercase()));
                     }
                     return;
                 }
+                // (with Ctrl held a letter types a control code: its own
+                // letter's what was let go)
+                let text = if st.ctrl { x.letter(sym) } else { text };
                 let Some(k) = key_in(sym, text) else { return };
                 st.input.push(Input::Key { k, down });
                 if down && st.repeat.0 > 0 {

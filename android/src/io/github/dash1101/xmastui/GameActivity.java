@@ -388,7 +388,11 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 }
             });
             setOnEditorActionListener((v, id, ev) -> {
+                // (a keyboard's Enter comes down and up: once, on the way down)
+                if (ev != null && ev.getAction() != KeyEvent.ACTION_DOWN) return true;
                 if (game != 0) Native.typeKey(game, 1);
+                // (sent: the box empty at once, not when the village says)
+                setKb("");
                 return true;
             });
         }
@@ -429,12 +433,20 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 im.showSoftInput(kb, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
             }
         } else if ("set".equals(p[0])) {
-            setKb(p.length > 1 ? p[1] : "");
+            // (the village's tidied the line, a code's dashes put in: taken
+            // only if it's still what's in the box, give or take those;
+            // typed on since, the village tidies that in its turn)
+            String v = p.length > 1 ? p[1] : "";
+            if (letters(v).equals(letters(kb.getText().toString()))) setKb(v);
         } else if ("off".equals(p[0])) {
             kbOn = false;
             hideKeyboard();
             immersive();
         }
+    }
+
+    private static String letters(String s) {
+        return s.replace("-", "").replace(" ", "").toUpperCase(java.util.Locale.ROOT);
     }
 
     private void setKb(String text) {
