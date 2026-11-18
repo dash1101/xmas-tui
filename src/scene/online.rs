@@ -77,6 +77,14 @@ pub enum NetDo {
     Admin(u32, bool),
     /// The messages, all of them (marked read).
     Messages,
+    /// Friend i: a name of my own for them (asked for).
+    Rename(u8),
+    /// Friend i: quiet, or not.
+    Quiet(u8),
+    /// Friends & chats (the window).
+    Friends,
+    /// Friends & chats, with friend i picked.
+    ChatWith(u8),
     /// Something said just to someone here (their id).
     Whisper(u32),
     /// The link(s) hidden in a message (its place in the messages, newest
@@ -98,6 +106,8 @@ pub enum TextFor {
     JoinCode,
     Say,
     Motto,
+    /// A name for friend i (just here).
+    Rename(u8),
     /// The link code from another device.
     Link,
     /// A new villager's name.
@@ -394,6 +404,8 @@ pub struct Social {
     /// runs): the village stands still, online goes on (`rest_tick`), and
     /// the others see this villager greyed.
     pub resting: bool,
+    /// Friends & chats (the window).
+    pub chats: super::chats::Chats,
     /// (Tests, whose online side keeps to the village's clock: the seconds
     /// spent resting, which that clock doesn't count.)
     pub rested: f32,
@@ -703,6 +715,7 @@ impl Scene {
 
     /// Each frame: the online side moves on, and what it heard is shown.
     pub(super) fn update_online(&mut self, dt: f32, t: f32) {
+        self.update_chats();
         if self.social.want_public.replace(false) {
             self.online.watch_public();
         }
@@ -1700,6 +1713,12 @@ impl Scene {
                 self.social.panel_at = 0.0;
             }
             "card" => self.social.card = Some((sam, None)),
+            "chats" => {
+                self.online.pretend_chat(0, &[(false, "race you down the mountain after dinner?", 3600), (true, "you're on! the black run this time", 3500), (false, "ha. bring cocoa for the loser", 3400), (false, "also the lights on the square are up, come and see", 120)]);
+                self.online.pretend_chat(1, &[(false, "come and see the lights!", 40)]);
+                self.online.book.asking.push(net::Pal { name: "Robin".into(), code: "PRVWASKS0000".into(), waiting: false, quiet: false });
+                self.open_chats(Some(0));
+            }
             "netchess" | "netcards" => {
                 let k = if what == "netchess" { ask::CHESS } else { ask::SNOWFLAKES };
                 let me = self.online.my_id();
@@ -1836,13 +1855,14 @@ impl Scene {
         let (ox, oy, cover) = (f.ox, f.oy, f.cover_pictures);
         (f.ox, f.oy) = (0, 0);
         f.cover_pictures = true;
-        if self.trip.is_none() && self.look.is_none() {
+        if self.trip.is_none() && self.look.is_none() && !self.social.chats.open {
             self.draw_post(f);
         }
         if let Some(tb) = self.table.as_ref().filter(|_| self.table_shows()) {
             tb.draw(f, self.ui_look, self.now());
         }
         self.draw_social(f);
+        self.draw_chats(f);
         (f.ox, f.oy, f.cover_pictures) = (ox, oy, cover);
     }
 
@@ -1931,11 +1951,11 @@ impl Scene {
         let about = fr.iter().filter(|(p, h)| !p.waiting && h.as_ref().is_some_and(|h| h.on)).count();
         let n = fr.iter().filter(|(p, _)| !p.waiting).count();
         let friends = match (n, about) {
-            (0, _) => "★ friends: add one ▸".to_string(),
-            (n, 0) => format!("★ friends ({n}) ▸"),
-            (n, a) => format!("★ friends ({n} · {a} online) ▸"),
+            (0, _) => "★ friends & chats: add one".to_string(),
+            (n, 0) => format!("★ friends & chats ({n})"),
+            (n, a) => format!("★ friends & chats ({n} · {a} online)"),
         };
-        v.push((friends, Do::More(MORE_FRIENDS)));
+        v.push((friends, Do::Net(NetDo::Friends)));
         let groups = o.book.groups.len();
         v.push((if groups == 0 { "# groups (chat rooms shared by code) ▸".to_string() } else { format!("# groups ({groups}) ▸") }, Do::More(MORE_GROUPS)));
         match o.village() {
@@ -2085,6 +2105,10 @@ impl Scene {
     /// on a line of its own), for the box it's typed in.
     pub fn chat_prompt(&self, i: usize) -> String {
         let name = self.online.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
+        // (the chat's on show in friends & chats: only who it's to)
+        if self.social.chats.open {
+            return format!("✉ to {name}");
+        }
         let lines = self.online.chat(i);
         let mut s = format!("✉ chat with {name}");
         if lines.is_empty() {
@@ -2103,7 +2127,7 @@ impl Scene {
         let Some((p, here)) = fr.get(i) else { return ("friends".into(), vec![]) };
         let mut v = vec![];
         if !p.waiting {
-            v.push((format!("✉ chat with {}", p.name), Do::Net(NetDo::Mail(i as u8))));
+            v.push((format!("✉ chat with {}", p.name), Do::Net(NetDo::ChatWith(i as u8))));
             v.push((format!("♪ ping {} (a little tone)", p.name), Do::Net(NetDo::Ping(i as u8))));
         }
         if here.as_ref().is_some_and(|h| h.village.is_some()) {
@@ -2117,6 +2141,8 @@ impl Scene {
         if here.as_ref().is_some_and(|h| h.card.is_some()) {
             v.push((format!("★ {}'s profile card", p.name), Do::Net(NetDo::FriendCard(i as u8))));
         }
+        v.push((format!("✎ rename {} (just here)", p.name), Do::Net(NetDo::Rename(i as u8))));
+        v.push((if p.quiet { format!("♪ let {}'s messages chime again", p.name) } else { format!("⊘ quiet: no chime for {}'s messages", p.name) }, Do::Net(NetDo::Quiet(i as u8))));
         v.push((format!("✕ unfriend {}", p.name), Do::Net(NetDo::Unfriend(i as u8))));
         (p.name.clone(), v)
     }
@@ -2214,6 +2240,22 @@ impl Scene {
 
     /// The online menus behind a "▸" (see `more_menu`), if `k` is one.
     pub(super) fn online_more(&self, k: u8) -> Option<(String, Vec<(String, Do)>)> {
+        let (title, mut v) = self.online_more_only(k)?;
+        // each of the menus behind: the way back up first
+        let back = match k {
+            k if (MORE_GROUP..MORE_GROUP + 12).contains(&k) => Some(Do::More(MORE_GROUPS)),
+            k if k >= MORE_OTHER => Some(Do::More(MORE_PEOPLE)),
+            k if k >= MORE_FRIEND => Some(Do::Net(NetDo::ChatWith(k - MORE_FRIEND))),
+            MORE_PEOPLE | MORE_DEVICES | MORE_VILLAGERS | MORE_FRIENDS | MORE_GROUPS | MORE_MESSAGES | MORE_PUBLIC => Some(Do::More(MORE_ONLINE)),
+            _ => None,
+        };
+        if let Some(b) = back {
+            v.insert(0, ("◂ back".into(), b));
+        }
+        Some((title, v))
+    }
+
+    fn online_more_only(&self, k: u8) -> Option<(String, Vec<(String, Do)>)> {
         Some(match k {
             MORE_ONLINE => self.online_menu(),
             MORE_PEOPLE => self.people_menu(),
@@ -2422,6 +2464,20 @@ impl Scene {
                 self.post(if on { format!("⚙ {name} may change the village's settings") } else { format!("⚙ {name} asks first again") });
             }
             NetDo::Messages => self.messages_read(),
+            NetDo::Friends => self.open_chats(None),
+            NetDo::Rename(i) => {
+                let name = self.online.book.friends.get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
+                self.text_ask = Some((TextFor::Rename(i), format!("a name for {name} (just here; empty: as it was)")));
+            }
+            NetDo::Quiet(i) => {
+                if let Some(p) = self.online.book.friends.get_mut(i as usize) {
+                    p.quiet ^= true;
+                    let note = if p.quiet { format!("⊘ {} is quiet: their messages wait in the chat", p.name) } else { format!("♪ {}'s messages chime again", p.name) };
+                    self.online.dirty = true;
+                    self.post(note);
+                }
+            }
+            NetDo::ChatWith(i) => self.open_chats(Some(i as usize)),
             NetDo::ShowLink(k) => {
                 let n = self.social.log.len();
                 if let Some(l) = (k as usize).checked_add(1).and_then(|k| n.checked_sub(k)).and_then(|i| self.social.log.get_mut(i)) {
@@ -2501,6 +2557,13 @@ impl Scene {
                 self.online.say(text);
                 self.log_line(format!("☺ you: {text}"), false);
                 self.you_say(text, t);
+            }
+            TextFor::Rename(i) => {
+                let name = crate::net::clean(text.trim(), 32);
+                if let Some(p) = self.online.book.friends.get_mut(i as usize).filter(|_| !name.is_empty()) {
+                    p.name = name;
+                    self.online.dirty = true;
+                }
             }
             TextFor::Motto => {
                 let m: String = text.chars().take(60).collect();
@@ -2586,7 +2649,7 @@ fn greyed(l: sprites::Look) -> sprites::Look {
     sprites::Look { coat: g(l.coat), hat: l.hat.map(g), hair: g(l.hair), scarf: l.scarf.map(g), skin: g(l.skin), mittens: g(l.mittens), ..l }
 }
 
-fn ago_short(s: i64) -> String {
+pub(super) fn ago_short(s: i64) -> String {
     match s {
         s if s < 60 => "now".into(),
         s if s < 3600 => format!("{}m", s / 60),

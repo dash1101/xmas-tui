@@ -302,7 +302,7 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_chat(_: JNIEnv, _:
 /// Friends & online (the ✉ button).
 #[no_mangle]
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_online(_: JNIEnv, _: JClass, h: jlong) {
-    with_game(h, "online", (), |g| g.online_menu());
+    with_game(h, "online", (), |g| g.friends());
 }
 
 #[no_mangle]

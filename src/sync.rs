@@ -449,7 +449,7 @@ mod tests {
         pd.greeted = vec![1, 2];
         pp.cheer = 3; // (the phone's own, before linking)
         pp.greeted = vec![2, 7];
-        let mut bd = Book { code: "DESKCODE2345".into(), friends: vec![Pal { name: "Sam".into(), code: "SAMSAMSAMSAM".into(), waiting: false }], ..Default::default() };
+        let mut bd = Book { code: "DESKCODE2345".into(), friends: vec![Pal { name: "Sam".into(), code: "SAMSAMSAMSAM".into(), waiting: false, quiet: false }], ..Default::default() };
         let bp = Book { code: "PHONECODE234".into(), ..Default::default() };
         let (mut yd, mut yp) = (you("Robin"), you("phone person"));
         let (sd, sp) = (111u32, 222u32);

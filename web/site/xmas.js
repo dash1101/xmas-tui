@@ -107,6 +107,9 @@ function build() {
   sizeButtons();
   // the other villagers kept in this browser (for the menu)
   wasm.set_villagers(game, putText(JSON.stringify(folk().map((v) => v.name || "a villager (no name)"))));
+  // a look at something (?preview=chats), once the village has settled
+  const pv = new URLSearchParams(location.search).get("preview");
+  if (pv && /^[a-z0-9-]{1,24}$/.test(pv)) setTimeout(() => game && wasm.preview(game, putText(pv)), 3000);
 }
 
 // other villagers kept in this browser: their saves and settings
@@ -950,7 +953,7 @@ function togglePause() {
   toast(p ? "⏸ paused" : "▶ carrying on");
 }
 document.getElementById("b-pause").onclick = togglePause;
-document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.online(game); };
+document.getElementById("b-online").onclick = () => { if (!game) return; if (wasm.menu_open(game)) wasm.back(game); else wasm.friends(game); };
 document.getElementById("b-help").onclick = () => game && wasm.help(game, touchy ? 0 : 1);
 sizeButtons();
 document.getElementById("b-opts").onclick = () => game && wasm.open_panel(game);

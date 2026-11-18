@@ -1098,6 +1098,27 @@ impl App {
         };
     }
 
+    /// What a click (or key) in friends & chats asked for: something
+    /// online, or a menu (a friend's ⋯ at (x, y); back to friends & online).
+    fn chats_do(&mut self, d: crate::scene::chats::ChatsDo, x: i32, y: i32) {
+        use crate::ctxmenu::{CtxMenu, MenuAct};
+        use crate::scene::chats::ChatsDo;
+        match d {
+            ChatsDo::Net(n) => {
+                self.scene.woke();
+                self.scene.act(crate::scene::Do::Net(n));
+            }
+            ChatsDo::Menu(crate::scene::online::MORE_ONLINE) => self.open_online(),
+            ChatsDo::Menu(k) => {
+                let (title, items) = self.scene.more_menu(k);
+                let items = items.into_iter().map(|(l, d)| (l, MenuAct::Scene(d))).collect();
+                let (w, h) = (self.w as i32, self.ui_h() as i32);
+                self.menu = Some(CtxMenu::plain(x, y, title, items, w, h));
+            }
+            ChatsDo::Done => {}
+        }
+    }
+
     /// O: friends & online.
     fn open_online(&mut self) {
         use crate::ctxmenu::{CtxMenu, MenuAct};
@@ -1369,11 +1390,16 @@ impl App {
                 } else if settings::help_rect(bw).contains(bx, by) {
                     self.settings.help = true;
                 } else if settings::online_rect(bw).contains(bx, by) {
-                    self.open_online();
+                    self.menu = None;
+                    self.scene.open_chats(None);
                 } else if settings::gear_rect(bw).contains(bx, by) {
                     // (the buttons up there always answer: a game, a
                     // conversation or a card open doesn't take them)
                     self.settings.open = true;
+                } else if self.scene.on_chats(x, y) {
+                    // friends & chats: a friend picked, their ⋯, a line to write…
+                    let d = self.scene.chats_click(x, y);
+                    self.chats_do(d, x, y);
                 } else if self.scene.prompt_click(x, y) || self.scene.close_card() {
                     // (a question answered, a profile card put away)
                 } else if self.scene.post_click(x, y) {
@@ -1584,6 +1610,8 @@ impl App {
                     if let Some(a) = self.settings.wheel(x, y, up) {
                         self.acts.push(a);
                     }
+                } else if self.scene.on_chats(x, y) {
+                    self.scene.chats_scroll(!up);
                 } else if let Some((s, _)) = self.widgets.shelf_hit(gx, gy) {
                     self.widgets.shelf_scroll(s, if up { -1 } else { 1 });
                 } else if self.trackpad {
@@ -1740,6 +1768,24 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        // friends & chats open: up and down the friends, Enter to write,
+        // Esc to put it away
+        if self.settings.editing.is_none() && !self.settings.open && self.menu.is_none() && self.scene.chats_open() {
+            let d = match k {
+                KeyIn::Up => self.scene.chats_key(Some(true), false),
+                KeyIn::Down => self.scene.chats_key(Some(false), false),
+                KeyIn::Enter => self.scene.chats_key(None, true),
+                KeyIn::Esc => {
+                    self.scene.close_chats();
+                    Some(crate::scene::chats::ChatsDo::Done)
+                }
+                _ => None,
+            };
+            if let Some(d) = d {
+                self.chats_do(d, self.w as i32 / 2, self.ui_h() as i32 / 3);
+                return;
+            }
         }
         // a question asked by someone online: Y yes, N no thanks
         if self.settings.editing.is_none() && !self.settings.open && self.scene.asked_now() {

@@ -131,6 +131,8 @@ pub struct Game {
     /// still and quiet while online goes on; its picture as it stood.
     paused: bool,
     rest_base: Option<Frame>,
+    /// A finger down on friends & chats (the row it's at: a drag scrolls).
+    chats_drag: Option<i32>,
     /// A field of the menu's being typed in (by the app's own box).
     editing: Option<crate::settings::Field>,
     /// The widgets the web page shows (the clock, the weather, the
@@ -486,6 +488,7 @@ impl Game {
             cfg_dirty: false,
             paused: false,
             rest_base: None,
+            chats_drag: None,
             editing: None,
             widgets: cfg!(target_arch = "wasm32"),
             weather: crate::widgets::face::Weather { status: "the weather: set its city in the menu (Widgets)".into(), ..Default::default() },
@@ -858,6 +861,36 @@ impl Game {
         self.scene.open_chat();
     }
 
+    /// A preview (a look at something: "chats", "card", "netchess"…).
+    pub fn preview(&mut self, what: &str) {
+        self.scene.preview_perch(what);
+    }
+
+    /// Friends & chats (the ✉ button): each friend, and a chat with the
+    /// one picked.
+    pub fn friends(&mut self) {
+        self.menu = None;
+        self.scene.open_chats(None);
+    }
+
+    /// What a tap in friends & chats asked for: something online, or a
+    /// menu (a friend's ⋯ at (x, y); back to friends & online).
+    fn chats_do(&mut self, d: crate::scene::chats::ChatsDo, x: i32, y: i32) {
+        use crate::scene::chats::ChatsDo;
+        match d {
+            ChatsDo::Net(n) => {
+                self.scene.woke();
+                self.scene.act(Do::Net(n));
+            }
+            ChatsDo::Menu(crate::scene::online::MORE_ONLINE) => self.online_menu(),
+            ChatsDo::Menu(k) => {
+                let (title, items) = self.scene.more_menu(k);
+                self.open(x - 2, y + 1, title, Self::scene_items(items));
+            }
+            ChatsDo::Done => {}
+        }
+    }
+
     /// Friends & online (O on a keyboard).
     pub fn online_menu(&mut self) {
         let (title, items) = self.scene.more_menu(crate::scene::online::MORE_ONLINE);
@@ -1083,6 +1116,12 @@ impl Game {
     /// The mouse wheel over the menu (the web page): scroll it, or step
     /// the value under the pointer.
     pub fn panel_wheel(&mut self, x: f32, y: f32, up: bool) -> bool {
+        // (friends & chats: down or up the friends)
+        let c = self.ui_cell(x, y);
+        if !self.panel.open && self.scene.on_chats(c.0, c.1) {
+            self.scene.chats_scroll(!up);
+            return true;
+        }
         if !self.panel.open {
             return false;
         }
@@ -1388,6 +1427,10 @@ impl Game {
             return true;
         }
         if self.menu.take().is_some() || self.card.take().is_some() || self.scene.close_card() {
+            return true;
+        }
+        if self.scene.chats_open() {
+            self.scene.close_chats();
             return true;
         }
         if self.scene.at_table() {
@@ -1786,6 +1829,14 @@ impl Game {
             }
             return;
         }
+        // friends & chats open: E writes to the friend picked
+        if b == BTN_E && self.scene.chats_open() {
+            if let Some(d) = self.scene.chats_key(None, true) {
+                let (x, y) = (self.uw() / 2, self.uh() / 3);
+                self.chats_do(d, x, y);
+            }
+            return;
+        }
         match b {
             // (at the table: E plays; in a conversation, the answer the
             // joystick picked out)
@@ -1833,6 +1884,15 @@ impl Game {
             0 => {
                 self.moved = false;
                 self.carrying = false;
+                // friends & chats: a friend picked, their ⋯, a line to
+                // write (a drag goes down the friends)
+                if self.scene.on_chats(uc.0, uc.1) {
+                    self.press = None;
+                    self.chats_drag = Some(uc.1);
+                    let d = self.scene.chats_click(uc.0, uc.1);
+                    self.chats_do(d, uc.0, uc.1);
+                    return;
+                }
                 // a question asked by someone online (yes, no), a profile
                 // card (put away), the post (friends & online)
                 if self.scene.prompt_click(uc.0, uc.1) || self.scene.close_card() {
@@ -1869,6 +1929,15 @@ impl Game {
                     self.scene.woke();
                 }
             }
+            1 if self.chats_drag.is_some() => {
+                let from = self.chats_drag.unwrap_or(uc.1);
+                // (three rows to a friend)
+                if (uc.1 - from).abs() >= 3 {
+                    self.scene.chats_scroll(uc.1 < from);
+                    self.chats_drag = Some(uc.1);
+                }
+            }
+            2 | 3 if self.chats_drag.is_some() => self.chats_drag = None,
             1 if self.table_lift => self.scene.table_drag_to(uc.0, uc.1),
             2 | 3 if self.table_lift => {
                 self.table_lift = false;

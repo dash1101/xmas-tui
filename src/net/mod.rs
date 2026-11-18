@@ -118,6 +118,11 @@ pub struct Book {
     /// What's been written to and from each friend (by their code), the
     /// latest last: a chat's history.
     pub chats: std::collections::BTreeMap<String, Vec<ChatLine>>,
+    /// Read up to when, each friend's chat (by their code), and how many
+    /// lines that second had then (times are to the second): what's after
+    /// is new.
+    #[serde(default)]
+    pub read: std::collections::BTreeMap<String, (i64, u32)>,
 }
 
 /// One line of a chat with a friend.
@@ -184,10 +189,14 @@ pub fn clean(s: &str, max: usize) -> String {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct Pal {
+    /// (As they call themselves, or as renamed here.)
     pub name: String,
     pub code: String,
     /// Asked; no answer yet.
     pub waiting: bool,
+    /// Quiet: what they write is kept in the chat (and counted as new),
+    /// with no chime and no line in the post; their pings don't sound.
+    pub quiet: bool,
 }
 
 /// Where a villager is and how they look: sent to everyone in a shared
@@ -1066,7 +1075,13 @@ impl Online {
                     if self.is_friend(&from) && self.not_flooded(0, 8) {
                         let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
                         self.keep_chat(&from, false, &text);
-                        self.events.push(Event::Mail { from: clean(&name, 32), text, links });
+                        // (by the name they have here; a quiet friend's only
+                        // goes in the chat)
+                        let pal = self.book.friends.iter().find(|p| seal::norm(&p.code) == seal::norm(&from));
+                        if !pal.is_some_and(|p| p.quiet) {
+                            let name = pal.map(|p| p.name.clone()).unwrap_or_else(|| clean(&name, 32));
+                            self.events.push(Event::Mail { from: name, text, links });
+                        }
                     }
                 }
                 Some(Msg::Invite { from, name, village }) => {
@@ -1075,7 +1090,8 @@ impl Online {
                     }
                 }
                 Some(Msg::Ping { from, name }) => {
-                    if self.is_friend(&from) && self.not_flooded(0, 8) {
+                    let quiet = self.book.friends.iter().any(|p| p.quiet && seal::norm(&p.code) == seal::norm(&from));
+                    if self.is_friend(&from) && !quiet && self.not_flooded(0, 8) {
                         self.events.push(Event::Pinged(clean(&name, 32)));
                     }
                 }
@@ -1336,7 +1352,7 @@ impl Online {
             return;
         }
         if !self.book.asking.iter().any(|p| seal::norm(&p.code) == code) && self.book.asking.len() < 20 {
-            self.book.asking.push(Pal { name: name.clone(), code, waiting: false });
+            self.book.asking.push(Pal { name: name.clone(), code, waiting: false, quiet: false });
             self.dirty = true;
             self.events.push(Event::Asked(name));
         }
@@ -1513,11 +1529,22 @@ impl Online {
     pub fn pretend_friends(&mut self, friends: &[(&str, bool, bool)]) {
         for (i, (name, on, village)) in friends.iter().enumerate() {
             let code = format!("PRVW{i:04}ABCD");
-            self.book.friends.push(Pal { name: name.to_string(), code, waiting: false });
+            self.book.friends.push(Pal { name: name.to_string(), code, waiting: false, quiet: false });
             self.relive();
             if let Some(l) = self.live.last_mut() {
                 l.here = Some(Here { on: *on, village: village.then(|| "ABCD-EFGH-JKLM".into()), card: None });
             }
+        }
+    }
+
+    /// Previews: a chat with friend `i` (theirs: `mine` false), `ago`
+    /// seconds back.
+    pub fn pretend_chat(&mut self, i: usize, lines: &[(bool, &str, i64)]) {
+        let Some(code) = self.book.friends.get(i).map(|p| seal::norm(&p.code)) else { return };
+        let now = crate::clock::now().timestamp();
+        let v = self.book.chats.entry(code).or_default();
+        for (mine, text, ago) in lines {
+            v.push(ChatLine { at: now - ago, mine: *mine, text: text.to_string() });
         }
     }
 
@@ -1629,7 +1656,7 @@ impl Online {
             return Ok(());
         }
         if !self.book.friends.iter().any(|p| seal::norm(&p.code) == code) {
-            self.book.friends.push(Pal { name: "(asked)".into(), code: code.clone(), waiting: true });
+            self.book.friends.push(Pal { name: "(asked)".into(), code: code.clone(), waiting: true, quiet: false });
             self.dirty = true;
             self.relive();
             let topic = self.live.last().map(|l| l.here_topic.clone()).unwrap_or_default();
@@ -1710,6 +1737,41 @@ impl Online {
     /// The chat with friend `i` so far (the latest last).
     pub fn chat(&self, i: usize) -> &[ChatLine] {
         self.book.friends.get(i).and_then(|p| self.book.chats.get(&seal::norm(&p.code))).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// How many lines from friend `i` haven't been read yet.
+    pub fn unread(&self, i: usize) -> usize {
+        let Some(p) = self.book.friends.get(i) else { return 0 };
+        let code = seal::norm(&p.code);
+        let (since, n) = self.book.read.get(&code).copied().unwrap_or((0, 0));
+        let mut same = 0;
+        self.book
+            .chats
+            .get(&code)
+            .map(|v| {
+                v.iter()
+                    .filter(|l| {
+                        if l.at == since {
+                            same += 1;
+                        }
+                        !l.mine && (l.at > since || (l.at == since && same > n))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Friend `i`'s chat, read (as far as it goes now).
+    pub fn mark_read(&mut self, i: usize) {
+        let Some(p) = self.book.friends.get(i) else { return };
+        let code = seal::norm(&p.code);
+        let v = self.book.chats.get(&code).map(|v| v.as_slice()).unwrap_or(&[]);
+        let last = v.last().map(|l| l.at).unwrap_or(0);
+        let now = (last, v.iter().filter(|l| l.at == last).count() as u32);
+        if self.book.read.get(&code) != Some(&now) {
+            self.book.read.insert(code, now);
+            self.dirty = true;
+        }
     }
 
     fn enter(&mut self, code: String, host: bool) {
@@ -2943,6 +3005,23 @@ pub(crate) mod tests {
         assert!(b.mail(0, "snowball fight at the tree?"));
         relay.pump(&mut [&mut a, &mut b]);
         assert!(a.take_events().contains(&Event::Mail { from: "Sam".into(), text: "snowball fight at the tree?".into(), links: vec![] }));
+        assert_eq!(a.unread(0), 1);
+        a.mark_read(0);
+        assert_eq!(a.unread(0), 0);
+        // renamed here, and quiet: kept in the chat (and new), nothing else
+        a.book.friends[0].name = "Sammy".into();
+        a.book.friends[0].quiet = true;
+        assert!(b.mail(0, "you there?"));
+        assert!(b.ping(0));
+        relay.pump(&mut [&mut a, &mut b]);
+        let ev = a.take_events();
+        assert!(!ev.iter().any(|e| matches!(e, Event::Mail { .. } | Event::Pinged(_))), "{ev:?}");
+        assert_eq!(a.unread(0), 1);
+        assert_eq!(a.chat(0).last().map(|l| l.text.as_str()), Some("you there?"));
+        a.book.friends[0].quiet = false;
+        assert!(b.mail(0, "hello?"));
+        relay.pump(&mut [&mut a, &mut b]);
+        assert!(a.take_events().contains(&Event::Mail { from: "Sammy".into(), text: "hello?".into(), links: vec![] }), "by the name it has here");
         // Sam opens up; Robin sees the code in Sam's "here I am" and joins
         let vcode = b.host();
         b.tick(2.0, Some(Avatar { x: 0.5, y: 0.1, ..Default::default() }), 4242);

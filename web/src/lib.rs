@@ -278,6 +278,22 @@ pub extern "C" fn entropy(a: u32, b: u32, c: u32, d: u32) {
     net::seal::stir((c as u64) << 32 | d as u64);
 }
 
+/// A preview (the page's `?preview=…`: a look at something, e.g. "chats").
+#[no_mangle]
+pub extern "C" fn preview(w: *mut Web, len: usize) {
+    let bytes = unsafe {
+        let p = text_buf(std::ptr::null_mut(), len.max(1));
+        std::slice::from_raw_parts(p, len).to_vec()
+    };
+    unsafe { &mut *w }.game.preview(&String::from_utf8_lossy(&bytes));
+}
+
+/// Friends & chats (the ✉ button).
+#[no_mangle]
+pub extern "C" fn friends(w: *mut Web) {
+    unsafe { &mut *w }.game.friends();
+}
+
 /// Friends & online, as a menu in the village (O).
 #[no_mangle]
 pub extern "C" fn online(w: *mut Web) {

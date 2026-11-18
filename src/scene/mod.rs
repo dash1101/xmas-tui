@@ -23,6 +23,7 @@ use play::Pending;
 pub mod trips;
 pub mod builds;
 pub mod chapel;
+pub mod chats;
 pub mod newyear;
 pub mod pets;
 pub mod santa;
@@ -3078,7 +3079,7 @@ impl Scene {
         }
         // or: friends online (in a shared village: someone asking to play,
         // a profile card, a game of chess with one of them out in the snow)
-        if matches!(what, "online" | "card" | "netchess" | "netcards" | "gamesroom") {
+        if matches!(what, "online" | "card" | "netchess" | "netcards" | "gamesroom" | "chats") {
             return self.preview_online(what);
         }
         // or: away on a trip (the ski lodge, a run down the mountain, a drive;
@@ -6187,6 +6188,50 @@ mod tests {
         let sb = b.table.as_ref().unwrap().state_json();
         assert!(b.table.as_ref().unwrap().net.as_ref().unwrap().seq == 1, "the move never came: {sb}");
         assert!(!b.table.as_ref().unwrap().theirs(), "and it's Sam's move");
+    }
+
+    /// Friends & chats: each friend down the left (asked first, then
+    /// online), the chat with the one picked on the right; a click on
+    /// another picks them, their ⋯ opens their menu (back at the top of
+    /// it), the write line asks for a line to them, and back goes to
+    /// friends & online. (`--nocapture` shows it.)
+    #[test]
+    fn friends_and_chats_window() {
+        let mut s = walker_scene();
+        for _ in 0..30 {
+            s.update(DT, 0.0);
+        }
+        s.preview_perch("chats");
+        assert!(s.chats_open());
+        let mut f = Frame::new(120, 34);
+        s.draw_top(&mut f);
+        let text: Vec<String> = (0..f.h).map(|y| (0..f.w).map(|x| f.glyph[y * f.w + x].map(|g| g.ch).unwrap_or(' ')).collect()).collect();
+        println!("{}", text.join("\n"));
+        let all = text.join("\n");
+        for want in ["friends & chats", "◂ back", "Robin", "Sam", "Alex", "✉1", "race you down", "✎ write to Sam", "⋯"] {
+            assert!(all.contains(want), "no {want:?}");
+        }
+        // Alex picked: their chat
+        let (ry, _) = *s.social.chats.rows.borrow().iter().find(|(_, i)| *i == 1).expect("Alex's row");
+        let (x0, ..) = s.social.chats.at.get();
+        assert_eq!(s.chats_click(x0 + 6, ry), chats::ChatsDo::Done);
+        assert_eq!(s.social.chats.sel, Some(1));
+        s.update(DT, 0.0);
+        assert_eq!(s.online.unread(1), 0, "read once shown");
+        let mut f = Frame::new(120, 34);
+        s.draw_top(&mut f);
+        // the write line, and Alex's ⋯
+        let (wx, wy, _) = s.social.chats.write.get().expect("a line to write on");
+        assert_eq!(s.chats_click(wx + 2, wy), chats::ChatsDo::Net(online::NetDo::Mail(1)));
+        let (dx, dy, _) = *s.social.chats.dots.borrow().iter().find(|d| d.2 == 1).unwrap();
+        let d = s.chats_click(dx, dy);
+        assert_eq!(d, chats::ChatsDo::Menu(online::MORE_FRIEND + 1));
+        let (_, items) = s.more_menu(online::MORE_FRIEND + 1);
+        assert_eq!(items[0].0, "◂ back");
+        // back: friends & online, the window put away
+        let (bx, by, ..) = s.social.chats.buttons.borrow()[0];
+        assert_eq!(s.chats_click(bx + 1, by), chats::ChatsDo::Menu(online::MORE_ONLINE));
+        assert!(!s.chats_open());
     }
 
     /// Paused (the button, or the wallpaper resting for a game): the
