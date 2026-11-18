@@ -293,15 +293,18 @@ async fn keep_out(State(app): State<App>, Json(k): Json<KeepOut>) -> Response {
     if crate::broker::norm_code(&k.code).len() != 12 {
         return (StatusCode::BAD_REQUEST, "not a village's code").into_response();
     }
-    {
+    let found = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
-        b.keep_out(&k.code, id, &k.name, &k.why, k.ip);
+        let found = b.keep_out(&k.code, id, &k.name, &k.why, k.ip);
         if !k.slot.is_empty() {
             b.host_cmd(json!({ "kick": { "slot": k.slot, "id": id } }));
         }
-    }
+        found
+    };
     app.save();
-    StatusCode::NO_CONTENT.into_response()
+    // (not connected under that id: only the id's noted, and it changes
+    // each time their game starts; the console says so)
+    Json(json!({ "found": found })).into_response()
 }
 
 async fn let_back(State(app): State<App>, Json(k): Json<KeepOut>) -> Response {
@@ -819,6 +822,7 @@ document.addEventListener("click", async (e) => {
     const why = prompt("Why (just for you)?") || "";
     const r = await call("api/keep-out", { code: d.code, slot: d.slot, id: Number(d.kout), name: d.name || "", why, ip });
     if (!r.ok) alert(await r.text());
+    else if (!(await r.json()).found) alert("No connection was found under that id (they've gone, or their game isn't the usual one), so only the id was noted, and that changes each time a game starts. To stop them for good, find their connection under VILLAGES OPEN RIGHT NOW or CONNECTED and block the address.");
     loadState();
   }
   else if (d.kback) { await call("api/let-back", { code: d.code, key: d.kback }); loadState(); }

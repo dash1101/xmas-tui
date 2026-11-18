@@ -104,7 +104,7 @@ From the console, the project can quieten someone in those villages (what they s
 | The last word from each linked device (sealed) | Forgotten after 63 days without an update |
 | Public village listings and the public squares' status | Forgotten after 7 days without an update |
 | The public squares' settings, set by the project | Until changed |
-| Blocked IP addresses | Until unblocked |
+| Blocked IP addresses (an IPv6 address as the /64 block it's in) | Until unblocked |
 | Server villages: their names, codes and settings | Until the project removes them |
 | Villages kept out: their codes, the name they were listed under, why, and when | Until lifted |
 | Players kept out: their id and player tag, the name they went by, why, and when | Until lifted |

@@ -418,7 +418,10 @@ impl Broker {
             }
         }
         if !clean {
-            if let Some((t, p, retain)) = c.will {
+            // (their last word: not into a banned village, nor one they're
+            // kept out of, whenever that came about)
+            let shut = c.will.as_ref().is_some_and(|(t, ..)| self.blocked.contains(t) || self.kept_out.get(t).is_some_and(|keys| kept_out_of(keys, &c)));
+            if let Some((t, p, retain)) = c.will.clone().filter(|_| !shut) {
                 self.route(&t, &p, retain);
             }
         }
@@ -458,10 +461,9 @@ impl Broker {
                 return Ok(());
             }
         }
-        // a banned village, or one this player's kept out of: nothing
-        // through (counted against them like any message turned down, so
-        // one who floods it is still let go)
-        let shut = self.blocked.contains(topic) || self.kept_out.get(topic).is_some_and(|keys| kept_out_of(keys, c));
+        // a banned village: nothing through (counted against the sender
+        // like any message turned down, so one who floods it is let go)
+        let shut = self.blocked.contains(topic);
         if shut || c.tokens < 1.0 || !ok_topic(topic) || payload.len() > l.max_payload {
             c.dropped += 1;
             self.stats.dropped += 1;
@@ -473,6 +475,13 @@ impl Broker {
             return Ok(());
         }
         c.tokens -= 1.0;
+        // kept out of this village: not heard there. Quietly, and not held
+        // against them: their game may not know, and goes on talking; the
+        // rest of the relay stays theirs. (It still costs them their
+        // allowance of messages, so it's no way round the limits.)
+        if self.kept_out.get(topic).is_some_and(|keys| kept_out_of(keys, c)) {
+            return Ok(());
+        }
         c.sent += 1;
         self.stats.msgs_in += 1;
         self.stats.bytes_in += payload.len() as u64;
@@ -708,7 +717,8 @@ impl Broker {
             .iter()
             .filter(|(t, _)| t.starts_with("xmas-tui/1/village/"))
             .map(|(t, ids)| {
-                let mut who: Vec<(String, String, String, bool, String)> = ids.iter().filter_map(|id| self.conns.get(id)).map(|c| (c.ip.to_string(), c.client.clone(), c.agent.clone(), c.host, c.country.clone())).collect();
+                let outs = self.kept_out.get(t);
+                let mut who: Vec<(String, String, String, bool, String)> = ids.iter().filter_map(|id| self.conns.get(id)).filter(|c| !outs.is_some_and(|keys| kept_out_of(keys, c))).map(|c| (c.ip.to_string(), c.client.clone(), c.agent.clone(), c.host, c.country.clone())).collect();
                 who.sort();
                 (t.clone(), who)
             })
@@ -724,11 +734,15 @@ impl Broker {
     /// network: that would be the host, or a proxy with everyone behind
     /// it). What's said there no longer reaches them, nor what they say
     /// anyone there; the rest of the relay is theirs as before.
-    pub fn keep_out(&mut self, code: &str, id: u32, name: &str, why: &str, with_ip: bool) {
+    ///
+    /// Says whether a connection of theirs was found. Without one, only
+    /// the id is known, and that changes each time their game starts.
+    pub fn keep_out(&mut self, code: &str, id: u32, name: &str, why: &str, with_ip: bool) -> bool {
         let code = norm_code(code);
         if code.is_empty() {
-            return;
+            return false;
         }
+        let found = self.conns.values().any(|c| !c.host && player_of(&c.client) == Some(id));
         let mut keys = vec![format!("{id:08x}")];
         for c in self.conns.values().filter(|c| !c.host && player_of(&c.client) == Some(id)) {
             if let Some(t) = tag_of(&c.client).map(|t| format!("tag:{}", t.to_ascii_lowercase())) {
@@ -749,6 +763,7 @@ impl Broker {
             }
         }
         self.rekeep();
+        found
     }
 
     /// Let back into a village: one key, as the console shows it.
@@ -1178,6 +1193,17 @@ mod tests {
         b.publish(a, &v, b"hello", false).unwrap();
         assert_eq!(drain(&mut ra).len(), 1, "the spam got through, or hello didn't come back");
         assert!(drain(&mut rb).is_empty(), "still hearing the village");
+        // their game goes on talking, not knowing: never let go for it
+        for _ in 0..3000 {
+            b.kept.limits.burst = 1e9;
+            if let Some(c) = b.conns.get_mut(&bad) {
+                c.tokens = 1e9;
+            }
+            assert!(b.publish(bad, &v, b"here I am", false).is_ok(), "let go from the whole relay for talking in a village they're kept out of");
+        }
+        assert!(drain(&mut ra).is_empty());
+        // and not shown as in it
+        assert!(b.villages().iter().any(|(t, who)| *t == v && who.len() == 1), "{:?}", b.villages());
         // elsewhere: as anyone
         b.publish(bad, &other, b"hi", false).unwrap();
         assert_eq!((drain(&mut ra).len(), drain(&mut rb).len()), (1, 1));
@@ -1191,6 +1217,19 @@ mod tests {
             assert!(drain(&mut rc).is_empty());
             b.leave(c, true);
         }
+        // nor heard through a last word left behind (a will), kept or not
+        drain(&mut ra);
+        for retain in [false, true] {
+            let (tw, _rw) = channel(64);
+            let (w, _) = b.join(ip(2), "xt00002006bbbbbbbb0009".into(), Some((v.clone(), b"spam from a will".to_vec(), retain)), tw);
+            b.leave(w, false);
+        }
+        assert!(drain(&mut ra).is_empty(), "heard through a will");
+        let (tn, mut rn) = channel(64);
+        let (newcomer, _) = b.join(ip(8), "xt00002007eeeeeeee0001".into(), None, tn);
+        b.subscribe(newcomer, &[v.clone()]);
+        assert!(drain(&mut rn).is_empty(), "a kept will handed to a newcomer");
+        b.leave(newcomer, true);
         // let back (each key): hears it again
         for key in ["00002002", "tag:bbbbbbbb", "ip:203.0.113.2"] {
             b.let_back(code, key);
@@ -1207,6 +1246,8 @@ mod tests {
         // the villages in use: this one and the other, with who's there
         let vs = b.villages();
         assert!(vs.iter().any(|(t, who)| *t == v && who.len() == 2), "{vs:?}");
+        // someone not connected: only their id can be noted, and it says so
+        assert!(!b.keep_out(code, 0x7777, "Gone", "", true));
     }
 
     /// An IPv6 address counts as its whole /64: blocked, another address
