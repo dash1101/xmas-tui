@@ -180,9 +180,11 @@ function frame(now) {
 }
 
 // a tab out of sight gets no animation frames: a slow tick instead, so the
-// link to the relay stays up and friends' messages are taken in
+// link to the relay stays up and friends' messages are taken in. (Not only
+// when the page says it's hidden: a window covered by others can stop
+// getting frames while it still says it's visible.)
 setInterval(() => {
-  if (!game || !document.hidden) return;
+  if (!game || (!document.hidden && performance.now() - last < 900)) return;
   wasm.frame(game, 0.1, localMs());
   asked(getText(wasm.ask(game)));
   netPump(performance.now());
