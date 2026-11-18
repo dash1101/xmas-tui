@@ -79,7 +79,8 @@ last() {
 # line, sorted, so the two lists compare whatever order they come in).
 running() {
     # shellcheck disable=SC2086
-    timeout 60 docker inspect --format '{{.Image}}' $SERVICES 2>/dev/null | sort
+    # (a stopped one counts as not running: it's started again)
+    timeout 60 docker inspect --format '{{if .State.Running}}{{.Image}}{{end}}' $SERVICES 2>/dev/null | grep . | sort
 }
 pulled() {
     # shellcheck disable=SC2086

@@ -100,8 +100,29 @@ impl Scene {
         }
     }
 
+    /// (Tests: where the window was last drawn.)
+    #[cfg(test)]
+    pub fn chats_rect(&self) -> (i32, i32, i32, i32) {
+        self.social.chats.at.get()
+    }
+
+    #[cfg(test)]
     pub fn chats_open(&self) -> bool {
         self.social.chats.open
+    }
+
+    /// Showing, not folded to its title bar.
+    pub fn chats_shown(&self) -> bool {
+        let c = &self.social.chats;
+        c.open && !c.min
+    }
+
+    /// Open and not pinned: the window in hand, which the keyboard (and a
+    /// phone's buttons) go to. One pinned stays put like a widget, taking
+    /// clicks but leaving the keys, and the post, as they were.
+    pub fn chats_focused(&self) -> bool {
+        let c = &self.social.chats;
+        c.open && !c.min && !c.pinned
     }
 
     pub fn close_chats(&mut self) {

@@ -1078,7 +1078,7 @@ impl Game {
         // works as in the menu
         if !self.panel.open {
             match action {
-                0 if self.panel.on_pin(c.0, c.1).is_some() => {
+                0 if self.panel.on_pin(c.0, c.1).is_some() && !self.scene.on_chats(c.0, c.1) => {
                     if !self.panel.pin_grab(c.0, c.1) {
                         self.panel_press = Some((c.0, c.1, 0));
                         if let Some(a @ S::Set(f, _)) = self.panel.click(c.0, c.1) {
@@ -1482,7 +1482,7 @@ impl Game {
         if self.menu.take().is_some() || self.card.take().is_some() || self.scene.close_card() {
             return true;
         }
-        if self.scene.chats_open() {
+        if self.scene.chats_focused() {
             self.scene.close_chats();
             return true;
         }
@@ -1691,6 +1691,11 @@ impl Game {
         };
         if layered {
             self.scene.draw_ui(uf);
+        }
+        // the menu's pinned tabs, then over them the post, questions,
+        // cards, friends & chats
+        if let Some(c) = &shown {
+            self.panel.draw_pinned(uf, c, t);
         }
         self.scene.draw_top(uf);
         // (a menu or card hides the people and pets under it)
@@ -1911,7 +1916,7 @@ impl Game {
             return;
         }
         // friends & chats open: E writes to the friend picked
-        if b == BTN_E && self.scene.chats_open() {
+        if b == BTN_E && self.scene.chats_focused() {
             if let Some(d) = self.scene.chats_key(None, true) {
                 let (x, y) = (self.uw() / 2, self.uh() / 3);
                 self.chats_do(d, x, y);

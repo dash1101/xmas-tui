@@ -1902,7 +1902,9 @@ impl Scene {
         let link = self.online.link();
         let bg = crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.8);
         if self.online.wanted() {
-            let s = if link != Link::On {
+            let s = if self.online.too_old() {
+                " ✉ offline: update xmas-tui to play online ".to_string()
+            } else if link != Link::On {
                 " ✉ connecting… ".to_string()
             } else {
                 let about = self.online.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count();
@@ -1954,7 +1956,7 @@ impl Scene {
         let (ox, oy, cover) = (f.ox, f.oy, f.cover_pictures);
         (f.ox, f.oy) = (0, 0);
         f.cover_pictures = true;
-        if self.trip.is_none() && self.look.is_none() && !self.social.chats.open {
+        if self.trip.is_none() && self.look.is_none() && !self.chats_focused() {
             self.draw_post(f);
         }
         if let Some(tb) = self.table.as_ref().filter(|_| self.table_shows()) {
@@ -2023,6 +2025,7 @@ impl Scene {
             (Link::On, Some((n, most)), Some((name, _))) => format!("{name} · {n} of {most} here"),
             (Link::On, Some((n, most)), None) => format!("friends & online ● · {n} of {most} here"),
             (Link::On, None, _) => "friends & online ●".to_string(),
+            _ if o.too_old() => "friends & online (this version's too old: update to play online)".to_string(),
             _ => "friends & online (connecting…)".to_string(),
         };
         // asked: yes or no
@@ -2208,7 +2211,7 @@ impl Scene {
     pub fn chat_prompt(&self, i: usize) -> String {
         let name = self.online.book.friends.get(i).map(|p| p.name.clone()).unwrap_or_default();
         // (the chat's on show in friends & chats: only who it's to)
-        if self.social.chats.open {
+        if self.chats_shown() {
             return format!("✉ to {name}");
         }
         let lines = self.online.chat(i);

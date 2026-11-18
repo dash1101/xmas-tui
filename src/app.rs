@@ -1367,9 +1367,9 @@ impl App {
                 } else if self.settings.open && in_panel && self.settings.on_title(x, y) {
                     // pick the panel up by its title bar
                     self.settings.start_drag(x, y);
-                } else if !in_panel && self.settings.on_pin(x, y).is_some() && self.settings.pin_grab(x, y) {
+                } else if !in_panel && !self.scene.on_chats(x, y) && self.settings.on_pin(x, y).is_some() && self.settings.pin_grab(x, y) {
                     // a pinned tab's window, picked up by its title bar
-                } else if self.settings.open && in_panel || (!in_panel && self.settings.on_pin(x, y).is_some()) {
+                } else if self.settings.open && in_panel || (!in_panel && !self.scene.on_chats(x, y) && self.settings.on_pin(x, y).is_some()) {
                     match self.settings.click(x, y) {
                         // clicking into a text field (or back into the one
                         // being typed in) doesn't put away what's typed
@@ -1807,7 +1807,7 @@ impl App {
         }
         // friends & chats open: up and down the friends, Enter to write,
         // Esc to put it away
-        if self.settings.editing.is_none() && !self.settings.open && self.menu.is_none() && self.scene.chats_open() {
+        if self.settings.editing.is_none() && !self.settings.open && self.menu.is_none() && self.scene.chats_focused() {
             let d = match k {
                 KeyIn::Up => self.scene.chats_key(Some(true), false),
                 KeyIn::Down => self.scene.chats_key(Some(false), false),
@@ -3004,7 +3004,12 @@ impl App {
         if windows_apart {
             self.scene.draw_ui(&mut self.frame);
         }
-        // (the post, questions asked, cards and games with friends: over the widgets)
+        // the menu's pinned tabs, then over them the post, questions
+        // asked, cards, friends & chats and games with friends
+        {
+            let shown = self.shown_cfg().into_owned();
+            self.settings.draw_pinned(&mut self.frame, &shown, t);
+        }
         self.scene.draw_top(&mut self.frame);
         // the widgets' tops are something to climb up onto (next frame)
         // (in the village's cells: the widgets' may be bigger, on a layer of their own)
@@ -3588,6 +3593,33 @@ mod tests {
         click(&mut app, (close.0 + 1, close.1));
         assert!(app.cfg.ui.pins.is_empty(), "still pinned");
         assert_eq!(app.settings.pin_at(0), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pinned tab under friends & chats: the chats window is drawn over
+    /// it, and takes the click where they overlap.
+    #[test]
+    fn friends_and_chats_comes_over_a_pinned_tab() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-pins-over-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.widgets.weather = false;
+        cfg.ui.pins = vec![crate::config::PinCfg { what: "tab:5".into(), x: 60, y: 10, min: false }];
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 240, 72, true, true, false);
+        app.scene.open_chats(None);
+        app.step();
+        let (px, py, pw, ph) = app.settings.pin_at(0).expect("the pinned tab isn't drawn");
+        let (cx, cy, cw, _) = app.scene.chats_rect();
+        // a point on the chats window's title bar, inside the pinned tab too
+        let (x, y) = ((px + 2).max(cx + 30).min(cx + cw - 20), cy);
+        assert!(x >= px && x < px + pw && y >= py && y < py + ph, "they don't overlap: pin {:?}, chats {:?}", (px, py, pw, ph), (cx, cy, cw));
+        let g = app.frame.glyph[y as usize * app.frame.w + x as usize].map(|g| g.ch);
+        assert_ne!(g, None);
+        app.mouse(MouseIn::Down(Btn::Left), x, y);
+        assert!(app.scene.chats_dragging(), "the click went to the pinned tab under it");
+        assert!(!app.settings.pin_dragging());
+        app.mouse(MouseIn::Up(Btn::Left), x, y);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

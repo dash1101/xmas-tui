@@ -6442,10 +6442,15 @@ mod tests {
         frame(&mut s, &mut pins);
         assert_eq!((pins[0].x, pins[0].y), (x0 + 5, y0 + 2), "not kept where it was put");
         assert_eq!(s.social.chats.at.get().0, x0 + 5);
+        // pinned, it stays put like a widget: the keys and the post aren't
+        // its (the post shows, keys go where they would)
+        assert!(s.chats_shown() && !s.chats_focused());
+        assert!(frame(&mut s, &mut pins).contains("✉ online"), "the post hidden by a pinned window");
         // Esc: folded, still there
         s.close_chats();
         frame(&mut s, &mut pins);
         assert!(s.chats_open(), "pinned, but put away");
+        assert!(!s.chats_shown());
         assert_eq!(s.social.chats.at.get().3, 1, "not folded");
         assert!(pins[0].min);
         // opened out again

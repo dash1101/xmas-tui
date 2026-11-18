@@ -304,6 +304,8 @@ pub struct Settings {
     pub media_quiet: bool,
     /// The pinned tabs' windows as last drawn (which pin, where), and one
     /// being moved (which, where it was taken, where it is now).
+    /// The pinned tabs drawn already this frame (see `draw_pinned`).
+    pins_drawn: bool,
     pin_rects: Vec<(usize, Rect)>,
     pin_drag: Option<(usize, i32, i32, i32, i32)>,
     /// Resting (the village standing still): "" paused by hand, else why
@@ -1392,14 +1394,28 @@ impl Settings {
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
-        self.regions.clear();
-        self.hints.clear();
-        self.draw_pins(f, cfg, t);
+        // (the pinned tabs: drawn already this frame, under the village's
+        // own windows, or now)
+        if !std::mem::take(&mut self.pins_drawn) {
+            self.regions.clear();
+            self.hints.clear();
+            self.draw_pins(f, cfg, t);
+        }
         self.draw_panel(f, cfg, t);
         // dressed in the look chosen for the app's own panels
         if let Some(r) = self.rect {
             crate::widgets::looks::apply(f, r, &cfg.ui.look, BG, 11);
         }
+    }
+
+    /// The pinned tabs alone, first: what's drawn after them (friends &
+    /// chats, a question, a card) comes over them, and takes clicks first.
+    /// `draw` then draws the menu itself over everything.
+    pub fn draw_pinned(&mut self, f: &mut Frame, cfg: &Config, t: f32) {
+        self.regions.clear();
+        self.hints.clear();
+        self.draw_pins(f, cfg, t);
+        self.pins_drawn = true;
     }
 
     /// The menu's tabs pinned over the village: each a window of its own
