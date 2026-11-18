@@ -236,7 +236,7 @@ fn kept_out_of(keys: &HashSet<String>, c: &Conn) -> bool {
     if c.host {
         return false;
     }
-    if keys.contains(&format!("ip:{}", c.ip)) {
+    if keys.contains(&format!("ip:{}", block_of(c.ip))) {
         return true;
     }
     if player_of(&c.client).is_some_and(|id| keys.contains(&format!("{id:08x}"))) {
@@ -311,7 +311,7 @@ pub struct Broker {
 
 impl Broker {
     pub fn new(kept: Kept) -> Self {
-        let bans = kept.bans.iter().filter_map(|b| b.parse().ok()).collect();
+        let bans = kept.bans.iter().filter_map(|b| b.parse().ok()).map(block_of).collect();
         let mut b = Broker { kept, conns: HashMap::new(), next_id: 1, exact: HashMap::new(), wild: HashMap::new(), retained: HashMap::new(), retained_bytes: 0, order: VecDeque::new(), stats: Stats::default(), started: Instant::now(), recent: VecDeque::new(), bans, blocked: HashSet::new(), kept_out: HashMap::new(), reports: BTreeMap::new() };
         b.reblock();
         b.rekeep();
@@ -364,11 +364,11 @@ impl Broker {
         let l = &self.kept.limits;
         let why = if l.closed {
             Some("closed")
-        } else if self.bans.contains(&ip) {
+        } else if self.bans.contains(&block_of(ip)) {
             Some("banned")
         } else if self.conns.len() >= l.max_conns {
             Some("full")
-        } else if !internal(ip) && self.conns.values().filter(|c| c.ip == ip).count() >= l.max_conns_per_ip {
+        } else if !internal(ip) && self.conns.values().filter(|c| block_of(c.ip) == block_of(ip)).count() >= l.max_conns_per_ip {
             Some("too many from one address")
         } else {
             None
@@ -660,21 +660,26 @@ impl Broker {
         }
     }
 
-    /// Not let in again (and those connected from it let go).
+    /// Not let in again (and those connected from it let go). An IPv6
+    /// address stands for its whole block (see `block_of`).
     pub fn ban(&mut self, ip: IpAddr) {
+        let ip = block_of(ip);
         self.bans.insert(ip);
         if !self.kept.bans.contains(&ip.to_string()) {
             self.kept.bans.push(ip.to_string());
         }
-        let ids: Vec<u64> = self.conns.iter().filter(|(_, c)| c.ip == ip).map(|(&id, _)| id).collect();
+        let ids: Vec<u64> = self.conns.iter().filter(|(_, c)| block_of(c.ip) == ip).map(|(&id, _)| id).collect();
         for id in ids {
             self.kick(id);
         }
     }
 
     pub fn unban(&mut self, ip: IpAddr) {
+        // (as it was typed, and as its block: one kept before blocks were)
+        let block = block_of(ip);
         self.bans.remove(&ip);
-        self.kept.bans.retain(|b| *b != ip.to_string());
+        self.bans.remove(&block);
+        self.kept.bans.retain(|b| *b != ip.to_string() && *b != block.to_string());
     }
 
     /// What a connection said it is (the app's version and system), for
@@ -731,7 +736,7 @@ impl Broker {
                     keys.push(t);
                 }
             }
-            let k = format!("ip:{}", c.ip);
+            let k = format!("ip:{}", block_of(c.ip));
             if with_ip && !internal(c.ip) && !keys.contains(&k) {
                 keys.push(k);
             }
@@ -967,6 +972,23 @@ impl Broker {
     }
 }
 
+/// The address a connection counts as, for the limit on connections from
+/// one address and for blocking: an IPv4 address is itself; an IPv6 one
+/// stands for its whole /64 (the block one home or one machine is given,
+/// within which it can pick a new address whenever it likes).
+pub fn block_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v) => match v.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+    }
+}
+
 /// An address on this machine or its own network (the relay's host, in
 /// the next container): not held to the one-address limit. (Everyone else
 /// comes through Cloudflare, by their own address.)
@@ -1185,6 +1207,41 @@ mod tests {
         // the villages in use: this one and the other, with who's there
         let vs = b.villages();
         assert!(vs.iter().any(|(t, who)| *t == v && who.len() == 2), "{vs:?}");
+    }
+
+    /// An IPv6 address counts as its whole /64: blocked, another address
+    /// in the same block is blocked too (and those connected from it let
+    /// go), the next block isn't; the limit on connections from one
+    /// address counts the block; unblocking by any address in it lifts it.
+    #[test]
+    fn an_ipv6_address_stands_for_its_block() {
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(block_of(v6("2001:db8:1:2:aaaa:bbbb:cccc:dddd")), v6("2001:db8:1:2::"));
+        assert_eq!(block_of(v6("::ffff:203.0.113.7")), ip(7));
+        assert_eq!(block_of(ip(7)), ip(7));
+        let mut b = Broker::new(Kept::default());
+        let (ta, _ra) = channel(8);
+        let (a, _) = b.join(v6("2001:db8:1:2::10"), "a".into(), None, ta);
+        b.ban(v6("2001:db8:1:2::99"));
+        assert!(!b.has(a), "still connected from the blocked block");
+        assert_eq!(b.kept.bans, vec!["2001:db8:1:2::".to_string()]);
+        assert_eq!(b.admit(v6("2001:db8:1:2:1234::1")), Err("banned"));
+        assert!(b.admit(v6("2001:db8:1:3::1")).is_ok());
+        // (kept, it holds after a restart)
+        let mut again = Broker::new(b.kept.clone());
+        assert_eq!(again.admit(v6("2001:db8:1:2:ffff::2")), Err("banned"));
+        b.unban(v6("2001:db8:1:2::1"));
+        assert!(b.kept.bans.is_empty());
+        assert!(b.admit(v6("2001:db8:1:2:1234::1")).is_ok());
+        // the limit from one address: the block's
+        b.kept.limits.max_conns_per_ip = 2;
+        for n in 1..=2u16 {
+            let (t, _r) = channel(8);
+            std::mem::forget(_r);
+            b.join(IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 9, 9, 0, 0, 0, n)), format!("c{n}"), None, t);
+        }
+        assert_eq!(b.admit(v6("2001:db8:9:9:abcd::1")), Err("too many from one address"));
+        assert!(b.admit(v6("2001:db8:9:a::1")).is_ok());
     }
 
     #[test]

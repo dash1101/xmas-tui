@@ -633,6 +633,7 @@ const PAGE: &str = r##"<!doctype html>
     <table><tbody id="pbans"></tbody></table>
     <p>kept out of one village only (ban here, beside a player in a village the host keeps):</p>
     <table><tbody id="kouts"></tbody></table>
+    <p class="note">A blocked IPv6 address stands for its whole block (/64: the range one home or machine is given, and can hop about in), and the limit on connections from one address counts the block too.</p>
     <p class="note">A banned village can't be used on the relay and leaves the public list; a banned player (by the id their game has) can't connect. Someone can always start afresh with a new id or address: bans slow them down, they don't make them impossible.</p>
   </section>
   <section><h2>KEPT MESSAGES</h2>

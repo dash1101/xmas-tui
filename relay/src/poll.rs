@@ -129,7 +129,7 @@ async fn open(headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, St
     {
         // sessions not yet said hello count too
         let m = st.polls.0.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() >= most || m.values().filter(|p| p.ip == ip).count() >= per_ip {
+        if m.len() >= most || m.values().filter(|p| crate::broker::block_of(p.ip) == crate::broker::block_of(ip)).count() >= per_ip {
             return cors((StatusCode::SERVICE_UNAVAILABLE, "too many").into_response());
         }
     }

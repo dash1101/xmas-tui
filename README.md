@@ -473,9 +473,12 @@ web) shows what's happening online; a click on it opens friends & online.
   - **Server villages** (*· server*): villages the relay's own host keeps open, rather than a player's game. Some
     are listed; private ones are reached only with their code (*into a village by its code*). **★** marks the ones
     the relay features, and the list comes in the relay's order, the rest after, busiest first.
-  - **Looked after**: in the villages the relay's host keeps, its keeper can quieten someone, send them home, keep a
-    village or a player out of the relay, greet newcomers and make announcements, now or at set times. Notices show
-    in the post with a chime, and stay in ✉ messages.
+  - **Looked after**: in the villages the relay's host keeps, its keeper can quieten someone, send them home, keep
+    them out of that one village or off the relay altogether, block an address (the one that stops a bot), keep a
+    village out, greet newcomers and make announcements, now or at set times. Notices show in the post with a
+    chime, and stay in ✉ messages. The keeper's console also shows who's connected (address, country, the app's
+    version), every village in use right now (a private one only as a number: what's said in it is sealed), and
+    can update the relay in place.
   - **A village's limit**: Menu → Online → *Most visitors* (8 by default, 2 to 48). Past it, a newcomer is told
     it's full.
 - **One sky**: in a shared village everyone has the host's time of day (their clock, sunrise and sunset), wherever
