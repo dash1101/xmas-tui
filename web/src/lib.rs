@@ -150,6 +150,20 @@ pub extern "C" fn frame(w: *mut Web, dt: f32, local_ms: f64) -> *const u8 {
     w.rgba.as_ptr()
 }
 
+/// The frame rate set in the menu (the page keeps to it).
+#[no_mangle]
+pub extern "C" fn fps(w: *mut Web) -> f32 {
+    unsafe { &*w }.game.fps()
+}
+
+/// A frame's measures, from the page: `dt` after the last, `work` seconds
+/// to make it and put it on the page; the page's memory (megabytes).
+#[no_mangle]
+pub extern "C" fn perf_frame(w: *mut Web, dt: f32, work: f32, mem_mb: f32) {
+    let mem = (mem_mb > 0.0).then_some(mem_mb);
+    unsafe { &mut *w }.game.perf_frame(dt, work, || (None, mem));
+}
+
 #[no_mangle]
 pub extern "C" fn steer(w: *mut Web, mx: f32, my: f32, run: u32) {
     unsafe { &mut *w }.game.steer(mx, my, run != 0);

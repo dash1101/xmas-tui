@@ -164,16 +164,33 @@ function save() {
 }
 
 let barAway = false;
+// the frame rate set in the menu (Screen): the screen's frames between
+// skipped to keep to it, on average (a 60 Hz screen at 24: every 2nd or 3rd)
+let due = 0;
 function frame(now) {
+  const want = game && wasm.fps ? wasm.fps(game) : 60;
+  if (game && last && want < 58) {
+    if (now < due - 6) {
+      netPump(now);
+      feedAudio();
+      if (touchy) drawPad();
+      requestAnimationFrame(frame);
+      return;
+    }
+    due = Math.max(due + 1000 / want, now - 100);
+  } else due = now;
   const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / 30;
   last = now;
   if (game) {
+    const began = performance.now();
     const p = wasm.frame(game, dt, localMs());
     if (!img || img.data.buffer !== wasm.memory.buffer || imgPtr !== p) {
       img = new ImageData(new Uint8ClampedArray(wasm.memory.buffer, p, W * H * 4), W, H);
       imgPtr = p;
     }
     ctx.putImageData(img, 0, 0);
+    // (for the performance readout: the frame's time, the page's memory)
+    if (wasm.perf_frame) wasm.perf_frame(game, dt, (performance.now() - began) / 1000, wasm.memory.buffer.byteLength / 1048576);
     // what the village's menus ask of the page
     asked(getText(wasm.ask(game)));
     netPump(now);
@@ -751,7 +768,7 @@ function pickWords(label, k, values, words) {
   row(label, s);
 }
 // the buttons' size (the bar up top, the joystick and buttons on a touch screen)
-function btnScale() { return game ? Math.max(0.6, Math.min(2.5, wasm.buttons_k(game))) : 1; }
+function btnScale() { return game ? Math.max(0.25, Math.min(2.5, wasm.buttons_k(game))) : 1; }
 function sizeButtons() {
   document.documentElement.style.setProperty("--btn", btnScale());
   // the page's own boxes (talk, the buttons, notes) at the size of the
@@ -762,7 +779,7 @@ function sizeButtons() {
   const row = game && wasm.ui_row_px ? wasm.ui_row_px(game) * K / dpr : 20;
   const menus = game && wasm.ui_menus_k ? wasm.ui_menus_k(game) : 1;
   const r = document.documentElement.style;
-  r.setProperty("--ui", Math.max(0.6, Math.min(3, row / 18)).toFixed(3));
+  r.setProperty("--ui", Math.max(0.3, Math.min(3, row / 18)).toFixed(3));
   r.setProperty("--unit", Math.max(0.6, Math.min(3, row / menus / 18)).toFixed(3));
   if (touchy) drawPad();
 }

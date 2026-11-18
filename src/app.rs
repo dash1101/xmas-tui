@@ -173,6 +173,11 @@ pub struct App {
     /// The windows' size (how much bigger than the village's cells), and
     /// whether the front-end can show a UI of its own sizes.
     ui_k: f32,
+    /// How it's running (see `measure`).
+    meter: settings::PerfMeter,
+    meter_last: Option<Instant>,
+    meter_cpu: Option<(Instant, f64, f64)>,
+    meter_draw: Option<f32>,
     ui_ok: bool,
     /// The pointer, in the village's cells (fractions): each part of the UI
     /// works out its own cell from it.
@@ -414,6 +419,10 @@ impl App {
             wid_wh: (w, h),
             btn_wh: (w, h),
             ui_k: 1.0,
+            meter: Default::default(),
+            meter_last: None,
+            meter_cpu: None,
+            meter_draw: None,
             ui_ok: false,
             ptr: (0.0, 0.0),
             wallpaper,
@@ -507,7 +516,7 @@ impl App {
 
     /// Where the pointer is in part `p`'s own cells.
     fn part_pt(&self, p: usize) -> (i32, i32) {
-        let k = self.part_k[p].max(1.0);
+        let k = self.part_k[p].max(0.25);
         let (kx, ky) = self.part_layer[p].and_then(|i| self.layer_px.get(i).copied()).filter(|&(x, y)| x > 0.0 && y > 0.0).unwrap_or((k, k));
         ((self.ptr.0 / kx).floor() as i32, (self.ptr.1 / ky).floor() as i32)
     }
@@ -1343,16 +1352,17 @@ impl App {
     /// village made again for it (`remake`), where it stands.
     fn regrid(&mut self, w: usize, h: usize, remake: bool) {
         let ok = self.ui_ok;
-        let fix = |k: f32| {
-            let k = if ok && k.is_finite() { k.clamp(1.0, 2.5) } else { 1.0 };
-            if k < 1.05 {
+        let fix = |k: f32, least: f32| {
+            let k = if ok && k.is_finite() { k.clamp(least, 2.5) } else { 1.0 };
+            if (k - 1.0).abs() < 0.05 {
                 1.0
             } else {
                 (k * 20.0).round() / 20.0
             }
         };
-        let ks = [fix(self.cfg.ui.widgets_k()), fix(self.cfg.ui.buttons_k()), fix(self.cfg.ui.scale)];
-        let grid = |k: f32| if k > 1.0 { (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12)) } else { (w, h) };
+        let ks = [fix(self.cfg.ui.widgets_k(), 0.25), fix(self.cfg.ui.buttons_k(), 0.25), fix(self.cfg.ui.scale, config::WINDOWS_MIN)];
+        // (smaller than the village's cells: more of them)
+        let grid = |k: f32| if (k - 1.0).abs() > 1e-3 { (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12)) } else { (w, h) };
         // the layers, bottom to top (the widgets, the buttons, the windows):
         // parts next to each other at one size share one; the village's
         // own frame takes those at its size from the bottom
@@ -2339,7 +2349,7 @@ impl App {
     /// not any more. A shelf under it lights up.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn icon_drag(&mut self, at: Option<(f32, f32)>) {
-        let k = self.part_k[WIDGETS].max(1.0);
+        let k = self.part_k[WIDGETS].max(0.25);
         self.widgets.ext_drag = at.map(|(fx, fy)| ((fx / k).floor() as i32, (fy / k).floor() as i32));
     }
 
@@ -2347,7 +2357,7 @@ impl App {
     /// they go in its folder.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn desktop_drop(&mut self, fx: f32, fy: f32) {
-        let k = self.part_k[WIDGETS].max(1.0);
+        let k = self.part_k[WIDGETS].max(0.25);
         let (x, y) = ((fx / k).floor() as i32, (fy / k).floor() as i32);
         #[cfg(windows)]
         if let Some((s, _)) = self.widgets.shelf_hit(x, y) {
@@ -2482,7 +2492,7 @@ impl App {
             None if self.widgets.hit(x, y).is_some() => {}
             None => {
                 // (a shelf's cells: the widgets' size, over the village's)
-                let k = self.part_k[WIDGETS].max(1.0);
+                let k = self.part_k[WIDGETS].max(0.25);
                 let place = self.px_map.map(|(ox, oy, cw, ch)| (ox + (x as f32 * k * cw as f32) as i32 - 36, oy + (y as f32 * k * ch as f32) as i32 - 24));
                 self.widgets.send(Cmd::Move { paths: vec![path], to: crate::widgets::shelf::desktop_dir(), place });
             }
@@ -2549,6 +2559,7 @@ impl App {
     }
 
     pub fn step(&mut self) -> &[Cell] {
+        let began = Instant::now();
         let t = self.t();
         self.govern();
         // testing: a preview set up once things have settled
@@ -3141,6 +3152,7 @@ impl App {
             m.draw(&mut self.frame);
             crate::widgets::looks::apply(&mut self.frame, m.rect(), &self.cfg.ui.look, crate::frame::Bg::Mix(crate::color::pal::UI_PANEL, 0.95), 5);
         }
+        self.settings.draw_perf(&mut self.frame, &self.cfg);
         self.draw_typing();
         self.frame.ui_out(full_h);
         self.part_out(windows_layer);
@@ -3149,7 +3161,40 @@ impl App {
             l.frame.cut_hidden();
         }
         self.frame.compose();
+        self.measure(began);
         &self.frame.out
+    }
+
+    /// How it's running (the Screen tab, and the corner if it's asked
+    /// for): the frames a second, a frame's time (the village's, without
+    /// the front end's drawing it, which `drawn` adds), the processor in
+    /// all (and kitty's part of it), the memory.
+    fn measure(&mut self, began: Instant) {
+        let now = Instant::now();
+        // (the processor's starting point, from the first frame on)
+        if self.meter_last.is_none() {
+            self.meter_cpu = crate::perf::cpu_parts().map(|(o, k)| (now, o, k));
+        }
+        let dt = self.meter_last.map_or(0.0, |l| now.duration_since(l).as_secs_f32());
+        self.meter_last = Some(now);
+        let draw = self.meter_draw.take();
+        let work = now.duration_since(began).as_secs_f32() + draw.unwrap_or(0.0);
+        let Some((fps, frame_ms, draw_ms)) = self.meter.frame(dt, work, draw) else { return };
+        let cpu = crate::perf::cpu_parts().and_then(|(own, term)| {
+            let was = self.meter_cpu.replace((now, own, term));
+            was.map(|(at, o, k)| {
+                let wall = now.duration_since(at).as_secs_f64().max(0.01);
+                (((own - o) / wall).max(0.0) as f32, ((term - k) / wall).max(0.0) as f32)
+            })
+        });
+        self.settings.perf = Some(settings::PerfInfo { fps, frame_ms, draw_ms, cpu, mem_mb: crate::perf::mem_mb(), cells: (self.sw, self.sh), eased: self.eased });
+    }
+
+    /// The front end's drawing of the last frame took `secs` (counted in
+    /// the next one's time).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn drawn(&mut self, secs: f32) {
+        self.meter_draw = Some(secs);
     }
 }
 
@@ -3537,6 +3582,78 @@ mod tests {
         app.cfg.ui = crate::config::UiCfg::default();
         app.regrid(300, 60, false);
         assert!(app.ui_layers().is_empty() && app.part_layer == [None; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Smaller than the village's own: the widgets at a quarter, on a
+    /// layer of four times the cells; the windows no smaller than half
+    /// (the menu that sets them stays readable); a click on the widgets'
+    /// layer finds its cells.
+    #[test]
+    fn parts_of_the_ui_go_down_to_a_quarter() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-small-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.ui.scale = 0.25;
+        cfg.ui.widgets = Some(0.25);
+        cfg.ui.buttons = Some(0.5);
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 300, 60, true, true, false);
+        app.set_ui_layer_ok(true);
+        app.step();
+        assert_eq!(app.part_k, [0.25, 0.5, 0.5], "widgets a quarter, the buttons and windows (at the least) half");
+        assert_eq!(app.part_layer, [Some(0), Some(1), Some(1)]);
+        {
+            let ls = app.ui_layers();
+            assert_eq!((ls.len(), ls[0].0.w, ls[0].0.h, ls[1].0.w, ls[1].0.h), (2, 1200, 240, 600, 120));
+            // the buttons drawn on theirs, at the top right of it
+            let f = ls[1].0;
+            let g = settings::gear_rect(600);
+            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '❄'));
+        }
+        // the settings button, where it is at half size
+        let g = settings::gear_rect(600);
+        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 3) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
+        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 3) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
+        assert!(app.settings.open);
+        app.step();
+        let r = app.settings.rect.expect("the panel's drawn");
+        assert!(r.x + r.w <= 600 && r.y + r.h <= 120, "{r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The performance readout: made once a second from the frames (their
+    /// rate and time, the processor, the memory), shown in the corner
+    /// when asked for.
+    #[test]
+    fn the_performance_readout_adds_up_and_shows_in_the_corner() {
+        let mut m = settings::PerfMeter::default();
+        let mut out = None;
+        for _ in 0..61 {
+            out = out.or(m.frame(1.0 / 60.0, 0.004, Some(0.001)));
+        }
+        let (fps, ms, draw) = out.expect("a second's worth");
+        assert!((fps - 60.0).abs() < 0.5 && (ms - 4.0).abs() < 0.01 && draw.is_some_and(|d| (d - 1.0).abs() < 0.01), "{fps} {ms} {draw:?}");
+        // (a frame after a long stop isn't counted)
+        assert_eq!(m.frame(5.0, 0.01, None), None);
+        let dir = std::env::temp_dir().join(format!("xmas-app-perf-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.ui.perf = true;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 200, 50, true, true, false);
+        let t = Instant::now();
+        while t.elapsed().as_secs_f32() < 1.3 {
+            app.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let p = app.settings.perf.clone().expect("measured");
+        assert!(p.fps > 20.0 && p.frame_ms > 0.0 && p.cells == (200, 50), "{p:?}");
+        #[cfg(target_os = "linux")]
+        assert!(p.cpu.is_some() && p.mem_mb.is_some_and(|m| m > 1.0), "{p:?}");
+        app.step();
+        let row: String = (0..200).filter_map(|x| app.frame.glyph[48 * 200 + x].map(|g| g.ch)).collect();
+        assert!(row.contains("fps") && row.contains(" ms"), "{row:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

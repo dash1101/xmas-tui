@@ -329,6 +329,9 @@ impl Runner {
         app.screen_map = desktop.then(|| (g.size.0 as f32, g.size.1 as f32, g.offset.0 as f32, g.offset.1 as f32, g.raster.cw as f32, g.raster.ch as f32));
         app.frame.cell_aspect = g.raster.ch as f32 / g.raster.cw.max(1) as f32;
         app.step();
+        // (the drawing's time, for the performance readout: counted in
+        // with the next frame's)
+        let drawing = std::time::Instant::now();
         let (cols, rows) = app.scene_size();
         let (cw, ch) = (g.raster.cw, g.raster.ch);
         // the UI's own layers: each one's grid (as the app has it), cells to
@@ -491,6 +494,7 @@ impl Runner {
         } else {
             let _ = buf.present();
         }
+        app.drawn(drawing.elapsed().as_secs_f32());
         // pointer shape (only meaningful for a normal window)
         let want = app.pointer();
         if want != self.pointer && !self.opts.desktop {

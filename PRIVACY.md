@@ -49,6 +49,7 @@ Some widgets and effects read things on the device to show them. None of this le
 - **Shelves**: the names and icons of the files in the folders chosen for them.
 - **Resting for games**: which programs are running (to spot a game), and how busy the processors and graphics card are.
 - **Easing off**: how much processor time the wallpaper itself uses (and, on Linux, the kitty terminal drawing it), to lower its frame rate on a computer that struggles.
+- **Performance readout** (Menu → Screen): the frame rate, how long each frame takes, the processor time and memory the app itself uses (and, on Linux, kitty's processor time), shown on screen only.
 - **The clipboard**: only when copying or pasting a code.
 
 ## Going online

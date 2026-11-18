@@ -137,6 +137,8 @@ pub struct UiCfg {
     /// Windows pinned over the village (a menu tab, friends & chats, a
     /// friend's chat): kept open there, where they were put.
     pub pins: Vec<PinCfg>,
+    /// The frame rate and what it's costing, shown in a corner.
+    pub perf: bool,
 }
 
 /// A window pinned over the village: what ("tab:3", "chats",
@@ -153,7 +155,7 @@ pub struct PinCfg {
 
 impl Default for UiCfg {
     fn default() -> Self {
-        UiCfg { look: "classic".into(), scale: 1.0, widgets: None, buttons: None, pins: vec![] }
+        UiCfg { look: "classic".into(), scale: 1.0, widgets: None, buttons: None, pins: vec![], perf: false }
     }
 }
 
@@ -934,7 +936,37 @@ pub fn clean_fps(fps: f32) -> f32 {
     f
 }
 
+/// The sizes the windows, widgets and buttons step through (the windows
+/// stop at half, so the menu that sets them stays readable).
+pub const SIZE_STEPS: [f32; 20] = [0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.75, 1.9, 2.0, 2.25, 2.5];
+pub const WINDOWS_MIN: f32 = 0.5;
+
+/// Graphics presets: (name, frames a second, glow, snow, aurora, folk and
+/// animals, the snow and lights on open windows).
+pub const PRESETS: [(&str, f32, f32, f32, bool, f32, bool); 4] = [
+    ("low", 15.0, 0.0, 0.5, false, 0.5, false),
+    ("medium", 24.0, 0.6, 0.75, true, 0.75, true),
+    ("high", 30.0, 1.0, 1.0, true, 1.0, true),
+    ("ultra", 60.0, 1.3, 1.5, true, 1.25, true),
+];
+
 impl Config {
+    /// Which graphics preset these settings are (none: set by hand).
+    pub fn preset(&self) -> Option<usize> {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        PRESETS.iter().position(|&(_, fps, glow, snow, aurora, critters, win)| {
+            near(self.fps, fps) && near(self.scene.glow, glow) && near(self.scene.snow, snow) && self.scene.aurora == aurora && near(self.scene.critters, critters) && self.windows.snow == win && self.windows.lights == win
+        })
+    }
+
+    /// A graphics preset's settings, all at once.
+    pub fn apply_preset(&mut self, i: usize) {
+        let Some(&(_, fps, glow, snow, aurora, critters, win)) = PRESETS.get(i) else { return };
+        self.fps = fps;
+        (self.scene.glow, self.scene.snow, self.scene.aurora, self.scene.critters) = (glow, snow, aurora, critters);
+        (self.windows.snow, self.windows.lights) = (win, win);
+    }
+
     /// Settings back to how they start, keeping what's the villager's own:
     /// their village (seed), name, look, motto, pet and friends, the
     /// shelves' folders, and where the weather's for.

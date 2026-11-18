@@ -33,6 +33,33 @@ pub fn cpu_parts() -> Option<(f64, f64)> {
     }
 }
 
+/// The memory it holds (resident), in megabytes. `None` where it can't be
+/// read.
+pub fn mem_mb() -> Option<f32> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: f64 = s.split_whitespace().nth(1)?.parse().ok()?;
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as f64;
+        Some((pages * page / 1048576.0) as f32)
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) == 0 {
+            return None;
+        }
+        Some((c.WorkingSetSize as f64 / 1048576.0) as f32)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     /// utime + stime of /proc/<pid>/stat, in seconds.

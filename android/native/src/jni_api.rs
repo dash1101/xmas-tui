@@ -158,6 +158,7 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_detach(_: JNIEnv, 
 pub extern "system" fn Java_io_github_dash1101_xmastui_Native_frame(_: JNIEnv, _: JClass, h: jlong, dt: jfloat) {
     let Some(hd) = handle(h) else { return };
     guard("frame", (), || {
+        let began = std::time::Instant::now();
         let mut g = hd.game.lock().unwrap_or_else(|e| e.into_inner());
         g.frame(dt);
         let win = hd.win.lock().unwrap_or_else(|e| e.into_inner());
@@ -178,7 +179,30 @@ pub extern "system" fn Java_io_github_dash1101_xmastui_Native_frame(_: JNIEnv, _
             }
         }
         unsafe { ANativeWindow_unlockAndPost(*w) };
+        g.perf_frame(dt, began.elapsed().as_secs_f32(), || (cpu_share(), mem_mb()));
     })
+}
+
+/// The app's processor use since last asked, in cores (the performance
+/// readout, once a second).
+fn cpu_share() -> Option<(f32, f32)> {
+    static LAST: Mutex<Option<(std::time::Instant, f64)>> = Mutex::new(None);
+    let s = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = &s[s.rfind(')')? + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // (utime and stime, in the kernel's ticks: a hundred a second)
+    let secs = (f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?) / 100.0;
+    let now = std::time::Instant::now();
+    let was = LAST.lock().unwrap_or_else(|e| e.into_inner()).replace((now, secs))?;
+    let wall = now.duration_since(was.0).as_secs_f64().max(0.01);
+    Some((((secs - was.1) / wall).max(0.0) as f32, 0.0))
+}
+
+/// The memory the app holds (resident), in megabytes.
+fn mem_mb() -> Option<f32> {
+    let s = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let pages: f64 = s.split_whitespace().nth(1)?.parse().ok()?;
+    Some((pages * 4096.0 / 1048576.0) as f32)
 }
 
 #[no_mangle]

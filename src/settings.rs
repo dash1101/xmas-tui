@@ -34,6 +34,8 @@ pub enum F {
     UiScale,
     WidgetsScale,
     ButtonsScale,
+    Preset,
+    PerfOverlay,
     Zoom,
     Fps,
     Events,
@@ -208,6 +210,57 @@ pub const NET_LIST: u8 = 6;
 pub const NET_OPEN: u8 = 7;
 pub const NET_DEVICES: u8 = 8;
 
+/// How it's running, as the front end measures it (see `Settings::perf`).
+#[derive(Clone, Debug, Default)]
+pub struct PerfInfo {
+    /// Frames a second, lately; the time one takes (all of it), and of
+    /// that the drawing (where the front end tells it apart).
+    pub fps: f32,
+    pub frame_ms: f32,
+    pub draw_ms: Option<f32>,
+    /// Processor use, in cores: (the app, the terminal drawing it).
+    pub cpu: Option<(f32, f32)>,
+    pub mem_mb: Option<f32>,
+    pub cells: (usize, usize),
+    pub eased: Option<f32>,
+}
+
+/// Adds up frames into a `PerfInfo` once a second (the times given it:
+/// no clock of its own, for the web page's sake).
+#[derive(Clone, Debug, Default)]
+pub struct PerfMeter {
+    span: f32,
+    frames: u32,
+    work: f32,
+    draw: f32,
+    drew: bool,
+}
+
+impl PerfMeter {
+    /// A frame, `dt` after the last, that took `work` seconds (of it,
+    /// `draw` drawing it, if that's told apart). A second's worth: the
+    /// frames a second, a frame's time and drawing's, in milliseconds.
+    pub fn frame(&mut self, dt: f32, work: f32, draw: Option<f32>) -> Option<(f32, f32, Option<f32>)> {
+        if !(dt.is_finite() && work.is_finite()) || dt <= 0.0 || dt > 2.0 {
+            return None;
+        }
+        self.span += dt;
+        self.frames += 1;
+        self.work += work.max(0.0);
+        if let Some(d) = draw {
+            self.draw += d.max(0.0);
+            self.drew = true;
+        }
+        if self.span < 1.0 {
+            return None;
+        }
+        let n = self.frames.max(1) as f32;
+        let out = (n / self.span, self.work / n * 1000.0, self.drew.then(|| self.draw / n * 1000.0));
+        *self = PerfMeter::default();
+        Some(out)
+    }
+}
+
 /// Where the menu is. (The web page and the phone app use the others.)
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 #[allow(dead_code)]
@@ -314,6 +367,9 @@ pub struct Settings {
     pub resting: Option<String>,
     /// The frame rate eased off to, while it is (see `App::govern`).
     pub eased_fps: Option<f32>,
+    /// How it's running (the front end's measures), for the Screen tab
+    /// and the corner.
+    pub perf: Option<PerfInfo>,
     /// Where the panel was dragged to (top-left), and the grab offset while
     /// it's being dragged by its title bar.
     pub pos: Option<(i32, i32)>,
@@ -536,12 +592,21 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::UiScale => {
                     // (the widgets and buttons, if not set apart, stay as they were)
                     let (w, b) = (cfg.ui.widgets_k(), cfg.ui.buttons_k());
-                    cfg.ui.scale = ((cfg.ui.scale + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0;
+                    cfg.ui.scale = step_list(&crate::config::SIZE_STEPS, cfg.ui.scale, dir as i32).max(crate::config::WINDOWS_MIN);
                     cfg.ui.widgets = Some(w);
                     cfg.ui.buttons = Some(b);
                 }
-                F::WidgetsScale => cfg.ui.widgets = Some(((cfg.ui.widgets_k() + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0),
-                F::ButtonsScale => cfg.ui.buttons = Some(((cfg.ui.buttons_k() + 0.1 * dir).clamp(1.0, 2.5) * 10.0).round() / 10.0),
+                F::WidgetsScale => cfg.ui.widgets = Some(step_list(&crate::config::SIZE_STEPS, cfg.ui.widgets_k(), dir as i32)),
+                F::ButtonsScale => cfg.ui.buttons = Some(step_list(&crate::config::SIZE_STEPS, cfg.ui.buttons_k(), dir as i32)),
+                // (from settings set by hand: to high, the usual, and on from there)
+                F::Preset => {
+                    let n = crate::config::PRESETS.len() as i32;
+                    let i = match cfg.preset() {
+                        Some(i) => (i as i32 + dir as i32).clamp(0, n - 1),
+                        None => 2,
+                    };
+                    cfg.apply_preset(i as usize);
+                }
                 F::TimeOfDay => {
                     let m = crate::scene::daylight::MODES;
                     let i = m.iter().position(|o| *o == cfg.scene.time).unwrap_or(0) as i32;
@@ -602,6 +667,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 F::Locked => cfg.layout.locked ^= true,
                 F::WinSnow => cfg.windows.snow ^= true,
                 F::RestForGames => cfg.rest_for_games ^= true,
+                F::PerfOverlay => cfg.ui.perf ^= true,
                 F::EaseOff => cfg.ease_off ^= true,
                 F::WinLights => cfg.windows.lights ^= true,
                 F::Sound => cfg.sound.enabled ^= true,
@@ -934,6 +1000,8 @@ fn tip(a: Act) -> Option<&'static str> {
         F::UpdCheck => "Look for new versions now and then.",
         F::UpdAuto => "Install new versions without asking.",
         F::WinSnow => "Snow settles on top of open windows.",
+        F::Preset => "Low, medium, high or ultra: the frame rate, the glow, the snow, the aurora, how many folk and animals come by, and the snow and lights on open windows, all at once. Lower is lighter on the computer.",
+        F::PerfOverlay => "The frame rate, the time each frame takes, and what the wallpaper is costing the computer, in a corner of the screen.",
         F::EaseOff => "On a computer that struggles (an older laptop, or one drawing without its graphics card), the frame rate drops by itself, as far as 10 a second, and comes back up when it can.",
         F::RestForGames => "While a game runs, or the computer's working hard, the village stands still (the widgets and online carry on). A click on the desktop wakes it.",
         F::WinFront => "The snow falls in front of windows too.",
@@ -1991,6 +2059,80 @@ impl Settings {
         }
     }
 
+    /// The graphics preset, as a stepper: which it is, or "custom".
+    fn preset_row(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, yy: i32) {
+        let v = match cfg.preset() {
+            Some(i) => format!("{}  (frame rate, glow, snow, aurora, folk)", crate::config::PRESETS[i].0),
+            None => "custom  (set by hand: ◂ ▸ picks a preset)".to_string(),
+        };
+        self.stepper(f, lx, vx, yy, "Graphics", F::Preset, &v);
+    }
+
+    /// How it's running: the frame rate, a frame's time, the processor and
+    /// memory it's costing (where the front end can tell), and the corner
+    /// display's switch. Returns the rows used.
+    fn perf_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, yy: i32) -> i32 {
+        let mut y = yy;
+        let dim = pal::UI_DIM;
+        match &self.perf {
+            Some(p) => {
+                let mut line = format!("{:.0} fps · {:.1} ms a frame", p.fps, p.frame_ms);
+                if let Some(d) = p.draw_ms {
+                    line.push_str(&format!(" ({:.1} the village, {:.1} drawing it)", (p.frame_ms - d).max(0.0), d));
+                }
+                f.text(lx, y, &line, pal::UI_TEXT, BG, 0.0);
+                y += 1;
+                let mut more = vec![];
+                if let Some((own, term)) = p.cpu {
+                    more.push(if term > 0.005 { format!("processor {:.0}% of a core (the village {:.0}%, kitty {:.0}%)", (own + term) * 100.0, own * 100.0, term * 100.0) } else { format!("processor {:.0}% of a core", own * 100.0) });
+                }
+                if let Some(m) = p.mem_mb {
+                    more.push(format!("memory {m:.0} MB"));
+                }
+                more.push(format!("{}×{} cells", p.cells.0, p.cells.1));
+                if let Some(e) = p.eased {
+                    more.push(format!("easing off: {e:.0} fps"));
+                }
+                f.text(lx, y, &more.join(" · "), dim, BG, 0.0);
+                y += 1;
+            }
+            // (the tray's settings window is apart from the wallpaper: it
+            // can't see how that's running)
+            None if self.standalone => {
+                f.text(lx, y, "the wallpaper's own menu (Screen) shows how it's running", dim, BG, 0.0);
+                y += 1;
+            }
+            None => {
+                f.text(lx, y, "measuring…", dim, BG, 0.0);
+                y += 1;
+            }
+        }
+        self.check(f, lx, y, "Show it in a corner of the screen", Act::Toggle(F::PerfOverlay), cfg.ui.perf);
+        y + 1 - yy
+    }
+
+    /// The corner display (Screen → show it in a corner): one line, at
+    /// the bottom right.
+    pub fn draw_perf(&self, f: &mut Frame, cfg: &Config) {
+        let Some(p) = self.perf.as_ref().filter(|_| cfg.ui.perf) else { return };
+        let mut s = format!(" {:.0} fps · {:.1} ms", p.fps, p.frame_ms);
+        if let Some((own, term)) = p.cpu {
+            s.push_str(&format!(" · cpu {:.0}%", (own + term) * 100.0));
+            if term > 0.005 {
+                s.push_str(&format!(" (kitty {:.0}%)", term * 100.0));
+            }
+        }
+        if let Some(e) = p.eased {
+            s.push_str(&format!(" · easing off: {e:.0}"));
+        }
+        s.push(' ');
+        let n = s.chars().count() as i32;
+        let (x, y) = ((f.w as i32 - n - 1).max(0), f.h as i32 - 2);
+        let keep = std::mem::replace(&mut f.keep_ui, false);
+        f.text(x, y, &s, pal::UI_TEXT, crate::frame::Bg::Mix(pal::UI_PANEL, 0.85), 0.0);
+        f.keep_ui = keep;
+    }
+
     /// The sizes of what's over the village, each its own: the windows,
     /// menus and dialogs; the widgets; the buttons up top. Returns the
     /// rows used.
@@ -2001,7 +2143,8 @@ impl Settings {
             self.stepper(f, lx, vx, yy, "Widgets size", F::WidgetsScale, &pct(cfg.ui.widgets_k()));
             return 1;
         }
-        self.stepper(f, lx, vx, yy, "Windows size", F::UiScale, &format!("{}  (menus, dialogs, games)", pct(cfg.ui.scale)));
+        let (what, also) = if self.kind == Kind::Web { ("Menus size", "menus, talk, games") } else { ("Windows size", "menus, dialogs, games") };
+        self.stepper(f, lx, vx, yy, what, F::UiScale, &format!("{}  ({also}; 50% at the least)", pct(cfg.ui.scale)));
         self.stepper(f, lx, vx, yy + 1, "Widgets size", F::WidgetsScale, &pct(cfg.ui.widgets_k()));
         self.stepper(f, lx, vx, yy + 2, "Buttons size", F::ButtonsScale, &format!("{}  (up top)", pct(cfg.ui.buttons_k())));
         3
@@ -2009,6 +2152,17 @@ impl Settings {
 
     /// Resolution, zoom, frame rate, and playing it in a window.
     fn display_rows(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32) -> i32 {
+        self.preset_row(f, cfg, lx, vx, yy);
+        yy += 1;
+        let yy = self.display_rows_rest(f, cfg, lx, vx, yy);
+        // how it's running
+        let mut yy = yy + 1;
+        self.section(f, lx, yy, "PERFORMANCE");
+        yy += 1;
+        yy + self.perf_rows(f, cfg, lx, yy)
+    }
+
+    fn display_rows_rest(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32) -> i32 {
         if self.kind != Kind::Desktop {
             let v = view_of(cfg);
             let how = if v < 0.99 { "  (smaller: more of the village)" } else if v > 1.01 { "  (closer to the villager)" } else { "" };
@@ -2998,5 +3152,56 @@ mod tests {
         assert_eq!(step_list(&FPS_STEPS, 25.0, -1), 24.0);
         assert_eq!(step_list(&SLEIGH_STEPS, 60.0, 1), 60.0);
         assert_eq!(step_list(&FPS_STEPS, 30.0, 1), 45.0); // on-list: unchanged behaviour
+    }
+
+    /// The widgets and buttons step down to a quarter, the windows to half;
+    /// all of them up to two and a half.
+    #[test]
+    fn sizes_step_down_to_a_quarter() {
+        let mut cfg = Config::default();
+        for _ in 0..30 {
+            apply(&mut cfg, Act::Dec(F::WidgetsScale));
+            apply(&mut cfg, Act::Dec(F::ButtonsScale));
+            apply(&mut cfg, Act::Dec(F::UiScale));
+        }
+        assert_eq!((cfg.ui.widgets_k(), cfg.ui.buttons_k(), cfg.ui.scale), (0.25, 0.25, 0.5));
+        apply(&mut cfg, Act::Inc(F::WidgetsScale));
+        assert_eq!(cfg.ui.widgets_k(), 0.3);
+        for _ in 0..30 {
+            apply(&mut cfg, Act::Inc(F::UiScale));
+        }
+        assert_eq!(cfg.ui.scale, 2.5);
+        // (a size set by hand off the steps: the next one along)
+        cfg.ui.widgets = Some(1.05);
+        apply(&mut cfg, Act::Dec(F::WidgetsScale));
+        assert_eq!(cfg.ui.widgets_k(), 1.0);
+    }
+
+    /// A graphics preset sets them all at once and is known again after;
+    /// set by hand, it's "custom", and the first step is to high.
+    #[test]
+    fn graphics_presets_set_everything_at_once() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.preset(), Some(2), "the defaults are high");
+        apply(&mut cfg, Act::Dec(F::Preset));
+        assert_eq!((cfg.preset(), cfg.fps, cfg.scene.glow), (Some(1), 24.0, 0.6));
+        apply(&mut cfg, Act::Dec(F::Preset));
+        apply(&mut cfg, Act::Dec(F::Preset));
+        assert_eq!((cfg.preset(), cfg.fps, cfg.scene.aurora, cfg.windows.snow), (Some(0), 15.0, false, false));
+        cfg.scene.snow = 2.5;
+        assert_eq!(cfg.preset(), None, "set by hand: custom");
+        apply(&mut cfg, Act::Inc(F::Preset));
+        assert_eq!(cfg.preset(), Some(2));
+        for _ in 0..5 {
+            apply(&mut cfg, Act::Inc(F::Preset));
+        }
+        assert_eq!((cfg.preset(), cfg.fps), (Some(3), 60.0));
+        // and the Screen tab says which, with the readout and its switch
+        let mut s = Settings { open: true, tab: TAB_DESKTOP, kind: Kind::Web, ..Default::default() };
+        s.perf = Some(PerfInfo { fps: 59.6, frame_ms: 3.2, mem_mb: Some(41.0), cells: (180, 75), ..Default::default() });
+        let mut f = Frame::new(140, 60);
+        s.draw(&mut f, &cfg, 0.0);
+        let all: String = (0..60).map(|y| row(&f, y)).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("ultra") && all.contains("60 fps · 3.2 ms a frame") && all.contains("memory 41 MB") && all.contains("in a corner"), "{all}");
     }
 }

@@ -107,7 +107,7 @@ impl Panel {
     /// the wallpaper honours it (Windows).
     pub fn ui_k(&self) -> f64 {
         if cfg!(windows) {
-            self.cfg.ui.scale.clamp(1.0, 2.5) as f64
+            self.cfg.ui.scale.clamp(crate::config::WINDOWS_MIN, 2.5) as f64
         } else {
             1.0
         }

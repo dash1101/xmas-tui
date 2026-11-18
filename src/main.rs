@@ -692,6 +692,7 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             app.screen_map = term.screen_map();
         }
         app.step();
+        let drawing = Instant::now();
         let (cells, pics) = app.output();
         term.pictures = pics.to_vec();
         if let Err(e) = term.draw(cells, w, h) {
@@ -699,6 +700,7 @@ fn run_terminal(cfg: config::Config, seed: u32, path: &std::path::Path, wallpape
             shutdown_extras();
             return Err(e);
         }
+        app.drawn(drawing.elapsed().as_secs_f32());
         let frame_dt = app.frame_dt();
         next += frame_dt;
         let now = Instant::now();

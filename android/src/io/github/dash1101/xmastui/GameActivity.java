@@ -425,6 +425,22 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     String text = ask.substring(7);
                     Prefs.putConfig(GameActivity.this, text);
                     cfgUsed = text;
+                    // its frame rate (Screen, or a graphics preset): the game's, the loop again at it
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?m)^fps = ([0-9.]+)").matcher(text);
+                    if (m.find()) {
+                        int f = 30;
+                        try {
+                            f = Math.max(15, Math.min(60, Math.round(Float.parseFloat(m.group(1)))));
+                        } catch (NumberFormatException ignored) {
+                        }
+                        if (f != Prefs.get(GameActivity.this).getInt("game_fps", 30)) {
+                            Prefs.get(GameActivity.this).edit().putInt("game_fps", f).apply();
+                            if (running && f != loopFps) {
+                                stopLoop();
+                                startLoop();
+                            }
+                        }
+                    }
                 } else if (ask != null && ask.startsWith("edit:")) {
                     String q = ask.substring(5);
                     int k = q.indexOf('\u0001');

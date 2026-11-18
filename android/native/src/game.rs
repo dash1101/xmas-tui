@@ -38,11 +38,13 @@ impl UiLayer {
     /// For a village of `cols` × `rows` cells of `cw` × `ch` px, its letters
     /// `scale` times bigger (none: the same size, no layer of its own).
     fn new(cw: usize, ch: usize, cols: usize, rows: usize, scale: f32) -> Option<UiLayer> {
-        let scale = if scale.is_finite() { scale.clamp(1.0, 6.0) } else { 1.0 };
-        if scale < 1.05 {
+        let scale = if scale.is_finite() { scale.clamp(0.2, 6.0) } else { 1.0 };
+        if (scale - 1.0).abs() < 0.05 {
             return None;
         }
-        let (ucw, uch) = (((cw as f32 * scale).round() as usize).max(cw + 1), ((ch as f32 * scale).round() as usize).max(ch + 1));
+        // (smaller than the village's: letters of 3 px at the least)
+        let px = |c: usize| if scale > 1.0 { ((c as f32 * scale).round() as usize).max(c + 1) } else { ((c as f32 * scale).round() as usize).clamp(2, c.saturating_sub(1).max(2)) };
+        let (ucw, uch) = (px(cw), px(ch).max(3));
         let (ucols, urows) = ((cols * cw / ucw).max(30), (rows * ch / uch).max(16));
         let mut frame = Frame::new(ucols, urows);
         frame.cell_aspect = uch as f32 / ucw as f32;
@@ -50,10 +52,67 @@ impl UiLayer {
     }
 }
 
+/// A UI layer over the village just drawn (`fb`, `stride` px a row, the
+/// village's cells `out` from `off`, `grid` of them, each `cell` px): its
+/// cells (where there's something), its pictures; the village's cells
+/// under it noted, to be drawn again next frame.
+fn compose_layer(u: &mut UiLayer, fb: &mut [u32], out: &[crate::frame::Cell], stride: usize, off: (usize, usize), grid: (usize, usize), cell: (usize, usize)) {
+    let (cols, rows) = grid;
+    let (scw, sch) = cell;
+    // (what's under its panels and writing cut away from its pictures:
+    // a game's board under its names and lines)
+    u.frame.cut_hidden();
+    let mut covered = vec![];
+    let fw = u.frame.w;
+    for (i, g) in u.frame.glyph.iter().enumerate() {
+        let Some(g) = g else { continue };
+        let (ux, uy) = (i % fw, i / fw);
+        let (px, py) = (off.0 + ux * u.cw, off.1 + uy * u.ch);
+        // the village's cells under it
+        let (x0, x1) = (((px - off.0) / scw).min(cols), ((px - off.0 + u.cw).div_ceil(scw)).min(cols));
+        let (y0, y1) = (((py - off.1) / sch).min(rows), ((py - off.1 + u.ch).div_ceil(sch)).min(rows));
+        let (bg, bg_a) = match g.bg {
+            crate::frame::Bg::Scene => ([0, 0, 0], 0.0),
+            crate::frame::Bg::Solid(c) => (c.tonemap(), 1.0),
+            // (see-through: solid, the village behind it averaged, as
+            // the frosted look is at the village's own size)
+            crate::frame::Bg::Mix(c, a) if out.len() == cols * rows => (crate::frame::frost(out, cols, (x0, x1, y0, y1), c.tonemap(), (a.clamp(0.0, 1.0) * 255.0) as u8), 1.0),
+            crate::frame::Bg::Mix(c, a) => (c.tonemap(), a),
+        };
+        u.raster.draw_cell_over(fb, stride, px, py, g.ch, g.fg.tonemap(), bg, bg_a, g.alpha.clamp(0.0, 1.0));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                covered.push(y * cols + x);
+            }
+        }
+    }
+    for p in &u.frame.pictures {
+        if !p.draw_fitted(fb, stride, off.0 as i32, off.1 as i32, u.cw, u.ch) {
+            match p.sprite_px(u.cw, u.ch) {
+                Some((x, y, k)) => p.pic.blit_scaled(fb, stride, off.0 as i32 + x, off.1 as i32 + y, k),
+                None => p.pic.blit(fb, stride, off.0 + p.x.max(0) as usize * u.cw, off.1 + p.y.max(0) as usize * u.ch, p.cols as usize * u.cw, p.rows as usize * u.ch),
+            }
+        }
+        let (x0, y0) = ((p.x.max(0) as usize * u.cw) / scw, (p.y.max(0) as usize * u.ch) / sch);
+        let (x1, y1) = ((((p.x + p.cols).max(0) as usize * u.cw).div_ceil(scw)).min(cols), (((p.y + p.rows).max(0) as usize * u.ch).div_ceil(sch)).min(rows));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                covered.push(y * cols + x);
+            }
+        }
+    }
+    u.covered = covered;
+}
+
 pub struct Game {
     pub scene: Scene,
     /// The UI's own layer, bigger (see `UiLayer`; None: the village's size).
     ui: Option<UiLayer>,
+    /// The widgets' (the web page), when they're set a size of their own
+    /// (None: they go on the UI's layer).
+    wl: Option<UiLayer>,
+    /// How it's running (the Screen tab, the corner).
+    meter: crate::settings::PerfMeter,
     cfg: Config,
     frame: Frame,
     spare: Frame,
@@ -369,10 +428,20 @@ const HELP: &[&str] = &[
 /// pixels to a point: the village has at least 75 rows, often smaller than
 /// that, and its menus and talk mustn't shrink with it).
 fn ui_k(setting: f32, size: f32, ch: usize, cols: usize, rows: usize) -> f32 {
-    let k = setting.clamp(1.0, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0);
+    let k = setting.clamp(crate::config::WINDOWS_MIN, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0);
     // never so big the menu (80 columns) doesn't fit across, or there are
     // fewer than 24 rows of it
-    k.min(cols as f32 / 80.0).min(rows as f32 / 24.0).max(1.0)
+    let k = k.min(cols as f32 / 80.0).min(rows as f32 / 24.0);
+    // (set smaller than the village's own: as small as letters of 6 px)
+    if setting < 1.0 { k.max(6.0 / ch.max(1) as f32) } else { k.max(1.0) }
+}
+
+/// The widgets' size (the web page) the same way, their own setting (down
+/// to a quarter), letters of 4 px at the least.
+fn widgets_k(setting: f32, size: f32, ch: usize, cols: usize) -> f32 {
+    let k = setting.clamp(0.25, 2.5) * (18.0 * size.clamp(0.5, 4.0) / ch.max(1) as f32).max(1.0);
+    // (the widgets are 64 columns wide)
+    k.min(cols as f32 / 66.0).max(4.0 / ch.max(1) as f32)
 }
 
 /// Cells for a screen: rows from the short side (about 18 px a row at
@@ -431,10 +500,16 @@ impl Game {
         frame.cell_aspect = ch as f32 / cw as f32;
         let audio = if cfg.sound.enabled && !cfg!(target_arch = "wasm32") { Audio::start(&cfg.sound) } else { None };
         let pull = cfg!(target_arch = "wasm32").then(|| audio::Pull::new(&cfg.sound));
-        let ui = UiLayer::new(cw, ch, cols, rows, ui_k(cfg.ui.scale, size, ch, cols, rows));
+        let uk = ui_k(cfg.ui.scale, size, ch, cols, rows);
+        let ui = UiLayer::new(cw, ch, cols, rows, uk);
+        // (the web page's widgets, when they're a size of their own)
+        let wk = widgets_k(cfg.ui.widgets_k(), size, ch, cols);
+        let wl = (cfg!(target_arch = "wasm32") && (wk - uk).abs() > 0.05).then(|| UiLayer::new(cw, ch, cols, rows, wk)).flatten();
         Game {
             scene,
             ui,
+            wl,
+            meter: Default::default(),
             frame,
             spare: Frame::new(1, 1),
             raster: Raster::new(cw, ch),
@@ -553,7 +628,15 @@ impl Game {
         // the UI's own layer, at its own size
         let ui_scale = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw as f32).unwrap_or(1.0);
         let want = ui_k(self.cfg.ui.scale, size, self.raster.ch, self.cols, self.rows);
-        if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != (want >= 1.05)) || (ui_scale - want).abs() > 0.2 {
+        // the widgets' (the web page), when not the same size
+        let wk = widgets_k(self.cfg.ui.widgets_k(), size, self.raster.ch, self.cols);
+        let wl_want = (self.widgets && (wk - want).abs() > 0.05).then_some(wk);
+        let wl_now = self.wl.as_ref().map(|u| u.cw as f32 / self.raster.cw as f32);
+        if regrid || wl_want.is_some() != wl_now.is_some() || wl_want.zip(wl_now).is_some_and(|(a, b)| (a - b).abs() > 0.2) || (self.cfg.ui.widgets_k() - old.ui.widgets_k()).abs() > 0.01 {
+            self.wl = wl_want.and_then(|k| UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, k));
+            self.prev.clear();
+        }
+        if regrid || (self.cfg.ui.scale - old.ui.scale).abs() > 0.01 || (self.ui.is_some() != ((want - 1.0).abs() >= 0.05)) || (ui_scale - want).abs() > 0.2 {
             self.ui = UiLayer::new(self.raster.cw, self.raster.ch, self.cols, self.rows, want);
             self.menu = None;
             self.card = None;
@@ -924,8 +1007,8 @@ impl Game {
     pub fn hover(&mut self, x: f32, y: f32) {
         // the friends widget's row under the pointer, picked out
         if let Some(r) = self.friends_at {
-            // (on the UI's layer: its cells)
-            let vc = self.ui_cell(x, y);
+            // (on the widgets' layer: its cells)
+            let vc = self.wid_cell(x, y);
             self.friends_hover = match (r.contains(vc.0, vc.1), self.scene.friends_view()) {
                 (true, Some(v)) => crate::widgets::face::friends_rows(r, &v).into_iter().find(|(y, _)| *y == vc.1).map(|(_, h)| h),
                 _ => None,
@@ -1033,6 +1116,11 @@ impl Game {
         self.set_cfg(c);
     }
 
+    /// The frame rate set (the page and the phone keep to it).
+    pub fn fps(&self) -> f32 {
+        crate::config::clean_fps(self.cfg.fps)
+    }
+
     /// How big the buttons up top are (the page's own bar follows it).
     pub fn buttons_k(&self) -> f32 {
         self.cfg.ui.buttons_k()
@@ -1044,7 +1132,7 @@ impl Game {
     /// together.
     pub fn ui_row_px(&self) -> (f32, f32) {
         let ch = self.ui.as_ref().map_or(self.raster.ch, |u| u.ch) as f32;
-        (ch, self.cfg.ui.scale.clamp(1.0, 2.5))
+        (ch, self.cfg.ui.scale.clamp(crate::config::WINDOWS_MIN, 2.5))
     }
 
     /// The settings as they stand, for the app to keep (TOML).
@@ -1540,6 +1628,17 @@ impl Game {
         }
     }
 
+    /// A frame's measures, from the front end (see `PerfMeter`): `dt`
+    /// after the last, `work` seconds to make and draw it. Once a second
+    /// the readout's made again, with `more`'s processor use and memory
+    /// (where they can be read).
+    pub fn perf_frame(&mut self, dt: f32, work: f32, more: impl FnOnce() -> (Option<(f32, f32)>, Option<f32>)) {
+        if let Some((fps, frame_ms, draw_ms)) = self.meter.frame(dt, work, None) {
+            let (cpu, mem_mb) = more();
+            self.panel.perf = Some(crate::settings::PerfInfo { fps, frame_ms, draw_ms, cpu, mem_mb, cells: (self.cols, self.rows), eased: None });
+        }
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.pw, self.ph)
     }
@@ -1663,6 +1762,10 @@ impl Game {
         // the post, questions, the table, menus and cards: over the village
         // (in a layer of their own, bigger, if the UI's set bigger)
         let layered = self.ui.is_some();
+        // (the widgets start under the page's buttons: their bar is two of
+        // the buttons' rows, in the widgets' own rows)
+        let bar_px = 2.0 * self.ui.as_ref().map_or(self.raster.ch, |u| u.ch) as f32 / self.cfg.ui.scale.clamp(crate::config::WINDOWS_MIN, 2.5) * self.cfg.ui.buttons_k().clamp(0.25, 2.5);
+        let wid_top = self.wl.as_ref().or(self.ui.as_ref()).map(|u| ((bar_px - 1.0) / u.ch.max(1) as f32).ceil().max(1.0) as i32);
         let uf = match &mut self.ui {
             Some(u) => {
                 u.frame.clear();
@@ -1675,14 +1778,24 @@ impl Game {
         // as the page's own boxes do), down the right-hand side under the
         // page's buttons, where there's room
         self.friends_at = None;
+        // (their own size: their own layer)
+        let own = self.wl.is_some();
+        if let Some(w) = &mut self.wl {
+            w.frame.clear();
+        }
         if self.widgets && !self.panel.open {
+            let uf: &mut Frame = match &mut self.wl {
+                Some(w) => &mut w.frame,
+                None => &mut *uf,
+            };
+            let layered = layered || own;
             use crate::widgets::{face, Rect};
             // (zoomed right in, not all of them fit: the weather goes
             // first, then friends; the clock stays)
             let room = if layered { 66 } else { 110 };
             if uf.w >= room {
                 let x = uf.w as i32 - 64;
-                let mut y = if layered { 2 } else { 5 };
+                let mut y = if layered { wid_top.unwrap_or(2) } else { 5 };
                 if self.cfg.clock.enabled {
                     y = face::draw_clock(uf, x + 2, y, &self.cfg.clock, t) + 1;
                 }
@@ -1725,6 +1838,7 @@ impl Game {
         if let Some(c) = &shown {
             self.panel.draw(uf, c, t);
         }
+        self.panel.draw_perf(uf, &self.cfg);
         self.frame.compose();
         self.draw();
     }
@@ -1736,6 +1850,19 @@ impl Game {
 
     fn uh(&self) -> i32 {
         self.ui.as_ref().map(|u| u.frame.h).unwrap_or(self.rows) as i32
+    }
+
+    /// The widgets' cell under screen pixel (x, y) (their own layer's, or
+    /// the UI's).
+    fn wid_cell(&self, x: f32, y: f32) -> (i32, i32) {
+        match &self.wl {
+            Some(u) => {
+                let cx = ((x - self.off.0 as f32) / u.cw as f32).floor() as i32;
+                let cy = ((y - self.off.1 as f32) / u.ch as f32).floor() as i32;
+                (cx.clamp(0, u.frame.w as i32 - 1), cy.clamp(0, u.frame.h as i32 - 1))
+            }
+            None => self.ui_cell(x, y),
+        }
     }
 
     /// The UI's cell under screen pixel (x, y).
@@ -1754,53 +1881,12 @@ impl Game {
     /// there's something), its pictures; the village's cells under it are
     /// drawn again next frame.
     fn draw_ui(&mut self) {
-        let Some(u) = &mut self.ui else { return };
-        // (what's under its panels and writing cut away from its pictures:
-        // a game's board under its names and lines)
-        u.frame.cut_hidden();
-        let stride = self.pw;
-        let (cols, rows) = (self.cols, self.rows);
+        let (stride, off, cols, rows) = (self.pw, self.off, self.cols, self.rows);
         let (scw, sch) = (self.raster.cw, self.raster.ch);
-        let mut covered = vec![];
-        let fw = u.frame.w;
-        for (i, g) in u.frame.glyph.iter().enumerate() {
-            let Some(g) = g else { continue };
-            let (ux, uy) = (i % fw, i / fw);
-            let (px, py) = (self.off.0 + ux * u.cw, self.off.1 + uy * u.ch);
-            // the village's cells under it
-            let (x0, x1) = (((px - self.off.0) / scw).min(cols), ((px - self.off.0 + u.cw).div_ceil(scw)).min(cols));
-            let (y0, y1) = (((py - self.off.1) / sch).min(rows), ((py - self.off.1 + u.ch).div_ceil(sch)).min(rows));
-            let (bg, bg_a) = match g.bg {
-                crate::frame::Bg::Scene => ([0, 0, 0], 0.0),
-                crate::frame::Bg::Solid(c) => (c.tonemap(), 1.0),
-                // (see-through: solid, the village behind it averaged, as
-                // the frosted look is at the village's own size)
-                crate::frame::Bg::Mix(c, a) if self.frame.out.len() == cols * rows => (crate::frame::frost(&self.frame.out, cols, (x0, x1, y0, y1), c.tonemap(), (a.clamp(0.0, 1.0) * 255.0) as u8), 1.0),
-                crate::frame::Bg::Mix(c, a) => (c.tonemap(), a),
-            };
-            u.raster.draw_cell_over(&mut self.fb, stride, px, py, g.ch, g.fg.tonemap(), bg, bg_a, g.alpha.clamp(0.0, 1.0));
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    covered.push(y * cols + x);
-                }
-            }
+        // (the widgets' own layer under the windows')
+        for u in [&mut self.wl, &mut self.ui].into_iter().flatten() {
+            compose_layer(u, &mut self.fb, &self.frame.out, stride, off, (cols, rows), (scw, sch));
         }
-        for p in &u.frame.pictures {
-            if !p.draw_fitted(&mut self.fb, stride, self.off.0 as i32, self.off.1 as i32, u.cw, u.ch) {
-                match p.sprite_px(u.cw, u.ch) {
-                    Some((x, y, k)) => p.pic.blit_scaled(&mut self.fb, stride, self.off.0 as i32 + x, self.off.1 as i32 + y, k),
-                    None => p.pic.blit(&mut self.fb, stride, self.off.0 + p.x.max(0) as usize * u.cw, self.off.1 + p.y.max(0) as usize * u.ch, p.cols as usize * u.cw, p.rows as usize * u.ch),
-                }
-            }
-            let (x0, y0) = ((p.x.max(0) as usize * u.cw) / scw, (p.y.max(0) as usize * u.ch) / sch);
-            let (x1, y1) = ((((p.x + p.cols).max(0) as usize * u.cw).div_ceil(scw)).min(cols), (((p.y + p.rows).max(0) as usize * u.ch).div_ceil(sch)).min(rows));
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    covered.push(y * cols + x);
-                }
-            }
-        }
-        u.covered = covered;
     }
 
     /// The cells (only those that changed, and those under pictures) and
@@ -1822,7 +1908,7 @@ impl Game {
                 }
             }
         }
-        if let Some(u) = &self.ui {
+        for u in [&self.wl, &self.ui].into_iter().flatten() {
             for &i in &u.covered {
                 if i < under.len() {
                     under[i] = true;
@@ -1979,7 +2065,7 @@ impl Game {
         if self.menu_touch(action, uc) {
             return;
         }
-        if self.friends_touch(action, uc) {
+        if self.friends_touch(action, self.wid_cell(x, y)) {
             return;
         }
         match action {
