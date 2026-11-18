@@ -5,8 +5,6 @@
 
 use crate::app::{App, Btn, KeyIn, MouseIn};
 use crate::config::Config;
-use crate::frame::Cell;
-use crate::raster::Raster;
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -31,56 +29,17 @@ pub struct Opts {
 struct Gfx {
     window: Rc<Window>,
     surface: Surface<Rc<Window>, Rc<Window>>,
-    raster: Raster,
-    fb: Vec<u32>,
-    prev: Vec<Cell>,
-    /// Pictures drawn over the cells last frame.
-    pics: Vec<crate::frame::Placed>,
+    /// The village drawn into pixels (see `blit`).
+    blit: crate::blit::Blit,
     size: (u32, u32),
     #[cfg_attr(not(windows), allow(dead_code))]
     origin: (i32, i32),
-    offset: (usize, usize),
-    force: bool,
     /// Too small to hold a single cell (e.g. minimized: Resized(0x0)):
     /// nothing is laid out or drawn until the next usable size.
     hidden: bool,
     /// Our HWND (Windows), for the desktop attach / liveness checks.
     #[cfg(windows)]
     hwnd: usize,
-    /// The UI's own layers (bigger letters over the village, for the parts
-    /// of it set bigger), bottom to top.
-    layers: Vec<GLayer>,
-}
-
-/// A layer of the UI as drawn: its grid and cell size (uw, uh, cw, ch),
-/// its letters, what was drawn of it last frame (cells, pictures).
-struct GLayer {
-    grid: (usize, usize, usize, usize),
-    raster: Raster,
-    prev: Vec<Option<UiCell>>,
-    pics: Vec<crate::frame::Placed>,
-}
-
-
-/// A cell of the UI's layer as drawn (to tell when it changes).
-#[derive(Clone, Copy, PartialEq)]
-struct UiCell {
-    ch: char,
-    fg: [u8; 3],
-    bg: [u8; 3],
-    bga: u8,
-    fga: u8,
-}
-
-impl UiCell {
-    fn of(g: &crate::frame::Glyph) -> UiCell {
-        let (bg, bga) = match g.bg {
-            crate::frame::Bg::Scene => ([0, 0, 0], 0),
-            crate::frame::Bg::Solid(c) => (c.tonemap(), 255),
-            crate::frame::Bg::Mix(c, a) => (c.tonemap(), (a.clamp(0.0, 1.0) * 255.0) as u8),
-        };
-        UiCell { ch: g.ch, fg: g.fg.tonemap(), bg, bga, fga: (g.alpha.clamp(0.0, 1.0) * 255.0) as u8 }
-    }
 }
 
 /// Windows desktop mode: the window we were attached to is gone (Explorer
@@ -229,13 +188,8 @@ impl Runner {
         if g.hidden {
             return;
         }
-        g.raster = Raster::new(cw, ch);
         g.size = (w, h);
-        let (cols, rows) = (w as usize / cw, h as usize / ch); // both >= 1 now
-        g.offset = ((w as usize - cols * cw) / 2, (h as usize - rows * ch) / 2);
-        g.fb = vec![0x0003_050f; (w * h) as usize];
-        g.prev.clear();
-        g.force = true;
+        let (cols, rows) = g.blit.layout(w, h, cw, ch);
         let _ = g.surface.resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap());
         match self.app.as_mut() {
             Some(app) => app.resize(cols, rows),
@@ -267,9 +221,9 @@ impl Runner {
             return;
         }
         let px = crate::winsys::taskbar_bottom(g.hwnd as _).max(0) as usize;
-        let ch = g.raster.ch.max(1);
+        let ch = g.blit.raster.ch.max(1);
         let rows = app.scene_size().1;
-        let clear = (g.size.1 as usize).saturating_sub(px + g.offset.1) / ch;
+        let clear = (g.size.1 as usize).saturating_sub(px + g.blit.offset.1) / ch;
         app.set_safe_bottom(rows.saturating_sub(clear));
     }
 
@@ -295,7 +249,7 @@ impl Runner {
             app.release_all();
         }
         if let Some(g) = self.gfx.as_mut() {
-            g.force = true;
+            g.blit.force = true;
             g.window.request_redraw();
         }
     }
@@ -313,7 +267,8 @@ impl Runner {
     /// of the UI, at its own size, takes its own cell from it).
     fn to_scene(&self, x: f64, y: f64) -> (f32, f32) {
         let Some(g) = self.gfx.as_ref() else { return (-1.0, -1.0) };
-        (((x - g.offset.0 as f64) / g.raster.cw.max(1) as f64) as f32, ((y - g.offset.1 as f64) / g.raster.ch.max(1) as f64) as f32)
+        let (o, r) = (g.blit.offset, &g.blit.raster);
+        (((x - o.0 as f64) / r.cw.max(1) as f64) as f32, ((y - o.1 as f64) / r.ch.max(1) as f64) as f32)
     }
 
     fn draw(&mut self) {
@@ -325,164 +280,27 @@ impl Runner {
         // the grid on screen (the village's cells), for putting a file
         // dragged off a shelf where it was let go (Windows desktop: the
         // window is at the monitor's origin)
-        app.px_map = desktop.then(|| (g.origin.0 + g.offset.0 as i32, g.origin.1 + g.offset.1 as i32, g.raster.cw as i32, g.raster.ch as i32));
-        app.screen_map = desktop.then(|| (g.size.0 as f32, g.size.1 as f32, g.offset.0 as f32, g.offset.1 as f32, g.raster.cw as f32, g.raster.ch as f32));
-        app.frame.cell_aspect = g.raster.ch as f32 / g.raster.cw.max(1) as f32;
+        app.px_map = desktop.then(|| (g.origin.0 + g.blit.offset.0 as i32, g.origin.1 + g.blit.offset.1 as i32, g.blit.raster.cw as i32, g.blit.raster.ch as i32));
+        app.screen_map = desktop.then(|| (g.size.0 as f32, g.size.1 as f32, g.blit.offset.0 as f32, g.blit.offset.1 as f32, g.blit.raster.cw as f32, g.blit.raster.ch as f32));
+        app.frame.cell_aspect = g.blit.raster.ch as f32 / g.blit.raster.cw.max(1) as f32;
         app.step();
         // (the drawing's time, for the performance readout: counted in
         // with the next frame's)
         let drawing = std::time::Instant::now();
-        let (cols, rows) = app.scene_size();
-        let (cw, ch) = (g.raster.cw, g.raster.ch);
-        // the UI's own layers: each one's grid (as the app has it), cells to
-        // fit over the village's
-        let want: Vec<(usize, usize, usize, usize)> = app.ui_layers().iter().map(|(f, _)| (f.w, f.h, (cols * cw / f.w.max(1)).max(1), (rows * ch / f.h.max(1)).max(1))).collect();
-        // (the app finds the pointer on them by these: whole pixels, a
-        // little off each layer's size)
-        app.layer_px = want.iter().map(|&(_, _, ucw, uch)| (ucw as f32 / cw.max(1) as f32, uch as f32 / ch.max(1) as f32)).collect();
-        if want.len() != g.layers.len() || want.iter().zip(&g.layers).any(|(a, l)| *a != l.grid) {
-            g.layers = want.iter().map(|&grid| GLayer { grid, raster: Raster::new(grid.2, grid.3), prev: vec![], pics: vec![] }).collect();
-            g.force = true;
-        }
-        let (cells, pics) = app.output();
-        let pics = pics.to_vec();
-        let now: Vec<(Vec<Option<UiCell>>, Vec<crate::frame::Placed>)> = app.ui_layers().iter().map(|(f, _)| (f.glyph.iter().map(|g| g.as_ref().map(UiCell::of)).collect(), f.pictures.clone())).collect();
+        let drawn = g.blit.draw(app);
+        let full = drawn.full;
         let stride = g.size.0 as usize;
-        let full = g.force || g.prev.len() != cells.len();
-        // the village's cells under a layer's: (x0, x1, y0, y1)
-        let span = |grid: (usize, usize, usize, usize), ux: usize, uy: usize, n: usize, m: usize| {
-            let (_, _, ucw, uch) = grid;
-            ((ux * ucw / cw).min(cols), ((ux + n) * ucw).div_ceil(cw).min(cols), (uy * uch / ch).min(rows), ((uy + m) * uch).div_ceil(ch).min(rows))
-        };
-        // which of the village's cells are drawn again: the ones that
-        // changed, or under pictures (real icons: redrawn every frame, so a
-        // picture always goes onto fresh cells; and last frame's, so a moved
-        // one leaves nothing behind)...
-        let mut need = vec![false; cols * rows];
-        for (i, n) in need.iter_mut().enumerate() {
-            *n = full || cells[i] != g.prev[i];
-        }
-        let mark = |need: &mut Vec<bool>, (x0, x1, y0, y1): (usize, usize, usize, usize)| {
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    need[y * cols + x] = true;
-                }
-            }
-        };
-        for p in pics.iter().chain(g.pics.iter()) {
-            // (a sprite's cells are approximate: a cell more all round)
-            let m = p.sprite.is_some() as i32;
-            let (px, py, pc, pr) = (p.x - m, p.y - m, p.cols + 2 * m, p.rows + 2 * m);
-            let c = |v: i32, n: usize| (v.max(0) as usize).min(n);
-            mark(&mut need, (c(px, cols), c(px + pc, cols), c(py, rows), c(py + pr, rows)));
-        }
-        // ...or under a layer's cell that changed (or went), or its pictures
-        let mut dirty: Vec<Vec<bool>> = vec![];
-        for (l, (ui_now, pics_now)) in g.layers.iter().zip(&now) {
-            let uw = l.grid.0.max(1);
-            let mut d = vec![false; ui_now.len()];
-            for (i, c) in ui_now.iter().enumerate() {
-                let was = l.prev.get(i).copied().flatten();
-                if full || was != *c {
-                    d[i] = true;
-                    if was.is_some() || c.is_some() {
-                        mark(&mut need, span(l.grid, i % uw, i / uw, 1, 1));
-                    }
-                }
-            }
-            for p in pics_now.iter().chain(l.pics.iter()) {
-                mark(&mut need, span(l.grid, p.x.max(0) as usize, p.y.max(0) as usize, (p.cols + 1).max(0) as usize, (p.rows + 1).max(0) as usize));
-            }
-            dirty.push(d);
-        }
-        // a layer's cell drawn again has all of the village under it drawn
-        // again first (so nothing see-through goes over itself twice); that
-        // may take in more of the layers' cells: until it settles
-        let redraw = |need: &[bool], (x0, x1, y0, y1): (usize, usize, usize, usize)| (y0..y1).any(|y| (x0..x1).any(|x| need[y * cols + x]));
-        for _ in 0..4 {
-            let mut grew = false;
-            for (li, (l, (ui_now, _))) in g.layers.iter().zip(&now).enumerate() {
-                let uw = l.grid.0.max(1);
-                for (i, c) in ui_now.iter().enumerate() {
-                    if c.is_none() {
-                        continue;
-                    }
-                    let sp = span(l.grid, i % uw, i / uw, 1, 1);
-                    if (dirty[li][i] || redraw(&need, sp)) && !(sp.2..sp.3).all(|y| (sp.0..sp.1).all(|x| need[y * cols + x])) {
-                        mark(&mut need, sp);
-                        grew = true;
-                    }
-                }
-            }
-            if !grew {
-                break;
-            }
-        }
-        for cy in 0..rows {
-            for cx in 0..cols {
-                let i = cy * cols + cx;
-                if need[i] {
-                    g.raster.draw_cell(&mut g.fb, stride, g.offset.0 + cx * cw, g.offset.1 + cy * ch, &cells[i]);
-                }
-            }
-        }
-        // (the rows drawn again: what's sent to the screen)
-        let (y0, y1) = match (need.chunks(cols.max(1)).position(|r| r.iter().any(|&n| n)), need.chunks(cols.max(1)).rposition(|r| r.iter().any(|&n| n))) {
-            (Some(a), Some(b)) => (a, b),
-            _ => (usize::MAX, 0),
-        };
-        g.prev = cells.to_vec();
-        for p in &pics {
-            if p.draw_fitted(&mut g.fb, stride, g.offset.0 as i32, g.offset.1 as i32, cw, ch) {
-                continue;
-            }
-            match p.sprite_px(cw, ch) {
-                Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
-                None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x as usize * cw, g.offset.1 + p.y as usize * ch, p.cols as usize * cw, p.rows as usize * ch),
-            }
-        }
-        // the UI's layers over it all, bottom to top: their cells that
-        // changed, or that sit over the village drawn again, then their
-        // pictures
-        for (li, (l, (ui_now, pics_now))) in g.layers.iter_mut().zip(now).enumerate() {
-            let (uw, _, ucw, uch) = l.grid;
-            let uw = uw.max(1);
-            for (i, c) in ui_now.iter().enumerate() {
-                let Some(c) = c else { continue };
-                let (ux, uy) = (i % uw, i / uw);
-                let sp = span(l.grid, ux, uy, 1, 1);
-                if dirty[li][i] || redraw(&need, sp) {
-                    // (a see-through panel: solid, the village behind it averaged)
-                    let (bg, bga) = if c.bga > 0 && c.bga < 255 { (crate::frame::frost(cells, cols, sp, c.bg, c.bga), 255) } else { (c.bg, c.bga) };
-                    l.raster.draw_cell_over(&mut g.fb, stride, g.offset.0 + ux * ucw, g.offset.1 + uy * uch, c.ch, c.fg, bg, bga as f32 / 255.0, c.fga as f32 / 255.0);
-                }
-            }
-            for p in &pics_now {
-                if !p.draw_fitted(&mut g.fb, stride, g.offset.0 as i32, g.offset.1 as i32, ucw, uch) {
-                    match p.sprite_px(ucw, uch) {
-                        Some((x, y, k)) => p.pic.blit_scaled(&mut g.fb, stride, g.offset.0 as i32 + x, g.offset.1 as i32 + y, k),
-                        None => p.pic.blit(&mut g.fb, stride, g.offset.0 + p.x.max(0) as usize * ucw, g.offset.1 + p.y.max(0) as usize * uch, p.cols as usize * ucw, p.rows as usize * uch),
-                    }
-                }
-            }
-            l.prev = ui_now;
-            l.pics = pics_now;
-        }
-        g.pics = pics;
         let Ok(mut buf) = g.surface.buffer_mut() else { return };
         let (dy0, dy1) = if full || buf.age() != 1 {
             (0, g.size.1 as usize)
-        } else if y0 == usize::MAX {
-            (0, 0)
         } else {
-            (g.offset.1 + y0 * ch, g.offset.1 + (y1 + 1) * ch)
+            drawn.rows.unwrap_or((0, 0))
         };
         if full || buf.age() != 1 {
-            buf.copy_from_slice(&g.fb);
+            buf.copy_from_slice(&g.blit.fb);
         } else if dy1 > dy0 {
-            buf[dy0 * stride..dy1 * stride].copy_from_slice(&g.fb[dy0 * stride..dy1 * stride]);
+            buf[dy0 * stride..dy1 * stride].copy_from_slice(&g.blit.fb[dy0 * stride..dy1 * stride]);
         }
-        g.force = false;
         if dy1 > dy0 {
             let rect = softbuffer::Rect {
                 x: 0,
@@ -543,9 +361,9 @@ impl Runner {
             let bare = inside && p.on_desktop && !crate::winsys::over_icon(p.x, p.y);
             let ours = bare && app.right_click_ours(fx, fy);
             // (the village's cell: the finest the UI's parts, at any size, are cut)
-            let (cw, ch) = (g.raster.cw as i32, g.raster.ch as i32);
-            let x0 = g.origin.0 + g.offset.0 as i32 + cx * cw;
-            let y0 = g.origin.1 + g.offset.1 as i32 + cy * ch;
+            let (cw, ch) = (g.blit.raster.cw as i32, g.blit.raster.ch as i32);
+            let x0 = g.origin.0 + g.blit.offset.0 as i32 + cx * cw;
+            let y0 = g.origin.1 + g.blit.offset.1 as i32 + cy * ch;
             crate::winsys::rclick_target((x0, y0, x0 + cw, y0 + ch), ours, bare);
         }
         // the wheel (and a touchpad's two-finger scrolls and pinches) over
@@ -640,9 +458,9 @@ impl Runner {
         // a right-click the hook took from the desktop: our menu if there's
         // something of ours there, else Windows' menu after all
         if let Some((sx, sy)) = crate::winsys::take_rclick() {
-            let (cw, ch) = (g.raster.cw.max(1), g.raster.ch.max(1));
-            let rx = (sx - g.origin.0 - g.offset.0 as i32) as f32 / cw as f32;
-            let ry = (sy - g.origin.1 - g.offset.1 as i32) as f32 / ch as f32;
+            let (cw, ch) = (g.blit.raster.cw.max(1), g.blit.raster.ch.max(1));
+            let rx = (sx - g.origin.0 - g.blit.offset.0 as i32) as f32 / cw as f32;
+            let ry = (sy - g.origin.1 - g.blit.offset.1 as i32) as f32 / ch as f32;
             if app.right_click(rx, ry) {
                 // the menu shows now, not at the next frame
                 self.draw_now = true;
@@ -882,18 +700,15 @@ impl Runner {
         self.gfx = Some(Gfx {
             window: window.clone(),
             surface,
-            raster: { crate::frame::set_pictures_ok(true); Raster::new(8, 17) },
-            fb: vec![],
-            prev: vec![],
-            pics: vec![],
+            blit: {
+                crate::frame::set_pictures_ok(true);
+                crate::blit::Blit::new()
+            },
             size: (0, 0),
             origin,
-            offset: (0, 0),
-            force: true,
             hidden: false,
             #[cfg(windows)]
             hwnd: own_hwnd,
-            layers: vec![],
         });
         self.layout(size);
         // window snow & lights in front of the other windows
@@ -1038,7 +853,7 @@ impl ApplicationHandler for Runner {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (fx, fy) = self.to_scene(self.cursor.0, self.cursor.1);
-                let cell = self.gfx.as_ref().map(|g| (g.raster.cw.max(1) as f32, g.raster.ch.max(1) as f32)).unwrap_or((8.0, 16.0));
+                let cell = self.gfx.as_ref().map(|g| (g.blit.raster.cw.max(1) as f32, g.blit.raster.ch.max(1) as f32)).unwrap_or((8.0, 16.0));
                 let Some(app) = self.app.as_mut() else { return };
                 match delta {
                     // a trackpad: smooth, both ways at once (along the

@@ -29,7 +29,7 @@ Contact: open an issue at [github.com/dash1101/xmas-tui/issues](https://github.c
 | Desktop (Windows) | Settings and the save | `%APPDATA%\xmas-tui\` |
 | | The log | `%LOCALAPPDATA%\xmas-tui\wallpaper.log` |
 | Android | Settings and the save | The app's own private storage |
-| Web page | Settings, the save, other villagers made in that browser | The browser's local storage for xmas.novalabs.app |
+| Web page | Settings, the save, other villagers made in that browser; and (from 1.26.1) the page's own files, so it opens with no connection, installed as an app or not | The browser's local storage for xmas.novalabs.app |
 
 None of this is sent anywhere by xmas-tui, except as described under "Going online" (and then sealed).
 

@@ -686,10 +686,19 @@ const ICONS = [
   ["...#...", "...#...", ".#####.", "#######", ".#####.", "...#...", "...#..."],
 ];
 let stick = null, knob = null, pressed = new Map();
+// the phone's notch and rounded corners (CSS pixels): the joystick and the
+// buttons keep clear of them
+function safeInsets() {
+  const cs = getComputedStyle(document.getElementById("safe"));
+  const v = (k) => parseFloat(cs[k]) || 0;
+  return { l: v("paddingLeft"), r: v("paddingRight"), b: v("paddingBottom"), t: v("paddingTop") };
+}
 function layout() {
-  const w = pad.width, h = pad.height, s = Math.min(w, h) / 360 * btnScale();
+  const sa = safeInsets(), k = pad.width / Math.max(1, pad.clientWidth || pad.width);
+  const w = pad.width - sa.r * k, h = pad.height - sa.b * k, l = sa.l * k;
+  const s = Math.min(pad.width, pad.height) / 360 * btnScale();
   return {
-    stick: { x: 40 * s + 58 * s, y: h - 36 * s - 58 * s, r: 58 * s },
+    stick: { x: l + 40 * s + 58 * s, y: h - 36 * s - 58 * s, r: 58 * s },
     btn: [
       { x: w - 70 * s, y: h - 82 * s, r: 40 * s, b: "E", icon: 0, col: "#c83a46" },
       { x: w - 170 * s, y: h - 52 * s, r: 32 * s, b: "JUMP", icon: 1, col: "#1e2850" },
@@ -774,6 +783,35 @@ pad.addEventListener("pointercancel", padUp);
 const box = document.getElementById("opts"), pane = document.getElementById("pane"), tabsEl = document.getElementById("tabs");
 const TABS = ["Villager", "Friends", "Village", "Sound", "Looks", "Save"];
 let tab = 0, rebuildT = 0;
+
+// ------------------------------------------------------------ as an app
+// Installed on a phone's home screen (or a computer's): an app of its own,
+// full screen, opening with no connection too (sw.js keeps its files).
+if ("serviceWorker" in navigator && (location.protocol === "https:" || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) {
+  addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+const installed = matchMedia("(display-mode: standalone), (display-mode: fullscreen)").matches || navigator.standalone === true;
+// Android and desktop browsers offer to install it: a button for it on the bar
+let installAsk = null;
+addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installAsk = e;
+  document.getElementById("b-install").style.display = "inline";
+});
+document.getElementById("b-install").onclick = async () => {
+  if (!installAsk) return;
+  installAsk.prompt();
+  try { await installAsk.userChoice; } catch (e) {}
+  installAsk = null;
+  document.getElementById("b-install").style.display = "none";
+};
+addEventListener("appinstalled", () => { document.getElementById("b-install").style.display = "none"; });
+// an iPhone or iPad's Safari has no such offer: how to, said once
+if (!installed && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+  let told = false;
+  try { told = !!localStorage.getItem("xmas-tui-told-install"); localStorage.setItem("xmas-tui-told-install", "1"); } catch (e) {}
+  if (!told) setTimeout(() => toast("to have the village as an app: Share ⬆ → Add to Home Screen"), 4000);
+}
 
 function toast(s) {
   const t = document.getElementById("toast");

@@ -1,6 +1,6 @@
 [package]
 name = "xmas-tui"
-version = "1.26.0"
+version = "1.26.1"
 edition = "2021"
 description = "A cozy, glowing TUI Christmas scene meant to run as a live desktop wallpaper"
 license-file = "LICENSE"
@@ -31,6 +31,11 @@ libc = "0.2"
 zbus = "5"
 smithay-client-toolkit = { version = "0.19", default-features = false }
 wayland-client = "0.31"
+# (the wallpaper drawn straight onto the desktop: a sharp buffer at a
+# fractional scale, the pointer's shape; the keyboard's layout, loaded at
+# run time where there is one)
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+xkbcommon-dl = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

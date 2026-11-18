@@ -524,6 +524,13 @@ pub struct Frame {
     /// How much bigger the view's drawn (zoomed in): the glow spreads as
     /// far again, so it looks as it does at 1×, only bigger.
     glow_k: f32,
+    /// The glow worked out only every so many frames (a live wallpaper:
+    /// every other; it changes too slowly to see), the last one's kept in
+    /// `near` meanwhile; and how many frames since, and whether there is a
+    /// last one yet (none after a resize).
+    pub bloom_every: u32,
+    bloom_tick: u32,
+    bloomed: bool,
 }
 
 impl Frame {
@@ -563,6 +570,9 @@ impl Frame {
             glow_near: 1.0,
             glow_far: 1.0,
             glow_k: 1.0,
+            bloom_every: 1,
+            bloom_tick: 0,
+            bloomed: false,
         };
         f.resize(w, h);
         f
@@ -578,6 +588,7 @@ impl Frame {
         self.light = vec![Rgb::BLACK; np];
         self.soft = vec![0; np];
         self.near = vec![Rgb::BLACK; np];
+        self.bloomed = false;
         self.tmp = vec![Rgb::BLACK; np];
         let nh = self.pw.div_ceil(2) * self.ph.div_ceil(2);
         self.half = vec![Rgb::BLACK; nh];
@@ -718,10 +729,21 @@ impl Frame {
     pub fn px_disc(&mut self, cx: f32, cy: f32, r: f32, c: Rgb, a: f32) {
         let (x0, x1) = ((cx - r - 1.0).floor() as i32, (cx + r + 1.0).ceil() as i32);
         let (y0, y1) = ((cy - r - 1.0).floor() as i32, (cy + r + 1.0).ceil() as i32);
+        // (nothing of it on the screen: nothing to do)
+        let (sx0, sx1, sy0, sy1) = (x0 - self.ox, x1 - self.ox, y0 + 2 * self.oy, y1 + 2 * self.oy);
+        if sx1 < 0 || sy1 < 0 || sx0 >= self.pw as i32 || sy0 >= self.ph as i32 {
+            return;
+        }
+        // (well inside or well outside its edge: no square root needed)
+        let (inner, outer) = ((r - 0.5).max(0.0).powi(2), (r + 0.5).powi(2));
         for y in y0..=y1 {
+            let dy2 = (y as f32 + 0.5 - cy).powi(2);
             for x in x0..=x1 {
-                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-                let cov = (r + 0.5 - d).clamp(0.0, 1.0);
+                let d2 = (x as f32 + 0.5 - cx).powi(2) + dy2;
+                if d2 >= outer {
+                    continue;
+                }
+                let cov = if d2 <= inner { 1.0 } else { (r + 0.5 - d2.sqrt()).clamp(0.0, 1.0) };
                 if cov > 0.0 {
                     self.px_blend(x, y, c, a * cov);
                 }
@@ -1249,15 +1271,22 @@ impl Frame {
 
     pub fn compose(&mut self) {
         self.cut_hidden();
-        self.bloom();
-        let (pw, ph) = (self.pw, self.ph);
-        if self.pre_on && self.pre.len() == pw * ph {
-            for (n, p) in self.near.iter_mut().zip(&self.pre) {
-                *n += *p;
-            }
+        self.bloom_tick = self.bloom_tick.wrapping_add(1);
+        if !self.bloomed || self.bloom_every <= 1 || self.bloom_tick % self.bloom_every == 0 {
+            self.bloom();
+            self.bloomed = true;
         }
+        let (pw, ph) = (self.pw, self.ph);
+        // (the glow, and the light baked in beforehand, added as they're
+        // read: the glow is kept as it is for the frames it's not worked
+        // out again)
+        let pre = (self.pre_on && self.pre.len() == pw * ph).then_some(&self.pre);
+        let lit = |near: &[Rgb], i: usize| match pre {
+            Some(p) => near[i] + p[i],
+            None => near[i],
+        };
         for i in 0..pw * ph {
-            let l = self.near[i];
+            let l = lit(&self.near, i);
             // (a big sprite's pixels take light like a glyph: lit 0.6)
             self.px[i] += if self.soft[i] != 0 { l * 0.27 } else { l };
         }
@@ -1277,7 +1306,7 @@ impl Frame {
                         }
                     }
                     Some(g) => {
-                        let light = (self.near[ti] + self.near[bi]) * 0.5;
+                        let light = (lit(&self.near, ti) + lit(&self.near, bi)) * 0.5;
                         let scene = (top + bot) * 0.5;
                         let bg = match g.bg {
                             Bg::Scene => scene,

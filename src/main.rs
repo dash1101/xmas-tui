@@ -3,6 +3,7 @@
 
 mod app;
 mod audio;
+mod blit;
 mod color;
 mod clock;
 mod config;
@@ -36,6 +37,8 @@ mod winshelf;
 mod winsys;
 #[cfg(any(target_os = "linux", windows))]
 mod winsnow;
+#[cfg(target_os = "linux")]
+mod wlwall;
 
 use app::{App, Btn, KeyIn, MouseIn};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -62,6 +65,8 @@ struct Args {
     /// 3 oven) and let it play this many seconds.
     poke: Option<(u8, f32)>,
     wallpaper: bool,
+    /// The Linux wallpaper drawn straight onto the desktop (see `wlwall`).
+    native_wall: bool,
     settings: bool,
     tab: usize,
     /// (previews) `--tab 1:0`: the You tab, friend 0's look being chosen
@@ -125,6 +130,7 @@ fn parse_args() -> Args {
         controls: false,
         poke: None,
         wallpaper: false,
+        native_wall: false,
         settings: false,
         tab: 0,
         friend: None,
@@ -204,6 +210,11 @@ fn parse_args() -> Args {
             "--after-update" => a.after_update = it.next().and_then(|v| v.parse().ok()),
             "--pan" => a.pan = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--wallpaper" => a.wallpaper = true,
+            // (drawn straight onto the desktop: see wlwall)
+            "--native-wallpaper" => {
+                a.wallpaper = true;
+                a.native_wall = true;
+            }
             "--windowed" => a.windowed = true,
             "--fullscreen" => {
                 a.windowed = true;
@@ -390,6 +401,10 @@ fn main() {
         }
         return;
     }
+    #[cfg(target_os = "linux")]
+    if args.native_wall {
+        std::process::exit(run_native(cfg, seed, &path));
+    }
     if let Err(e) = run_terminal(cfg, seed, &path, args.wallpaper) {
         Term::leave();
         eprintln!("xmas-tui: {e}");
@@ -397,6 +412,44 @@ fn main() {
     }
     if update::restart_requested() {
         update::relaunch();
+    }
+}
+
+/// The Linux wallpaper drawn straight onto the desktop (see `wlwall`): 0
+/// once it's done, 3 when this desktop can't have it (the launcher has
+/// kitty draw it instead).
+#[cfg(target_os = "linux")]
+fn run_native(cfg: config::Config, seed: u32, path: &std::path::Path) -> i32 {
+    redirect_stderr_to_log();
+    std::panic::set_hook(Box::new(|info| {
+        shutdown_extras();
+        eprintln!("{info}");
+    }));
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as usize);
+        libc::signal(libc::SIGHUP, on_signal as *const () as usize);
+        libc::signal(libc::SIGINT, on_signal as *const () as usize);
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("xmas-tui: not a Wayland desktop: kitty draws the wallpaper instead");
+        return 3;
+    }
+    if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) {
+        FX_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let res = wlwall::run(cfg, seed, path, &|| STOP.load(std::sync::atomic::Ordering::SeqCst));
+    shutdown_extras();
+    match res {
+        Ok(()) => {
+            if update::restart_requested() {
+                update::relaunch();
+            }
+            0
+        }
+        Err(wlwall::CantDraw(why)) => {
+            eprintln!("xmas-tui: can't draw straight onto this desktop ({why}): kitty draws it instead");
+            3
+        }
     }
 }
 
@@ -901,6 +954,8 @@ fn run_bench(cfg: &config::Config, seed: u32, args: &Args) {
     let mut term = Term::new();
     let (mut bytes, mut t_term) = (0usize, 0.0f64);
     let mut spare = Frame::new(1, 1);
+    // (as the wallpaper has it)
+    frame.bloom_every = if cfg.fps >= 20.0 { 2 } else { 1 };
     for _ in 0..args.bench {
         let a = Instant::now();
         scene.update(dt, t);

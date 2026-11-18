@@ -33,6 +33,7 @@ struct Ornament {
     seed: u32,
 }
 
+#[derive(Clone, Copy)]
 struct TreeCell {
     ch: char,
     fg: Rgb,
@@ -47,6 +48,9 @@ pub struct Tree {
     pub hw_base: f32,
     cells: HashMap<(i32, i32), TreeCell>,
     order: Vec<(i32, i32)>,
+    /// The cells in that order, as they're drawn each frame (a list, not a
+    /// lookup each).
+    drawn: Vec<(i32, i32, TreeCell)>,
     garland: Vec<(i32, i32, char, Rgb, f32)>,
     bulbs: Vec<Bulb>,
     ornaments: Vec<Ornament>,
@@ -239,11 +243,13 @@ impl Tree {
             }
         }
 
+        let drawn = order.iter().filter_map(|k| cells.get(k).map(|c| (k.0, k.1, *c))).collect();
         Tree {
             cx,
             top,
             hw_base: hw_max,
             cells,
+            drawn,
             order,
             garland,
             bulbs,
@@ -317,12 +323,11 @@ impl Tree {
             f.put_g(x, y, Glyph::new(ch, Rgb::hex(0x3d2414)).lit(0.8));
         }
         // foliage
-        for k in &self.order {
-            let c = &self.cells[k];
+        for &(x, y, c) in &self.drawn {
             if c.edge {
-                f.put_g(k.0, k.1, Glyph::new(c.ch, c.fg).lit(0.35));
+                f.put_g(x, y, Glyph::new(c.ch, c.fg).lit(0.35));
             } else {
-                f.put_g(k.0, k.1, Glyph::new(c.ch, c.fg).solid(c.bg).lit(0.3));
+                f.put_g(x, y, Glyph::new(c.ch, c.fg).solid(c.bg).lit(0.3));
             }
         }
         let bg_at = |x: i32, y: i32| -> Bg {

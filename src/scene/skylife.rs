@@ -16,6 +16,38 @@ struct Cloud {
     speed: f32,
     seed: u32,
     dense: f32,
+    /// How thick it is at each of its pixels (from its own top left,
+    /// `mask_w` wide), worked out now and then (`mask_t`), not every frame:
+    /// the wisps change too slowly to see from one frame to the next, and
+    /// the noise is the dearest thing in the sky.
+    mask: Vec<f32>,
+    mask_w: usize,
+    mask_t: f32,
+}
+
+impl Cloud {
+    /// Its wisps as they are at `t` (the shape travels with the cloud).
+    fn shape(&mut self, t: f32) {
+        let (hw, hh) = (self.len.ceil() as i32, self.h.ceil() as i32);
+        let (w, h) = ((2 * hw + 1) as usize, (2 * hh + 1) as usize);
+        self.mask.resize(w * h, 0.0);
+        self.mask_w = w;
+        self.mask_t = t;
+        for ly in 0..h {
+            let dy = (ly as f32 - hh as f32) / self.h;
+            for lx in 0..w {
+                let dx = (lx as f32 - hw as f32) / self.len;
+                let fall = (1.0 - dx * dx - dy * dy * 1.4).max(0.0);
+                let a = if fall <= 0.0 {
+                    0.0
+                } else {
+                    let n = fbm2(lx as f32 * 0.06 + t * 0.01, ly as f32 * 0.12, 3, self.seed);
+                    ((n - 0.36) * 3.0 * fall.sqrt()).clamp(0.0, 1.0) * self.dense * 0.8
+                };
+                self.mask[ly * w + lx] = a;
+            }
+        }
+    }
 }
 
 struct Flyer {
@@ -71,6 +103,9 @@ impl SkyLife {
                 speed: rng.range(0.6, 1.6),
                 seed: rng.int(0, 1 << 20) as u32,
                 dense: rng.range(0.35, 0.8),
+                mask: vec![],
+                mask_w: 0,
+                mask_t: -1e9,
             })
             .collect();
         SkyLife {
@@ -106,12 +141,16 @@ impl SkyLife {
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, dt: f32, t: f32, wind: f32, sun: f32, festive: bool, view: (f32, f32), moon_y: f32) {
         let w = self.w;
-        for c in &mut self.clouds {
+        for (i, c) in self.clouds.iter_mut().enumerate() {
             c.x += (c.speed + wind * 0.05) * dt;
             if c.x - c.len > w {
                 c.x = -c.len;
             } else if c.x + c.len < -10.0 {
                 c.x = w + c.len;
+            }
+            // (each about once a second, a few frames apart from the others)
+            if (t - c.mask_t).abs() > 1.0 + i as f32 * 0.13 || c.mask.is_empty() {
+                c.shape(t);
             }
         }
         // an airplane, high up, now and then
@@ -209,22 +248,18 @@ impl SkyLife {
         let night = Rgb::hex(0x56608e);
         let day = Rgb::hex(0xf2f4fa);
         let base = night.lerp(day, sun);
+        let _ = t;
         for c in &self.clouds {
-            let (x0, x1) = ((c.x - c.len) as i32, (c.x + c.len) as i32);
-            let (y0, y1) = ((c.y - c.h) as i32, (c.y + c.h) as i32);
-            for y in y0..=y1 {
-                let dy = (y as f32 - c.y) / c.h;
-                for x in x0..=x1 {
-                    let dx = (x as f32 - c.x) / c.len;
-                    let fall = (1.0 - dx * dx - dy * dy * 1.4).max(0.0);
-                    if fall <= 0.0 {
-                        continue;
-                    }
-                    let n = fbm2(x as f32 * 0.06 + t * 0.01, y as f32 * 0.12, 3, c.seed);
-                    let a = ((n - 0.36) * 3.0 * fall.sqrt()).clamp(0.0, 1.0) * c.dense * 0.8;
-                    if a <= 0.01 {
-                        continue;
-                    }
+            let (hw, hh) = (c.len.ceil() as i32, c.h.ceil() as i32);
+            let (x0, y0) = (c.x.round() as i32 - hw, c.y.round() as i32 - hh);
+            let w = c.mask_w.max(1);
+            for (k, &a) in c.mask.iter().enumerate() {
+                if a <= 0.01 {
+                    continue;
+                }
+                let (x, y) = (x0 + (k % w) as i32, y0 + (k / w) as i32);
+                {
+                    let dy = (y as f32 - c.y) / c.h;
                     // moonlit (or sunlit) on top, darker below
                     let near_moon = 1.0 - ((x as f32 - moon.0).hypot((y as f32 - moon.1) * 1.4) / 120.0).clamp(0.0, 1.0);
                     let lit = 0.8 + 0.25 * (-dy) + 0.5 * near_moon * (1.0 - sun);

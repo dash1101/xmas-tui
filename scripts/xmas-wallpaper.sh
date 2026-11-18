@@ -20,34 +20,6 @@ if [[ -f "$NOTE" ]]; then
     exit 0
   fi
 fi
-# kitty draws it: the newest of the one on the PATH and an official build in
-# ~/.local/kitty.app (Settings → Desktop → "set as wallpaper" fetches one).
-# From 0.42 the panel is `kitten panel`; 0.34–0.41 (Debian 13 has 0.41) only
-# have `kitty +kitten panel`, without --listen-on.
-kver() { "$1" --version 2>/dev/null | awk '{print $2}'; }
-at_least() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
-KITTY=""; KV=""
-for k in "$(command -v kitty || true)" "$HOME/.local/kitty.app/bin/kitty"; do
-  [[ -n "$k" && -x "$k" ]] || continue
-  v="$(kver "$k")"; [[ -n "$v" ]] || continue
-  if [[ -z "$KV" ]] || ! at_least "$KV" "$v"; then KITTY="$k"; KV="$v"; fi
-done
-if [[ -z "$KITTY" ]]; then
-  echo "xmas-tui: kitty isn't installed (Settings → Desktop → set as wallpaper fetches it)" >&2
-  sleep 30; exit 1
-fi
-if [[ "${XDG_SESSION_TYPE:-}" == x11 ]] && ! at_least "$KV" 0.42.0; then
-  echo "xmas-tui: kitty $KV can't draw the desktop on X11 (that needs 0.42 or newer)" >&2
-  sleep 30; exit 1
-fi
-KITTEN="${KITTEN:-$(dirname "$KITTY")/kitten}"
-[[ -x "$KITTEN" ]] || KITTEN="$(command -v kitten || echo kitten)"
-# an installed release keeps its binary in bin/ (and updates it there); a
-# source checkout runs its own build; the .deb puts it on the PATH
-BIN="$DIR/bin/xmas-tui"
-[[ -x "$BIN" ]] || BIN="$DIR/target/release/xmas-tui"
-[[ -x "$BIN" ]] || BIN="$(command -v xmas-tui || true)"
-
 # Wait until a real monitor is connected (after deep sleep the display can
 # vanish entirely; starting a panel then would attach to nothing).
 monitor_connected() {
@@ -61,6 +33,43 @@ waited=0
 until monitor_connected; do sleep 2; waited=1; done
 # give KWin a moment to bring the output up after a wake
 (( waited )) && sleep 4
+
+# kitty draws it: the newest of the one on the PATH and an official build in
+# ~/.local/kitty.app (Settings → Desktop → "set as wallpaper" fetches one).
+# From 0.42 the panel is `kitten panel`; 0.34–0.41 (Debian 13 has 0.41) only
+# have `kitty +kitten panel`, without --listen-on.
+kver() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+at_least() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
+KITTY=""; KV=""
+for k in "$(command -v kitty || true)" "$HOME/.local/kitty.app/bin/kitty"; do
+  [[ -n "$k" && -x "$k" ]] || continue
+  v="$(kver "$k")"; [[ -n "$v" ]] || continue
+  if [[ -z "$KV" ]] || ! at_least "$KV" "$v"; then KITTY="$k"; KV="$v"; fi
+done
+# the app's own binary: an installed release keeps it in bin/ (and updates
+# it there); a source checkout runs its own build; the .deb puts it on the
+# PATH
+BIN="$DIR/bin/xmas-tui"
+[[ -x "$BIN" ]] || BIN="$DIR/target/release/xmas-tui"
+[[ -x "$BIN" ]] || BIN="$(command -v xmas-tui || true)"
+# without kitty (or asked: XMAS_RENDERER=native), on a Wayland desktop with
+# the layer shell (KDE Plasma, Sway, Hyprland…): the app draws straight onto
+# the desktop itself (exit code 3: it can't here)
+if [[ -n "${WAYLAND_DISPLAY:-}" && ( -z "$KITTY" || "${XMAS_RENDERER:-}" == native ) ]]; then
+  rc=0; "$BIN" --native-wallpaper "$@" || rc=$?
+  [[ $rc -ne 3 ]] && exit $rc
+fi
+if [[ -z "$KITTY" ]]; then
+  echo "xmas-tui: kitty isn't installed (Settings → Desktop → set as wallpaper fetches it)" >&2
+  sleep 30; exit 1
+fi
+if [[ "${XDG_SESSION_TYPE:-}" == x11 ]] && ! at_least "$KV" 0.42.0; then
+  echo "xmas-tui: kitty $KV can't draw the desktop on X11 (that needs 0.42 or newer)" >&2
+  sleep 30; exit 1
+fi
+KITTEN="${KITTEN:-$(dirname "$KITTY")/kitten}"
+[[ -x "$KITTEN" ]] || KITTEN="$(command -v kitten || echo kitten)"
+
 
 # focus-policy on-demand: clicking the desktop gives the wallpaper keyboard
 # focus (needed to type a city in settings, and for the typed easter eggs).

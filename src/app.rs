@@ -1243,7 +1243,9 @@ impl App {
         let own_share = ((own - own_was) / wall).max(0.0);
         let chosen = config::clean_fps(self.cfg.fps);
         let cur = self.eased.unwrap_or(chosen).min(chosen);
-        if share > 0.40 {
+        // (over a quarter of a core, for a wallpaper, is a lot: an older
+        // laptop feels it)
+        if share > 0.25 {
             self.light_since = None;
             if let Some(&down) = STEPS.iter().find(|&&s| s < cur - 0.5) {
                 // (and what of it the terminal drawing it costs: on Linux,
@@ -1256,7 +1258,7 @@ impl App {
         } else if let Some(e) = self.eased {
             let up = STEPS.iter().rev().find(|&&s| s > e + 0.5).copied().unwrap_or(chosen).min(chosen);
             // (what it would cost at the next step up, from what it costs now)
-            let light = share < 0.15 && share * ((up / e) as f64) < 0.30;
+            let light = share < 0.10 && share * ((up / e) as f64) < 0.20;
             if !light {
                 self.light_since = None;
             } else if now.duration_since(*self.light_since.get_or_insert(now)).as_secs() >= 30 {
@@ -3104,6 +3106,9 @@ impl App {
         for l in &mut self.layers {
             l.frame.cut_hidden();
         }
+        // (the glow every other frame at a smooth frame rate: too slow a
+        // change to see, and the dearest part of a frame)
+        self.frame.bloom_every = if self.frame_dt().as_secs_f32() < 0.05 { 2 } else { 1 };
         self.frame.compose();
         self.measure(began);
         &self.frame.out
@@ -3758,7 +3763,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Easing off: costing more than 40% of a core, the frame rate drops a
+    /// Easing off: costing more than a quarter of a core, the frame rate drops a
     /// step at a time (as far as 10); light again for half a minute, it
     /// comes back a step at a time, never past the one chosen; the setting
     /// off, it's what was chosen.
@@ -3802,6 +3807,14 @@ mod tests {
         assert_eq!(fps(&app), 15.0);
         app.cfg.ease_off = false;
         assert_eq!(fps(&app), 20.0);
+        // a third of a core is already enough to ease off
+        app.cfg.ease_off = true;
+        app.cfg.fps = 30.0;
+        app.eased = None;
+        cpu += 0.3 * 5.0;
+        s += 5;
+        app.govern_with(at(s), cpu, cpu);
+        assert_eq!(fps(&app), 24.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

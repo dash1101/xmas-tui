@@ -2020,6 +2020,9 @@ impl Game {
             self.panel.draw(uf, c, t);
         }
         self.panel.draw_perf(uf, &self.cfg);
+        // (the glow every other frame at a smooth frame rate: too slow a
+        // change to see, and the dearest part of a frame)
+        self.frame.bloom_every = if self.cfg.fps >= 20.0 { 2 } else { 1 };
         self.frame.compose();
         self.draw();
     }
