@@ -1314,6 +1314,12 @@ impl Scene {
                     tr.go(t + wait);
                 }
             }
+            // the village's host announcing something
+            Event::Notice(text) => {
+                self.post(format!("✦ {text}"));
+                self.log_line(format!("✦ (the host) {text}"), true);
+                self.chime();
+            }
             // a shooting star someone sent off
             Event::Star { x, y } => {
                 let sx = self.local(x, 0.0).0 - self.cam;
@@ -2156,7 +2162,10 @@ impl Scene {
         if !listed.is_empty() {
             for (k, l) in listed.iter().enumerate().take(12) {
                 let full = l.n >= l.limit;
-                v.push((format!("⌂ {} · {} of {}{}", l.name, l.n, l.limit, if full { " (full)" } else { "" }), Do::Net(NetDo::Listed(k as u8))));
+                // (★ featured by the relay; a server village: kept open by it)
+                let star = if o.featured(l) { "★ " } else { "" };
+                let server = if l.server { " · server" } else { "" };
+                v.push((format!("{star}⌂ {} · {} of {}{server}{}", l.name, l.n, l.limit, if full { " (full)" } else { "" }), Do::Net(NetDo::Listed(k as u8))));
             }
         } else if on {
             v.push(("(no villagers' own villages listed right now)".into(), Do::More(MORE_PUBLIC)));

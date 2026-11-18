@@ -353,6 +353,8 @@ static SCALE_NEEDS_RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::A
 
 impl App {
     pub fn new(cfg: Config, seed: u32, path: &Path, w: usize, h: usize, wallpaper: bool, keyboard: bool, extras: bool) -> Self {
+        // (a relay of the player's own, if they've chosen one)
+        crate::net::tcp::set_custom_relay((!cfg.relay.is_empty()).then(|| cfg.relay.clone()));
         let mut frame = Frame::new(w, h);
         frame.glow_near = cfg.scene.glow;
         frame.glow_far = cfg.scene.glow;
@@ -1918,7 +1920,7 @@ impl App {
         }
         if let Some(buf) = self.settings.editing.as_mut() {
             match k {
-                KeyIn::Char(c) if buf.chars().count() < if self.settings.edit == Some(settings::Field::Motto) { 60 } else { 28 } => buf.push(c),
+                KeyIn::Char(c) if buf.chars().count() < match self.settings.edit { Some(settings::Field::Motto) => 60, Some(settings::Field::Relay) => 200, _ => 28 } => buf.push(c),
                 KeyIn::Backspace => {
                     buf.pop();
                 }
@@ -2735,6 +2737,11 @@ impl App {
         self.settings.fps_override = self.fps_override;
         // `applied` always advances (also mid-drag), so a change is acted on
         // once instead of rebuilding the scene every frame until the drop
+        // a relay of the player's own: from now on, and a new link to it
+        if self.cfg.relay != old.relay {
+            crate::net::tcp::set_custom_relay((!self.cfg.relay.is_empty()).then(|| self.cfg.relay.clone()));
+            self.scene.online.relink_now();
+        }
         if reseed || !config::same(&self.cfg, &old) {
             // walking speed and the traffic side apply live; anything else
             // about the scene rebuilds it

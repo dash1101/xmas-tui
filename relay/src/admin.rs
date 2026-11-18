@@ -154,6 +154,8 @@ async fn set_squares(State(app): State<App>, Json(v): Json<std::collections::BTr
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
         b.kept.squares = clean;
         b.say_squares();
+        // (and to the host, keeping them)
+        b.say_host();
     }
     app.save();
     StatusCode::NO_CONTENT.into_response()
@@ -167,6 +169,7 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
     let reports: serde_json::Map<String, serde_json::Value> = b
         .reports
         .iter()
+        .filter(|(_, (at, _))| at.elapsed().as_secs() < 120)
         .map(|(slot, (at, v))| {
             let mut v = v.clone();
             v["age"] = json!(at.elapsed().as_secs());
@@ -322,8 +325,15 @@ async fn ban_player(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
 }
 
 async fn unban_player(State(app): State<App>, Json(b): Json<BanOf>) -> Response {
-    let Some(id) = id_of(&b.id) else { return (StatusCode::BAD_REQUEST, "not a player's id").into_response() };
-    app.broker.lock().unwrap_or_else(|e| e.into_inner()).unban_player(id);
+    // (an id, or a key as the console shows it: "tag:…")
+    let key = match &b.id {
+        serde_json::Value::String(s) if s.starts_with("tag:") => s.clone(),
+        v => match id_of(v) {
+            Some(id) => format!("{id:08x}"),
+            None => return (StatusCode::BAD_REQUEST, "not a player's id").into_response(),
+        },
+    };
+    app.broker.lock().unwrap_or_else(|e| e.into_inner()).unban_key(&key);
     app.save();
     StatusCode::NO_CONTENT.into_response()
 }

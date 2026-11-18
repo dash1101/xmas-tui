@@ -506,6 +506,15 @@ impl Game {
     /// village is built from: the village, in place). `size`: the cells'
     /// size (as at the start).
     pub fn configure(&mut self, cfg: Config, size: f32) {
+        // a relay of the player's own: from now on (a new link, if it's changed)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let want = (!cfg.relay.is_empty()).then(|| cfg.relay.clone());
+            if crate::net::tcp::custom_relay() != want {
+                crate::net::tcp::set_custom_relay(want);
+                self.scene.online.relink_now();
+            }
+        }
         self.size = size;
         let old = std::mem::replace(&mut self.cfg, cfg);
         self.regrid(old, size);
@@ -1205,6 +1214,7 @@ impl Game {
                     st::Field::Name => "your name",
                     st::Field::Motto => "the line on your profile card",
                     st::Field::City => "the weather's city",
+                    st::Field::Relay => "a community's relay (wss://…/mqtt; the button beside it: the village's own)",
                     st::Field::PetName(_) => "the pet's name",
                     st::Field::Friend(_) => "their name (empty: off the list)",
                     st::Field::NewFriend => "a friend or family member's name",

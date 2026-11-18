@@ -135,10 +135,15 @@ pub enum Relay {
 /// polling), then the free ones.
 pub fn relays() -> Vec<Relay> {
     let mut v = vec![];
-    if let Ok(r) = std::env::var("XMAS_RELAY") {
+    let custom = std::env::var("XMAS_RELAY").ok().or_else(custom_relay);
+    if let Some(r) = custom {
         if super::ws::parse(&r).is_some() {
             v.push(if r.starts_with("http") { Relay::Poll(r) } else { Relay::Ws(r) });
         }
+    }
+    // (the relay's own host: that relay and no other)
+    if std::env::var_os("XMAS_RELAY_ONLY").is_some() && !v.is_empty() {
+        return v;
     }
     for &(host, port, url) in RELAYS {
         v.push(match port {
@@ -148,6 +153,20 @@ pub fn relays() -> Vec<Relay> {
         });
     }
     v
+}
+
+/// A relay of the player's own choosing (Menu → Online: a community's
+/// own server), tried before the village's.
+static CUSTOM: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_custom_relay(url: Option<String>) {
+    if let Ok(mut c) = CUSTOM.lock() {
+        *c = url.filter(|u| super::ws::parse(u).is_some());
+    }
+}
+
+pub fn custom_relay() -> Option<String> {
+    CUSTOM.lock().ok().and_then(|c| c.clone())
 }
 
 fn open(relay: &Relay) -> Option<Pipe> {
@@ -299,7 +318,9 @@ pub fn pump(online: &mut Online, link: &mut Option<Tcp>) {
         match u {
             Up::Connected => {
                 // (the village's own relay is believed when it speaks as itself)
-                online.set_trusted(l.via().contains("xmas-relay.novalabs.app") || std::env::var_os("XMAS_RELAY").is_some());
+                // (and one chosen by name: a community's own relay, whose
+                // own word is believed there)
+                online.set_trusted(l.via().contains("xmas-relay.novalabs.app") || std::env::var_os("XMAS_RELAY").is_some() || custom_relay().is_some_and(|c| l.via().contains(super::ws::parse(&c).map(|u| u.host).unwrap_or_default().as_str())));
                 online.connected();
             }
             Up::Bytes(b) => online.feed(&b),

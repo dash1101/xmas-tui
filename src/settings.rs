@@ -181,6 +181,8 @@ pub enum Act {
     Pause,
     /// The privacy page (PRIVACY.md on GitHub), in the browser.
     Privacy,
+    /// Back to the village's own relay.
+    ClearRelay,
     /// The controls card.
     Help,
     /// A setting that's a public square's own (pointed at: says so).
@@ -234,6 +236,8 @@ pub struct NetInfo {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Field {
     City,
+    /// A relay of the player's own choosing.
+    Relay,
     Name,
     Shelf(u8),
     Friend(u8),
@@ -707,6 +711,11 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
                 false
             }
         }
+        Act::ClearRelay => {
+            let had = !cfg.relay.is_empty();
+            cfg.relay.clear();
+            had
+        }
         Act::Net(_) | Act::Restart | Act::Pause | Act::Privacy | Act::Help | Act::Locked => false,
         Act::Shuffle | Act::ExportSave | Act::ImportSave | Act::Edit(_) | Act::BackToWallpaper | Act::RestartNow | Act::RestartLater | Act::Close | Act::Quit | Act::Uninstall | Act::UninstallNow | Act::ResetSettings | Act::ResetNow | Act::OpenConfig | Act::OpenLog | Act::NotNow | Act::Autostart | Act::Tab(_) | Act::CheckUpdate | Act::InstallUpdate | Act::DismissUpdate | Act::PopOut | Act::FullScreen | Act::ShelfOpen(_) | Act::ShelfFolder(_) | Act::ShelfNewFrom | Act::SetWallpaper | Act::DismissWallOffer | Act::LockScreen | Act::LockRedraw | Act::InstallFfmpeg | Act::FriendSel(_) => false,
     }
@@ -762,6 +771,8 @@ fn tip(a: Act) -> Option<&'static str> {
     let f = match a {
         Act::Inc(f) | Act::Dec(f) | Act::Toggle(f) | Act::Set(f, _) => f,
         Act::Edit(Field::City) => return Some("The weather widget's city (and the real sunrise, sunset and side of the road)."),
+        Act::Edit(Field::Relay) => return Some("A community's own relay (wss://…/mqtt), tried before the village's: its public villages, its squares, its people. Blank: the village's own."),
+        Act::ClearRelay => return Some("Back to the village's own relay."),
         Act::Edit(Field::Name) => return Some("What the village calls the villager. Word gets round once it's set."),
         Act::Edit(Field::PetName(_)) => return Some("The pet's name. People mention it, and it answers to it."),
         Act::PetAdd => return Some("Another pet, to come along too: a dog, a cat, a bunny, a young reindeer, a fox or a little bird."),
@@ -1001,6 +1012,7 @@ impl Settings {
         self.commit(cfg);
         let text = match which {
             Field::City => cfg.weather.city.clone(),
+            Field::Relay => cfg.relay.clone(),
             Field::Name => cfg.scene.name.clone(),
             Field::PetName(i) => cfg.scene.pet_at(i).map(|p| p.name.clone()).unwrap_or_default(),
             Field::Shelf(i) => cfg.shelves.get(i as usize).map(|c| c.name.clone()).unwrap_or_default(),
@@ -1027,6 +1039,13 @@ impl Settings {
                 }
             }
             Field::Name => cfg.scene.name = short(),
+            // (only an address the game can reach: wss://, ws://, https://)
+            Field::Relay => {
+                let t = text.trim();
+                if t.is_empty() || ["wss://", "ws://", "https://", "http://"].iter().any(|p| t.starts_with(p)) {
+                    cfg.relay = t.chars().take(200).collect();
+                }
+            }
             Field::PetName(i) => {
                 if !text.is_empty() {
                     if let Some(p) = cfg.scene.pet_at_mut(i) {
@@ -2162,7 +2181,7 @@ impl Settings {
     /// Online: going on, the friend code, friends and the public villages,
     /// one's own village, what others write, devices.
     #[allow(clippy::too_many_arguments)]
-    fn tab_online(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, _t: f32) {
+    fn tab_online(&mut self, f: &mut Frame, cfg: &Config, lx: i32, vx: i32, mut yy: i32, right: i32, t: f32) {
         let n = self.net.clone();
         let clip = |s: &str, w: i32| -> String { s.chars().take(w.max(4) as usize).collect() };
         self.section(f, lx, yy, "ONLINE");
@@ -2224,6 +2243,19 @@ impl Settings {
         yy += 2;
         let x = f.text(lx, yy, "Sealed end to end; what's sent, kept and to whom: ", pal::UI_DIM, BG, 0.0);
         self.button(f, x, yy, "privacy ↗", Act::Privacy);
+        yy += 2;
+        self.section(f, lx, yy, "RELAY");
+        yy += 1;
+        f.text(lx, yy, "Relay", pal::UI_TEXT, BG, 0.0);
+        let editing = self.edit == Some(Field::Relay) && self.editing.is_some();
+        let txt = if editing { self.editing.clone().unwrap_or_default() } else if cfg.relay.is_empty() { "(the village's own)".to_string() } else { cfg.relay.clone() };
+        let w = (right - lx - 34).clamp(20, 50);
+        self.field(f, Rect { x: lx + 8, y: yy, w, h: 1 }, &txt, editing, Act::Edit(Field::Relay), t);
+        if !cfg.relay.is_empty() {
+            self.button(f, lx + 10 + w, yy, "use the village's own", Act::ClearRelay);
+        }
+        yy += 1;
+        f.text(lx, yy, "A community's own relay (wss://…/mqtt): its squares, its villages, its people.", pal::UI_DIM, BG, 0.0);
     }
 
     /// Looking after things: the save, a restart, settings back as they

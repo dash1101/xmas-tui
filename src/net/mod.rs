@@ -96,7 +96,21 @@ pub struct Listing {
     pub n: usize,
     pub limit: usize,
     pub square: bool,
+    /// Kept open by the relay's own host (not a player's game).
+    pub server: bool,
     at: i64,
+}
+
+/// What the village's own relay says about the public villages (from its
+/// console): featured first, then in this order (names or codes), the
+/// codes kept out, and words starred out in public villages.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct PublicRules {
+    pub featured: Vec<String>,
+    pub order: Vec<String>,
+    pub banned: Vec<String>,
+    pub words: Vec<String>,
 }
 
 /// Kept in the save: online or not, this villager's friend code, friends.
@@ -439,6 +453,9 @@ enum Msg {
         /// want it).
         #[serde(default)]
         music: Option<Tune>,
+        /// Who the host's keeping from talking there.
+        #[serde(default)]
+        muted: Vec<u32>,
     },
     /// In a village: gone (`host`: the village closes; a square's next
     /// villager takes over).
@@ -447,7 +464,21 @@ enum Msg {
     Full { id: u32, to: u32 },
     /// A public village's state (kept by the relay, on a topic of its own):
     /// its name, its code, how many are in it, the most it takes, when.
-    Status { name: String, code: String, n: u16, limit: u16, at: i64, square: bool },
+    Status {
+        name: String,
+        code: String,
+        n: u16,
+        limit: u16,
+        at: i64,
+        square: bool,
+        /// Kept open by the relay's own host.
+        #[serde(default)]
+        server: bool,
+    },
+    /// From a village's host: sent home (`to`).
+    Kick { id: u32, to: u32 },
+    /// From a village's host: an announcement (to everyone there, or `to`).
+    Notice { id: u32, to: u32, text: String },
 }
 
 /// What happened, for the scene to show.
@@ -494,6 +525,8 @@ pub enum Event {
     Rules { rules: String, admin: bool },
     /// Who's out in the host's village (a guest; see `Msg::Crowd`).
     Crowd(String),
+    /// An announcement from the village's host.
+    Notice(String),
 }
 
 /// The link to the relay, as the menus show it.
@@ -696,17 +729,50 @@ struct Shared {
     limit: usize,
     /// The host's clock as last heard (a guest), and when it was heard.
     clock: Option<([f32; 3], f32)>,
+    /// Who's kept from talking here (by the host; a guest: as heard).
+    muted: Vec<u32>,
 }
 
 /// Where the village's own relay says things (the public squares'
 /// settings, from its console): plain JSON, believed only from that relay.
 pub const ADMIN_SQUARES: &str = "xmas-tui/1/admin/squares";
+/// The public list's order, featured places, banned codes, extra words.
+pub const ADMIN_PUBLIC: &str = "xmas-tui/1/admin/public";
+/// For the relay's own host: what it keeps open, and what it's asked to do.
+pub const ADMIN_HOST: &str = "xmas-tui/1/admin/host";
+pub const ADMIN_CMD: &str = "xmas-tui/1/admin/cmd";
+/// The host's reports, by village (`…/report/<name>`).
+pub const ADMIN_REPORT: &str = "xmas-tui/1/admin/report/";
+/// A village's official word, from the relay's own host (only it may
+/// speak there, the relay sees to that): `…/v/<the village topic's id>`.
+pub const ADMIN_V: &str = "xmas-tui/1/admin/v/";
+/// Ids below this are the relay's own host's: from anyone else, ignored.
+pub const HOST_IDS: u32 = 0x1000;
+
+/// A village topic's official twin (where only the relay's host speaks).
+fn official(topic: &str) -> String {
+    format!("{ADMIN_V}{}", topic.rsplit('/').next().unwrap_or(""))
+}
 
 pub struct Online {
     /// Connected to the village's own relay (what it says as itself is
     /// believed), and each public square's settings as it last said them
     /// (JSON, by the square's name).
     trusted: bool,
+    /// The same each time from this villager's friend code, and nothing
+    /// to get it back from (see `connected`).
+    tag: u32,
+    /// The relay's own host (no villager of its own; signs in with
+    /// `login`): it alone may speak on a village's official topic.
+    server: bool,
+    login: Option<(String, String)>,
+    /// What the relay says of the public villages.
+    pub public_rules: PublicRules,
+    /// The relay's own host: what the relay's said to it (topic, JSON).
+    pub admin_in: Vec<(String, Vec<u8>)>,
+    /// The relay's own host: what's been said in its village lately (when,
+    /// who, their name, what).
+    pub said_here: std::collections::VecDeque<(i64, u32, String, String)>,
     square_rules: HashMap<String, String>,
     /// This side's clock (minutes into the day, sunrise, sunset), sent to
     /// the guests while hosting (see `set_clock`).
@@ -789,7 +855,14 @@ impl Online {
         let code = book.code.clone();
         let mut o = Online {
             name: name.to_string(),
-            id: seal::random() as u32 | 1,
+            // (above the relay's own host's ids)
+            id: (seal::random() as u32 | 1).max(HOST_IDS + 1),
+            tag: seal::number_of(&[b"xmas-tui player", seal::norm(&code).as_bytes()]),
+            server: false,
+            login: None,
+            public_rules: PublicRules::default(),
+            admin_in: vec![],
+            said_here: std::collections::VecDeque::new(),
             trusted: false,
             square_rules: HashMap::new(),
             my_clock: [720.0, 450.0, 1020.0],
@@ -896,6 +969,12 @@ impl Online {
         self.relink = true;
     }
 
+    /// A new link (another relay chosen): the old one closed, the next made.
+    pub fn relink_now(&mut self) {
+        self.relink = true;
+        self.relay_skip = 0;
+    }
+
     /// The friends list changed elsewhere (a linked device): taken on.
     pub fn merge_book(&mut self, book: Book) {
         let on = self.book.on;
@@ -989,7 +1068,14 @@ impl Online {
             return;
         }
         let plain = serde_json::to_vec(m).unwrap_or_default();
-        self.out.extend(mqtt::publish(topic, &seal.seal(&plain), retain));
+        let sealed = seal.seal(&plain);
+        // the relay's own host, in a village it keeps: on the official twin
+        // too (where only it may speak: newer games believe it there; older
+        // ones hear the usual copy)
+        if self.server && self.village.as_ref().is_some_and(|v| v.topic == topic) {
+            self.out.extend(mqtt::publish(&official(topic), &sealed, false));
+        }
+        self.out.extend(mqtt::publish(topic, &sealed, retain));
     }
 
     fn here_msg(&self, on: bool) -> Msg {
@@ -1019,14 +1105,22 @@ impl Online {
         self.link = Link::Connecting;
         (self.link_since, self.refused) = (self.t, false);
         let will = self.me.seal(&serde_json::to_vec(&self.here_msg(false)).unwrap_or_default());
-        let client = format!("xt{:08x}{:04x}", self.id, seal::random() as u16);
-        self.out.extend(mqtt::connect(&client, 45, Some((&self.my_here.clone(), &will))));
+        // (the id, then a tag that's the same each time from this friend
+        // code, which can't be turned back into it: the relay keeps a
+        // banned player out by it)
+        let client = format!("xt{:08x}{:08x}{:04x}", self.id, self.tag, seal::random() as u16);
+        let login = self.login.clone();
+        self.out.extend(mqtt::connect_as(&client, 45, Some((&self.my_here.clone(), &will)), login.as_ref().map(|(u, p)| (u.as_str(), p.as_str()))));
     }
 
     fn on_connack(&mut self) {
         self.link = Link::On;
         if self.trusted {
-            self.subscribe(vec![ADMIN_SQUARES.to_string()]);
+            self.subscribe(vec![ADMIN_SQUARES.to_string(), ADMIN_PUBLIC.to_string()]);
+        }
+        // the relay's own host: what it's to keep open, and do
+        if self.server {
+            self.subscribe(vec![ADMIN_HOST.to_string(), ADMIN_CMD.to_string()]);
         }
         // back (perhaps after a blip): where this villager is, at once
         self.next_me = 0.0;
@@ -1036,6 +1130,7 @@ impl Online {
         topics.extend(self.live.iter().map(|l| l.here_topic.clone()));
         if let Some(v) = &self.village {
             topics.push(v.topic.clone());
+            topics.push(official(&v.topic));
         }
         if let Some(s) = &mut self.sync {
             topics.push(format!("{}/+", s.base));
@@ -1094,6 +1189,20 @@ impl Online {
 
     fn got(&mut self, topic: &str, payload: &[u8]) {
         // the public squares' settings, from the village's own relay
+        if topic == ADMIN_PUBLIC {
+            if self.trusted && payload.len() <= 64 * 1024 {
+                if let Ok(r) = serde_json::from_slice::<PublicRules>(payload) {
+                    self.public_rules = PublicRules { banned: r.banned.iter().map(|c| seal::norm(c)).collect(), words: r.words.iter().take(400).map(|w| w.to_lowercase()).collect(), ..r };
+                }
+            }
+            return;
+        }
+        if self.server && (topic == ADMIN_HOST || topic == ADMIN_CMD) {
+            if payload.len() <= 512 * 1024 && self.admin_in.len() < 64 {
+                self.admin_in.push((topic.to_string(), payload.to_vec()));
+            }
+            return;
+        }
         if topic == ADMIN_SQUARES {
             if self.trusted && payload.len() <= 16 * 1024 {
                 if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(payload) {
@@ -1105,7 +1214,7 @@ impl Online {
         let parse = |seal: &Seal| seal.open(payload).and_then(|p| serde_json::from_slice::<Msg>(&p).ok());
         // a public village's state (a square's copy, or one listed)
         if topic.starts_with("xmas-tui/1/public/") || topic.starts_with("xmas-tui/1/listed/") {
-            if let Some(Msg::Status { name, code, n, limit, at, square }) = parse(&public_seal()) {
+            if let Some(Msg::Status { name, code, n, limit, at, square, server }) = parse(&public_seal()) {
                 let code = seal::norm(&code);
                 // (a square's status only on its own topic; a listing only
                 // for a real code)
@@ -1113,7 +1222,7 @@ impl Online {
                 if ok {
                     let name = if self.clean_words { filter::words(&clean(&name, 40)) } else { clean(&name, 40) };
                     let limit = (limit as usize).clamp(2, MAX_LIMIT);
-                    self.public.insert(code.clone(), Listing { name, code, n: (n as usize).min(limit), limit, square, at });
+                    self.public.insert(code.clone(), Listing { name, code, n: (n as usize).min(limit), limit, square, server, at });
                 }
             }
             return;
@@ -1201,7 +1310,10 @@ impl Online {
             }
         }
         let Some(v) = &self.village else { return };
-        if topic != v.topic {
+        // (its official twin: the relay's own host's word, only from our
+        // relay, which lets nobody else speak there)
+        let from_host = topic == official(&v.topic) && self.trusted;
+        if topic != v.topic && !from_host {
             return;
         }
         let Some(m) = parse(&v.seal) else { return };
@@ -1211,9 +1323,13 @@ impl Online {
         let sender = match &m {
             Msg::Me { id, .. } | Msg::Card { id, .. } | Msg::Wave { id, .. } | Msg::Ask { id, .. } | Msg::Answer { id, .. } | Msg::Table { id, .. } | Msg::Up { id, .. } | Msg::Show { id, .. } | Msg::Tagged { id, .. } | Msg::Star { id, .. } | Msg::Go { id, .. } | Msg::Finish { id, .. } | Msg::Talk { id, .. } | Msg::Whisper { id, .. } | Msg::Want { id, .. } | Msg::Throw { id, .. } | Msg::Bye { id, .. } => *id,
             Msg::Village { host, .. } => *host,
-            Msg::Crowd { id, .. } | Msg::Full { id, .. } => *id,
+            Msg::Crowd { id, .. } | Msg::Full { id, .. } | Msg::Kick { id, .. } | Msg::Notice { id, .. } => *id,
             _ => 0,
         };
+        // the relay's own host's ids: only on its official topic
+        if sender != 0 && sender < HOST_IDS && !from_host {
+            return;
+        }
         if sender != me && !self.not_flooded(sender, 60) {
             return;
         }
@@ -1285,9 +1401,34 @@ impl Online {
             Msg::Go { id, seed, at } if id != me => self.events.push(Event::Go { seed, at }),
             Msg::Star { id, x, y } if id != me && x.is_finite() && y.is_finite() && x.abs() < 1e4 => self.events.push(Event::Star { x, y: y.clamp(0.0, 400.0) }),
             Msg::Finish { id, name, score, secs } if id != me => self.events.push(Event::Finish { id, name: clean(&name, 32), score, secs: if secs.is_finite() { secs } else { 0.0 } }),
+            // (someone the host's keeping quiet: not heard)
+            Msg::Talk { id, .. } if v.muted.contains(&id) => {}
             Msg::Talk { id, text } if id != me => {
                 let (text, links) = filter::tidy(&clean(&text, 120), self.clean_words);
+                // a public village: its relay's words starred out too
+                let public = v.square.is_some() || self.public.contains_key(&v.code);
+                let text = if public { filter::also(&text, &self.public_rules.words) } else { text };
+                if self.server {
+                    let name = v.others.get(&id).map(|o| o.name.clone()).unwrap_or_default();
+                    self.said_here.push_back((now(), id, name, text.clone()));
+                    while self.said_here.len() > 60 {
+                        self.said_here.pop_front();
+                    }
+                }
                 self.events.push(Event::Said { id, text, links });
+            }
+            // sent home by the host
+            Msg::Kick { id, to } if to == me && v.host_id == Some(id) => {
+                self.leave_village();
+                self.note("⌂ the village's host sent you home");
+                return;
+            }
+            // the host's announcement
+            Msg::Notice { id, to, text } if (to == 0 || to == me) && v.host_id == Some(id) => {
+                let text = clean(&text, 200);
+                if !text.is_empty() {
+                    self.events.push(Event::Notice(text));
+                }
             }
             Msg::Whisper { id, to, name, text } if id != me && to == me => {
                 let (text, links) = filter::tidy(&clean(&text, 280), self.clean_words);
@@ -1323,8 +1464,11 @@ impl Online {
             Msg::Village { host, .. } if host != me && v.square.is_some() && (v.host || v.host_id.is_some_and(|h| h < host)) => {}
             // (the first host heard is the host: nobody else takes over)
             Msg::Village { host, .. } if host != me && v.square.is_none() && v.host_id.is_some_and(|h| h != host) => {}
-            Msg::Village { host, name, seed, rules, admins, limit, clock, music } if host != me => {
+            Msg::Village { host, name, seed, rules, admins, limit, clock, music, muted } if host != me => {
                 self.host_tune = music.filter(|m| m.t.is_finite() && m.t >= 0.0 && (m.style as usize) < 4);
+                if v.host_id.is_none_or(|h| h == host) {
+                    v.muted = muted.into_iter().take(500).collect();
+                }
                 v.host_seen = t;
                 v.host_id = Some(host);
                 if let Some(c) = clock.filter(|c| c.iter().all(|x| x.is_finite() && (0.0..=1440.0).contains(x))) {
@@ -1475,11 +1619,12 @@ impl Online {
         // is, the same for whoever hosts it)
         let square = self.village.as_ref().and_then(|v| v.square);
         let limit = self.village.as_ref().map(|v| v.limit).unwrap_or(DEFAULT_LIMIT);
+        let muted = self.village.as_ref().map(|v| v.muted.clone()).unwrap_or_default();
         if host && t >= self.next_village {
             self.next_village = t + 2.0;
             let m = match square {
-                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune },
-                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune },
+                Some((i, _)) => Msg::Village { host: self.id, name: SQUARES[i].to_string(), seed: square_seed(i), rules: String::new(), admins: vec![], limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune, muted: muted.clone() },
+                None => Msg::Village { host: self.id, name: self.name.clone(), seed, rules: self.rules.clone(), admins: self.admins.clone(), limit: limit as u16, clock: Some(self.my_clock), music: self.my_tune, muted: muted.clone() },
             };
             self.send(&topic, &seal, &m, false);
         }
@@ -1488,12 +1633,14 @@ impl Online {
         if host && (square.is_some() || self.book.listed) && t >= self.next_status {
             self.next_status = t + 15.0;
             let v = self.village.as_ref().unwrap();
-            let n = (v.others.len() + 1) as u16;
+            // (the relay's own host isn't someone there)
+            let n = (v.others.len() + !self.server as usize) as u16;
             let (name, code, at) = match square {
                 Some((i, c)) => (if c > 1 { format!("{} #{c}", SQUARES[i]) } else { SQUARES[i].to_string() }, v.code.clone(), now()),
+                None if self.server => (self.name.clone(), v.code.clone(), now()),
                 None => (format!("{}'s village", self.name), v.code.clone(), now()),
             };
-            let m = Msg::Status { name, code: code.clone(), n, limit: limit as u16, at, square: square.is_some() };
+            let m = Msg::Status { name, code: code.clone(), n, limit: limit as u16, at, square: square.is_some(), server: self.server };
             let st = if square.is_some() { status_topic(&code) } else { listed_topic(self.id) };
             self.send(&st, &public_seal(), &m, true);
         }
@@ -1609,7 +1756,7 @@ impl Online {
         self.book.on = true;
         self.link = Link::On;
         let code = seal::new_code();
-        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT, clock: None };
+        let mut v = Shared { seal: Seal::new(&code), topic: seal::topic("village", &code), code: seal::norm(&code), host: true, seed: None, host_seen: 0.0, others: HashMap::new(), knock_until: f32::INFINITY, rules: (String::new(), false), host_id: None, square: None, limit: DEFAULT_LIMIT, clock: None, muted: vec![] };
         for (id, name, av, card) in others {
             v.others.insert(id, Other { name: name.into(), av, shown: (av.x, av.y), seen: 1e9, host: false, card, wave: (0.0, 0), vel: (0.0, 0.0), trail: Trail::default(), trip_trail: Trail::default(), trip_air: Trail::default() });
         }
@@ -1882,8 +2029,9 @@ impl Online {
         }
         let topic = seal::topic("village", &code);
         let limit = if host { self.limit.clamp(2, MAX_LIMIT) } else { MAX_LIMIT };
-        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None, square: None, limit, clock: None });
-        self.subscribe(vec![topic]);
+        self.village = Some(Shared { seal: Seal::new(&code), topic: topic.clone(), code, host, seed: None, host_seen: self.t, others: HashMap::new(), knock_until: self.t + 12.0, rules: (String::new(), false), host_id: None, square: None, limit, clock: None, muted: vec![] });
+        // (and its official twin: the relay's own host's word, if it keeps it)
+        self.subscribe(vec![topic.clone(), official(&topic)]);
         self.next_here = 0.0;
         self.next_village = 0.0;
         self.last_me = None;
@@ -1904,6 +2052,9 @@ impl Online {
         let code = seal::norm(code);
         if code.len() != 12 {
             return Err("a village code is twelve letters and numbers");
+        }
+        if self.public_rules.banned.contains(&code) {
+            return Err("that village has been closed by the relay");
         }
         if self.link != Link::On {
             // (in as soon as the link's up)
@@ -2043,10 +2194,102 @@ impl Online {
     pub fn listings(&self) -> Vec<Listing> {
         let fresh = now() - 60;
         let own = self.village.as_ref().map(|v| v.code.clone());
-        let mut v: Vec<Listing> = self.public.values().filter(|l| !l.square && l.at >= fresh && Some(&l.code) != own.as_ref()).cloned().collect();
-        v.sort_by(|a, b| b.n.cmp(&a.n).then(a.name.cmp(&b.name)));
+        let banned = &self.public_rules.banned;
+        let mut v: Vec<Listing> = self.public.values().filter(|l| !l.square && l.at >= fresh && Some(&l.code) != own.as_ref() && !banned.contains(&l.code)).cloned().collect();
+        // (featured first, then as the relay orders them, then the busiest)
+        v.sort_by(|a, b| self.rank(a).cmp(&self.rank(b)).then(b.n.cmp(&a.n)).then(a.name.cmp(&b.name)));
         v.truncate(30);
         v
+    }
+
+    /// Where a public village goes in the list, as the relay has it.
+    fn rank(&self, l: &Listing) -> usize {
+        let r = &self.public_rules;
+        let at = |list: &[String]| list.iter().position(|x| x.trim().eq_ignore_ascii_case(&l.name) || seal::norm(x) == l.code);
+        match (at(&r.featured), at(&r.order)) {
+            (Some(i), _) => i,
+            (None, Some(i)) => r.featured.len() + i,
+            _ => usize::MAX / 2,
+        }
+    }
+
+    /// Featured by the relay (a ★ in the list).
+    pub fn featured(&self, l: &Listing) -> bool {
+        self.public_rules.featured.iter().any(|x| x.trim().eq_ignore_ascii_case(&l.name) || seal::norm(x) == l.code)
+    }
+
+    // ---------------- the relay's own host (see `crate::host`)
+
+    /// The relay's own host, as one of its villages' (`id` below
+    /// `HOST_IDS`): no villager of its own, signed in with the token.
+    pub fn server(id: u32, name: &str, token: &str) -> Online {
+        let mut o = Online::new(Book { on: true, ..Default::default() }, name);
+        (o.server, o.id) = (true, id.clamp(1, HOST_IDS - 1));
+        o.login = Some(("xmas-host".into(), token.into()));
+        o
+    }
+
+    /// Keep this village open (the relay's own host): a square (`square`),
+    /// or a server village by its code, listed for anyone or not.
+    pub fn keep_open(&mut self, code: &str, square: Option<usize>, limit: usize, listed: bool) {
+        self.enter(seal::norm(code), true);
+        let me = self.id;
+        if let Some(v) = self.village.as_mut() {
+            v.square = square.map(|i| (i % SQUARES.len(), 1));
+            v.limit = if square.is_some() { SQUARE_LIMIT } else { limit.clamp(2, MAX_LIMIT) };
+            v.host_id = Some(me);
+        }
+        self.book.listed = listed && square.is_none();
+        (self.next_village, self.next_status) = (0.0, 0.0);
+    }
+
+    /// The relay's own host: someone sent home from its village.
+    pub fn kick(&mut self, id: u32) {
+        let m = Msg::Kick { id: self.id, to: id };
+        self.to_village(&m);
+        if let Some(v) = self.village.as_mut() {
+            v.others.remove(&id);
+        }
+    }
+
+    /// The relay's own host: an announcement (to everyone there, or `to`).
+    pub fn notice(&mut self, to: u32, text: &str) {
+        let m = Msg::Notice { id: self.id, to, text: text.chars().take(200).collect() };
+        self.to_village(&m);
+    }
+
+    /// The relay's own host: who's kept from talking in its village (said
+    /// with the village's next word).
+    pub fn set_muted(&mut self, ids: Vec<u32>) {
+        if let Some(v) = self.village.as_mut() {
+            if v.muted != ids {
+                v.muted = ids;
+                self.next_village = 0.0;
+            }
+        }
+    }
+
+    /// The village's host, as heard (or this villager, hosting).
+    #[cfg(test)]
+    pub fn host_id(&self) -> Option<u32> {
+        self.village.as_ref().and_then(|v| v.host_id)
+    }
+
+    /// Who's in the village (id, name).
+    pub fn players(&self) -> Vec<(u32, String)> {
+        self.others().into_iter().map(|(id, o)| (id, o.name.clone())).collect()
+    }
+
+    /// Who's muted in the village.
+    pub fn muted_here(&self) -> Vec<u32> {
+        self.village.as_ref().map(|v| v.muted.clone()).unwrap_or_default()
+    }
+
+    /// A message of the relay's own (the host's reports): as it is.
+    pub fn publish_raw(&mut self, topic: &str, payload: &[u8], retain: bool) {
+        if self.link == Link::On {
+            self.out.extend(mqtt::publish(topic, payload, retain));
+        }
     }
 
     /// Out of the shared village (closing it, if hosting).
@@ -2635,6 +2878,98 @@ pub(crate) mod tests {
         }
         assert!(met, "the second found the square's host: {:?} {:?}", b.square(), b.headcount());
         assert_eq!(b.headcount().map(|h| h.1), Some(SQUARE_LIMIT));
+    }
+
+    /// The relay's own host keeping the squares (needs a relay and a host
+    /// running: XMAS_RELAY, and XMAS_ADMIN for the relay's console, opened
+    /// with ADMIN_OPEN=1): players come in as its guests, never hosting;
+    /// the console's announcement reaches them, a mute keeps one quiet, a
+    /// kick sends one home; a server village opens by code and, banned, is
+    /// closed; a banned player is let go and kept out.
+    #[test]
+    #[ignore]
+    fn a_square_kept_by_the_relays_own_host() {
+        let admin = std::env::var("XMAS_ADMIN").expect("XMAS_ADMIN (the console, e.g. http://127.0.0.1:18981)");
+        let post = |path: &str, body: serde_json::Value| -> u16 {
+            use std::io::{Read, Write};
+            let u = super::ws::parse(&admin.replace("http://", "ws://")).unwrap();
+            let mut s = std::net::TcpStream::connect((u.host.as_str(), u.port)).unwrap();
+            let b = body.to_string();
+            write!(s, "POST {path} HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\nx-relay-admin: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}", b.len()).unwrap();
+            let mut r = String::new();
+            let _ = s.read_to_string(&mut r);
+            r.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)
+        };
+        let mut a = Online::new(Book { on: true, ..Default::default() }, "Ann");
+        let mut b = Online::new(Book { on: true, ..Default::default() }, "Bo");
+        let (mut la, mut lb) = (None, None);
+        let mut t = 0.0;
+        let av = Some(Avatar { x: 1.0, ..Default::default() });
+        let mut evs: (Vec<Event>, Vec<Event>) = (vec![], vec![]);
+        let mut step = |a: &mut Online, b: &mut Online, n: usize, evs: &mut (Vec<Event>, Vec<Event>)| {
+            for _ in 0..n {
+                tcp::pump(a, &mut la);
+                a.tick(t, av, 1);
+                tcp::pump(b, &mut lb);
+                b.tick(t, av, 1);
+                evs.0.extend(a.take_events());
+                evs.1.extend(b.take_events());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                t += 0.05;
+            }
+        };
+        step(&mut a, &mut b, 60, &mut evs);
+        assert_eq!((a.link(), b.link()), (Link::On, Link::On), "couldn't reach the relay");
+        a.join_square(0);
+        b.join_square(0);
+        step(&mut a, &mut b, 120, &mut evs);
+        for (who, o) in [("Ann", &a), ("Bo", &b)] {
+            assert_eq!(o.square().map(|s| s.1), Some(false), "{who} is hosting (the relay's host isn't there?)");
+            assert!(o.host_id().is_some_and(|h| h < HOST_IDS), "{who}'s host isn't the relay's: {:?}", o.host_id());
+        }
+        assert!(a.other(b.my_id()).is_some(), "Ann doesn't see Bo");
+        // an announcement
+        assert_eq!(post("/api/say", serde_json::json!({ "to": "North Pole Square", "text": "hello, squares" })), 204);
+        step(&mut a, &mut b, 40, &mut evs);
+        for (who, e) in [("Ann", &evs.0), ("Bo", &evs.1)] {
+            assert!(e.contains(&Event::Notice("hello, squares".into())), "{who} didn't hear it: {e:?}");
+        }
+        // a mute: Bo's not heard
+        assert_eq!(post("/api/moderate", serde_json::json!({ "slot": "North Pole Square", "id": b.my_id(), "action": "mute" })), 204);
+        step(&mut a, &mut b, 60, &mut evs);
+        evs.0.clear();
+        b.say("can anyone hear me");
+        step(&mut a, &mut b, 30, &mut evs);
+        assert!(!evs.0.iter().any(|e| matches!(e, Event::Said { .. })), "Bo was heard though muted");
+        assert_eq!(post("/api/moderate", serde_json::json!({ "slot": "North Pole Square", "id": b.my_id(), "action": "unmute" })), 204);
+        step(&mut a, &mut b, 60, &mut evs);
+        b.say("and now?");
+        step(&mut a, &mut b, 30, &mut evs);
+        assert!(evs.0.iter().any(|e| matches!(e, Event::Said { text, .. } if text == "and now?")), "Bo still muted");
+        // a kick: Bo's sent home
+        assert_eq!(post("/api/moderate", serde_json::json!({ "slot": "North Pole Square", "id": b.my_id(), "action": "kick" })), 204);
+        step(&mut a, &mut b, 40, &mut evs);
+        assert!(b.village().is_none(), "Bo wasn't sent home");
+        // a server village, private: in by its code
+        let code = "TESTVLGE2345";
+        assert_eq!(post("/api/servers", serde_json::json!([{ "name": "Test Village", "code": code, "public": false, "limit": 6, "seed": 77, "rules": {} }])), 204);
+        step(&mut a, &mut b, 60, &mut evs);
+        b.join(code).unwrap();
+        step(&mut a, &mut b, 80, &mut evs);
+        assert!(b.host_id().is_some_and(|h| h < HOST_IDS), "no host in the server village: {:?}", b.host_id());
+        // banned: closed, and not to be joined again
+        assert_eq!(post("/api/ban-village", serde_json::json!({ "code": code, "name": "Test Village", "why": "a test" })), 204);
+        step(&mut a, &mut b, 40, &mut evs);
+        assert!(b.public_rules.banned.contains(&code.to_string()), "the ban didn't reach the game");
+        b.leave_village();
+        assert!(b.join(code).is_err());
+        assert_eq!(post("/api/unban-village", serde_json::json!({ "code": code })), 204);
+        assert_eq!(post("/api/servers", serde_json::json!([])), 204);
+        // a banned player: let go, and kept out on the way back
+        assert_eq!(post("/api/ban-player", serde_json::json!({ "id": a.my_id(), "name": "Ann", "why": "a test" })), 204);
+        step(&mut a, &mut b, 120, &mut evs);
+        assert_ne!(a.link(), Link::On, "Ann's still connected though banned");
+        assert_eq!(post("/api/unban-player", serde_json::json!({ "id": a.my_id() })), 204);
     }
 
     /// Through a real public relay (needs the internet):

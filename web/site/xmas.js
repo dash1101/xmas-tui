@@ -405,7 +405,15 @@ class PollSocket {
     if (this.onclose) this.onclose({});
   }
 }
-let ws = null, wsTry = 0, wsWait = 0, wsOpenAt = 0, relays = null;
+let ws = null, wsTry = 0, wsWait = 0, wsOpenAt = 0, relays = null, wsMine = "";
+// the menu's Relay (the settings kept here): a community's own, or none
+function customRelay() {
+  try {
+    const m = (localStorage.getItem(CFG) || "").match(/^relay = "([^"]*)"$/m);
+    const u = m ? m[1].trim() : "";
+    return /^(wss|ws|https|http):\/\//.test(u) ? u : "";
+  } catch (e) { return ""; }
+}
 fetch("relays.json").then((r) => r.json()).then((j) => { if (Array.isArray(j.ws) && j.ws.length) relays = j.ws; }).catch(() => {});
 function netPump(now) {
   const want = wasm.net_want(game);
@@ -420,14 +428,18 @@ function netPump(now) {
     ws.onclose = null; ws.close(); ws = null; wasm.net_link(game, 0);
     wsTry++; wsWait = now + 500;
   }
+  // a community's own relay, chosen in the menu: tried first (and its
+  // own word believed)
+  const mine = customRelay();
+  if (mine !== wsMine) { wsMine = mine; wsTry = 0; if (ws) { flushNet(); ws.onclose = null; ws.close(); ws = null; wasm.net_link(game, 0); } }
   if (!ws && now > wsWait) {
-    const list = relays || RELAYS;
+    const list = (mine ? [mine] : []).concat(relays || RELAYS);
     const url = list[wsTry % list.length];
     wsTry++;
     try { ws = /^https?:/.test(url) ? new PollSocket(url) : new WebSocket(url, "mqtt"); } catch (e) { ws = null; wsWait = now + 3000; return; }
     ws.binaryType = "arraybuffer";
     // (the village's own relay: what it says as itself is believed)
-    const own = /^(wss|https):\/\/xmas-relay\.novalabs\.app\//.test(url);
+    const own = /^(wss|https):\/\/xmas-relay\.novalabs\.app\//.test(url) || (mine && url === mine);
     ws.onopen = () => { wsTry--; wsOpenAt = performance.now(); if (game) wasm.net_link(game, own ? 2 : 1); };
     ws.onmessage = (e) => {
       if (!game) return;

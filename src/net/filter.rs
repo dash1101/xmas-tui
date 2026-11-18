@@ -81,6 +81,38 @@ fn linky(word: &str) -> bool {
 }
 
 /// Links taken out (shown as "🔗link"), and the links themselves.
+/// These words as well (a public village's own list, from its relay):
+/// starred out like the rest, whatever their case.
+pub fn also(text: &str, extra: &[String]) -> String {
+    if extra.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if extra.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+            let mut cs = word.chars();
+            if let Some(f) = cs.next() {
+                out.push(f);
+            }
+            out.extend(cs.map(|_| '*'));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '\'' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 pub fn links(text: &str) -> (String, Vec<String>) {
     let mut found = vec![];
     let shown: Vec<String> = text

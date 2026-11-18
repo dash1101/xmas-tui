@@ -220,6 +220,12 @@ pub fn player_of(client: &str) -> Option<u32> {
     client.strip_prefix("xt").and_then(|r| r.get(..8)).and_then(|h| u32::from_str_radix(h, 16).ok())
 }
 
+/// The player's tag in a client's name (the eight hex digits after the
+/// id: the same each time a villager comes, whatever their id that day).
+pub fn tag_of(client: &str) -> Option<&str> {
+    client.strip_prefix("xt").and_then(|r| r.get(8..16)).filter(|h| h.len() == 8 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Counts for the admin console.
 #[derive(Serialize, Default, Clone, Debug)]
 pub struct Stats {
@@ -293,7 +299,8 @@ impl Broker {
         if id < HOST_IDS && !host {
             return Err("that id is the relay's own");
         }
-        if self.kept.player_bans.iter().any(|b| b.key == format!("{id:08x}")) {
+        let tag = tag_of(client).map(|t| format!("tag:{}", t.to_ascii_lowercase()));
+        if self.kept.player_bans.iter().any(|b| b.key == format!("{id:08x}") || Some(&b.key) == tag.as_ref()) {
             return Err("banned");
         }
         Ok(())
@@ -392,6 +399,8 @@ impl Broker {
                 if payload.len() <= 256 * 1024 && slot.len() <= 64 {
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
                         self.reports.insert(slot.to_string(), (Instant::now(), v));
+                        // (a village closed: its last report goes after a while)
+                        self.reports.retain(|_, (at, _)| at.elapsed().as_secs() < 120);
                     }
                 }
                 return Ok(());
@@ -683,9 +692,20 @@ impl Broker {
 
     /// A player kept out (by id): those connected as them let go.
     pub fn ban_player(&mut self, id: u32, name: &str, why: &str) {
-        let key = format!("{id:08x}");
-        if !self.kept.player_bans.iter().any(|b| b.key == key) {
-            self.kept.player_bans.push(Ban { key, name: name.chars().take(60).collect(), why: why.chars().take(200).collect(), at: now_secs() });
+        // (by their tag too, if they're here: the same next time they come,
+        // whatever their id then)
+        let mut keys = vec![format!("{id:08x}")];
+        for c in self.conns.values().filter(|c| player_of(&c.client) == Some(id)) {
+            if let Some(t) = tag_of(&c.client).map(|t| format!("tag:{}", t.to_ascii_lowercase())) {
+                if !keys.contains(&t) {
+                    keys.push(t);
+                }
+            }
+        }
+        for key in keys {
+            if !self.kept.player_bans.iter().any(|b| b.key == key) {
+                self.kept.player_bans.push(Ban { key, name: name.chars().take(60).collect(), why: why.chars().take(200).collect(), at: now_secs() });
+            }
         }
         let gone: Vec<u64> = self.conns.iter().filter(|(_, c)| player_of(&c.client) == Some(id)).map(|(&k, _)| k).collect();
         for k in gone {
@@ -695,7 +715,17 @@ impl Broker {
 
     pub fn unban_player(&mut self, id: u32) {
         let key = format!("{id:08x}");
-        self.kept.player_bans.retain(|b| b.key != key);
+        // (and the tag banned with it)
+        let tags: Vec<String> = self.kept.player_bans.iter().filter(|b| b.key == key).map(|b| (b.name.clone(), b.at)).flat_map(|(n, at)| self.kept.player_bans.iter().filter(move |o| o.key.starts_with("tag:") && o.name == n && o.at == at).map(|o| o.key.clone())).collect();
+        self.kept.player_bans.retain(|b| b.key != key && !tags.contains(&b.key));
+    }
+
+    /// Unbanned by its key as the console shows it (an id, or "tag:…").
+    pub fn unban_key(&mut self, key: &str) {
+        match u32::from_str_radix(key, 16) {
+            Ok(id) if key.len() == 8 => self.unban_player(id),
+            _ => self.kept.player_bans.retain(|b| b.key != key),
+        }
     }
 
     /// The announcements due now (and when each comes next): what to say,
@@ -937,12 +967,18 @@ mod tests {
         b.unban_village("ABCDEFGHJKLM");
         b.publish(p, &t, b"open again", false).unwrap();
         assert!(has(&drain(&mut rq), "open again"));
-        // a banned player: let go, and kept out
+        // a banned player: let go, and kept out (by their tag too: back
+        // tomorrow with another id, still out)
+        let (tp2, _rp2) = channel(64);
+        let (p2, _) = b.join(ip(4), "xt12345678abcdef01aa".into(), None, tp2);
         b.ban_player(0x1234_5678, "Grinch", "spam");
-        assert!(!b.has(p));
+        assert!(!b.has(p) && !b.has(p2));
         assert!(b.may_join("xt12345678dd", false).is_err());
+        assert!(b.may_join("xt99999999abcdef01bb", false).is_err(), "back with another id");
+        assert!(b.may_join("xt99999999aaaaaaaabb", false).is_ok());
         b.unban_player(0x1234_5678);
         assert!(b.may_join("xt12345678dd", false).is_ok());
+        assert!(b.may_join("xt99999999abcdef01bb", false).is_ok(), "the tag's ban stayed");
     }
 
     /// Announcements: said when due, once or again and again; one missed

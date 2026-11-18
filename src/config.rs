@@ -17,6 +17,9 @@ pub struct Config {
     /// and online go on) while a game runs or the computer's busy, unless
     /// the desktop itself has the focus.
     pub rest_for_games: bool,
+    /// A relay of the player's own choosing (a community's own server:
+    /// `wss://…/mqtt` or `https://…/poll`); empty: the village's own.
+    pub relay: String,
     pub scene: SceneCfg,
     pub clock: ClockCfg,
     pub widgets: WidgetCfg,
@@ -770,6 +773,7 @@ impl Default for Config {
             zoom: 1.0,
             seed: 0,
             rest_for_games: true,
+            relay: String::new(),
             scene: SceneCfg::default(),
             clock: ClockCfg::default(),
             widgets: WidgetCfg::default(),

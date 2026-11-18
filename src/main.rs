@@ -10,6 +10,7 @@ mod ctxmenu;
 mod export;
 mod frame;
 mod guard;
+mod host;
 mod icon;
 #[cfg(target_os = "linux")]
 mod linwall;
@@ -257,6 +258,14 @@ fn main() {
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--shelf-probe") {
         winshelf::probe(&std::env::args().skip(2).collect::<Vec<_>>());
+        return;
+    }
+    // the relay's own host: no window, no sound (see host.rs)
+    if std::env::args().nth(1).as_deref() == Some("--host") {
+        if let Err(e) = host::run() {
+            eprintln!("xmas-tui host: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     // look the people and pet sprites over: --sprite-sheet OUT.png

@@ -40,18 +40,23 @@ fn packet(head: u8, body: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// Connect: a clean session, `keepalive` seconds, and a will (published,
-/// retained, if the connection drops without a goodbye).
-pub fn connect(client: &str, keepalive: u16, will: Option<(&str, &[u8])>) -> Vec<u8> {
+/// Connect: a clean session, `keepalive` seconds, a will (published,
+/// retained, if the connection drops without a goodbye), and a sign-in
+/// (user name, password) for the relay's own host.
+pub fn connect_as(client: &str, keepalive: u16, will: Option<(&str, &[u8])>, login: Option<(&str, &str)>) -> Vec<u8> {
     let mut v = vec![];
     str16(&mut v, b"MQTT");
     v.push(4);
-    v.push(0x02 | if will.is_some() { 0x04 | 0x20 } else { 0 });
+    v.push(0x02 | if will.is_some() { 0x04 | 0x20 } else { 0 } | if login.is_some() { 0x80 | 0x40 } else { 0 });
     v.extend_from_slice(&keepalive.to_be_bytes());
     str16(&mut v, client.as_bytes());
     if let Some((topic, payload)) = will {
         str16(&mut v, topic.as_bytes());
         str16(&mut v, payload);
+    }
+    if let Some((user, pass)) = login {
+        str16(&mut v, user.as_bytes());
+        str16(&mut v, pass.as_bytes());
     }
     packet(0x10, v)
 }
@@ -195,7 +200,7 @@ mod tests {
         assert_eq!(got[1], Packet::ConnAck(0));
         assert_eq!(got[2], Packet::Publish { topic: "t".into(), payload: b"hi".to_vec() });
         // the length of a connect counts its will
-        let c = connect("xt1", 60, Some(("w", b"bye")));
+        let c = connect_as("xt1", 60, Some(("w", b"bye")), None);
         assert_eq!(c[0], 0x10);
         assert_eq!(c[1] as usize, c.len() - 2);
     }
