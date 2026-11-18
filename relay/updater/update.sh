@@ -14,9 +14,9 @@
 # the two services below.
 #
 # Besides being asked, it looks after things by itself:
-# * every day at AUTO_UPDATE (for example 04:30, the container's own time:
-#   TZ), it does the same update. Compose only starts a service again when
-#   its image has changed, so on a day with nothing new nobody notices.
+# * every day at AUTO_UPDATE (for example 07:30, in UTC), it does the same
+#   update. A service is started again only when its image has changed, so
+#   on a day with nothing new nobody notices.
 # * old images of the relay and its host are cleared away after an update.
 # * if the relay stops answering its health check (three looks in a row, a
 #   minute apart), it's started again.
@@ -75,11 +75,33 @@ last() {
 
 # The update itself. Each step is given so long and no longer (a pull that
 # hangs doesn't hold the updater for ever).
+# The images the two run now, and the ones compose would start (one a
+# line, sorted, so the two lists compare whatever order they come in).
+running() {
+    # shellcheck disable=SC2086
+    timeout 60 docker inspect --format '{{.Image}}' $SERVICES 2>/dev/null | sort
+}
+pulled() {
+    # shellcheck disable=SC2086
+    imgs=$(timeout 60 docker compose config --images $SERVICES 2>/dev/null)
+    # shellcheck disable=SC2086
+    [ -n "$imgs" ] && timeout 60 docker image inspect --format '{{.Id}}' $imgs 2>/dev/null | sort
+}
+
 run_update() {
     status pulling "the newest images"
+    before=$(running)
     # shellcheck disable=SC2086
     if ! out=$(timeout 900 docker compose pull $SERVICES 2>&1); then
         status failed "pulling: $(last "$out")"
+        return 0
+    fi
+    # (nothing newer, and both running: left as they are. Compose would
+    # leave them too, but a compose of another version than the machine's
+    # can count their settings differently and start them again for nothing)
+    after=$(pulled)
+    if [ -n "$before" ] && [ "$before" = "$after" ] && [ "$(printf '%s\n' "$before" | grep -c .)" -eq 2 ]; then
+        status done "${1:-}nothing newer: both already running the newest images"
         return 0
     fi
     status restarting "starting them again"

@@ -148,9 +148,10 @@ sudo docker compose logs --tail 5 xmas-updater   # "watching /data for requestsâ
 ### By itself (the updater, from relay 1.5.0)
 
 With the updater on, it also:
-- updates every day at `AUTO_UPDATE` (UTC; `09:30` by default, 4:30 in the morning in New York
-  in winter; set it empty in `.env` for none). Compose starts a service again only when there's a
-  newer image, so on most days nothing happens;
+- updates every day at `AUTO_UPDATE` (UTC; `07:30` by default, 2:30 in the morning in New York
+  in winter and 3:30 in summer, clear of the server's Sunday 4:00-6:00 restart window; set it
+  empty in `.env` for none). A service is started again only when its image has changed, so on
+  most days nothing happens;
 - clears away old images of the relay and its host afterwards;
 - starts the relay again if it stops answering its health check for three minutes running.
 

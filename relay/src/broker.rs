@@ -58,6 +58,29 @@ impl Default for Limits {
     }
 }
 
+/// The oldest game let in, unless the console says otherwise: the first
+/// that says its version on every way in (and has the fixes since the
+/// audit).
+pub const MIN_APP: &str = "1.25.4";
+
+/// A version from what a client says it is ("xmas-tui/1.25.4 (linux)", or
+/// "1.25.4"), to compare.
+pub fn version_of(s: &str) -> Option<(u32, u32, u32)> {
+    let v = s.trim().strip_prefix("xmas-tui/").unwrap_or(s.trim());
+    let v = v.split([' ', '-', '+']).next()?;
+    let mut it = v.split('.').map(|n| n.parse::<u32>().ok());
+    let out = (it.next()??, it.next().flatten().unwrap_or(0), it.next().flatten().unwrap_or(0));
+    Some(out)
+}
+
+/// Is a client that said `agent` new enough for `min` (empty: always)?
+pub fn new_enough(agent: &str, min: &str) -> bool {
+    match version_of(min) {
+        None => true,
+        Some(m) => version_of(agent).is_some_and(|v| v >= m),
+    }
+}
+
 /// What's waiting to go out to every connection, in all (bytes).
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
 /// What may wait for one connection (bytes): past it, it's too slow to
@@ -107,6 +130,10 @@ impl Drop for Q {
 pub struct Down {
     tx: Sender<Q>,
     queued: Arc<AtomicUsize>,
+    /// Told when the relay lets the connection go (too slow, kicked,
+    /// banned), so its session ends at once and what was waiting for it
+    /// is let go with it.
+    gone: Arc<tokio::sync::Notify>,
 }
 
 /// How a push went.
@@ -121,7 +148,7 @@ pub enum Push {
 
 impl From<Sender<Q>> for Down {
     fn from(tx: Sender<Q>) -> Down {
-        Down { tx, queued: Arc::new(AtomicUsize::new(0)) }
+        Down { tx, queued: Arc::new(AtomicUsize::new(0)), gone: Arc::new(tokio::sync::Notify::new()) }
     }
 }
 
@@ -131,6 +158,11 @@ impl Down {
         self.queued.fetch_add(n, Ordering::Relaxed);
         QUEUED.fetch_add(n, Ordering::Relaxed);
         Q { bytes, n, conn: self.queued.clone() }
+    }
+
+    /// Told when the relay's let it go.
+    pub fn gone(&self) -> Arc<tokio::sync::Notify> {
+        self.gone.clone()
     }
 
     /// What's waiting for it now (bytes).
@@ -190,6 +222,10 @@ pub struct Kept {
     pub welcome: BTreeMap<String, String>,
     /// Announcements to come.
     pub schedules: Vec<Schedule>,
+    /// The oldest version of the game let in ("1.25.4"): older ones may be
+    /// missing a fix, and are turned away with a word to update. Empty:
+    /// any.
+    pub min_version: String,
     /// Players kept out of one village (by the village's code): by their
     /// id, their tag, or their address ("ip:…").
     pub keepouts: BTreeMap<String, Vec<Ban>>,
@@ -212,6 +248,7 @@ impl Default for Kept {
             welcome: BTreeMap::new(),
             schedules: vec![],
             keepouts: BTreeMap::new(),
+            min_version: MIN_APP.to_string(),
         }
     }
 }
@@ -618,6 +655,8 @@ impl Broker {
     /// will published.
     pub fn leave(&mut self, id: u64, clean: bool) {
         let Some(c) = self.conns.remove(&id) else { return };
+        // (its session ends now, not at its next word)
+        c.tx.gone.notify_one();
         for f in &c.subs {
             self.unfile(f, id);
         }
@@ -985,6 +1024,19 @@ impl Broker {
         self.kept.bans.retain(|b| *b != ip.to_string() && *b != block.to_string());
     }
 
+    /// The oldest game let in, changed: those already here and older are
+    /// let go (their game says why when it tries again). How many.
+    pub fn set_min_version(&mut self, v: &str) -> usize {
+        self.kept.min_version = v.trim().chars().take(20).collect();
+        self.say_public();
+        let min = self.kept.min_version.clone();
+        let old: Vec<u64> = self.conns.iter().filter(|(_, c)| !c.host && !new_enough(&c.agent, &min)).map(|(&id, _)| id).collect();
+        for id in &old {
+            self.kick(*id);
+        }
+        old.len()
+    }
+
     /// What a connection said it is (the app's version and system), for
     /// the console.
     pub fn set_agent(&mut self, id: u64, agent: &str, country: &str) {
@@ -1102,7 +1154,9 @@ impl Broker {
         // out as its topic, which can't be turned back into the code)
         let banned: Vec<&str> = k.village_bans.iter().filter(|b| !b.name.is_empty()).map(|b| b.key.as_str()).collect();
         let banned_ids: Vec<String> = k.village_bans.iter().map(|b| topic_of("village", &b.key).rsplit('/').next().unwrap_or("").to_string()).collect();
-        let json = serde_json::to_vec(&serde_json::json!({ "featured": k.featured, "order": k.order, "banned": banned, "banned_ids": banned_ids, "words": k.words })).unwrap_or_default();
+        // (and the relay's own version, and the oldest game it lets in: a
+        // game can tell its player when either is out of date)
+        let json = serde_json::to_vec(&serde_json::json!({ "featured": k.featured, "order": k.order, "banned": banned, "banned_ids": banned_ids, "words": k.words, "relay": env!("CARGO_PKG_VERSION"), "min_app": k.min_version })).unwrap_or_default();
         self.say(ADMIN_PUBLIC, &json);
     }
 
@@ -1598,6 +1652,30 @@ mod tests {
         }
         assert_eq!(b.admit(v6("2001:db8:9:9:abcd::1")), Err("too many from one address"));
         assert!(b.admit(v6("2001:db8:9:a::1")).is_ok());
+    }
+
+    /// Versions: read from what a client says, compared; raising the
+    /// oldest let in lets go of those older, never the host.
+    #[test]
+    fn the_oldest_version_let_in() {
+        assert_eq!(version_of("xmas-tui/1.25.4 (linux)"), Some((1, 25, 4)));
+        assert_eq!(version_of("1.26"), Some((1, 26, 0)));
+        assert_eq!(version_of("web"), None);
+        assert!(new_enough("xmas-tui/1.25.4 (web)", "1.25.4") && new_enough("xmas-tui/1.30.0 (android)", "1.25.4"));
+        assert!(!new_enough("xmas-tui/1.25.3 (linux)", "1.25.4") && !new_enough("web", "1.25.4") && !new_enough("", "1.25.4"));
+        assert!(new_enough("", ""), "no minimum: anyone");
+        assert_eq!(Kept::default().min_version, MIN_APP);
+        let mut b = Broker::new(Kept::default());
+        let (t1, _r1) = channel(8);
+        let (t2, _r2) = channel(8);
+        let (th, _rh) = channel(8);
+        let (a, _) = b.join(ip(1), "xt00002001aaaaaaaa0001".into(), None, t1);
+        let (o, _) = b.join(ip(2), "xt00002002bbbbbbbb0001".into(), None, t2);
+        let (h, _) = b.join_as(IpAddr::from([172, 18, 0, 3]), "xt00000002aa".into(), None, th, true);
+        b.set_agent(a, "xmas-tui/1.26.0 (linux)", "");
+        b.set_agent(o, "xmas-tui/1.25.4 (web)", "");
+        assert_eq!(b.set_min_version("1.26.0"), 1);
+        assert!(b.has(a) && !b.has(o) && b.has(h), "the host, or the newer one, let go");
     }
 
     #[test]

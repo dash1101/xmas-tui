@@ -94,9 +94,10 @@ services:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-xmas-relay}
       # (no settings of its own to read or write: the images are public)
       DOCKER_CONFIG: /nonexistent
-      # the daily update, in UTC ("09:30" is 4:30 in the morning in New
-      # York in winter); empty: none
-      AUTO_UPDATE: ${AUTO_UPDATE-09:30}
+      # the daily update, in UTC ("07:30": 2:30 in the morning in New York
+      # in winter, 3:30 in summer; clear of the server's own Sunday 4-6
+      # restarts); empty: none
+      AUTO_UPDATE: ${AUTO_UPDATE-07:30}
     logging: *logging
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

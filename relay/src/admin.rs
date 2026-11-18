@@ -39,6 +39,7 @@ pub fn router(app: App) -> Router {
         .route("/api/keep-out", post(keep_out))
         .route("/api/let-back", post(let_back))
         .route("/api/update", post(update))
+        .route("/api/min-version", post(min_version))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
@@ -369,6 +370,7 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
         .collect();
     Json(json!({
         "keepouts": k.keepouts,
+        "min_version": k.min_version,
         "villages": villages,
         "update": updater(&app.data),
         "host_here": b.host_here(),
@@ -386,6 +388,23 @@ async fn state(State(app): State<App>) -> Json<serde_json::Value> {
         "reports": reports,
         "now": crate::broker::now_secs(),
     }))
+}
+
+#[derive(Deserialize)]
+struct MinVersion {
+    version: String,
+}
+
+/// The oldest game let in (empty: any); those already here and older are
+/// let go.
+async fn min_version(State(app): State<App>, Json(m): Json<MinVersion>) -> Response {
+    let v = m.version.trim();
+    if !v.is_empty() && crate::broker::version_of(v).is_none() {
+        return (StatusCode::BAD_REQUEST, "a version is like 1.25.4").into_response();
+    }
+    let n = app.broker.lock().unwrap_or_else(|e| e.into_inner()).set_min_version(v);
+    app.save();
+    Json(json!({ "let_go": n })).into_response()
 }
 
 /// The updater beside the relay (see DEPLOY.md): heard from lately or not,
@@ -769,6 +788,10 @@ const PAGE: &str = r##"<!doctype html>
   <section><h2>CONNECTED</h2><div class="wrap"><table><thead><tr><th>#</th><th>who (where the host knows)</th><th>address (country)</th><th>version</th><th>client</th><th>for</th><th>subs</th><th>sent</th><th>got</th><th>dropped</th><th></th></tr></thead><tbody id="conns"></tbody></table></div>
     <p class="note" id="versions"></p>
   </section>
+  <section><h2>VERSIONS</h2>
+    <p>oldest game let in: <input id="minver" placeholder="any" style="width:110px"> <button id="saveminver">save</button> <span class="note" id="minvernote"></span></p>
+    <p class="note">Older games are turned away with a word to update (from 1.25.4 the game says so and checks for an update; older ones just can't connect). Raising it lets go of anyone connected with an older one. Empty: any version. The relay's own host is never turned away.</p>
+  </section>
   <section><h2>UPDATE</h2>
     <p id="updnow"></p>
     <p><button id="update">update the relay and its host now</button> <span class="note">pulls the newest images and starts them again; players are dropped for a few seconds and come straight back</span></p>
@@ -912,6 +935,8 @@ async function loadState() {
     const name = v.name ? `${esc(v.name)} <span class="note">${esc(v.kind)}</span>` : `<span class="note">a private village · ${esc(v.topic)}</span>`;
     return `<tr><td>${name}</td><td>${v.who.filter((w) => !w.host).length}</td><td>${from}</td></tr>`;
   }).join("") || `<tr><td colspan="3" class="note">none right now</td></tr>`;
+  if (document.activeElement !== $("minver")) $("minver").value = st.min_version || "";
+  $("minvernote").textContent = st.min_version ? "" : "(any version is let in)";
   const u = st.update || {};
   $("updnow").textContent = "relay " + (u.relay || "?") + (st.host_here ? " · its host connected" : " · its host not connected");
   $("update").disabled = !u.alive || u.asked || (u.status && (u.status.state === "pulling" || u.status.state === "restarting"));
@@ -994,6 +1019,14 @@ document.addEventListener("click", async (e) => {
   else if (d.srvdel && confirm("Close and remove this server village?")) { editSrv = true; srvs.splice(Number(d.srvdel), 1); drawServers(); }
   else if (d.scdel) { editSched = true; scheds.splice(Number(d.scdel), 1); drawSched(); }
 });
+$("saveminver").onclick = async () => {
+  const version = $("minver").value.trim();
+  const r = await call("api/min-version", { version });
+  if (!r.ok) { alert(await r.text()); return; }
+  const j = await r.json();
+  $("minvernote").textContent = j.let_go ? `saved: ${j.let_go} older connected game(s) let go` : "saved";
+  loadState(); refresh();
+};
 $("update").onclick = async () => {
   if (!confirm("Update the relay and its host now? Everyone's dropped for a few seconds and comes straight back.")) return;
   const r = await call("api/update", {});

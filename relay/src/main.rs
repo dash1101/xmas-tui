@@ -378,6 +378,18 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: broker:
         }
         _ => false,
     };
+    // what the game is: as it says when signing in (every way in, the web
+    // page too), else its request's user-agent; too old to be let in: told
+    // so (its game asks its player to update, and doesn't go elsewhere)
+    let agent = match &login {
+        Some((user, _)) if user.starts_with("xmas-tui/") => (user.chars().filter(|c| !c.is_control()).take(48).collect(), agent.1),
+        _ => agent,
+    };
+    let min = app.broker.lock().unwrap_or_else(|e| e.into_inner()).kept.min_version.clone();
+    if !host && !broker::new_enough(&agent.0, &min) {
+        let _ = down.send(codec::connack(1)).await;
+        return;
+    }
     let joined = {
         let mut b = app.broker.lock().unwrap_or_else(|e| e.into_inner());
         let joined = (b.ip_ok(ip) && b.may_join(&client, host).is_ok()).then(|| b.join_as(ip, client, will, down.clone(), host));
@@ -396,6 +408,7 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: broker:
         app.broker.lock().unwrap_or_else(|e| e.into_inner()).leave(id, false);
         return;
     }
+    let gone = down.gone();
     drop(down);
     // (silent past one and a half times its keep-alive: gone)
     let idle = Duration::from_secs((keepalive.clamp(10, 600) as u64 * 3) / 2);
@@ -404,9 +417,13 @@ pub async fn session(mut up: tokio::sync::mpsc::Receiver<Vec<u8>>, down: broker:
     let (mut spent, mut since) = (0u32, std::time::Instant::now());
     let mut n = 0u32;
     'conn: loop {
-        let bytes = match tokio::time::timeout(idle, up.recv()).await {
-            Ok(Some(b)) => b,
-            _ => break,
+        let bytes = tokio::select! {
+            got = tokio::time::timeout(idle, up.recv()) => match got {
+                Ok(Some(b)) => b,
+                _ => break,
+            },
+            // (let go by the relay: done)
+            _ = gone.notified() => break,
         };
         if reader.feed(&bytes).is_err() {
             break;
