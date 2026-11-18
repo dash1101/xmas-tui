@@ -28,23 +28,22 @@ cd "$PROJECT_DIR" || { echo "xmas-updater: no folder $PROJECT_DIR" >&2; exit 1; 
 
 now() { date +%s; }
 
-# A file in the data folder, written whole: through a file of its own beside
-# it, then moved into place. Never through a link or onto a folder (the
-# relay's side of that folder isn't trusted).
+# A file in the data folder, written whole. The relay's side of that folder
+# isn't trusted: it can swap anything there at any moment. So the file is
+# made in a folder of the updater's own (its own user's, closed to everyone
+# else, so nothing can be planted in it), and moved into place in one step:
+# never through a link, never onto a folder.
+OWN="$DATA/.updater"
 put() {
-    f="$DATA/$1"
-    t="$DATA/.$1.tmp"
-    # (a link is taken away, never followed; a folder there is left alone,
-    # and nothing is written)
-    rm -f -- "$t" 2>/dev/null
-    [ -L "$f" ] && rm -f -- "$f" 2>/dev/null
-    if [ -e "$t" ] || [ -L "$t" ] || [ -d "$f" ] || [ -L "$f" ]; then
-        return 0
-    fi
-    (umask 022 && printf '%s\n' "$2" >"$t") 2>/dev/null || return 0
-    if [ -L "$t" ] || ! mv -f -- "$t" "$f" 2>/dev/null; then
-        rm -f -- "$t" 2>/dev/null
-    fi
+    (
+        mkdir -m 700 "$OWN" 2>/dev/null
+        cd "$OWN" 2>/dev/null || exit 0
+        [ "$(stat -c '%u %a' . 2>/dev/null)" = "$(id -u) 700" ] || exit 0
+        umask 022
+        rm -f -- "./$1" 2>/dev/null
+        printf '%s\n' "$2" >"./$1" 2>/dev/null || exit 0
+        mv -fT -- "./$1" "$DATA/$1" 2>/dev/null || rm -f -- "./$1" 2>/dev/null
+    )
     return 0
 }
 
@@ -63,16 +62,18 @@ last() {
     printf '%s' "$1" | tail -n 4
 }
 
-update() {
+# The update itself. Each step is given so long and no longer (a pull that
+# hangs doesn't hold the updater for ever).
+run_update() {
     status pulling "the newest images"
     # shellcheck disable=SC2086
-    if ! out=$(docker compose pull $SERVICES 2>&1); then
+    if ! out=$(timeout 900 docker compose pull $SERVICES 2>&1); then
         status failed "pulling: $(last "$out")"
         return 0
     fi
     status restarting "starting them again"
     # shellcheck disable=SC2086
-    if ! out=$(docker compose up -d --no-deps $SERVICES 2>&1); then
+    if ! out=$(timeout 300 docker compose up -d --no-deps $SERVICES 2>&1); then
         status failed "starting: $(last "$out")"
         return 0
     fi
@@ -82,7 +83,22 @@ update() {
     return 0
 }
 
-[ -f "$DATA/update.status" ] && [ ! -L "$DATA/update.status" ] || status idle "ready"
+# (While it's busy, it still says it's here.)
+update() {
+    (while :; do
+        put update.alive "$(now)"
+        sleep 5
+    done) &
+    keeper=$!
+    run_update
+    kill "$keeper" 2>/dev/null
+    wait "$keeper" 2>/dev/null
+    return 0
+}
+
+# (Always said afresh: a "pulling" left by an updater stopped halfway would
+# otherwise stand for ever.)
+status idle "ready"
 echo "xmas-updater: watching $DATA for requests, for $SERVICES in $PROJECT_DIR"
 while :; do
     put update.alive "$(now)"

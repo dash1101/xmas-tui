@@ -76,11 +76,12 @@ services:
     environment:
       PROJECT_DIR: ${PROJECT_DIR:-/opt/xmas-relay}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-xmas-relay}
-      DOCKER_CONFIG: /tmp/.docker
+      # (no settings of its own to read or write: the images are public)
+      DOCKER_CONFIG: /nonexistent
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # (the same path inside as on the machine, so "./data" means the same)
-      - ${PROJECT_DIR:-/opt/xmas-relay}:${PROJECT_DIR:-/opt/xmas-relay}:ro
+      - ./:${PROJECT_DIR:-/opt/xmas-relay}:ro
       - ./data:/data
     read_only: true
     tmpfs:
