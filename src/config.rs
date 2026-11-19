@@ -470,6 +470,10 @@ impl LayoutCfg {
 #[serde(default)]
 pub struct SceneCfg {
     pub aurora: bool,
+    /// The cinematic sky: the aurora as curtains of light with rays drawn in
+    /// letters, a faint grid of dots over the night, and the glow stronger
+    /// (the graphics preset above ultra).
+    pub cinematic: bool,
     /// Snow density multiplier (0 disables snow).
     pub snow: f32,
     pub wind: f32,
@@ -813,7 +817,7 @@ impl Default for Config {
 
 impl Default for SceneCfg {
     fn default() -> Self {
-        SceneCfg { aurora: true, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, village_limit: 8, clean_words: true, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), pets: vec![], name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
+        SceneCfg { aurora: true, cinematic: false, snow: 1.0, wind: 1.0, sleigh_minutes: 4.0, glow: 1.0, events: 1.0, critters: 1.0, most_at_once: 24, bushes: true, player: true, autopilot: false, autopilot_after: 20.0, autopilot_area: "anywhere".into(), autopilot_reach: 1.0, village_limit: 8, clean_words: true, only_friends: false, walk_speed: 1.0, traffic: "auto".into(), time: "auto".into(), talk_time: 1.0, chattiness: 1.0, pet: PetCfg::default(), pets: vec![], name: String::new(), friends: vec![], wear: FriendCfg { scarf: true, ..Default::default() }, motto: String::new() }
     }
 }
 
@@ -942,28 +946,30 @@ pub const SIZE_STEPS: [f32; 20] = [0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
 pub const WINDOWS_MIN: f32 = 0.5;
 
 /// Graphics presets: (name, frames a second, glow, snow, aurora, folk and
-/// animals, the snow and lights on open windows).
-pub const PRESETS: [(&str, f32, f32, f32, bool, f32, bool); 4] = [
-    ("low", 15.0, 0.0, 0.5, false, 0.5, false),
-    ("medium", 24.0, 0.6, 0.75, true, 0.75, true),
-    ("high", 30.0, 1.0, 1.0, true, 1.0, true),
-    ("ultra", 60.0, 1.3, 1.5, true, 1.25, true),
+/// animals, the snow and lights on open windows, the cinematic sky).
+pub type Preset = (&'static str, f32, f32, f32, bool, f32, bool, bool);
+pub const PRESETS: [Preset; 5] = [
+    ("low", 15.0, 0.0, 0.5, false, 0.5, false, false),
+    ("medium", 24.0, 0.6, 0.75, true, 0.75, true, false),
+    ("high", 30.0, 1.0, 1.0, true, 1.0, true, false),
+    ("ultra", 60.0, 1.3, 1.5, true, 1.25, true, false),
+    ("cinematic", 60.0, 1.5, 1.5, true, 1.25, true, true),
 ];
 
 impl Config {
     /// Which graphics preset these settings are (none: set by hand).
     pub fn preset(&self) -> Option<usize> {
         let near = |a: f32, b: f32| (a - b).abs() < 0.01;
-        PRESETS.iter().position(|&(_, fps, glow, snow, aurora, critters, win)| {
-            near(self.fps, fps) && near(self.scene.glow, glow) && near(self.scene.snow, snow) && self.scene.aurora == aurora && near(self.scene.critters, critters) && self.windows.snow == win && self.windows.lights == win
+        PRESETS.iter().position(|&(_, fps, glow, snow, aurora, critters, win, cine)| {
+            near(self.fps, fps) && near(self.scene.glow, glow) && near(self.scene.snow, snow) && self.scene.aurora == aurora && near(self.scene.critters, critters) && self.windows.snow == win && self.windows.lights == win && self.scene.cinematic == cine
         })
     }
 
     /// A graphics preset's settings, all at once.
     pub fn apply_preset(&mut self, i: usize) {
-        let Some(&(_, fps, glow, snow, aurora, critters, win)) = PRESETS.get(i) else { return };
+        let Some(&(_, fps, glow, snow, aurora, critters, win, cine)) = PRESETS.get(i) else { return };
         self.fps = fps;
-        (self.scene.glow, self.scene.snow, self.scene.aurora, self.scene.critters) = (glow, snow, aurora, critters);
+        (self.scene.glow, self.scene.snow, self.scene.aurora, self.scene.critters, self.scene.cinematic) = (glow, snow, aurora, critters, cine);
         (self.windows.snow, self.windows.lights) = (win, win);
     }
 

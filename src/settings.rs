@@ -40,6 +40,8 @@ pub enum F {
     Fps,
     Events,
     Aurora,
+    /// The cinematic sky (see `SceneCfg::cinematic`).
+    Cinematic,
     Clock,
     Hour24,
     Seconds,
@@ -708,6 +710,7 @@ pub fn apply(cfg: &mut Config, act: Act) -> bool {
         Act::Toggle(f) => {
             match f {
                 F::Aurora => cfg.scene.aurora ^= true,
+                F::Cinematic => cfg.scene.cinematic ^= true,
                 F::Clock => cfg.clock.enabled ^= true,
                 F::Hour24 => cfg.clock.hour24 ^= true,
                 F::Seconds => cfg.clock.seconds ^= true,
@@ -1005,6 +1008,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::TimeOfDay => "Day and night: following the real sun (auto), or one time of day always.",
         F::Fps => "Frames a second. Lower is lighter on the computer.",
         F::Aurora => "The northern lights in the sky.",
+        F::Cinematic => "The aurora as curtains of light, its rays drawn in letters, a faint grid of dots over the night sky, and the glow stronger. Part of the cinematic preset; a little heavier.",
         F::Bushes => "Berry bushes to pick berries from (animals love them).",
         F::Player => "The villager: walk about with WASD or the arrow keys.",
         F::OnlyFriends => "Only the friends & family named here come by as people (the animals still wander through). Off: the village's own folk come by too.",
@@ -1051,7 +1055,7 @@ fn tip(a: Act) -> Option<&'static str> {
         F::UpdCheck => "Look for new versions now and then.",
         F::UpdAuto => "Install new versions without asking.",
         F::WinSnow => "Snow settles on top of open windows.",
-        F::Preset => "Low, medium, high or ultra: the frame rate, the glow, the snow, the aurora, how many folk and animals come by, and the snow and lights on open windows, all at once. Lower is lighter on the computer.",
+        F::Preset => "Low, medium, high, ultra or cinematic: the frame rate, the glow, the snow, the aurora, how many folk and animals come by, and the snow and lights on open windows, all at once (cinematic: the aurora as curtains of light in letters too). Lower is lighter on the computer.",
         F::PerfOverlay => "The frame rate, the time each frame takes, and what the wallpaper is costing the computer, in a corner of the screen.",
         F::EaseOff => "On a computer that struggles (an older laptop, or one drawing without its graphics card), the frame rate drops by itself, as far as 10 a second, and comes back up when it can.",
         F::RestForGames => "While a game runs, or the computer's working hard, the village stands still (the widgets and online carry on). A click on the desktop wakes it.",
@@ -1940,6 +1944,8 @@ impl Settings {
         yy += 1;
         let cx = self.check(f, lx, yy, "Aurora", Act::Toggle(F::Aurora), cfg.scene.aurora) + 3;
         self.check(f, cx, yy, "Berry bushes", Act::Toggle(F::Bushes), cfg.scene.bushes);
+        yy += 1;
+        self.check(f, lx, yy, "Cinematic sky", Act::Toggle(F::Cinematic), cfg.scene.cinematic);
         yy += 2;
         self.section(f, lx, yy, "VISITORS");
         yy += 1;
@@ -3319,7 +3325,10 @@ mod tests {
         for _ in 0..5 {
             apply(&mut cfg, Act::Inc(F::Preset));
         }
-        assert_eq!((cfg.preset(), cfg.fps), (Some(3), 60.0));
+        // (the top: cinematic, its sky on; one down, ultra, without it)
+        assert_eq!((cfg.preset(), cfg.fps, cfg.scene.cinematic), (Some(4), 60.0, true));
+        apply(&mut cfg, Act::Dec(F::Preset));
+        assert_eq!((cfg.preset(), cfg.fps, cfg.scene.cinematic), (Some(3), 60.0, false));
         // and the Screen tab says which, with the readout and its switch
         let mut s = Settings { open: true, tab: TAB_DESKTOP, kind: Kind::Web, ..Default::default() };
         s.perf = Some(PerfInfo { fps: 59.6, frame_ms: 3.2, mem_mb: Some(41.0), cells: (180, 75), ..Default::default() });

@@ -30,6 +30,13 @@ pub struct Sky {
     shooting: Option<Shooting>,
     next_shoot: f32,
     pub aurora: bool,
+    /// The cinematic sky: the aurora as curtains of light (see `aurora`),
+    /// in letters too, and a faint grid of dots over the night.
+    pub cinematic: bool,
+    /// How much it's night (0 by day, 1 dark), set before it's drawn.
+    pub night: std::cell::Cell<f32>,
+    /// The curtains' light this frame (cinematic).
+    curtains: std::cell::RefCell<super::aurora::Aurora>,
     town_x: f32,
     base: Vec<Rgb>,
     horizon: f32,
@@ -78,6 +85,9 @@ impl Sky {
             shooting: None,
             next_shoot: rng.range(6.0, 20.0),
             aurora,
+            cinematic: false,
+            night: std::cell::Cell::new(1.0),
+            curtains: Default::default(),
             town_x,
             base: vec![],
             horizon,
@@ -167,7 +177,15 @@ impl Sky {
             }
         }
         let horizon = self.horizon;
-        if self.aurora {
+        if self.aurora && self.cinematic {
+            let k = self.night.get();
+            if k > 0.02 {
+                let mut c = self.curtains.borrow_mut();
+                c.render(f.pw, horizon, t, self.seed, off as f32, boost, 3);
+                let (mx, my, mr) = self.moon;
+                c.add_to(f, k, 1.0, Some(((mx - off as f32).rem_euclid(f.pw.max(1) as f32), my, mr)));
+            }
+        } else if self.aurora {
             self.draw_aurora(f, t, horizon, boost, off);
         }
 
@@ -244,8 +262,17 @@ impl Sky {
     }
 
     /// Glyph-layer stars (bright ones get real characters + a small glow).
-    pub fn draw_glyphs(&self, f: &mut Frame, t: f32, off: i32) {
+    /// Cinematic: the aurora's rays in letters first, and (`dots`) the faint
+    /// grid of dots over the rest of the night sky after.
+    pub fn draw_glyphs(&self, f: &mut Frame, t: f32, off: i32, dots: bool) {
         let w = f.w.max(1) as i32;
+        // (the moon, drifted with the sky: no letters over it)
+        let (mx, my, mr) = self.moon;
+        let moon = Some(((mx - off as f32).rem_euclid(f.pw.max(1) as f32), my, mr));
+        let night = self.night.get();
+        if self.aurora && self.cinematic {
+            self.curtains.borrow().letters(f, night, moon);
+        }
         for s in &self.stars {
             let (cx, cy) = ((s.x as i32 - off).rem_euclid(w), (s.y / 2.0) as i32);
             let Some(ch) = s.glyph else {
@@ -264,6 +291,9 @@ impl Sky {
             let k = (s.b * 0.6 + 0.4) * (0.45 + 0.55 * tw) * spark;
             f.put_g(cx, cy, Glyph::new(ch, s.tint * k).lit(0.2));
             f.light_cell(cx, cy, s.tint * (k * 0.35));
+        }
+        if self.cinematic && dots {
+            super::aurora::dots(f, (self.horizon / 2.0) as i32 - 1, night, moon);
         }
     }
 }

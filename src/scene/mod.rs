@@ -16,6 +16,7 @@ pub mod lines;
 pub mod player;
 pub mod sky;
 pub mod autopilot;
+pub mod aurora;
 pub mod balloon;
 pub mod games;
 pub mod play;
@@ -399,6 +400,8 @@ pub enum Do {
     /// A trip out: the train up to the ski slopes (true; from the station),
     /// or a drive (from the car by home).
     Trip(bool),
+    /// Off to Aurora Lake, to skate under the northern lights.
+    Lake,
     /// Online: friends, messages, shared villages.
     Net(online::NetDo),
 }
@@ -638,7 +641,8 @@ impl Scene {
         let _ = town_x;
         // the sky (stars, moon, aurora) stays put on screen; the warm glow
         // of the town sits where the default view puts it
-        let sky = sky::Sky::new(pw, ph, seed, cfg.aurora, wf * 0.72, &land.sky_ceiling(w), land.horizon);
+        let mut sky = sky::Sky::new(pw, ph, seed, cfg.aurora, wf * 0.72, &land.sky_ceiling(w), land.horizon);
+        sky.cinematic = cfg.cinematic;
         village.bake();
 
         let cam = ((ww - w) / 2) as f32;
@@ -1139,6 +1143,10 @@ impl Scene {
             Do::TeamFight => self.start_team_fight(),
             Do::Game(k) => self.start_game(k),
             Do::Trip(_) => self.goal = Some(Goal { then: what, until: t + 60.0 }),
+            Do::Lake => {
+                self.goal = None;
+                self.soon(Pending::Lake);
+            }
             // everything else: walk over there first
             _ => self.goal = Some(Goal { then: what, until: t + 25.0 }),
         }
@@ -2032,6 +2040,7 @@ impl Scene {
             tr.done = Some(match tr.at {
                 trips::Where::Drive => trips::Back::Home,
                 trips::Where::Moon { .. } => trips::Back::Sky,
+                trips::Where::Lake { .. } => trips::Back::Lake,
                 _ => trips::Back::Station,
             });
             return true;
@@ -3154,14 +3163,17 @@ impl Scene {
                     tr.interact(t);
                     tr
                 }
+                "lake" => trips::Trip::lake(t - 2.0, 7),
                 _ => trips::Trip::ski(t, 7),
             };
+            tr.cinematic = self.sky.cinematic;
             tr.preview(rest, t);
             if friends {
                 let at = |a: u8, x: f32, lane: f32, air: f32, sat: bool| crate::net::TripAt { at: a, x, lane, air, sat, dir: 1.0, el: 2.0, ..Default::default() };
                 let (a, x, lane, sat) = match rest {
                     "carriage" => (2, 0.32, 0.0, false),
                     "moon" => (8, 44.0, 0.0, false),
+                    "lake" => (9, tr.here(t).x + 16.0, 0.0, false),
                     "lodge" => (3, 0.6, 0.0, false),
                     _ => (5, tr.here(t).x + 14.0, 2.0, false),
                 };
@@ -5192,6 +5204,8 @@ impl Scene {
         f.oy = oy;
         // pixel layer (sky things stay on screen, the world scrolls)
         f.ox = 0;
+        // (the cinematic aurora fades in with the night)
+        self.sky.night.set(((0.5 - self.daylight.sun) / 0.35).clamp(0.0, 1.0));
         self.sky.draw_px(f, t, self.director.flare.value(t), self.sky_off());
         self.draw_moon_visitors(f);
         let dl = self.daylight;
@@ -5219,7 +5233,8 @@ impl Scene {
         if dl.sun < 0.45 {
             // stars and the moon's glyphs (not in daylight)
             f.specks = true;
-            self.sky.draw_glyphs(f, t, self.sky_off());
+            // (the dots not while zoomed in: every one a picture then)
+            self.sky.draw_glyphs(f, t, self.sky_off(), !self.zoomed.get());
             f.specks = false;
         }
         f.ox = self.sky_off();
@@ -6615,6 +6630,110 @@ mod tests {
         assert!(a.trip.is_none(), "still up there");
         both(&mut a, &mut b, 6.0, false);
         assert!(a.player.as_ref().is_some_and(|p| !p.in_air() && p.y > 0.0), "never landed");
+    }
+
+    /// Aurora Lake: off from the things-to-do list (not walked to), out
+    /// on the ice under the aurora; skating glides on after letting go, a
+    /// hop, a twirl; friends in the same village see each other there; ↓
+    /// and back where the villager left, on their feet.
+    #[test]
+    fn skating_on_aurora_lake() {
+        use crate::net::{Book, Online};
+        let mut relay = crate::net::tests::Relay::default();
+        let (mut a, mut b) = (walker_scene(), walker_scene());
+        a.put_online(Online::new(Book { on: true, ..Default::default() }, "Robin"));
+        b.put_online(Online::new(Book { on: true, ..Default::default() }, "Sam"));
+        a.online.connected();
+        b.online.connected();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        let code = b.online.code();
+        a.online.add_friend(&code).unwrap();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.accept(0);
+        let vc = a.online.host();
+        relay.pump(&mut [&mut a.online, &mut b.online]);
+        b.online.join(&vc).unwrap();
+        let mut both = |a: &mut Scene, b: &mut Scene, secs: f32| {
+            for _ in 0..(secs / DT) as usize {
+                a.update(DT, 0.0);
+                b.update(DT, 0.0);
+                relay.pump(&mut [&mut a.online, &mut b.online]);
+            }
+        };
+        both(&mut a, &mut b, 3.0);
+        let from = a.player.as_ref().unwrap().x;
+        // on the list of things to do, and straight there
+        let (_, todo) = a.todo_menu();
+        let lake = todo.iter().find(|(_, d)| *d == Do::Lake).expect("no lake on the list");
+        assert!(lake.0.contains("Aurora Lake"));
+        a.act(Do::Lake);
+        both(&mut a, &mut b, 1.0);
+        assert!(a.trip.as_ref().is_some_and(|tr| matches!(tr.at, trips::Where::Lake { .. })), "not on the lake");
+        // a push, then let go: it glides on
+        a.mv = (1.0, 0.0);
+        both(&mut a, &mut b, 1.0);
+        a.mv = (0.0, 0.0);
+        let x0 = a.trip.as_ref().unwrap().here(a.now()).x;
+        both(&mut a, &mut b, 1.0);
+        let x1 = a.trip.as_ref().unwrap().here(a.now()).x;
+        assert!(x1 - x0 > 5.0, "no glide: {x0} → {x1}");
+        // a hop and a twirl
+        a.jump();
+        both(&mut a, &mut b, 0.2);
+        assert!(a.trip.as_ref().unwrap().here(a.now()).air > 0.0, "no hop");
+        a.release_jump();
+        both(&mut a, &mut b, 1.5);
+        a.interact();
+        both(&mut a, &mut b, 0.3);
+        assert!(a.trip.as_ref().unwrap().here(a.now()).sat, "no twirl");
+        // seen there from the village, and on the lake too
+        let there = b.online.other(a.online.my_id()).and_then(|o| o.av.trip).map(|t| t.at);
+        assert_eq!(there, Some(9), "not seen on the lake");
+        b.act(Do::Lake);
+        both(&mut a, &mut b, 3.0);
+        assert!(a.trip.as_ref().unwrap().fellows.iter().any(|f| f.at.at == 9), "Sam not seen on the ice");
+        // drawn: the aurora over it, the mirror under it
+        let mut f = crate::frame::Frame::new(160, 40);
+        let mut spare = crate::frame::Frame::new(160, 40);
+        a.render(&mut f, &mut spare, 0.0, 1.0, None);
+        let (top, ice) = (f.px[20 * 160 + 80], f.px[60 * 160 + 80]);
+        assert!(top.g > top.r && ice.b > 0.0, "{top:?} {ice:?}");
+        // ↓: home, standing where they left
+        a.mv = (0.0, 1.0);
+        both(&mut a, &mut b, 0.5);
+        a.mv = (0.0, 0.0);
+        both(&mut a, &mut b, 1.5);
+        assert!(a.trip.is_none(), "still skating");
+        let p = a.player.as_ref().unwrap();
+        assert!((p.x - from).abs() < 2.0 && !p.in_air(), "not back where they left ({} vs {from})", p.x);
+    }
+
+    /// The cinematic sky: at night the aurora's rays are letters, and the
+    /// rest of the night sky a faint grid of dots; the plain sky has none.
+    #[test]
+    fn the_cinematic_sky_is_letters_and_dots() {
+        let mut cfg = SceneCfg { cinematic: true, ..SceneCfg::default() };
+        cfg.time = "night".into();
+        let letters = |cfg: &SceneCfg| {
+            let mut s = Scene::new(200, 60, 7, cfg);
+            s.update(DT, 0.0);
+            let mut best = 0;
+            for k in 0..6 {
+                for _ in 0..30 {
+                    s.update(DT * 4.0, 0.0);
+                }
+                let mut f = crate::frame::Frame::new(200, 60);
+                let mut spare = crate::frame::Frame::new(200, 60);
+                s.render(&mut f, &mut spare, k as f32, 1.0, None);
+                let rays = f.glyph.iter().flatten().filter(|g| matches!(g.ch, '|' | '¦' | ':')).count();
+                let dots = f.glyph.iter().flatten().filter(|g| g.ch == '·').count();
+                best = best.max(rays.min(1) * dots);
+            }
+            best
+        };
+        assert!(letters(&cfg) > 200, "no letters and dots in the cinematic sky");
+        cfg.cinematic = false;
+        assert_eq!(letters(&cfg), 0, "the plain sky has letters");
     }
 
     /// The chat box: / opens it, what's typed is there (the caret moved,

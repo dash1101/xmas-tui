@@ -912,6 +912,8 @@ impl Scene {
                 4 => "on the chairlift".into(),
                 5 => "on the slopes".into(),
                 6 => "out for a drive".into(),
+                8 => "on the moon".into(),
+                9 => "skating on Aurora Lake".into(),
                 _ => "away on a trip".into(),
             };
         }

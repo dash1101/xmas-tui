@@ -8,7 +8,8 @@
 //! And the moon: jumped high enough, on Christmas spirit, right off the top
 //! of the sky, the villager's up there (a little moon, round in a few
 //! hundred steps, light enough to bound about on, the Earth hanging over
-//! it), with anyone else who's got there; ↓ comes back down.
+//! it), with anyone else who's got there; ↓ comes back down. And Aurora
+//! Lake (see `lake`): a frozen lake under the northern lights, to skate on.
 //!
 //! Each part is a scene of its own, drawn full screen in the same pixel-art
 //! way as the village.
@@ -17,6 +18,8 @@ use crate::audio::Sfx;
 use crate::color::{pal, Rgb};
 use crate::frame::{Bg, Frame, Glyph};
 use crate::rng::{h01, hash2, noise1, Rng};
+
+mod lake;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Where {
@@ -35,6 +38,8 @@ pub enum Where {
     Drive,
     /// On the moon (since when: the first moments, flying up to it).
     Moon { since: f32 },
+    /// Skating on Aurora Lake (since when).
+    Lake { since: f32 },
 }
 
 /// What a trip asks of the village (when it's over).
@@ -46,6 +51,8 @@ pub enum Back {
     Home,
     /// Down from the sky (the moon), where the villager left.
     Sky,
+    /// Back from Aurora Lake, where the villager left.
+    Lake,
 }
 
 /// Round the little moon (columns): walking on from here comes back to the
@@ -266,6 +273,11 @@ pub struct Trip {
     pub best_score: u32,
     /// On the moon (see `Where::Moon`).
     moon: Option<MoonWalk>,
+    /// On Aurora Lake (see `lake`).
+    lake: Option<lake::Skate>,
+    /// The cinematic look (set by the village): the lake's aurora in
+    /// letters.
+    pub cinematic: bool,
 }
 
 /// Where things stand at the lodge (columns, on an 160-wide layout
@@ -360,6 +372,8 @@ impl Trip {
             km: 0.0,
             best_score: 0,
             moon: None,
+            lake: None,
+            cinematic: false,
         }
     }
 
@@ -429,6 +443,11 @@ impl Trip {
                 Some(m) => TripAt { at: 8, x: m.x, air: m.air, sat: m.walk.fract() > 0.5 && m.air <= 0.0, el: t - since, ..base },
                 None => TripAt { at: 8, ..base },
             },
+            // (on the lake: sat = twirling)
+            Where::Lake { since } => {
+                let (x, air, twirl) = self.lake_here();
+                TripAt { at: 9, x, air, sat: twirl, el: t - since, ..base }
+            }
         }
     }
 
@@ -571,6 +590,12 @@ impl Trip {
                     self.update(1.0 / 30.0, t + k as f32 / 30.0, (1.0, 0.0));
                 }
             }
+            // (skating along a while: lines in the ice behind)
+            "lake" => {
+                for k in 0..150 {
+                    self.update(1.0 / 30.0, t + k as f32 / 30.0, (if k < 60 { 1.0 } else { 0.0 }, 0.0));
+                }
+            }
             _ => {}
         }
     }
@@ -589,8 +614,10 @@ impl Trip {
             Where::Shuttle { home, since } => Where::Shuttle { home, since: since - s },
             Where::Carriage { home, since } => Where::Carriage { home, since: since - s },
             Where::Lift { since } => Where::Lift { since: since - s },
+            Where::Lake { since } => Where::Lake { since: since - s },
             w => w,
         };
+        self.lake_rebase(s);
         self.gate = self.gate.map(|g| g - s);
         self.go_at = self.go_at.map(|g| g - s);
         if let Some(r) = &mut self.run {
@@ -651,6 +678,7 @@ impl Trip {
             // at the bottom, waiting: back up now
             Where::Ski if self.down.is_some() => self.lift_back(t),
             Where::Ski => {}
+            Where::Lake { .. } => self.lake_twirl(t),
             Where::Drive => self.done = Some(Back::Home),
             Where::Moon { since } => {
                 // a flag planted where the villager stands (five at most)
@@ -733,6 +761,7 @@ impl Trip {
             Where::Drive => Some("home"),
             Where::Moon { since } if self.t_ok(since) => Some("plant a flag"),
             Where::Moon { .. } => None,
+            Where::Lake { .. } => Some("twirl"),
         }
     }
 
@@ -825,6 +854,10 @@ impl Trip {
 
     /// Space: jump (skiing); held, higher. The car's horn, driving.
     pub fn jump(&mut self, held: bool) {
+        if let Where::Lake { .. } = self.at {
+            self.lake_jump(held);
+            return;
+        }
         if let (Where::Moon { .. }, Some(m)) = (self.at, &mut self.moon) {
             // (light up here: a bound, held for longer still)
             if held && m.air <= 0.0 {
@@ -940,6 +973,7 @@ impl Trip {
             }
             Where::Ski => self.ski_step(dt, t, mv),
             Where::Moon { since } => self.moon_step(dt, t, since, mv),
+            Where::Lake { .. } => self.lake_step(dt, t, mv),
             Where::Drive => {
                 // a gentle drive: speed up, ease off, the other lane
                 self.speed = if mv.0 > 0.0 { (self.speed + dt * 0.3).min(1.0) } else if mv.0 < 0.0 { (self.speed - dt * 0.6).max(0.0) } else { (self.speed - dt * 0.03).max(0.15) };
@@ -1186,6 +1220,7 @@ impl Trip {
             Where::Ski => self.draw_ski(f, t, look),
             Where::Drive => self.draw_drive(f, t),
             Where::Moon { since } => self.draw_moon(f, t, t - since, look),
+            Where::Lake { since } => self.draw_lake(f, t, t - since, look),
         }
         let _ = (w, h);
     }
@@ -1207,6 +1242,7 @@ impl Trip {
             Where::Drive => (w / 2.0, h * 0.6),
             // (people on the moon grow with the screen's rows, as in the village)
             Where::Moon { .. } => (w / 2.0, moon_surface(0.0, ph) / 2.0 - self.moon.as_ref().map(|m| m.air).unwrap_or(0.0) - 9.0 * crate::scene::sprite_k(h as usize)),
+            Where::Lake { .. } => (w / 2.0, lake::feet_row(h as usize) - self.lake_here().1 - 7.5 * crate::scene::sprite_k(h as usize)),
         };
         ((x / kx) as i32, (y / ky) as i32)
     }
@@ -1244,6 +1280,7 @@ impl Trip {
             Where::Ski => " → tuck · ← slow · ↑ ↓ lanes · Space jump · air: ← → spin, ↓ grab ",
             Where::Drive => " → faster · ← slower · ↑ ↓ lanes · Space honk · E home ",
             Where::Moon { .. } => " ← → walk round the moon · Space: bound (so light!) · E: a flag · ↓ or Esc: back down home ",
+            Where::Lake { .. } => " ← → skate (it glides on) · Space: hop · E: twirl · ↓ or Esc: back to the village ",
         };
         let n = hint.chars().count() as i32;
         let (hx, hy) = spot(n, 1, false);

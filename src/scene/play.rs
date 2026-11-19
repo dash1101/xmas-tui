@@ -58,6 +58,8 @@ pub enum Pending {
     Race(u32, f32),
     /// Round the table in the games room (the table's number).
     GameRoom(u32),
+    /// Off to Aurora Lake.
+    Lake,
 }
 
 /// How long the view takes to close (and again to open).
@@ -94,6 +96,7 @@ impl Scene {
                     Pending::Join(id) => self.join_trip(id),
                     Pending::Race(seed, at) => self.start_race(seed, at),
                     Pending::GameRoom(game) => self.enter_games_room(game),
+                    Pending::Lake => self.to_the_lake(),
                 }
                 // (opening round where the villager is now)
                 let (x, y) = self.zoom_focus();
@@ -546,6 +549,26 @@ impl Scene {
         }
     }
 
+    /// Off to Aurora Lake, to skate under the northern lights. In a shared
+    /// village, everyone who goes skates the same lake (its floes, its
+    /// skaters), and sees each other there.
+    pub(super) fn to_the_lake(&mut self) {
+        let t = self.now();
+        let Some(p) = &self.player else { return };
+        self.moon_from = Some(p.x);
+        let shared = self.online.village().is_some();
+        let seed = if shared { self.seed ^ 0x1a4e } else { self.rng.next_u32() };
+        self.goal = None;
+        self.balloon = None;
+        let mut tr = super::trips::Trip::lake(t, seed);
+        tr.cinematic = self.sky.cinematic;
+        self.trip = Some(tr);
+        if shared {
+            let name = self.your_name().to_string();
+            self.online.say(&format!("{name}'s gone skating on Aurora Lake"));
+        }
+    }
+
     /// Along to where someone online is on their trip.
     pub(super) fn join_trip(&mut self, id: u32) {
         let t = self.now();
@@ -570,7 +593,9 @@ impl Scene {
     pub(super) fn update_trip(&mut self, dt: f32, t: f32) {
         self.update_trip_online();
         let mv = self.mv;
+        let cinematic = self.sky.cinematic;
         let Some(tr) = &mut self.trip else { return };
+        tr.cinematic = cinematic;
         tr.update(dt, t, mv);
         for (sfx, v) in tr.take_sounds() {
             self.director.sound(sfx, self.cam + self.w as f32 / 2.0, v);
@@ -588,6 +613,22 @@ impl Scene {
         let Some(back) = tr.done else { return };
         let (runs, best, km, score) = (tr.runs, tr.best, tr.km, tr.best_score);
         self.trip = None;
+        // back from the lake: standing where they left, as if from a walk
+        if back == super::trips::Back::Lake {
+            let x = self.moon_from.take().unwrap_or(self.cam + self.w as f32 / 2.0);
+            let y = self.lo_at(x);
+            if let Some(p) = self.player.as_mut() {
+                p.x = x;
+                p.y = y;
+                p.perch = None;
+                p.lie = None;
+            }
+            self.look_at(x);
+            self.cam = self.cam_target;
+            self.ctx.cam = self.cam;
+            self.you_say("those lights!", t + 1.0);
+            return;
+        }
         // down from the moon: falling back into the sky where they left it
         if back == super::trips::Back::Sky {
             let x = self.moon_from.take().unwrap_or(self.cam + self.w as f32 / 2.0);
@@ -753,6 +794,7 @@ impl Scene {
         if self.home.is_some() {
             v.push(("⚐ a drive in the car".into(), Do::Trip(false)));
         }
+        v.push(("❄ skate on Aurora Lake, under the northern lights".into(), Do::Lake));
         if let Some(h) = self.home {
             v.push(("⚑ go home".into(), Do::Visit(h)));
         }
