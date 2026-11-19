@@ -644,6 +644,9 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     } catch (Exception ignored) {
                     }
                     recreate();
+                } else if (ask != null && ask.startsWith("note:")) {
+                    // a word from the village (a widget hidden, the widgets locked)
+                    android.widget.Toast.makeText(GameActivity.this, ask.substring(5), android.widget.Toast.LENGTH_SHORT).show();
                 } else if (ask != null && ask.startsWith("copy:")) {
                     String text = ask.substring(5);
                     ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);

@@ -170,12 +170,26 @@ impl Picture {
     }
 
     /// Blit into a 0RGB pixel buffer, scaled to fit `bw`×`bh` at (x, y)
-    /// (centred, aspect kept; bilinear; alpha-blended over what's there).
+    /// (centred, aspect kept; alpha-blended over what's there). Pixel art
+    /// stays crisp: grown by a whole number when that nearly fills the
+    /// space, otherwise each pixel kept square-edged with only the seam
+    /// between two of them blended ("sharp bilinear"); shrunk, bilinear.
     pub fn blit(&self, buf: &mut [u32], stride: usize, x: usize, y: usize, bw: usize, bh: usize) {
         if self.w == 0 || self.h == 0 || bw == 0 || bh == 0 {
             return;
         }
-        let k = (bw as f32 / self.w as f32).min(bh as f32 / self.h as f32);
+        let fit = (bw as f32 / self.w as f32).min(bh as f32 / self.h as f32);
+        // (a whole-number scale, if it loses little of the space)
+        let whole = fit.floor();
+        let k = if whole >= 1.0 && whole / fit >= 0.85 { whole } else { fit };
+        if k == whole {
+            let (dw, dh) = (self.w * k as usize, self.h * k as usize);
+            self.blit_scaled(buf, stride, (x + (bw - dw) / 2) as i32, (y + (bh - dh) / 2) as i32, k as usize);
+            return;
+        }
+        // how sharp the seams are: none when shrinking (plain bilinear)
+        let sharp = k.max(1.0);
+        let edge = |f: f32| ((f - 0.5) * sharp + 0.5).clamp(0.0, 1.0);
         let (dw, dh) = ((self.w as f32 * k).round() as usize, (self.h as f32 * k).round() as usize);
         let (ox, oy) = (x + (bw - dw) / 2, y + (bh - dh) / 2);
         let rows = buf.len() / stride.max(1);
@@ -185,7 +199,7 @@ impl Picture {
                 break;
             }
             let sy = ((dy as f32 + 0.5) / k - 0.5).clamp(0.0, (self.h - 1) as f32);
-            let (y0, fy) = (sy.floor() as usize, sy.fract());
+            let (y0, fy) = (sy.floor() as usize, edge(sy.fract()));
             let y1 = (y0 + 1).min(self.h - 1);
             for dx in 0..dw {
                 let px = ox + dx;
@@ -193,7 +207,7 @@ impl Picture {
                     break;
                 }
                 let sx = ((dx as f32 + 0.5) / k - 0.5).clamp(0.0, (self.w - 1) as f32);
-                let (x0, fx) = (sx.floor() as usize, sx.fract());
+                let (x0, fx) = (sx.floor() as usize, edge(sx.fract()));
                 let x1 = (x0 + 1).min(self.w - 1);
                 let mut c = [0f32; 4];
                 for (xx, yy, wgt) in [(x0, y0, (1.0 - fx) * (1.0 - fy)), (x1, y0, fx * (1.0 - fy)), (x0, y1, (1.0 - fx) * fy), (x1, y1, fx * fy)] {
@@ -1440,6 +1454,24 @@ fn box_blur(buf: &mut [Rgb], tmp: &mut [Rgb], w: usize, h: usize, r: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pixel art scaled up stays crisp: by a whole number, every pixel its
+    /// own colour; by a fraction, all but the seams between them.
+    #[test]
+    fn pictures_grow_crisp() {
+        // a 2×2 checker, black and white
+        let (b, w) = ([0u8, 0, 0, 255], [255u8, 255, 255, 255]);
+        let pic = Picture::new(2, 2, [b, w, w, b].concat());
+        let pure = |buf: &[u32]| buf.iter().filter(|&&p| p == 0 || p == 0xff_ffff).count();
+        // 8× (a whole number fits)
+        let mut buf = vec![0x0080_8080u32; 16 * 16];
+        pic.blit(&mut buf, 16, 0, 0, 16, 16);
+        assert_eq!(pure(&buf), 256, "blended at a whole-number scale");
+        // 2.5× (no whole number near enough): only the middle seam blends
+        let mut buf = vec![0x0080_8080u32; 5 * 5];
+        pic.blit(&mut buf, 5, 0, 0, 5, 5);
+        assert!(pure(&buf) >= 16, "only {} of 25 crisp", pure(&buf));
+    }
 
     /// Zoomed in, the scene's pixels get bigger but a speech bubble keeps
     /// its letters side by side (and its size).

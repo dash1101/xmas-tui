@@ -328,6 +328,12 @@ pub extern "C" fn set_installable(w: *mut Web, on: u32) {
     unsafe { &mut *w }.game.set_installable(on != 0);
 }
 
+/// The page's full screen: 0 not to be had (no button for it), 1 off, 2 on.
+#[no_mangle]
+pub extern "C" fn set_fullscreen(w: *mut Web, state: u32) {
+    unsafe { &mut *w }.game.set_fullscreen(state.min(2) as u8);
+}
+
 /// Played by touch (a phone's browser): the touch controls card.
 #[no_mangle]
 pub extern "C" fn set_touch(w: *mut Web, on: u32) {

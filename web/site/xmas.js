@@ -87,9 +87,12 @@ function size() {
 
 // the size of the menus' and talk's letters, against 18 of the canvas's
 // pixels: the screen's own density (about 18 css px a row on a computer,
-// 13 on a phone, where room's short); the settings' sizes go on top
+// 13 on a phone, where room's short), times the page's Size; the menu's
+// own sizes go on top. (The same at the start, on a resize and on a
+// settings change: the village's rows come from it.)
 function cellSize(dpr) {
-  return Math.max(0.5, Math.min(4, (dpr || 1) * (touchy ? 0.72 : 1) / K));
+  const size = (opts().size || 100) / 100;
+  return Math.max(0.5, Math.min(4, (dpr || 1) * (touchy ? 0.72 : 1) / K * size));
 }
 
 function build() {
@@ -109,6 +112,7 @@ function build() {
   // and the phone)
   wasm.set_touch(game, touchy ? 1 : 0);
   if (installAsk) wasm.set_installable(game, 1);
+  fullState();
   // the other villagers kept in this browser (for the menu)
   wasm.set_villagers(game, putText(JSON.stringify(folk().map((v) => v.name || "a villager (no name)"))));
   // a look at something (?preview=chats), once the village has settled
@@ -296,6 +300,9 @@ function asked(a) {
     toast(wasm.sound_on(game) ? "♪ sound on" : "sound off");
   } else if (a === "install") {
     installApp();
+  } else if (a === "fullscreen") {
+    // (the bar's button: asked for in the tap itself, as browsers want)
+    toggleFull();
   } else if (a.startsWith("rules:") && false) {
     // the village's settings, changed by a guest (said yes to): kept
     try {
@@ -312,6 +319,9 @@ function asked(a) {
   } else if (a.startsWith("newvillager:")) {
     const n = a.slice(12);
     setTimeout(() => newVillager(n), 0);
+  } else if (a.startsWith("note:")) {
+    // a word from the village (a widget hidden, the widgets locked)
+    toast(a.slice(5));
   } else if (a.startsWith("copy:")) {
     const t = a.slice(5);
     try { navigator.clipboard.writeText(t).then(() => toast("copied: " + t), () => toast(t)); } catch (e) { toast(t); }
@@ -830,6 +840,25 @@ async function installApp() {
   if (game) wasm.set_installable(game, 0);
 }
 addEventListener("appinstalled", () => { installAsk = null; if (game) wasm.set_installable(game, 0); });
+// full screen: a button on the bar, where the browser can (not an iPhone's
+// Safari: there it's the app from the home screen; nor the app already
+// full screen)
+const fullOk = !matchMedia("(display-mode: fullscreen)").matches && !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+function fullNow() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function fullState() { if (game && wasm.set_fullscreen) wasm.set_fullscreen(game, fullOk ? (fullNow() ? 2 : 1) : 0); }
+function toggleFull() {
+  const el = document.documentElement;
+  try {
+    if (fullNow()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else {
+      const go = el.requestFullscreen || el.webkitRequestFullscreen;
+      const p = go && go.call(el, { navigationUI: "hide" });
+      if (p && p.catch) p.catch(() => toast("full screen isn't allowed here"));
+    }
+  } catch (e) { toast("full screen isn't allowed here"); }
+}
+document.addEventListener("fullscreenchange", fullState);
+document.addEventListener("webkitfullscreenchange", fullState);
 // an iPhone or iPad's Safari has no such offer: how to, said once
 if (!installed && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
   let told = false;
@@ -860,7 +889,7 @@ function reconfigure() {
   rebuildT = setTimeout(() => {
     if (!game) return;
     const o = opts();
-    wasm.configure(game, putText(config(o)), o.size / 100);
+    wasm.configure(game, putText(config(o)), cellSize(window.devicePixelRatio || 1));
   }, 120);
 }
 function el(tag, attrs, ...kids) {

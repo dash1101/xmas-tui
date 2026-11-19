@@ -37,6 +37,8 @@ pub enum Icon {
     Globe,
     /// A list (more to choose from).
     List,
+    /// The screen's four corners, arrows out (full screen).
+    Full,
 }
 
 /// The palette: a letter a colour ('.' clear).
@@ -137,6 +139,9 @@ fn art(i: Icon) -> [&'static str; 12] {
         Icon::List => [
             "............", ".gg.wwwwwwww", ".gg.wwwwwwww", "............", ".gg.wwwwwwww", ".gg.wwwwwwww", "............", ".gg.wwwwwwww", ".gg.wwwwwwww", "............", "............", "............",
         ],
+        Icon::Full => [
+            "wwww....wwww", "ww........ww", "w.w......w.w", "w..w....w..w", "............", "............", "............", "............", "w..w....w..w", "w.w......w.w", "ww........ww", "wwww....wwww",
+        ],
         Icon::Restart => [
             "....eeee....", "..ee....ee..", ".e........e.", "e.........e.", "e........eee", "e.........e.", ".e..........", "..ee....ee..", "....eeee....", "............", "............", "............",
         ],
@@ -194,6 +199,7 @@ pub fn sign(i: Icon) -> (char, Rgb) {
         Icon::Moon => ('☾', Rgb::hex(0xffe9a8)),
         Icon::Restart => ('↻', Rgb::hex(0x9be08a)),
         Icon::List => ('☰', Rgb::hex(0xf4f0ea)),
+        Icon::Full => ('⤢', Rgb::hex(0xf4f0ea)),
     }
 }
 
@@ -221,7 +227,7 @@ mod tests {
     #[test]
     fn every_icon_is_twelve_by_twelve() {
         use Icon::*;
-        for i in [Home, Village, You, Pets, Online, Sound, Effects, Widgets, Shelves, Windows, Screen, Upkeep, Friends, Chat, Todo, Pause, Play, Help, Menu, Centre, Devices, Moon, Back, Restart, Globe, List] {
+        for i in [Home, Village, You, Pets, Online, Sound, Effects, Widgets, Shelves, Windows, Screen, Upkeep, Friends, Chat, Todo, Pause, Play, Help, Menu, Centre, Devices, Moon, Back, Restart, Globe, List, Full] {
             for (y, row) in art(i).iter().enumerate() {
                 let n = row.chars().count();
                 assert_eq!(n, 12, "{i:?} row {y}: {row:?}");

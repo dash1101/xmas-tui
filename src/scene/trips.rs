@@ -1190,27 +1190,32 @@ impl Trip {
         let _ = (w, h);
     }
 
-    /// Where the villager's head is (cells), for the [E] over it.
-    fn head_at(&self, f: &Frame) -> (i32, i32) {
-        let (w, h) = (f.w as f32, f.h as f32);
-        // (the feet: as each part draws the villager; a head about 11 rows
-        // above them, at the size they're drawn)
-        match self.at {
-            Where::Shuttle { .. } => ((w / 3.0) as i32 - 4, (h * 0.75 - 9.0) as i32),
-            Where::Carriage { .. } => ((self.x * w) as i32, (h * 0.8 - 12.0) as i32),
-            Where::Lodge => ((self.x * w) as i32, (h * 0.8 - 12.0) as i32),
-            Where::Lift { .. } => ((w / 2.0) as i32, (h / 3.0) as i32),
-            Where::Ski => ((w / 3.0) as i32, (h * 0.5 - 12.0) as i32),
-            Where::Drive => ((w / 2.0) as i32, (h * 0.6) as i32),
-            Where::Moon { .. } => ((w / 2.0) as i32, (moon_surface(0.0, f.ph as f32) / 2.0 - self.moon.as_ref().map(|m| m.air).unwrap_or(0.0) - 9.0) as i32),
-        }
+    /// Where the villager's head is (cells of `f`), for the [E] over it.
+    /// `k`: the village's cells to one of `f`'s, across and down (the UI's
+    /// own layer has bigger ones: the villager's drawn on the village's).
+    fn head_at(&self, f: &Frame, k: (f32, f32)) -> (i32, i32) {
+        let (kx, ky) = (k.0.max(0.01), k.1.max(0.01));
+        // (worked out on the village's grid, as each part draws the
+        // villager: the feet, and a head about 11 of its rows above them)
+        let (w, h, ph) = (f.w as f32 * kx, f.h as f32 * ky, f.ph as f32 * ky);
+        let (x, y) = match self.at {
+            Where::Shuttle { .. } => (w / 3.0 - 4.0, h * 0.75 - 9.0),
+            Where::Carriage { .. } => (self.x * w, h * 0.8 - 12.0),
+            Where::Lodge => (self.x * w, h * 0.8 - 12.0),
+            Where::Lift { .. } => (w / 2.0, h / 3.0),
+            Where::Ski => (w / 3.0, h * 0.5 - 12.0),
+            Where::Drive => (w / 2.0, h * 0.6),
+            // (people on the moon grow with the screen's rows, as in the village)
+            Where::Moon { .. } => (w / 2.0, moon_surface(0.0, ph) / 2.0 - self.moon.as_ref().map(|m| m.air).unwrap_or(0.0) - 9.0 * crate::scene::sprite_k(h as usize)),
+        };
+        ((x / kx) as i32, (y / ky) as i32)
     }
 
     /// Over the trip, kept clear of the widgets (`avoid`: their rects, x,
     /// y, w, h) and above the taskbar: the keys along the top, the caption
     /// along the bottom, the [E] over the villager, the score and the
-    /// standings on the slope.
-    pub fn draw_ui(&self, f: &mut Frame, t: f32, avoid: &[(i32, i32, i32, i32)]) {
+    /// standings on the slope. `k`: the village's cells to one of `f`'s.
+    pub fn draw_ui(&self, f: &mut Frame, t: f32, avoid: &[(i32, i32, i32, i32)], k: (f32, f32)) {
         let (w, h) = (f.w as i32, f.h as i32);
         // what's been put where so far (the widgets, then each of these)
         let mut taken: Vec<(i32, i32, i32, i32)> = avoid.to_vec();
@@ -1266,12 +1271,13 @@ impl Trip {
         }
         // the [E] over the villager, and what it does
         if let Some(what) = self.prompt() {
-            let (x, y) = self.head_at(f);
-            let y = y.clamp(2, h - 4);
+            let (x, y) = self.head_at(f, k);
+            let y = y.clamp(3, h - 4);
             crate::scene::player::Player::draw_prompt(f, x, y, 'E', t);
             let label = format!(" {what} ");
             let n = label.chars().count() as i32;
-            f.text((x - n / 2).clamp(0, (w - n).max(0)), y - 1, &label, Rgb::hex(0xffe9a8), Bg::Mix(Rgb::hex(0x1a1a24), 0.7), 0.0);
+            // (above the [E]'s bob, so it never hides it)
+            f.text((x - n / 2).clamp(0, (w - n).max(0)), y - 2, &label, Rgb::hex(0xffe9a8), Bg::Mix(Rgb::hex(0x1a1a24), 0.7), 0.0);
         }
         // the caption, along the bottom
         if let Some((s, _)) = &self.caption {
@@ -2224,6 +2230,8 @@ impl Trip {
         use crate::scene::sprites::Pose;
         let Some(m) = &self.moon else { return };
         let (pw, ph) = (f.pw as i32, f.ph as i32);
+        // (people as big against the screen as in the village)
+        let sk = crate::scene::sprite_k(f.h);
         let up = (el / LIFT_OFF).clamp(0.0, 1.0);
         // the sky: black, the stars (streaming by while flying up)
         for y in 0..ph {
@@ -2331,13 +2339,13 @@ impl Trip {
             }
             let feet = surf(sx) / 2.0 - fw.at.air;
             let pose = if fw.at.air > 0.2 { Pose::Jump } else if fw.at.sat { Pose::Walk(1) } else { Pose::Stand };
-            person(f, &fw.look, pose, fw.at.dir, sx, feet, 1.6);
-            name_tag(f, &fw.name, sx, (feet - 11.0) as i32);
+            person(f, &fw.look, pose, fw.at.dir, sx, feet, 1.6 * sk);
+            name_tag(f, &fw.name, sx, (feet - 11.0 * sk) as i32);
         }
         // the villager, flying up into place, then about on the dust
         let feet = if up < 1.0 { surf(mid) / 2.0 + (1.0 - up) * ph as f32 * 0.5 } else { surf(mid) / 2.0 - m.air };
         let pose = if up < 1.0 || m.air > 0.0 { Pose::Jump } else if m.walk.fract() > 0.5 { Pose::Walk(1) } else { Pose::Stand };
-        person(f, look, pose, self.dir, mid, feet, 1.6);
+        person(f, look, pose, self.dir, mid, feet, 1.6 * sk);
     }
 }
 

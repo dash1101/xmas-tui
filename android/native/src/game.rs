@@ -170,6 +170,8 @@ pub struct Game {
     bar_down: Option<BarDo>,
     bar_hover: (i32, i32),
     installable: bool,
+    /// The page's full screen (see `set_fullscreen`).
+    fullscreen: u8,
     touch: bool,
     /// The villager's own village (the scene may be a friend's).
     own_seed: u32,
@@ -245,7 +247,32 @@ enum Act {
     /// Linking this device by the code it was opened with (yes), or not.
     LinkYes,
     LinkNo,
+    /// Something done to widget `i` (held down on it, or right-clicked).
+    Widget(usize, WidAct),
 }
+
+/// What can be done to a widget from its menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WidAct {
+    /// Its own size (the weather, friends), a step at a time.
+    Bigger,
+    Smaller,
+    /// All the widgets' size (the setting), a step at a time.
+    AllBigger,
+    AllSmaller,
+    /// Its next look.
+    Look,
+    /// Back where it was at first (and as big).
+    Back,
+    Hide,
+    /// The widgets locked in place, or not.
+    Lock,
+    /// The menu, at its Widgets page.
+    Settings,
+}
+
+/// The looks a widget can have, in turn.
+const LOOKS: [(&str, &str); 4] = [("classic", "classic"), ("frosted", "frosted"), ("wood", "wooden"), ("gift", "gift box")];
 
 /// The buttons up top (the same on the desktop, the web page and the
 /// phone): what each does.
@@ -261,6 +288,8 @@ enum BarDo {
     Help,
     Menu,
     Install,
+    /// Full screen (the web page), or back from it.
+    Full,
 }
 
 /// How the buttons up top stand this frame (see `draw_bar`).
@@ -270,6 +299,8 @@ struct BarState {
     /// 0 offline, 1 connecting, 2 online; friends about; something new.
     online: (u8, usize, bool),
     install: bool,
+    /// The page's full screen: 0 not to be had, 1 off, 2 on.
+    full: u8,
     hover: (i32, i32),
     down: Option<BarDo>,
 }
@@ -299,6 +330,9 @@ fn draw_bar(f: &mut Frame, st: &BarState, t: f32) -> Vec<(crate::widgets::Rect, 
         (I::Help, "help".into(), BarDo::Help),
         (I::Menu, "menu".into(), BarDo::Menu),
     ];
+    if st.full > 0 {
+        items.insert(items.len() - 1, (I::Full, if st.full == 2 { "window".into() } else { "full screen".into() }, BarDo::Full));
+    }
     if st.install {
         items.insert(0, (I::Devices, "install".into(), BarDo::Install));
     }
@@ -547,6 +581,18 @@ fn widgets_k(setting: f32, size: f32, ch: usize, cols: usize) -> f32 {
     k.min(cols as f32 / 66.0).max(4.0 / ch.max(1) as f32)
 }
 
+/// How far in the view goes by itself on this screen (`ph` px tall, the
+/// menus' letters 18 × `size` px): a villager about 1.55 of the menus' rows
+/// tall (about 28 px on a computer, 20 on a phone, where it's held close),
+/// so they're not tiny on a phone turned sideways; never further out than
+/// the whole village. One of the menu's zoom steps.
+fn auto_zoom(ph: usize, size: f32) -> f32 {
+    // (a villager: about 2.2 of the village's 75 rows)
+    let person = ph as f32 * 2.2 / 75.0 / (18.0 * size.clamp(0.5, 4.0));
+    let want = (1.55 / person.max(0.1)).clamp(1.0, 2.5);
+    crate::settings::ZOOMS.iter().copied().filter(|&z| z <= want + 0.01).last().unwrap_or(1.0)
+}
+
 /// Cells for a screen: rows from the short side (about 18 px a row at
 /// "size" 100), the width to match. Never fewer than the 75 the village is
 /// drawn for: its houses are made to the screen's height and its people to
@@ -648,6 +694,7 @@ impl Game {
             bar_down: None,
             bar_hover: (-1, -1),
             installable: false,
+            fullscreen: 0,
             touch: !cfg!(target_arch = "wasm32"),
             own_seed: seed,
             online_ok: true,
@@ -1033,7 +1080,101 @@ impl Game {
                 }
             }
             Act::LinkNo => self.link_offer = None,
+            Act::Widget(w, a) => {
+                self.widget_act(w, a);
+                // (a size or a look: the menu again, to go another step)
+                if matches!(a, WidAct::Bigger | WidAct::Smaller | WidAct::AllBigger | WidAct::AllSmaller | WidAct::Look) {
+                    let (title, items) = self.widget_items(w);
+                    self.open(m.x, m.y, title, items);
+                }
+            }
         }
+    }
+
+    /// A widget's menu: its name, and what can be done to it.
+    fn widget_items(&self, i: usize) -> (String, Vec<(String, Act)>) {
+        let name = match i {
+            0 => "the clock",
+            3 => "the weather",
+            _ => "friends & messages",
+        };
+        let a = |w: WidAct| Act::Widget(i, w);
+        let mut v: Vec<(String, Act)> = vec![];
+        if i == 3 || i == 6 {
+            v.push(("bigger".into(), a(WidAct::Bigger)));
+            v.push(("smaller".into(), a(WidAct::Smaller)));
+            let look = if i == 3 { &self.cfg.widgets.looks.weather } else { &self.cfg.widgets.looks.friends };
+            let shown = LOOKS.iter().find(|l| l.0 == look.as_str()).map_or("classic", |l| l.1);
+            v.push((format!("look: {shown} ▸"), a(WidAct::Look)));
+        }
+        v.push(("all the widgets bigger".into(), a(WidAct::AllBigger)));
+        v.push(("all the widgets smaller".into(), a(WidAct::AllSmaller)));
+        let size_key = match i {
+            3 => Some("weather"),
+            6 => Some("friends"),
+            _ => None,
+        };
+        if self.cfg.layout.get(i).is_some() || size_key.is_some_and(|k| self.cfg.layout.sizes.contains_key(k)) {
+            v.push(("back where it was at first".into(), a(WidAct::Back)));
+        }
+        v.push(("hide it".into(), a(WidAct::Hide)));
+        v.push((if self.cfg.layout.locked { "unlock the widgets" } else { "lock the widgets in place" }.into(), a(WidAct::Lock)));
+        v.push(("widget settings…".into(), a(WidAct::Settings)));
+        (name.to_string(), v)
+    }
+
+    /// Do `a` to widget `i` (kept: the app saves the settings).
+    fn widget_act(&mut self, i: usize, a: WidAct) {
+        let (fw, fh) = self.wid_size();
+        let key = if i == 3 { "weather" } else { "friends" };
+        // (its size now, the smallest it goes, and a step)
+        let (now, min, step) = if i == 3 { ((60, 8), (44, 8), (8, 1)) } else { ((40, 10), (28, 6), (6, 2)) };
+        let now = self.cfg.layout.sizes.get(key).map_or(now, |s| (s[0], s[1]));
+        match a {
+            WidAct::Bigger | WidAct::Smaller if i == 3 || i == 6 => {
+                let k = if a == WidAct::Bigger { 1 } else { -1 };
+                let w = (now.0 + k * step.0).clamp(min.0, fw.max(min.0));
+                let h = (now.1 + k * step.1).clamp(min.1, fh.clamp(min.1, 30));
+                self.cfg.layout.sizes.insert(key.into(), [w, h]);
+            }
+            WidAct::Bigger | WidAct::Smaller => {}
+            WidAct::AllBigger | WidAct::AllSmaller => {
+                let k = self.cfg.ui.widgets_k();
+                let k = if a == WidAct::AllBigger { k * 1.2 } else { k / 1.2 };
+                let old = self.cfg.clone();
+                self.cfg.ui.widgets = Some((k * 100.0).round().clamp(25.0, 250.0) / 100.0);
+                self.regrid(old, self.size);
+            }
+            WidAct::Look => {
+                let look = if i == 3 { &mut self.cfg.widgets.looks.weather } else { &mut self.cfg.widgets.looks.friends };
+                let at = LOOKS.iter().position(|l| l.0 == look.as_str()).unwrap_or(0);
+                *look = LOOKS[(at + 1) % LOOKS.len()].0.to_string();
+            }
+            WidAct::Back => {
+                self.cfg.layout.set(i, None);
+                if i == 3 || i == 6 {
+                    self.cfg.layout.sizes.remove(key);
+                }
+            }
+            WidAct::Hide => {
+                match i {
+                    0 => self.cfg.clock.enabled = false,
+                    3 => self.cfg.widgets.weather = false,
+                    _ => self.cfg.widgets.friends = false,
+                }
+                self.asks.push("note:hidden: the menu's Widgets page brings it back".into());
+            }
+            WidAct::Lock => {
+                self.cfg.layout.locked ^= true;
+                self.asks.push(if self.cfg.layout.locked { "note:the widgets are locked in place" } else { "note:the widgets can be moved again" }.into());
+            }
+            WidAct::Settings => {
+                self.open_panel();
+                self.panel.set_tab(crate::settings::TAB_WIDGETS);
+                return;
+            }
+        }
+        self.cfg_dirty = true;
     }
 
     /// Pause the village (it stands still and goes quiet; friends and a
@@ -1478,12 +1619,20 @@ impl Game {
             BarDo::Help => self.help(!self.touch),
             BarDo::Menu => self.open_panel(),
             BarDo::Install => self.asks.push("install".into()),
+            // (the page goes full screen in the tap itself, as it must)
+            BarDo::Full => self.asks.push("fullscreen".into()),
         }
     }
 
     /// The page can install the village as an app (its button up top).
     pub fn set_installable(&mut self, on: bool) {
         self.installable = on;
+    }
+
+    /// The page's full screen: 0 not to be had (the button's left out), 1
+    /// off, 2 on.
+    pub fn set_fullscreen(&mut self, state: u8) {
+        self.fullscreen = state.min(2);
     }
 
     /// Played by touch (the controls card shows the touch controls).
@@ -2077,7 +2226,12 @@ impl Game {
         match self.rest_base.as_ref().filter(|b| self.paused && (b.w, b.h) == (self.frame.w, self.frame.h)) {
             Some(b) => self.frame.clone_from(b),
             None => {
-                self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, self.cfg.zoom, Some(f));
+                // (out in the village, at the view's 1× and closer: in a
+                // little more on a small screen, by itself; further out
+                // than 1×, as set; trips and rooms fill the screen as made)
+                let auto = self.cfg.scale >= 0.999 && self.scene.out_in_village();
+                let zoom = if auto { (self.cfg.zoom * auto_zoom(self.ph, self.size)).min(4.0) } else { self.cfg.zoom };
+                self.zoom_xf = self.scene.render(&mut self.frame, &mut self.spare, t, zoom, Some(f));
                 if self.paused {
                     self.rest_base = Some(self.frame.clone());
                 }
@@ -2211,7 +2365,7 @@ impl Game {
                 crate::net::Link::On => 2,
                 _ => 1,
             }, o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count(), self.scene.unread_any());
-            let st = BarState { paused: self.paused, sound: self.cfg.sound.enabled, online, install: self.installable, hover: self.bar_hover, down: self.bar_down };
+            let st = BarState { paused: self.paused, sound: self.cfg.sound.enabled, online, install: self.installable, full: self.fullscreen, hover: self.bar_hover, down: self.bar_down };
             draw_bar(uf, &st, t)
         };
         // the menu's pinned tabs, then over them the post, questions,
@@ -2650,6 +2804,17 @@ impl Game {
     pub fn menu(&mut self, x: f32, y: f32) -> Option<(String, Vec<String>)> {
         let c = self.cell(x, y);
         let uc = self.ui_cell(x, y);
+        // a widget there: what can be done to it (locked or not)
+        if self.widgets && !self.panel.open {
+            let wc = self.wid_cell(x, y);
+            if let Some(&(i, _)) = self.wid_rects.iter().rev().find(|(_, r)| r.contains(wc.0, wc.1)) {
+                self.wid_drag = None;
+                self.press = None;
+                let (title, items) = self.widget_items(i);
+                self.open(uc.0 - 2, uc.1 + 1, title, items);
+                return None;
+            }
+        }
         let w = self.world(c);
         let (title, items) = self.scene.menu_at(w.0, w.1);
         self.press = None;

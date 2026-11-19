@@ -2318,6 +2318,14 @@ impl Scene {
         self.view_cam().round() as i32
     }
 
+    /// Out in the village (not away on a trip, not indoors): where a small
+    /// screen's own zoom applies (trips and rooms are drawn to fill it).
+    /// (The web page and the phone.)
+    #[allow(dead_code)]
+    pub fn out_in_village(&self) -> bool {
+        self.trip.is_none() && self.inside.is_none()
+    }
+
     /// How much the view is magnified on its own: rooms are drawn at
     /// their designed size and scaled up to fill a taller screen.
     pub fn view_zoom(&self) -> f32 {
@@ -5104,9 +5112,15 @@ impl Scene {
         // widgets; and a way home with no Esc key (a phone)
         if let Some(tr) = &self.trip {
             let k = self.ui_k.max(1.0);
-            let avoid: Vec<(i32, i32, i32, i32)> = self.widget_ledges.iter().map(|&(_, x, y, w, h)| ((x as f32 / k) as i32, (y as f32 / k) as i32, (w as f32 / k).ceil() as i32, (h as f32 / k).ceil() as i32)).collect();
-            tr.draw_ui(f, t, &avoid);
-            self.closer(f, 1, 1, if tr.at == trips::Where::Drive { " ⌂ home " } else { " ⌂ back to the village " });
+            let mut avoid: Vec<(i32, i32, i32, i32)> = self.widget_ledges.iter().map(|&(_, x, y, w, h)| ((x as f32 / k) as i32, (y as f32 / k) as i32, (w as f32 / k).ceil() as i32, (h as f32 / k).ceil() as i32)).collect();
+            // (the way home, top left: nothing goes under it)
+            let home = if tr.at == trips::Where::Drive { " ⌂ home " } else { " ⌂ back to the village " };
+            avoid.push((0, 0, home.chars().count() as i32 + 2, 2));
+            // (the villager's drawn on the village's grid; this may be the
+            // UI's, with bigger cells)
+            let kk = (self.w as f32 / f.w.max(1) as f32, self.h as f32 / f.h.max(1) as f32);
+            tr.draw_ui(f, t, &avoid, kk);
+            self.closer(f, 1, 1, home);
         }
         if self.inside.is_some() && self.look.is_none() {
             if let Some(c) = &self.convo {
