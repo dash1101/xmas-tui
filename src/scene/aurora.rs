@@ -11,7 +11,17 @@
 //! they are: the cinematic look. The frozen lake mirrors the same buffer.
 
 use crate::color::Rgb;
-use crate::frame::{Frame, Glyph};
+use crate::frame::{Bg, Frame, Glyph};
+
+/// Of a cell's two pixels, the darker (its background: a star in the
+/// other one stays a dot, not a grey cell) and the brighter.
+fn dark_light(a: Rgb, b: Rgb) -> (Rgb, Rgb) {
+    if a.r + a.g + a.b > b.r + b.g + b.b {
+        (b, a)
+    } else {
+        (a, b)
+    }
+}
 use crate::rng::{fbm1, h01, hash2, noise1};
 
 /// The aurora's light over a sky `w`×`h` pixels: how bright each pixel is,
@@ -235,6 +245,15 @@ impl Aurora {
                         continue;
                     }
                 }
+                // (a star in the cell, faint glow round it: the star shows,
+                // not the two averaged into a grey cell)
+                let (a, b) = (f.px_get(cx as i32, cy as i32 * 2), f.px_get(cx as i32, cy as i32 * 2 + 1));
+                if l < 0.3 && (a.r + a.g + a.b - b.r - b.g - b.b).abs() > 0.25 {
+                    let (dark, star) = dark_light(a, b);
+                    // (lit: the glow round it added, as the sky's own pixels get)
+                    f.put_g(cx as i32, cy as i32, Glyph::new('·', star * 1.3).bg(Bg::Solid(dark)).lit(1.25));
+                    continue;
+                }
                 let ch = if l < 0.12 {
                     '.'
                 } else if l < 0.22 {
@@ -271,14 +290,13 @@ pub fn dots(f: &mut Frame, rows: i32, k: f32, skip: Option<(f32, f32, f32)>) {
                 }
             }
             let (a, b) = (f.px_get(cx, cy * 2), f.px_get(cx, cy * 2 + 1));
-            let star = if a.r + a.g + a.b > b.r + b.g + b.b { a } else { b };
+            let (dark, star) = dark_light(a, b);
             if (a.r + a.g + a.b - b.r - b.g - b.b).abs() > 0.12 || star.r + star.g + star.b > 0.6 {
                 // (a star there: a bright dot of its own, not a grey cell)
-                f.put_g(cx, cy, Glyph::new('·', star * 1.3).lit(0.0));
+                f.put_g(cx, cy, Glyph::new('·', star * 1.3).bg(Bg::Solid(dark)).lit(1.25));
                 continue;
             }
-            let sky = (a + b) * 0.5;
-            f.put_g(cx, cy, Glyph::new('·', sky * (1.0 + 0.35 * k) + lift).lit(0.0));
+            f.put_g(cx, cy, Glyph::new('·', (a + b) * (0.5 + 0.18 * k) + lift).lit(0.0));
         }
     }
 }

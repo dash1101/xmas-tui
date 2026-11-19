@@ -250,7 +250,8 @@ impl Trip {
             let sy = h01(hash2(i, 29)) * (hz - 4.0);
             let tw = 0.55 + 0.45 * (t * (0.8 + h01(hash2(i, 3)) * 2.0) + i as f32).sin();
             let b = h01(hash2(i, 41));
-            f.px_set(sx as i32, sy as i32, Rgb::hex(0xdfe7f4) * ((0.15 + 0.7 * b * b) * tw));
+            // (light added: a faint one never darker than the sky)
+            f.px_add(sx as i32, sy as i32, Rgb::hex(0xdfe7f4) * ((0.12 + 0.7 * b * b) * tw));
         }
         // the aurora: the curtains, swelling now and then
         let flare = (0.5 + 0.5 * (t * 0.045 + seed as f32).sin()).powi(6) * 0.9;
@@ -458,10 +459,10 @@ impl Trip {
                     continue;
                 }
                 let (a, b) = (f.px_get(cx, cy * 2), f.px_get(cx, cy * 2 + 1));
-                let star = if a.r + a.g + a.b > b.r + b.g + b.b { a } else { b };
+                let (dark, star) = if a.r + a.g + a.b > b.r + b.g + b.b { (b, a) } else { (a, b) };
                 if (a.r + a.g + a.b - b.r - b.g - b.b).abs() > 0.12 || star.r + star.g + star.b > 0.6 {
                     // (a star, or its reflection: a bright dot of its own)
-                    f.put_g(cx, cy, Glyph::new('·', star * 1.3).lit(0.0));
+                    f.put_g(cx, cy, Glyph::new('·', star * 1.3).bg(Bg::Solid(dark)).lit(1.25));
                     continue;
                 }
                 let lift = if y > hz_row { Rgb::hex(0x04070d) } else { Rgb::hex(0x080d18) };
