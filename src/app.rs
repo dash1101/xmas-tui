@@ -123,6 +123,9 @@ pub struct App {
     /// off the layer's own size, and that adds up down the screen. The
     /// pointer's found on the layers with these.
     pub layer_px: Vec<(f32, f32)>,
+    /// The village's cells in pixels, where the front-end draws its own
+    /// (a UI layer's cells are whole pixels too, and its grid fits them).
+    cell_px: Option<(usize, usize)>,
     /// Why the desktop wallpaper rests (a game in front, the computer busy,
     /// locked), as the front end sees it: the village stands still, the
     /// widgets and online go on.
@@ -263,6 +266,8 @@ pub struct App {
     /// Running as a normal window; the window should toggle full screen.
     pub windowed: bool,
     pub fullscreen_toggle: bool,
+    /// The window's full screen (its front-end says).
+    pub win_full: bool,
     /// Quiet because another app is playing media; and since when the
     /// media state last disagreed with that (hysteresis).
     media_quiet: bool,
@@ -399,6 +404,7 @@ impl App {
             hush_check: None,
             windowed: false,
             fullscreen_toggle: false,
+            win_full: false,
             cfg,
             seed,
             frame,
@@ -424,6 +430,7 @@ impl App {
             meter_cpu: None,
             meter_draw: None,
             ui_ok: false,
+            cell_px: None,
             ptr: (0.0, 0.0),
             wallpaper,
             keyboard,
@@ -551,6 +558,21 @@ impl App {
 
     /// The front-end draws its own letters (a UI layer of bigger ones can
     /// go over the village).
+    /// The village's cells are `cw` × `ch` pixels (the front-end draws
+    /// them): each UI layer's cells are whole pixels as near its size as
+    /// can be, and as many of them as fill the screen (not a grid that, in
+    /// whole pixels, falls short of its right and bottom edges, where
+    /// nothing could be moved to).
+    pub fn set_cell_px(&mut self, cw: usize, ch: usize) {
+        if self.cell_px != Some((cw, ch)) {
+            self.cell_px = Some((cw, ch));
+            let (w, h) = (self.sw, self.sh);
+            if w > 0 && h > 0 {
+                self.regrid(w, h, false);
+            }
+        }
+    }
+
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_ui_layer_ok(&mut self, on: bool) {
         self.ui_ok = on;
@@ -1329,8 +1351,17 @@ impl App {
             }
         };
         let ks = [fix(self.cfg.ui.widgets_k(), 0.25), fix(self.cfg.ui.buttons_k(), 0.25), fix(self.cfg.ui.scale, config::WINDOWS_MIN)];
-        // (smaller than the village's cells: more of them)
-        let grid = |k: f32| if (k - 1.0).abs() > 1e-3 { (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12)) } else { (w, h) };
+        // (smaller than the village's cells: more of them; where the
+        // front-end draws its own, cells of whole pixels, as many as fit)
+        let px = self.cell_px;
+        let grid = |k: f32| match px {
+            _ if (k - 1.0).abs() <= 1e-3 => (w, h),
+            Some((cw, ch)) => {
+                let (ucw, uch) = (((cw as f32 * k).round() as usize).max(1), ((ch as f32 * k).round() as usize).max(1));
+                ((w * cw / ucw).max(20), (h * ch / uch).max(12))
+            }
+            None => (((w as f32 / k).floor() as usize).max(20), ((h as f32 / k).floor() as usize).max(12)),
+        };
         // the layers, bottom to top (the widgets, the buttons, the windows):
         // parts next to each other at one size share one; the village's
         // own frame takes those at its size from the bottom
@@ -1381,7 +1412,6 @@ impl App {
         let (gx, gy) = self.part_pt(WIDGETS);
         let (bx, by) = self.part_pt(BUTTONS);
         let (gw, gh) = (self.wid_wh.0 as i32, self.wid_wh.1 as i32);
-        let bw = self.btn_wh.0 as i32;
         let t = self.t();
         self.settings.hover = (x, y);
         self.settings.btn_hover = (bx, by);
@@ -1447,23 +1477,10 @@ impl App {
                     if !self.settings.help_click(x, y, w, h, &self.cfg.keys) {
                         self.settings.help = false;
                     }
-                } else if settings::pause_rect(bw).contains(bx, by) {
-                    self.toggle_pause();
-                } else if settings::zoom_rects(bw).0.contains(bx, by) {
-                    self.zoom_step(-1);
-                } else if settings::zoom_rects(bw).1.contains(bx, by) {
-                    self.zoom_step(1);
-                } else if settings::centre_rect(bw).contains(bx, by) {
-                    self.scene.recenter();
-                } else if settings::help_rect(bw).contains(bx, by) {
-                    self.settings.help = true;
-                } else if settings::online_rect(bw).contains(bx, by) {
-                    self.menu = None;
-                    self.scene.open_chats(None);
-                } else if settings::gear_rect(bw).contains(bx, by) {
+                } else if let Some(d) = self.settings.bar_hit(bx, by) {
                     // (the buttons up there always answer: a game, a
                     // conversation or a card open doesn't take them)
-                    self.settings.open = true;
+                    self.bar_do(d);
                 } else if self.scene.close_click(x, y) {
                     // (a ✕ or ⌂ button: as Esc)
                 } else if self.scene.on_chats(x, y) {
@@ -2047,8 +2064,8 @@ impl App {
                 None => "default",
             }
         } else if {
-            let ((bx, by), bw) = (self.settings.btn_hover, self.btn_wh.0 as i32);
-            settings::online_rect(bw).contains(bx, by) || settings::pause_rect(bw).contains(bx, by) || settings::gear_rect(bw).contains(bx, by) || settings::help_rect(bw).contains(bx, by) || settings::centre_rect(bw).contains(bx, by) || settings::zoom_rects(bw).0.contains(bx, by) || settings::zoom_rects(bw).1.contains(bx, by)
+            let (bx, by) = self.settings.btn_hover;
+            self.settings.bar_hit(bx, by).is_some()
         } || self.scene.post_click(hx, hy)
         {
             "pointer"
@@ -2147,6 +2164,44 @@ impl App {
             }
             MenuAct::Shelf(a) => self.shelf_act(a),
             MenuAct::Desktop => self.desktop_menu = true,
+        }
+    }
+
+    /// A button up top pressed.
+    fn bar_do(&mut self, d: settings::BarDo) {
+        use settings::BarDo;
+        self.scene.woke();
+        match d {
+            BarDo::Todo => self.open_todo(),
+            BarDo::Centre => self.scene.recenter(),
+            BarDo::Pause => self.toggle_pause(),
+            BarDo::Chat => {
+                self.menu = None;
+                self.scene.open_chat();
+            }
+            BarDo::Friends => {
+                self.menu = None;
+                self.scene.open_chats(None);
+            }
+            BarDo::Sound => self.acts.push(Act::Toggle(settings::F::Sound)),
+            BarDo::ZoomOut => self.zoom_step(-1),
+            BarDo::ZoomIn => self.zoom_step(1),
+            BarDo::Help => self.settings.help = true,
+            BarDo::Full => self.toggle_wall_full(),
+            BarDo::Menu => self.settings.open = true,
+            // (the phone's and the page's)
+            BarDo::More | BarDo::Install => {}
+        }
+    }
+
+    /// Full screen, for the button up top: 0 not to be had, 1 off, 2 on.
+    fn full_state(&self) -> u8 {
+        if self.windowed {
+            1 + self.win_full as u8
+        } else if self.wallpaper {
+            1 + self.wall_full as u8
+        } else {
+            0
         }
     }
 
@@ -2276,7 +2331,7 @@ impl App {
         }
         let pt = |k: f32| ((fx / k.max(1.0)).floor() as i32, (fy / k.max(1.0)).floor() as i32);
         let ((gx, gy), (bx, by)) = (pt(self.part_k[WIDGETS]), pt(self.part_k[BUTTONS]));
-        self.widgets.hit(gx, gy).is_some_and(|i| i != 0) || settings::gear_rect(self.btn_wh.0 as i32).contains(bx, by) || {
+        self.widgets.hit(gx, gy).is_some_and(|i| i != 0) || self.settings.bar_hit(bx, by).is_some() || {
             let (wx, wy) = self.world_of(fx, fy);
             let (title, items) = self.scene.menu_at(wx, wy);
             !matches!(title.as_str(), "here" | "the sky" | "the high sky" | "the village") || items.iter().any(|(_, d)| matches!(d, crate::scene::Do::DropOn(..)))
@@ -2989,15 +3044,7 @@ impl App {
         self.frame.clear();
         self.frame.safe_bottom = self.safe_bottom();
         // the zoomed view eases after the villager
-        let want = self.scene.zoom_focus();
-        let f = match self.zoom_focus {
-            Some((fx, fy)) if (fx - want.0).abs() < self.sw as f32 * 0.5 => {
-                let k = 1.0 - (-dt * 5.0).exp();
-                (fx + (want.0 - fx) * k, fy + (want.1 - fy) * k)
-            }
-            _ => want,
-        };
-        self.zoom_focus = Some(f);
+        let f = self.scene.eased_focus(&mut self.zoom_focus, dt);
         // the zoom eases to where it's been set
         // (it settles on a twentieth: 1.1, 1.25 … wherever it was set)
         let want = settings::zoom_settled(self.cfg.zoom);
@@ -3032,7 +3079,6 @@ impl App {
         self.part_out(i);
         // the buttons up top
         let i = self.part_in(BUTTONS);
-        self.settings.draw_gear(&mut self.frame, t);
         {
             let o = &self.scene.online;
             let about = o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count();
@@ -3042,7 +3088,8 @@ impl App {
                 _ => 1,
             };
             let asked = self.scene.asked_now() || !o.book.asking.is_empty();
-            self.settings.draw_online(&mut self.frame, state, about, asked, t);
+            let (sound, full) = (self.cfg.sound.enabled, self.full_state());
+            self.settings.draw_buttons(&mut self.frame, (state, about, asked), sound, full, t);
         }
         self.part_out(i);
         // the windows: the UI from here on keeps above the taskbar
@@ -3425,9 +3472,9 @@ mod tests {
         app.mouse(MouseIn::Down(Btn::Right), 20, 55);
         assert!(app.menu.is_none());
         // the settings button opens the panel; its title bar moves it
-        let g = settings::gear_rect(300);
-        app.mouse(MouseIn::Down(Btn::Left), g.x + 3, g.y);
-        app.mouse(MouseIn::Up(Btn::Left), g.x + 3, g.y);
+        let g = app.settings.bar_rect(settings::BarDo::Menu).expect("the menu button's up top");
+        app.mouse(MouseIn::Down(Btn::Left), g.x + 1, g.y);
+        app.mouse(MouseIn::Up(Btn::Left), g.x + 1, g.y);
         app.step();
         assert!(app.settings.open);
         let r = app.settings.rect.unwrap();
@@ -3528,15 +3575,16 @@ mod tests {
         {
             let ls = app.ui_layers();
             assert_eq!((ls.len(), ls[0].0.w, ls[0].1, ls[1].0.w, ls[1].1), (2, 150, 2.0, 200, 1.5));
-            // the buttons drawn on theirs
+            // the buttons drawn on theirs, the menu's at the top right
             let f = ls[0].0;
-            let g = settings::gear_rect(150);
-            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '❄'));
+            let g = app.settings.bar_rect(settings::BarDo::Menu).expect("the menu button's up top");
+            assert!(g.x + g.w >= 148, "{g:?}");
+            assert!(f.glyph[g.y as usize * f.w + g.x as usize].is_some_and(|c| c.ch == '❄'));
         }
         // the settings button, where it is at the buttons' size
-        let g = settings::gear_rect(150);
-        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 3) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
-        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 3) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
+        let g = app.settings.bar_rect(settings::BarDo::Menu).unwrap();
+        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 1) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
+        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 1) as f32 + 0.5) * 2.0, (g.y as f32 + 0.5) * 2.0);
         assert!(app.settings.open);
         app.step();
         // and the panel on the windows' layer, within its grid
@@ -3572,13 +3620,14 @@ mod tests {
             assert_eq!((ls.len(), ls[0].0.w, ls[0].0.h, ls[1].0.w, ls[1].0.h), (2, 1200, 240, 600, 120));
             // the buttons drawn on theirs, at the top right of it
             let f = ls[1].0;
-            let g = settings::gear_rect(600);
-            assert!(f.glyph[g.y as usize * f.w + g.x as usize + 1].is_some_and(|c| c.ch == '❄'));
+            let g = app.settings.bar_rect(settings::BarDo::Menu).expect("the menu button's up top");
+            assert!(g.x + g.w >= 598, "{g:?}");
+            assert!(f.glyph[g.y as usize * f.w + g.x as usize].is_some_and(|c| c.ch == '❄'));
         }
         // the settings button, where it is at half size
-        let g = settings::gear_rect(600);
-        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 3) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
-        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 3) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
+        let g = app.settings.bar_rect(settings::BarDo::Menu).unwrap();
+        app.mouse_at(MouseIn::Down(Btn::Left), ((g.x + 1) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
+        app.mouse_at(MouseIn::Up(Btn::Left), ((g.x + 1) as f32 + 0.5) * 0.5, (g.y as f32 + 0.5) * 0.5);
         assert!(app.settings.open);
         app.step();
         let r = app.settings.rect.expect("the panel's drawn");
@@ -3665,7 +3714,7 @@ mod tests {
             app.step();
         }
         let fast = app.frame_dt();
-        let p = settings::pause_rect(app.w as i32);
+        let p = app.settings.bar_rect(settings::BarDo::Pause).expect("the pause button's up top");
         app.mouse(MouseIn::Down(Btn::Left), p.x + 1, p.y);
         app.mouse(MouseIn::Up(Btn::Left), p.x + 1, p.y);
         assert!(app.resting(), "the ⏸ button didn't pause");
@@ -3845,9 +3894,9 @@ mod tests {
         app.step();
         app.scene.sit_at_test_table();
         assert!(app.scene.at_table());
-        let g = settings::gear_rect(app.w as i32);
-        app.mouse(MouseIn::Down(Btn::Left), g.x + 3, g.y);
-        app.mouse(MouseIn::Up(Btn::Left), g.x + 3, g.y);
+        let g = app.settings.bar_rect(settings::BarDo::Menu).expect("the menu button's up top");
+        app.mouse(MouseIn::Down(Btn::Left), g.x + 1, g.y);
+        app.mouse(MouseIn::Up(Btn::Left), g.x + 1, g.y);
         assert!(app.settings.open, "the settings opened");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3938,5 +3987,101 @@ impl Drop for App {
             l.close(self.scene.online.take_out());
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
+    }
+}
+
+#[cfg(test)]
+mod bar_and_layers {
+    use super::*;
+    use settings::BarDo;
+
+    /// A front-end that draws its own pixels (the window, the Wayland
+    /// wallpaper): each UI layer's cells are whole pixels, as many as fill
+    /// the screen to within one, at any size (they fell up to 150 px short
+    /// of its right and bottom edges); a widget goes right into the corner.
+    #[test]
+    fn layers_fill_the_screen_and_widgets_reach_its_corner() {
+        let (cols, rows, cw, ch) = (240usize, 67usize, 8usize, 16usize);
+        for k in [0.8f32, 1.1, 1.2, 1.35, 1.7, 2.3] {
+            let dir = std::env::temp_dir().join(format!("xmas-app-reach-{}-{}", std::process::id(), (k * 100.0) as i32));
+            let _ = std::fs::create_dir_all(&dir);
+            let mut cfg = Config::default();
+            cfg.scene.events = 0.0;
+            cfg.ui.scale = k;
+            let mut app = App::new(cfg, 9, &dir.join("config.toml"), cols, rows, true, true, false);
+            app.set_cell_px(cw, ch);
+            app.set_ui_layer_ok(true);
+            app.step();
+            // each layer as the front-end draws it (see `Blit::draw`)
+            let px: Vec<(usize, usize)> = app.ui_layers().iter().map(|(fr, _)| (cols * cw / fr.w, rows * ch / fr.h)).collect();
+            for ((fr, _), &(ucw, uch)) in app.ui_layers().iter().zip(&px) {
+                assert!(cols * cw - fr.w * ucw < ucw && rows * ch - fr.h * uch < uch, "at {k}: {}x{} cells of {ucw}x{uch} px on {}x{} px", fr.w, fr.h, cols * cw, rows * ch);
+            }
+            app.layer_px = px.iter().map(|&(u, v)| (u as f32 / cw as f32, v as f32 / ch as f32)).collect();
+            // the weather widget, dragged into the bottom right corner
+            let Some(r) = app.widgets.rects.get(3).copied().flatten() else { continue };
+            let (kx, ky) = app.part_layer[WIDGETS].map_or((1.0, 1.0), |i| app.layer_px[i]);
+            let (fx, fy) = ((r.x as f32 + 3.5) * kx, (r.y as f32 + 1.5) * ky);
+            app.mouse_at(MouseIn::Down(Btn::Left), fx, fy);
+            app.mouse_at(MouseIn::Drag, (fx + cols as f32) / 2.0, (fy + rows as f32) / 2.0);
+            app.mouse_at(MouseIn::Drag, cols as f32 - 0.01, rows as f32 - 0.01);
+            app.mouse_at(MouseIn::Up(Btn::Left), cols as f32 - 0.01, rows as f32 - 0.01);
+            app.step();
+            let r = app.widgets.rects[3].unwrap();
+            let (gw, gh) = (app.wid_wh.0 as i32, app.wid_wh.1 as i32);
+            assert_eq!((r.x + r.w, r.y + r.h), (gw, gh), "at {k}: {r:?} on {gw}x{gh}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The buttons up top, as on the phone: along the top row to its
+    /// right edge, and each does what it says.
+    #[test]
+    fn the_buttons_up_top_do_what_they_say() {
+        let dir = std::env::temp_dir().join(format!("xmas-app-bar-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.scene.events = 0.0;
+        cfg.sound.enabled = false;
+        let mut app = App::new(cfg, 9, &dir.join("config.toml"), 240, 60, true, true, false);
+        app.step();
+        let names: Vec<BarDo> = app.settings.bar_at.iter().map(|b| b.1).collect();
+        use BarDo::*;
+        // (a wallpaper: full screen's to be had)
+        assert_eq!(names, [Todo, Centre, Pause, Chat, Friends, Sound, ZoomOut, ZoomIn, Help, Full, Menu]);
+        let last = app.settings.bar_at.last().unwrap().0;
+        assert_eq!((last.x + last.w, last.y), (app.btn_wh.0 as i32 - 1, 0));
+        let click = |app: &mut App, d: BarDo| {
+            let r = app.settings.bar_rect(d).unwrap_or_else(|| panic!("no {d:?} button"));
+            app.mouse(MouseIn::Down(Btn::Left), r.x + 1, r.y);
+            app.mouse(MouseIn::Up(Btn::Left), r.x + 1, r.y);
+            app.step();
+        };
+        let z = app.cfg.zoom;
+        click(&mut app, ZoomIn);
+        assert!(app.cfg.zoom > z);
+        click(&mut app, ZoomOut);
+        assert_eq!(app.cfg.zoom, z);
+        click(&mut app, Sound);
+        assert!(app.cfg.sound.enabled, "the sound didn't come on");
+        click(&mut app, Sound);
+        assert!(!app.cfg.sound.enabled);
+        click(&mut app, Chat);
+        assert!(app.scene.typing().is_some(), "nothing to say it in");
+        app.key(KeyIn::Esc);
+        click(&mut app, Friends);
+        assert!(app.scene.chats_open());
+        app.key(KeyIn::Esc);
+        click(&mut app, Help);
+        assert!(app.settings.help);
+        click(&mut app, Help);
+        assert!(!app.settings.help, "a second press puts the controls away");
+        click(&mut app, Pause);
+        assert!(app.resting());
+        click(&mut app, Pause);
+        assert!(!app.resting());
+        click(&mut app, Menu);
+        assert!(app.settings.open);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

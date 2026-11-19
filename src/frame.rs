@@ -545,6 +545,15 @@ pub struct Frame {
     pub bloom_every: u32,
     bloom_tick: u32,
     bloomed: bool,
+    /// Where the view is (the camera, the zoom's window): when it's moved
+    /// since the glow was last worked out, it's worked out again, not kept
+    /// a column off (every light flickering as the village scrolls).
+    pub view: u64,
+    bloom_view: u64,
+    /// The camera's part of a cell, for what it follows (the villager,
+    /// their pets): added to where they're drawn (columns, rows), so they
+    /// hold still on screen while the village steps by under them.
+    pub track: (f32, f32),
 }
 
 impl Frame {
@@ -587,6 +596,9 @@ impl Frame {
             bloom_every: 1,
             bloom_tick: 0,
             bloomed: false,
+            view: 0,
+            bloom_view: 0,
+            track: (0.0, 0.0),
         };
         f.resize(w, h);
         f
@@ -625,6 +637,7 @@ impl Frame {
         self.pictures.clear();
         self.cover_pictures = false;
         self.cover_panels = false;
+        self.track = (0.0, 0.0);
     }
 
     /// Drawing the UI from here: the frame's height is what's above the
@@ -967,10 +980,25 @@ impl Frame {
         self.pictures.retain(|p| p.x + p.cols > 0 && p.y + p.rows > 0 && p.x < w && p.y < h);
     }
 
+    /// The zoomed view's window round (fx, fy): its top left as drawn
+    /// (on whole source pixels, so nothing shimmers as it moves) and
+    /// exactly (between them: what follows the villager is drawn by this,
+    /// so it holds still while the view steps along under it). The same
+    /// at its edges.
+    pub fn zoom_window(&self, z: f32, fx: f32, fy: f32, bounds: (f32, f32)) -> ((f32, f32), (f32, f32)) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        let (vw, vh) = (w / z, h / z);
+        let (bw, bh) = (bounds.0.min(w), bounds.1.min(h));
+        let x = (fx - vw * 0.5).clamp(0.0, (bw - vw).max(0.0).floor());
+        let y = (fy - vh * 0.55).clamp(0.0, ((bh - vh).max(0.0) * 2.0).floor() / 2.0);
+        ((x.floor(), (y * 2.0).floor() / 2.0), (x, y))
+    }
+
     pub fn zoom(&mut self, z: f32, fx: f32, fy: f32, bounds: (f32, f32), spare: &mut Frame) -> (f32, f32) {
         if z <= 1.001 {
             return (0.0, 0.0);
         }
+        let ((x0, y0), _) = self.zoom_window(z, fx, fy, bounds);
         if spare.w != self.w || spare.h != self.h {
             spare.resize(self.w, self.h);
         }
@@ -980,12 +1008,7 @@ impl Frame {
         std::mem::swap(&mut self.soft, &mut spare.soft);
         self.glyph.fill(None);
         self.light.fill(Rgb::BLACK);
-        let (w, h) = (self.w as f32, self.h as f32);
-        let (vw, vh) = (w / z, h / z);
-        let (bw, bh) = (bounds.0.min(w), bounds.1.min(h));
-        // on whole source pixels, so nothing shimmers as the view moves
-        let x0 = (fx - vw * 0.5).clamp(0.0, (bw - vw).max(0.0)).floor();
-        let y0 = ((fy - vh * 0.55).clamp(0.0, (bh - vh).max(0.0)) * 2.0).floor() / 2.0;
+        let (vw, vh) = (self.w as f32 / z, self.h as f32 / z);
         let (pw, ph) = (self.pw, self.ph);
         let cols: Vec<usize> = (0..pw).map(|x| ((x0 + (x as f32 + 0.5) / z) as usize).min(pw - 1)).collect();
         for y in 0..ph {
@@ -1286,9 +1309,10 @@ impl Frame {
     pub fn compose(&mut self) {
         self.cut_hidden();
         self.bloom_tick = self.bloom_tick.wrapping_add(1);
-        if !self.bloomed || self.bloom_every <= 1 || self.bloom_tick % self.bloom_every == 0 {
+        if !self.bloomed || self.bloom_every <= 1 || self.bloom_tick % self.bloom_every == 0 || self.view != self.bloom_view {
             self.bloom();
             self.bloomed = true;
+            self.bloom_view = self.view;
         }
         let (pw, ph) = (self.pw, self.ph);
         // (the glow, and the light baked in beforehand, added as they're
@@ -1519,5 +1543,27 @@ mod tests {
             c.g > c.r && c.g > c.b
         });
         assert!(greenish.count() >= 6, "not magnified");
+    }
+
+    /// The glow's worked out only every other frame, but again whenever
+    /// the view's moved: a light's glow is where the light is, not a
+    /// column behind it for a frame.
+    #[test]
+    fn the_glow_moves_with_the_view() {
+        let mut f = Frame::new(40, 10);
+        f.bloom_every = 2;
+        let glow_at = |f: &Frame| (0..f.pw).max_by(|&a, &b| f.near[5 * f.pw + a].r.total_cmp(&f.near[5 * f.pw + b].r)).unwrap();
+        // (frame 4: not one it'd be worked out on, but the view's moved)
+        for (frame, x, view) in [(0, 10.0, 1u64), (1, 10.0, 1), (2, 13.0, 1), (3, 16.0, 2), (4, 19.0, 3)] {
+            f.clear();
+            f.view = view;
+            f.light_px(x + 0.5, 5.5, Rgb::hex(0xffffff));
+            f.compose();
+            match frame {
+                // (the same view: kept from the frame before, every other)
+                2 => assert_eq!(glow_at(&f), 10, "kept"),
+                _ => assert_eq!(glow_at(&f), x as usize, "frame {frame}: the glow at {} not {x}", glow_at(&f)),
+            }
+        }
     }
 }

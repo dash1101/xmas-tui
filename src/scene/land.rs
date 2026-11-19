@@ -263,7 +263,9 @@ impl Land {
 
     /// The mountain cabins' window glow (they're on their own power).
     pub fn draw_lights(&self, f: &mut Frame, cam: f32, t: f32, glow: f32) {
-        let off = cam * PARALLAX;
+        // (where the far hills are drawn: on a whole column, the lamps with
+        // them, not drifting across their windows as the view moves)
+        let off = (cam * PARALLAX).round();
         for (i, &(x, y)) in self.cabins.iter().enumerate() {
             let fl = 0.8 + 0.2 * crate::rng::noise1(t * 3.0 + i as f32 * 7.0, 91);
             // clicked: the lamps turned right up for a while, easing back

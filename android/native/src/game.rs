@@ -274,93 +274,7 @@ enum WidAct {
 /// The looks a widget can have, in turn.
 const LOOKS: [(&str, &str); 4] = [("classic", "classic"), ("frosted", "frosted"), ("wood", "wooden"), ("gift", "gift box")];
 
-/// The buttons up top (the same on the desktop, the web page and the
-/// phone): what each does.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum BarDo {
-    Todo,
-    More,
-    Centre,
-    Pause,
-    Chat,
-    Friends,
-    Sound,
-    Help,
-    Menu,
-    Install,
-    /// Full screen (the web page), or back from it.
-    Full,
-}
-
-/// How the buttons up top stand this frame (see `draw_bar`).
-struct BarState {
-    paused: bool,
-    sound: bool,
-    /// 0 offline, 1 connecting, 2 online; friends about; something new.
-    online: (u8, usize, bool),
-    install: bool,
-    /// The page's full screen: 0 not to be had, 1 off, 2 on.
-    full: u8,
-    hover: (i32, i32),
-    down: Option<BarDo>,
-}
-
-/// The buttons up top, right along the top row: a picture each, and its
-/// name where there's room. Where each is.
-fn draw_bar(f: &mut Frame, st: &BarState, t: f32) -> Vec<(crate::widgets::Rect, BarDo)> {
-    use crate::color::{pal, Rgb};
-    use crate::frame::{Bg, Glyph};
-    use crate::pixicons::Icon as I;
-    let w = f.w as i32;
-    let wide = w >= 110;
-    let friends = match st.online {
-        (2, n, _) if n > 0 => format!("friends ●{n}"),
-        (2, ..) => "friends ●".to_string(),
-        (1, ..) => "friends ◌".to_string(),
-        _ => "friends ○".to_string(),
-    };
-    let mut items: Vec<(I, String, BarDo)> = vec![
-        (I::Todo, "do".into(), BarDo::Todo),
-        (I::List, "more".into(), BarDo::More),
-        (I::Centre, "centre".into(), BarDo::Centre),
-        (if st.paused { I::Play } else { I::Pause }, if st.paused { "carry on".into() } else { "pause".into() }, BarDo::Pause),
-        (I::Chat, "chat".into(), BarDo::Chat),
-        (I::Friends, friends, BarDo::Friends),
-        (I::Sound, if st.sound { "sound".into() } else { "muted".into() }, BarDo::Sound),
-        (I::Help, "help".into(), BarDo::Help),
-        (I::Menu, "menu".into(), BarDo::Menu),
-    ];
-    if st.full > 0 {
-        items.insert(items.len() - 1, (I::Full, if st.full == 2 { "window".into() } else { "full screen".into() }, BarDo::Full));
-    }
-    if st.install {
-        items.insert(0, (I::Devices, "install".into(), BarDo::Install));
-    }
-    let widths: Vec<i32> = items.iter().map(|(_, l, _)| if wide { 4 + l.chars().count() as i32 } else { 3 }).collect();
-    let total: i32 = widths.iter().sum::<i32>() + 1;
-    let mut x = (w - total - 1).max(0);
-    let mut out = vec![];
-    let panel = Bg::Mix(pal::UI_PANEL, 0.82);
-    f.put_g(x, 0, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(panel).lit(0.0));
-    x += 1;
-    for ((icon, label, d), bw) in items.into_iter().zip(widths) {
-        let r = crate::widgets::Rect { x, y: 0, w: bw, h: 1 };
-        let hot = r.contains(st.hover.0, st.hover.1) || st.down == Some(d);
-        let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { panel };
-        for xx in x..x + bw {
-            f.put_g(xx, 0, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
-        }
-        crate::pixicons::put(f, x, 0, 2, 1, icon, bg);
-        if wide {
-            // (something new among friends: their name glows)
-            let glow = if d == BarDo::Friends && st.online.2 { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
-            f.text(x + 2, 0, &format!(" {label}"), if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.9 * glow }, bg, 0.0);
-        }
-        out.push((r, d));
-        x += bw;
-    }
-    out
-}
+use crate::settings::{draw_bar, BarDo, BarState};
 
 /// Rows a choice takes (room for a finger).
 const GAP: i32 = 2;
@@ -1621,6 +1535,8 @@ impl Game {
             BarDo::Install => self.asks.push("install".into()),
             // (the page goes full screen in the tap itself, as it must)
             BarDo::Full => self.asks.push("fullscreen".into()),
+            // (the desktop's: a pinch here)
+            BarDo::ZoomOut | BarDo::ZoomIn => {}
         }
     }
 
@@ -2211,15 +2127,8 @@ impl Game {
             }
         }
         self.frame.clear();
-        let want = self.scene.zoom_focus();
-        let f = match self.focus {
-            Some((fx, fy)) if (fx - want.0).abs() < self.cols as f32 * 0.5 => {
-                let k = 1.0 - (-dt * 5.0).exp();
-                (fx + (want.0 - fx) * k, fy + (want.1 - fy) * k)
-            }
-            _ => want,
-        };
-        self.focus = Some(f);
+        // (the zoomed view eases after the villager)
+        let f = self.scene.eased_focus(&mut self.focus, dt);
         // (the scene's own panels go on the UI's layer, when it has one)
         self.scene.ui_wh = self.ui.as_ref().map(|u| (u.frame.w as i32, u.frame.h as i32));
         self.scene.ui_k = self.ui.as_ref().map(|u| u.cw as f32 / self.raster.cw.max(1) as f32).unwrap_or(1.0);
@@ -2365,7 +2274,7 @@ impl Game {
                 crate::net::Link::On => 2,
                 _ => 1,
             }, o.friends().iter().filter(|(_, h)| h.as_ref().is_some_and(|h| h.on)).count(), self.scene.unread_any());
-            let st = BarState { paused: self.paused, sound: self.cfg.sound.enabled, online, install: self.installable, full: self.fullscreen, hover: self.bar_hover, down: self.bar_down };
+            let st = BarState { paused: self.paused, sound: self.cfg.sound.enabled, online, install: self.installable, full: self.fullscreen, desktop: false, hover: self.bar_hover, down: self.bar_down, open: vec![] };
             draw_bar(uf, &st, t)
         };
         // the menu's pinned tabs, then over them the post, questions,

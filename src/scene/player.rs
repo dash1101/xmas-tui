@@ -147,10 +147,6 @@ pub struct Player {
     pub angel_at: Option<f32>,
     /// A snow angel just finished (the scene presses it into the snow).
     pub angel_made: bool,
-    /// Drawn this far along from where they are (the camera's part of a
-    /// cell, so they hold still on the screen while the village scrolls by
-    /// a cell at a time).
-    pub shift: f32,
     /// Hopping down off something (S): straight down to the snowfield, not
     /// onto whatever's below on the way.
     hop: bool,
@@ -161,7 +157,7 @@ pub struct Player {
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
         Player { x, y, dir: 1.0, berries: 0, moving: false, speed: 1.0, sprint: false, hold: None, k: 1.0, active_at: f32::NEG_INFINITY, phase: 0.0, step_cd: 0.0, breath_at: 4.0, held: None, fall: None, dizzy_until: 0.0, scoop_until: 0.0, snowball: false, throw_until: 0.0, lantern: false, cozy: false, petting_until: 0.0, cuddling: false, perch: None, climb: None, ledge_fall: false, left: None, magic: false, dropped: false, depth: None, aim: None, drop_to: None, jump_held: false,
-            wave_until: 0.0, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, shift: 0.0, hop: false, auto_pace: false }
+            wave_until: 0.0, boost: 0.0, glide: None, scramble_until: 0.0, lie: None, angel_at: None, angel_made: false, hop: false, auto_pace: false }
     }
 
     /// How fast to go: the walk speed, doubled while running.
@@ -681,7 +677,7 @@ impl Player {
         // (centre column, feet row, scale) on screen
         let (sc, sy, sk) = match view {
             Some(v) => (v.x(self.centre()), v.y(self.y + 1.0) - 1.0, self.k * v.z),
-            None => (self.centre() - self.shift, self.y, self.k),
+            None => (self.centre() + f.track.0, self.y + f.track.1, self.k),
         };
         let lying = self.lie.is_some();
         let flap = self.angel_at.map(|a| ((t - a) * 3.0) as i32 % 2 == 0);

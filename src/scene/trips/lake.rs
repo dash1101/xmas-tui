@@ -81,14 +81,18 @@ impl Field {
         Field { ph, hz, snow, crack }
     }
 
-    /// (snow, crack) at screen column `x` and pixel row `y` (below the
-    /// horizon), the villager at `cam` in the middle `mid`.
-    fn at(&self, x: f32, y: usize, cam: f32, mid: f32) -> (f32, f32) {
-        let Some(r) = y.checked_sub(self.hz as usize).filter(|&r| r < self.snow.len()) else { return (0.0, 0.5) };
+    /// (snow, crack, which sample: the same bit of ice from frame to
+    /// frame) at screen column `x` and pixel row `y` (below the horizon),
+    /// the villager at `cam` in the middle `mid`. Each row moves along by
+    /// whole pixels (nearer rows faster), so the floes and cracks slide by
+    /// as they are, not shimmering as they're picked out between pixels.
+    fn at(&self, x: f32, y: usize, cam: f32, mid: f32) -> (f32, f32, usize) {
+        let Some(r) = y.checked_sub(self.hz as usize).filter(|&r| r < self.snow.len()) else { return (0.0, 0.5, 0) };
         let d = ((y as f32 - self.hz) / (self.ph as f32 - self.hz).max(1.0)).clamp(0.001, 1.0);
-        let wx = (cam + (x - mid) / (0.32 + 1.5 * d)).rem_euclid(LAKE_W);
+        let s = 1.0 / (0.32 + 1.5 * d);
+        let wx = (((cam / s).round() + x - mid) * s).rem_euclid(LAKE_W);
         let i = ((wx * PER) as usize).min(self.snow[r].len() - 1);
-        (self.snow[r][i], self.crack[r][i])
+        (self.snow[r][i], self.crack[r][i], i)
     }
 }
 
@@ -257,16 +261,18 @@ impl Trip {
         let flare = (0.5 + 0.5 * (t * 0.045 + seed as f32).sin()).powi(6) * 0.9;
         {
             let mut a = k.sky.borrow_mut();
-            a.render(pw, hz, t, seed ^ 0xa0a, cam * 0.12, flare, 3);
+            a.render(pw, hz, t, seed ^ 0xa0a, (cam * 0.12).round(), flare, 3);
             a.add_to(f, 1.0, 1.0, None);
         }
         // ---- the far shore: low hills, a line of dark spruce
+        // (on whole pixels: the trees go by as they are, not boiling)
+        let far = (cam * 0.25).round();
         let shore = |x: usize| -> f32 {
-            let wx = cam * 0.25 + (x as f32 - mid);
+            let wx = far + (x as f32 - mid);
             hz - (1.5 + 4.0 * fbm1(wx * 0.012, 3, seed ^ 0x5e0))
         };
         for x in 0..pw {
-            let wx = cam * 0.25 + (x as f32 - mid);
+            let wx = far + (x as f32 - mid);
             let base = shore(x);
             // the trees round here (one every 3 columns or so, some gaps)
             let mut top = base;
@@ -322,14 +328,15 @@ impl Trip {
                 // darker nearer (looking down into it), a deep blue
                 let mut c = refl * (0.66 - 0.26 * d) + Rgb::hex(0x040914) * (0.6 + 0.4 * d);
                 // the snow and the floes on it, and thin frost at their edges
-                let (n, cr) = field.at(xf, y, cam, mid);
+                let (n, cr, at) = field.at(xf, y, cam, mid);
                 if n > 0.56 {
                     let edge = ((n - 0.56) / 0.04).clamp(0.0, 1.0);
-                    let grain = 0.92 + 0.08 * h01(hash2((cam + xf) as i32 * 3 + x as i32, y as i32));
+                    // (the snow's grain and glints: on the ice, going by with it)
+                    let grain = 0.92 + 0.08 * h01(hash2(at as i32, y as i32));
                     let lit = Rgb::hex(0x7f98bc) * (0.5 + 0.4 * d) * grain + tint * (0.1 + 0.18 * glow);
                     c = c.lerp(lit, edge * 0.92);
                     // a glint now and then
-                    if edge >= 1.0 && h01(hash2((cam * 0.5 + xf) as i32, y as i32 ^ (t * 1.5) as i32)) > 0.9975 {
+                    if edge >= 1.0 && h01(hash2(at as i32, y as i32 ^ (t * 1.5) as i32)) > 0.9975 {
                         c = Rgb::hex(0xeaf4ff);
                     }
                 } else if (cr - 0.5).abs() < 0.004 * (0.5 + d) {
@@ -512,4 +519,25 @@ fn reflection(f: &mut Frame, look: &crate::scene::sprites::Look, pose: crate::sc
             .clone()
     });
     f.sprite(cx, feet + rows, rows, flipped);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each row of the ice moves along by whole pixels as the villager
+    /// skates (nearer rows faster): the same floes and cracks a pixel on,
+    /// not picked out again between pixels (which shimmered).
+    #[test]
+    fn the_ice_slides_by_whole_pixels() {
+        let f = Field::new(120, 7);
+        for y in [60usize, 80, 100, 119] {
+            let d = ((y as f32 - f.hz) / (120.0 - f.hz)).clamp(0.001, 1.0);
+            let s = 1.0 / (0.32 + 1.5 * d);
+            let cam = 40.0 * s;
+            for x in 10..100 {
+                assert_eq!(f.at(x as f32 + 1.0, y, cam, 60.0), f.at(x as f32, y, cam + s, 60.0), "row {y}, column {x}");
+            }
+        }
+    }
 }

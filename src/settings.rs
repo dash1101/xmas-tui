@@ -337,6 +337,8 @@ pub struct Settings {
     /// The pointer over the buttons up top (in their own cells: they can
     /// be a size of their own).
     pub btn_hover: (i32, i32),
+    /// The buttons up top, where they were drawn.
+    pub bar_at: Vec<(Rect, BarDo)>,
     /// Native-window extras (quit button, start-with-OS toggle).
     pub extras: bool,
     /// Some(state) where start-with-OS is supported.
@@ -1096,37 +1098,110 @@ pub fn zoom_settled(z: f32) -> f32 {
     ((z * 20.0).round() / 20.0).clamp(1.0, 4.0)
 }
 
-/// The menu button: always there, top right.
-pub fn gear_rect(w: i32) -> Rect {
-    Rect { x: w - 10, y: 0, w: 9, h: 1 }
-}
-
-/// The controls button, just left of it.
-pub fn help_rect(w: i32) -> Rect {
-    Rect { x: w - 22, y: 0, w: 11, h: 1 }
-}
-
-/// The re-centre button (back to the villager), left of the controls one.
-pub fn centre_rect(w: i32) -> Rect {
-    Rect { x: w - 32, y: 0, w: 9, h: 1 }
-}
-
-/// The friends & online button, left of the zoom ones.
-pub fn online_rect(w: i32) -> Rect {
-    Rect { x: w - 53, y: 0, w: 13, h: 1 }
-}
-
 /// The privacy page (the menu's Upkeep and Online tabs open it).
 pub const PRIVACY_URL: &str = "https://github.com/dash1101/xmas-tui/blob/main/PRIVACY.md";
 
-/// The pause button (⏸, and ▶ to carry on), left of the friends one.
-pub fn pause_rect(w: i32) -> Rect {
-    Rect { x: w - 58, y: 0, w: 4, h: 1 }
+/// The buttons up top (the same on the desktop, the web page and the
+/// phone): what each does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BarDo {
+    Todo,
+    More,
+    Centre,
+    Pause,
+    Chat,
+    Friends,
+    Sound,
+    /// The desktop's zoom (the phone and the page pinch).
+    ZoomOut,
+    ZoomIn,
+    Help,
+    Menu,
+    Install,
+    /// Full screen (the page, the desktop's window or wallpaper), or back
+    /// from it.
+    Full,
 }
 
-/// The zoom buttons (out, in), left of the re-centre one.
-pub fn zoom_rects(w: i32) -> (Rect, Rect) {
-    (Rect { x: w - 39, y: 0, w: 3, h: 1 }, Rect { x: w - 36, y: 0, w: 3, h: 1 })
+/// How the buttons up top stand this frame (see `draw_bar`).
+pub struct BarState {
+    pub paused: bool,
+    pub sound: bool,
+    /// 0 offline, 1 connecting, 2 online; friends about; something new.
+    pub online: (u8, usize, bool),
+    pub install: bool,
+    /// Full screen: 0 not to be had (the button's left out), 1 off, 2 on.
+    pub full: u8,
+    /// The desktop: the zoom's − and +, the keyboard's controls (no "more":
+    /// right-click has it).
+    pub desktop: bool,
+    pub hover: (i32, i32),
+    pub down: Option<BarDo>,
+    /// Buttons whose window is open (shown pressed).
+    pub open: Vec<BarDo>,
+}
+
+/// The buttons up top, along the top row at the right: a picture each,
+/// and its name where there's room. Where each is.
+pub fn draw_bar(f: &mut Frame, st: &BarState, t: f32) -> Vec<(Rect, BarDo)> {
+    use crate::pixicons::Icon as I;
+    let w = f.w as i32;
+    let friends = match st.online {
+        (2, n, _) if n > 0 => format!("friends ●{n}"),
+        (2, ..) => "friends ●".to_string(),
+        (1, ..) => "friends ◌".to_string(),
+        _ => "friends ○".to_string(),
+    };
+    let mut items: Vec<(I, String, BarDo)> = vec![(I::Todo, "do".into(), BarDo::Todo)];
+    if !st.desktop {
+        items.push((I::List, "more".into(), BarDo::More));
+    }
+    items.extend([
+        (I::Centre, "centre".into(), BarDo::Centre),
+        (if st.paused { I::Play } else { I::Pause }, if st.paused { "carry on".into() } else { "pause".into() }, BarDo::Pause),
+        (I::Chat, "chat".into(), BarDo::Chat),
+        (I::Friends, friends, BarDo::Friends),
+        (I::Sound, if st.sound { "sound".into() } else { "muted".into() }, BarDo::Sound),
+    ]);
+    if st.desktop {
+        items.push((I::ZoomOut, String::new(), BarDo::ZoomOut));
+        items.push((I::ZoomIn, String::new(), BarDo::ZoomIn));
+    }
+    items.push((I::Help, if st.desktop { "controls".into() } else { "help".into() }, BarDo::Help));
+    if st.full > 0 {
+        items.push((I::Full, if st.full == 2 { "window".into() } else { "full screen".into() }, BarDo::Full));
+    }
+    items.push((I::Menu, "menu".into(), BarDo::Menu));
+    if st.install {
+        items.insert(0, (I::Devices, "install".into(), BarDo::Install));
+    }
+    // names where they all fit (not on a narrow screen: pictures alone)
+    let named: i32 = items.iter().map(|(_, l, _)| if l.is_empty() { 3 } else { 4 + l.chars().count() as i32 }).sum::<i32>() + 2;
+    let wide = w >= 110 && named <= w;
+    let widths: Vec<i32> = items.iter().map(|(_, l, _)| if wide && !l.is_empty() { 4 + l.chars().count() as i32 } else { 3 }).collect();
+    let total: i32 = widths.iter().sum::<i32>() + 1;
+    let mut x = (w - total - 1).max(0);
+    let mut out = vec![];
+    let panel = Bg::Mix(pal::UI_PANEL, 0.82);
+    f.put_g(x, 0, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(panel).lit(0.0));
+    x += 1;
+    for ((icon, label, d), bw) in items.into_iter().zip(widths) {
+        let r = Rect { x, y: 0, w: bw, h: 1 };
+        let hot = r.contains(st.hover.0, st.hover.1) || st.down == Some(d) || st.open.contains(&d);
+        let bg = if hot { Bg::Solid(Rgb::hex(0x3a2a14)) } else { panel };
+        for xx in x..x + bw {
+            f.put_g(xx, 0, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
+        }
+        crate::pixicons::put(f, x, 0, 2, 1, icon, bg);
+        if bw > 3 {
+            // (something new among friends: their name glows)
+            let glow = if d == BarDo::Friends && st.online.2 { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
+            f.text(x + 2, 0, &format!(" {label}"), if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.9 * glow }, bg, 0.0);
+        }
+        out.push((r, d));
+        x += bw;
+    }
+    out
 }
 
 /// The controls card: (keys, what they do, which of the villager's keys
@@ -1449,75 +1524,37 @@ impl Settings {
         false
     }
 
-    /// The settings button (always showing, so the panel's always one
-    /// click away — right-click isn't available everywhere).
-    pub fn draw_gear(&self, f: &mut Frame, t: f32) {
-        // pause / carry on, and while resting, why
-        let r = pause_rect(f.w as i32);
-        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
+    /// The buttons up top (always showing, so the menu's always one click
+    /// away: right-click isn't available everywhere), as on the phone: the
+    /// friends & online one's `online` (0 offline, 1 connecting, 2 online;
+    /// friends about; something waiting), the sound on or not, full screen
+    /// (0 not to be had, 1 off, 2 on). While resting, why, beside them.
+    pub fn draw_buttons(&mut self, f: &mut Frame, online: (u8, usize, bool), sound: bool, full: u8, t: f32) {
         let paused = self.resting.as_deref() == Some("");
-        let bg = Bg::Mix(pal::UI_PANEL, if hot || paused { 0.9 } else { 0.62 });
-        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        let _ = t;
-        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, if paused { crate::pixicons::Icon::Play } else { crate::pixicons::Icon::Pause }, bg);
-        f.put_g(r.x + 3, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
-        if let Some(why) = &self.resting {
+        let mut open = vec![];
+        if self.open {
+            open.push(BarDo::Menu);
+        }
+        if self.help {
+            open.push(BarDo::Help);
+        }
+        let st = BarState { paused, sound, online, install: false, full, desktop: true, hover: self.btn_hover, down: None, open };
+        self.bar_at = draw_bar(f, &st, t);
+        if let (Some(why), Some((r, _))) = (&self.resting, self.bar_at.first()) {
             let note = if why.is_empty() { " paused · ▶ or P to carry on ".to_string() } else { format!(" resting: {why} ") };
             let n = note.chars().count() as i32;
-            f.text(r.x - 1 - n, r.y, &note, Rgb::hex(0xbfe4ff), Bg::Mix(pal::UI_PANEL, 0.8), 0.0);
+            f.text(r.x - 2 - n, r.y, &note, Rgb::hex(0xbfe4ff), Bg::Mix(pal::UI_PANEL, 0.8), 0.0);
         }
-        // zoom out / in
-        let (zo, zi) = zoom_rects(f.w as i32);
-        for (r, ch) in [(zo, '−'), (zi, '+')] {
-            let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
-            let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-            f.put_g(r.x, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
-            f.put_g(r.x + 1, r.y, Glyph::new(ch, if hot { pal::UI_TITLE } else { Rgb::hex(0xbfe4ff) * 0.9 }).bg(bg).lit(0.0));
-            f.put_g(r.x + 2, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
-        }
-        // the re-centre button: back to the villager
-        let r = centre_rect(f.w as i32);
-        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
-        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Centre, bg);
-        f.text(r.x + 3, r.y, "centre", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
-        // and the controls button beside it
-        let r = help_rect(f.w as i32);
-        let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.help;
-        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Help, bg);
-        f.text(r.x + 3, r.y, "controls", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 }, bg, 0.0);
-        let r = gear_rect(f.w as i32);
-        let hot = r.contains(self.btn_hover.0, self.btn_hover.1) || self.open;
-        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-        let tc = if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 };
-        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Menu, bg);
-        f.text(r.x + 3, r.y, "menu ", tc, bg, 0.0);
     }
 
-    /// The friends & online button (`state`: 0 offline, 1 connecting, 2
-    /// online; how many friends are about; something waiting).
-    pub fn draw_online(&self, f: &mut Frame, state: u8, about: usize, waiting: bool, t: f32) {
-        let r = online_rect(f.w as i32);
-        let hot = r.contains(self.btn_hover.0, self.btn_hover.1);
-        let bg = Bg::Mix(pal::UI_PANEL, if hot { 0.9 } else { 0.62 });
-        f.put_g(r.x, r.y, Glyph::new('▐', pal::UI_PANEL * 0.0).bg(bg).lit(0.0));
-        let pulse = if waiting { 1.0 + 0.3 * (t * 4.0).sin() } else { 1.0 };
-        crate::pixicons::put(f, r.x + 1, r.y, 2, 1, crate::pixicons::Icon::Friends, bg);
-        let x = f.text(r.x + 3, r.y, "friends", if hot { pal::UI_TITLE } else { pal::UI_TEXT * 0.85 * pulse }, bg, 0.0);
-        let (dot, c) = match state {
-            2 if about > 0 => (format!(" ●{about}"), Rgb::hex(0x9be08a)),
-            2 => (" ●".to_string(), Rgb::hex(0x9be08a)),
-            1 => (" ◌".to_string(), pal::UI_DIM),
-            _ => (" ○".to_string(), pal::UI_DIM),
-        };
-        let x = f.text(x, r.y, &dot, c, bg, 0.0);
-        for xx in x..r.x + r.w {
-            f.put_g(xx, r.y, Glyph::new(' ', pal::UI_TEXT).bg(bg).lit(0.0));
-        }
+    /// The button up top at (x, y) (the buttons' own cells), as last drawn.
+    pub fn bar_hit(&self, x: i32, y: i32) -> Option<BarDo> {
+        self.bar_at.iter().find(|(r, _)| r.contains(x, y)).map(|(_, d)| *d)
+    }
+
+    /// Where a button up top is, as last drawn.
+    pub fn bar_rect(&self, d: BarDo) -> Option<Rect> {
+        self.bar_at.iter().find(|(_, b)| *b == d).map(|(r, _)| *r)
     }
 
     pub fn draw(&mut self, f: &mut Frame, cfg: &Config, t: f32) {

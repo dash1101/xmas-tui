@@ -912,8 +912,7 @@ fn run_export(cfg: &config::Config, seed: u32, dir: &str, args: &Args) {
             widgets.draw(&mut frame, t);
             scene.set_widget_ledges(widgets.rects.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r.x, r.y, r.w, r.h))).collect());
             scene.draw_top(&mut frame);
-            settings.draw_gear(&mut frame, t);
-            settings.draw_online(&mut frame, if scene.online.wanted() { 2 } else { 0 }, 1, scene.asked_now(), t);
+            settings.draw_buttons(&mut frame, (if scene.online.wanted() { 2 } else { 0 }, 1, scene.asked_now()), cfg.sound.enabled, 0, t);
             settings.draw(&mut frame, cfg, t);
             settings.draw_help(&mut frame, &cfg.keys, &cfg.ui.look);
         }

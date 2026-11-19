@@ -1170,7 +1170,7 @@ impl MyPet {
         let scale = super::critters::pet_scale(k);
         let (sx, sy) = match view {
             Some(v) => (v.x(self.x), v.y(self.y + 1.0) - 1.0),
-            None => (self.x, self.y),
+            None => (self.x + f.track.0, self.y + f.track.1),
         };
         let tricking = match self.busy {
             Some(Busy::Trick { which, until }) => Some((which, until)),

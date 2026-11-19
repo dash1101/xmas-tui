@@ -1458,9 +1458,12 @@ impl Trip {
                 } else if y >= wy0 && y < wy1 && (x % (pw / 6).max(1)) > 6 {
                     // outside: sky, mountains, pines whipping by
                     let k = (y - wy0) as f32 / (wy1 - wy0) as f32;
-                    let sx = x as f32 + scroll * 0.15;
+                    // (on whole pixels: the hills and pines move along,
+                    // not boiling as they're worked out between them)
+                    let sx = x as f32 + (scroll * 0.15).round();
                     let ridge = (noise1(sx * 0.02, self.seed) * (wy1 - wy0) as f32 * 0.6) as i32;
-                    let tree = ((x as f32 + scroll).rem_euclid(23.0) as i32) < 7 && y > wy1 - 12 + ((x as f32 + scroll).rem_euclid(23.0) as i32 - 3).abs() * 2;
+                    let near = (x as f32 + scroll.round()).rem_euclid(23.0) as i32;
+                    let tree = near < 7 && y > wy1 - 12 + (near - 3).abs() * 2;
                     if tree {
                         Rgb::hex(0x1e4a2e)
                     } else if y - wy0 > (wy1 - wy0) / 2 - ridge / 3 {
@@ -1865,13 +1868,16 @@ impl Trip {
         use crate::scene::sprites::{Look, Pose};
         let Some(r) = &self.run else { return };
         let (pw, ph) = (f.pw as i32, f.ph as i32);
+        // (the slope moves by whole pixels, everything on it with it: its
+        // bumps and tracks don't shimmer as they're worked out between)
+        let rx = r.x.round();
         self.backdrop(f, r.x * 0.5, ph / 2, 0.0);
         // the slope: down to the right; the skier a third of the way along.
         // Lanes: further back is higher up the screen, a little smaller.
         let sx = pw / 3;
         let fall = 0.42;
         let surface = |px: i32, lane: f32| -> f32 {
-            let along = r.x + (px - sx) as f32;
+            let along = rx + (px - sx) as f32;
             ph as f32 * 0.5 + (px - sx) as f32 * fall + noise1(along * 0.02, self.seed) * 6.0 - lane * 9.0
         };
         for x in 0..pw {
@@ -1882,7 +1888,7 @@ impl Trip {
                 f.px_set(x, y, c);
             }
             // each lane's groomed track
-            let along = (r.x + (x - sx) as f32) as i32;
+            let along = (rx + (x - sx) as f32) as i32;
             for l in 0..LANES {
                 if along.rem_euclid(9) < 5 {
                     f.px_set(x, surface(x, l as f32) as i32 + 1, Rgb::hex(0xc8d4ec));
@@ -1893,7 +1899,7 @@ impl Trip {
         let mut order: Vec<&(f32, usize, u8)> = self.things.iter().collect();
         order.sort_by_key(|th| std::cmp::Reverse(th.1));
         for &&(x, lane, k) in &order {
-            let px = sx + (x - r.x) as i32;
+            let px = sx + (x - rx).round() as i32;
             if px < -20 || px > pw + 20 {
                 continue;
             }
@@ -1944,7 +1950,7 @@ impl Trip {
             }
         }
         // the finish: a banner across the slope, flags either side
-        let fx = sx + (RUN_LEN - r.x) as i32;
+        let fx = sx + (RUN_LEN - rx).round() as i32;
         if fx > -30 && fx < pw + 30 {
             let (b0, b1) = (surface(fx, 0.0) as i32, surface(fx, (LANES - 1) as f32 + 0.6) as i32);
             for y in b1 - 26..b0 {
@@ -1962,7 +1968,7 @@ impl Trip {
         // the others racing down (and those down, standing about at the
         // bottom, skis off)
         for rv in &r.rivals {
-            let px = sx + (rv.x - r.x) as i32;
+            let px = sx + (rv.x - rx).round() as i32;
             if px < -20 || px > pw + 20 {
                 continue;
             }
@@ -1982,7 +1988,7 @@ impl Trip {
         }
         // friends on the slope
         for fw in self.fellows.iter().filter(|fw| fw.at.at == 5) {
-            let px = sx + (fw.at.x - r.x) as i32;
+            let px = sx + (fw.at.x - rx).round() as i32;
             if px < -20 || px > pw + 20 {
                 continue;
             }
@@ -2059,7 +2065,7 @@ impl Trip {
         // layers: far hills, a ridge of pines with windows, the near verge
         for (layer, (base, amp, tone, speed)) in [(0.55, 24.0, 0x2a3458, 0.05), (0.7, 14.0, 0x1a2a3a, 0.2)].into_iter().enumerate() {
             for x in 0..pw {
-                let u = (x as f32 + d * speed) * 0.01;
+                let u = (x as f32 + (d * speed).round()) * 0.01;
                 let n = noise1(u, self.seed ^ layer as u32);
                 let top = (road_y as f32 * base - n * amp) as i32;
                 for y in top.max(0)..road_y {
@@ -2068,7 +2074,7 @@ impl Trip {
                 }
                 // pines along the nearer ridge, and a lit window now and then
                 if layer == 1 {
-                    let px = (x as f32 + d * speed) as i32;
+                    let px = x + (d * speed).round() as i32;
                     if px.rem_euclid(11) == 0 {
                         for k in 0..10 {
                             for dx in -(k / 3)..=(k / 3) {
@@ -2179,7 +2185,7 @@ impl Trip {
             let sp = 0.1 + layer as f32 * 0.15;
             for x in 0..pw {
                 // ridged: sharp peaks, not rolling waves
-                let u = (x as f32 + scroll * sp) * 0.012;
+                let u = (x as f32 + (scroll * sp).round()) * 0.012;
                 let ridge = |v: f32| 1.0 - (v * 2.0 - 1.0).abs();
                 let n = ridge(noise1(u, self.seed ^ layer as u32)) * 0.75 + ridge(noise1(u * 3.1, self.seed ^ 9)) * 0.25;
                 let top = (horizon as f32 * base - n * amp) as i32;

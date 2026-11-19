@@ -192,14 +192,19 @@ impl Runner {
         let (cols, rows) = g.blit.layout(w, h, cw, ch);
         let _ = g.surface.resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap());
         match self.app.as_mut() {
-            Some(app) => app.resize(cols, rows),
+            Some(app) => {
+                app.resize(cols, rows);
+                app.set_cell_px(cw, ch);
+                app.win_full = g.window.fullscreen().is_some();
+            }
             None => {
                 let desktop = self.opts.desktop;
                 let mut app = App::new(self.cfg.clone(), self.seed, &self.path, cols, rows, desktop, !desktop, true);
                 app.set_windowed(!desktop);
                 app.set_can_focus(desktop);
                 // (this front-end draws its own letters: a UI layer of bigger
-                // ones can go over the village)
+                // ones can go over the village, in cells of whole pixels)
+                app.set_cell_px(cw, ch);
                 app.set_ui_layer_ok(true);
                 app.start_audio();
                 if crate::save::on() {

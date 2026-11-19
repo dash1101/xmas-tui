@@ -39,6 +39,9 @@ pub enum Icon {
     List,
     /// The screen's four corners, arrows out (full screen).
     Full,
+    /// A magnifying glass with a minus (zoom out) or a plus (zoom in).
+    ZoomOut,
+    ZoomIn,
 }
 
 /// The palette: a letter a colour ('.' clear).
@@ -142,6 +145,12 @@ fn art(i: Icon) -> [&'static str; 12] {
         Icon::Full => [
             "wwww....wwww", "ww........ww", "w.w......w.w", "w..w....w..w", "............", "............", "............", "............", "w..w....w..w", "w.w......w.w", "ww........ww", "wwww....wwww",
         ],
+        Icon::ZoomIn => [
+            "..hhhhh.....", ".h.....h....", "h...w...h...", "h...w...h...", "h.wwwww.h...", "h...w...h...", "h...w...h...", ".h.....h....", "..hhhhhnn...", "........nn..", ".........nn.", "..........n.",
+        ],
+        Icon::ZoomOut => [
+            "..hhhhh.....", ".h.....h....", "h.......h...", "h.......h...", "h.wwwww.h...", "h.......h...", "h.......h...", ".h.....h....", "..hhhhhnn...", "........nn..", ".........nn.", "..........n.",
+        ],
         Icon::Restart => [
             "....eeee....", "..ee....ee..", ".e........e.", "e.........e.", "e........eee", "e.........e.", ".e..........", "..ee....ee..", "....eeee....", "............", "............", "............",
         ],
@@ -200,6 +209,8 @@ pub fn sign(i: Icon) -> (char, Rgb) {
         Icon::Restart => ('↻', Rgb::hex(0x9be08a)),
         Icon::List => ('☰', Rgb::hex(0xf4f0ea)),
         Icon::Full => ('⤢', Rgb::hex(0xf4f0ea)),
+        Icon::ZoomIn => ('+', Rgb::hex(0xbfe4ff)),
+        Icon::ZoomOut => ('−', Rgb::hex(0xbfe4ff)),
     }
 }
 
@@ -227,7 +238,7 @@ mod tests {
     #[test]
     fn every_icon_is_twelve_by_twelve() {
         use Icon::*;
-        for i in [Home, Village, You, Pets, Online, Sound, Effects, Widgets, Shelves, Windows, Screen, Upkeep, Friends, Chat, Todo, Pause, Play, Help, Menu, Centre, Devices, Moon, Back, Restart, Globe, List, Full] {
+        for i in [Home, Village, You, Pets, Online, Sound, Effects, Widgets, Shelves, Windows, Screen, Upkeep, Friends, Chat, Todo, Pause, Play, Help, Menu, Centre, Devices, Moon, Back, Restart, Globe, List, Full, ZoomOut, ZoomIn] {
             for (y, row) in art(i).iter().enumerate() {
                 let n = row.chars().count();
                 assert_eq!(n, 12, "{i:?} row {y}: {row:?}");

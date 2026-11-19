@@ -80,6 +80,10 @@ pub struct Scene {
     /// Camera: world column at the left edge, and where it's heading.
     cam: f32,
     cam_target: f32,
+    /// The camera going along with the villager (its target where they
+    /// push the edge of the middle of the screen, not on a whole column
+    /// till they stop).
+    cam_follow: bool,
     /// The view was lifted to keep the villager in it, up high (and comes
     /// down with them).
     lifted: bool,
@@ -694,6 +698,7 @@ impl Scene {
             ww,
             cam,
             cam_target: cam,
+            cam_follow: false,
             lifted: false,
             player,
             mv: (0.0, 0.0),
@@ -2325,6 +2330,54 @@ impl Scene {
 
     fn cam_i(&self) -> i32 {
         self.view_cam().round() as i32
+    }
+
+    /// Where the camera is between the whole columns (and rows) the
+    /// village is drawn at: what it follows is drawn this far along
+    /// (out in the village; nothing indoors or looking out of a window).
+    fn track(&self) -> (f32, f32) {
+        if self.inside.is_some() || self.look.is_some() || self.trip.is_some() {
+            return (0.0, 0.0);
+        }
+        (self.cam_i() as f32 - self.cam, self.sky_up - self.oy_i() as f32)
+    }
+
+    /// Zoomed in by `z` round `focus` (on screen): the view as it's drawn
+    /// (on whole source pixels: everyone's drawn by it), and as it is
+    /// exactly, by the camera as it is (the villager and their pets are
+    /// drawn by that, so they hold still on screen while the view steps
+    /// along under them).
+    fn zoom_views(&self, f: &Frame, z: f32, (fx, fy): (f32, f32)) -> (View, View) {
+        let bounds = self.view_bounds();
+        let tr = if self.aboard() { (0.0, 0.0) } else { self.track() };
+        let ((x0, y0), _) = f.zoom_window(z, fx, fy, bounds);
+        let (_, (ex, ey)) = f.zoom_window(z, fx + tr.0, fy + tr.1, bounds);
+        let (cam, oy) = (self.cam_i() as f32, self.oy_i() as f32);
+        (View { z, x0, y0, cam, oy }, View { z, x0: ex, y0: ey, cam: cam - tr.0, oy: oy + tr.1 })
+    }
+
+    /// Up in the balloon's basket (drawn with it, as it is).
+    fn aboard(&self) -> bool {
+        self.balloon.as_ref().is_some_and(|b| b.aboard)
+    }
+
+    /// The zoomed view's centre, eased after the villager from `prev`
+    /// (last frame's, kept in the village's own columns and rows, so the
+    /// camera stepping a column along doesn't jolt it): this frame's, on
+    /// screen.
+    pub fn eased_focus(&self, prev: &mut Option<(f32, f32)>, dt: f32) -> (f32, f32) {
+        let want = self.zoom_focus();
+        let (ox, oy) = if self.inside.is_none() && self.look.is_none() && self.trip.is_none() { (self.cam_i() as f32, self.oy_i() as f32) } else { (0.0, 0.0) };
+        let want = (want.0 + ox, want.1 - oy);
+        let now = match *prev {
+            Some((fx, fy)) if (fx - want.0).abs() < self.w as f32 * 0.5 => {
+                let k = 1.0 - (-dt * 5.0).exp();
+                (fx + (want.0 - fx) * k, fy + (want.1 - fy) * k)
+            }
+            _ => want,
+        };
+        *prev = Some(now);
+        (now.0 - ox, now.1 + oy)
     }
 
     /// Out in the village (not away on a trip, not indoors): where a small
@@ -4263,17 +4316,24 @@ impl Scene {
             // up on a widget: it's fixed to the screen, so the view holds still
             let on_widget = p.perch.and_then(|i| self.ledges.get(i)).is_some_and(|l| l.on_screen());
             // the camera keeps the player comfortably in view as they go
-            // (walking, in the air, carried along on autopilot); its target
-            // is a whole column, so it comes to rest square on the cells
+            // (walking, in the air, carried along on autopilot): it goes
+            // along at their pace (its target where they are, not stepping
+            // a whole column at a time, so it doesn't speed up and slow
+            // down with each), and once they stop or turn back, it comes to
+            // rest on a whole column, square on the cells
             let moved = before.is_some_and(|(bx, _)| (bx - p.x).abs() > 1e-4);
-            if moved && !on_widget {
-                let (w, c) = (self.w as f32, p.centre());
-                let (l, r) = ((w * 0.3).round(), (w * 0.7).round());
-                if c - self.cam_target < l {
-                    self.cam_target = (c - l).round();
-                } else if c - self.cam_target > r {
-                    self.cam_target = (c - r).round();
+            let (w, c) = (self.w as f32, p.centre());
+            let (l, r) = ((w * 0.3).round(), (w * 0.7).round());
+            let push = (moved && !on_widget).then(|| if c - self.cam_target < l { Some(c - l) } else if c - self.cam_target > r { Some(c - r) } else { None }).flatten();
+            match push {
+                Some(x) => {
+                    self.cam_target = x;
+                    self.cam_follow = true;
                 }
+                None if std::mem::take(&mut self.cam_follow) => self.cam_target = self.cam_target.round(),
+                None => {}
+            }
+            if moved && !on_widget {
                 self.cam_target = self.cam_target.clamp(0.0, (self.ww - self.w) as f32);
             }
             // up high (a tall tree, a big jump): the view lifts to keep them
@@ -5043,15 +5103,19 @@ impl Scene {
         if z > 1.001 {
             let (fx, fy) = focus.unwrap_or_else(|| self.zoom_focus());
             let (bw, bh) = self.view_bounds();
+            let (v, along) = self.zoom_views(f, z, (fx, fy));
             let (x0, y0) = f.zoom(z, fx, fy, (bw, bh), spare);
             // (whatever pictures were drawn before it — indoors, everyone —
             // grow with it)
             f.zoom_pictures(z, x0, y0);
             xf = (z, x0, y0);
             if self.zoomed.get() {
-                self.draw_people(f, View { z, x0, y0, cam: self.cam_i() as f32, oy: self.oy_i() as f32 });
+                self.draw_people(f, v, along);
             }
         }
+        // (away on a trip, the view's always on the move: the glow worked
+        // out every frame)
+        f.view = view_key(&[self.cam_i() as f32, self.oy_i() as f32, z, xf.1, xf.2, if self.trip.is_some() { self.now() } else { 0.0 }]);
         self.zoomed.set(false);
         self.draw_iris(f);
         let full = f.ui_in();
@@ -5062,7 +5126,7 @@ impl Scene {
 
     /// Zoomed in: people, animals and pets drawn straight into the zoomed
     /// frame at the bigger size (crisp pixel art, not magnified glyphs).
-    fn draw_people(&self, f: &mut Frame, v: View) {
+    fn draw_people(&self, f: &mut Frame, v: View, along: View) {
         let t = self.now();
         let glow = self.cfg.glow;
         (f.ox, f.oy) = (0, 0);
@@ -5072,17 +5136,17 @@ impl Scene {
         if let (Some(p), None) = (&self.player, &self.inside) {
             let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
             for more in &self.more_pets {
-                more.draw(f, t, sprite_k(self.h) * v.z, Some(v));
+                more.draw(f, t, sprite_k(self.h) * v.z, Some(along));
             }
             // (in the villager's arms: drawn in front of them)
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
-                pet.draw(f, t, sprite_k(self.h) * v.z, Some(v));
+                pet.draw(f, t, sprite_k(self.h) * v.z, Some(along));
             }
             if !self.in_igloo {
-                p.draw(f, t, glow, Some(v));
+                p.draw(f, t, glow, Some(along));
             }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
-                pet.draw(f, t, sprite_k(self.h) * v.z, Some(v));
+                pet.draw(f, t, sprite_k(self.h) * v.z, Some(along));
             }
         }
         f.day = 0.0;
@@ -5299,22 +5363,30 @@ impl Scene {
         }
         if let (Some(p), None, true) = (&self.player, &self.inside, people) {
             let pet = self.my_pet.as_ref().filter(|pet| !pet.staying);
+            // (the villager and their pets: where the camera is between
+            // whole columns too, so they hold still on screen as it goes
+            // along with them)
+            let along = if self.aboard() { (0.0, 0.0) } else { self.track() };
+            f.track = along;
             for more in &self.more_pets {
                 more.draw(f, t, sprite_k(self.h), None);
             }
             if let Some(pet) = pet.filter(|pet| !pet.held()) {
                 pet.draw(f, t, sprite_k(self.h), None);
             }
+            f.track = (0.0, 0.0);
             if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
                 b.draw_back(f, t, sprite_k(self.h));
             }
             self.draw_ridden(f, t, false);
+            f.track = along;
             if !self.in_igloo {
                 p.draw(f, t, glow, None);
             }
             if let Some(pet) = pet.filter(|pet| pet.held()) {
                 pet.draw(f, t, sprite_k(self.h), None);
             }
+            f.track = (0.0, 0.0);
             if let Some(b) = self.balloon.as_ref().filter(|_| self.inside.is_none()) {
                 b.draw_front(f, sprite_k(self.h));
                 if b.reachable(p.centre(), p.y) && self.convo.is_none() {
@@ -5380,6 +5452,12 @@ impl Scene {
 pub enum Held {
     Berries,
     Item(shop::Item),
+}
+
+/// Where the view is, as a number that changes when it moves (see
+/// `Frame::view`).
+fn view_key(v: &[f32]) -> u64 {
+    v.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x.to_bits() as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 /// A zoomed view, for drawing people and animals straight into it at the
@@ -7885,5 +7963,79 @@ mod tests {
         let (z, ..) = s.render(&mut f, &mut spare, 0.0, 1.5, None);
         assert!((z - 1.5).abs() < 1e-3);
         assert!(f.soft.iter().any(|&v| v != 0), "nobody drawn into the zoomed view");
+    }
+
+    /// Running along, the camera goes along with the villager at their
+    /// pace: they hold still on screen (drawn where the camera is between
+    /// whole columns too) while the village steps by a column at a time,
+    /// evenly; stopped, it comes to rest on a whole column.
+    #[test]
+    fn the_villager_holds_still_as_the_view_follows() {
+        for (sprint, dt) in [(false, 1.0 / 60.0), (true, 1.0 / 60.0), (true, 1.0 / 30.0)] {
+            let mut cfg = SceneCfg::default();
+            cfg.events = 0.0;
+            cfg.critters = 0.0;
+            let mut s = Scene::new(200, 50, 7, &cfg);
+            s.set_sprint(sprint);
+            s.set_move(1.0, 0.0);
+            let cam0 = s.cam;
+            let (mut from, mut shown, mut steps, mut since, mut last) = (None, vec![], vec![], 0, s.cam_i());
+            for n in 0..(10.0 / dt) as usize {
+                s.update(dt, 0.0);
+                if from.is_none() && (s.cam - cam0).abs() > 0.01 {
+                    from = Some(n + (1.0 / dt) as usize);
+                }
+                if from.is_some_and(|f| n >= f) {
+                    shown.push(s.player.as_ref().unwrap().centre() + s.track().0 - s.cam_i() as f32);
+                    since += 1;
+                    if s.cam_i() != last {
+                        steps.push(since);
+                        since = 0;
+                    }
+                }
+                last = s.cam_i();
+            }
+            let (lo, hi) = shown.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            assert!(shown.len() > 60 && hi - lo < 0.05, "sprint {sprint} at {dt}: the villager moved {} columns on screen", hi - lo);
+            // (a step every so many frames, give or take one)
+            let (a, b) = steps[1..].iter().fold((usize::MAX, 0), |(a, b), &v| (a.min(v), b.max(v)));
+            assert!(b - a <= 1, "uneven steps: {steps:?}");
+            s.set_move(0.0, 0.0);
+            run(&mut s, 2.0);
+            assert_eq!(s.cam, s.cam.round(), "the camera came to rest between columns");
+            assert_eq!(s.track(), (0.0, 0.0));
+        }
+    }
+
+    /// Zoomed in (as a phone is by itself), the view follows the villager
+    /// on whole pixels; the villager's drawn where it is exactly, so they
+    /// glide on screen as the view eases after them, not jumping by the
+    /// zoom's pixels each time it steps (as they did).
+    #[test]
+    fn zoomed_in_the_villager_glides() {
+        for z in [1.75f32, 3.0] {
+            let mut cfg = SceneCfg::default();
+            cfg.events = 0.0;
+            cfg.critters = 0.0;
+            let mut s = Scene::new(200, 50, 7, &cfg);
+            s.set_sprint(true);
+            s.set_move(1.0, 0.0);
+            let f = Frame::new(200, 50);
+            let (mut prev, mut xs, mut steps, dt) = (None, vec![], 0, 1.0 / 60.0);
+            let mut last = None;
+            for n in 0..(6.0 / dt) as usize {
+                s.update(dt, 0.0);
+                let foc = s.eased_focus(&mut prev, dt);
+                let (v, along) = s.zoom_views(&f, z, foc);
+                if n as f32 * dt > 2.0 {
+                    xs.push(along.x(s.player.as_ref().unwrap().centre()));
+                    steps += (last.is_some_and(|l| l != v.x0 + v.cam)) as usize;
+                }
+                last = Some(v.x0 + v.cam);
+            }
+            let most = xs.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+            assert!(steps > 30, "the view didn't follow ({steps} steps)");
+            assert!(most < 0.3, "zoomed {z}: the villager jumped {most} columns on screen in a frame");
+        }
     }
 }

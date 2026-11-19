@@ -590,9 +590,13 @@ pub fn run(cfg: Config, seed: u32, path: &Path, stop: &dyn Fn() -> bool) -> Resu
             let (cw, ch) = cell_size(ph, s, render);
             let (cols, rows) = blit.layout(pw, ph, cw, ch);
             match app.as_mut() {
-                Some(a) => a.resize(cols, rows),
+                Some(a) => {
+                    a.resize(cols, rows);
+                    a.set_cell_px(cw, ch);
+                }
                 None => {
                     let mut a = App::new(cfg.clone(), seed, path, cols, rows, true, true, true);
+                    a.set_cell_px(cw, ch);
                     a.set_ui_layer_ok(true);
                     a.set_exact_keys();
                     a.start_audio();

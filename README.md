@@ -164,16 +164,20 @@ anything is replaced, and `xmas-tui --update` does the same from a terminal. **R
 Click the bare desktop first so the wallpaper has keyboard focus (on Windows the keyboard then comes to the village,
 every key, Ctrl and all, until something else is clicked).
 
+The buttons along the top right are the same on the desktop, the web page and the phone: **do** (things to do),
+**centre**, **pause**, **chat**, **friends**, **sound**, the zoom's **−** and **+** (the desktop's; a pinch elsewhere),
+**controls**, **full screen** (where there is one) and the **❄ menu**. On a narrow screen they show their pictures alone.
+
 | Input | What it does |
 |---|---|
 | **WASD** / **arrow keys** | walk the villager; the view follows (hold **Shift** to run) |
 | **E** / **Enter** | interact with whatever the `[E]` prompt points at (people, animals, bushes, doors, the cabin…); with nothing else around, the villager's pet |
 | **Space** | jump; held, higher (up to twice as high); in the air, again: the Christmas spirit lifts the villager once more; steer in the air with **A** / **D**. Up against a house, a tree, a lamp post, the cabin, a present, a widget or a window, a leap right up onto it (a tall tree: its lowest branch in reach) |
 | **W** up on something | on up it: a roof to its ridge, a tree branch by branch to the star; **S** hops down |
-| **T** | things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
+| **T** | (or the **do** button) things to do right here: build, a snow angel, a rest, a carol, tag, a team snowball fight, a light show, fireworks, the ski trip, a drive, a game at the table indoors… (**1**–**9** or the arrows and **Enter** to pick) |
 | **O** | friends & online: go online, friends, groups, messages, open this village or go into a friend's, play with friends there, the profile card, linked devices. The **✉ friends** button (top right) opens friends & chats |
 | **P** | pause the village (also the **⏸** button, top right; **▶** carries on): it stands still and goes quiet, the widgets and online carry on, and others in a shared village see the villager greyed |
-| **/** | talk: to everyone here; *@name what to say* to one person (a friend anywhere, or someone here, just them); *@group …* to a group's chat room |
+| **/** | (or the **chat** button) talk: to everyone here; *@name what to say* to one person (a friend anywhere, or someone here, just them); *@group …* to a group's chat room |
 | **Y** / **N** | yes (or no thanks) to what a friend online asks (a game, tag, a race, the train); clicking the question works too |
 | **Z** | lie down in the snow for a rest (stars at night, a doze); **Space** then makes a snow angel; any direction key gets up |
 | **F** | invite someone along (animals want a berry); with nobody in front, say goodbye to everyone |
@@ -190,9 +194,9 @@ every key, Ctrl and all, until something else is clicked).
 | **right-click**, or **press and hold** | options for whatever's under the pointer: drop in from the sky, walk over, say hello, give a gift, visit a house, the villager's stats… (settings at the bottom) |
 | **drag** anyone (the villager and the pet too) | carry them about, then drop them in the snow |
 | **click** things | presents, trees, the snowman, houses, lamps, the station, the moon, the sky… |
-| **⚙ settings** (top right) | the settings panel; drag its title bar to move it |
-| **F11** | full screen and back: the wallpaper itself, or a popped-out window |
-| **Ctrl +** / **Ctrl -** / **Ctrl 0**, **Ctrl+wheel**, the **− +** buttons | zoom in (1.1×, 1.2× … up to 4×), out, back to 1× (it eases in) |
+| **❄ menu** (top right) | the menu; drag its title bar to move it |
+| **F11** | full screen and back: the wallpaper itself, or a popped-out window (also the **full screen** button) |
+| **Ctrl +** / **Ctrl -** / **Ctrl 0**, **Ctrl+wheel**, the **−** and **+** buttons (magnifying glasses) | zoom in (1.1×, 1.2× … up to 4×), out, back to 1× (it eases in) |
 | **Ctrl Shift +** / **Ctrl Shift -** | resolution: finer or coarser detail, everything the same size |
 
 ## 🌟 What's in the scene
