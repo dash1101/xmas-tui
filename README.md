@@ -985,3 +985,7 @@ versions or passing it off as someone else's work is not allowed without written
 were MIT-licensed, and copies of those already obtained stay under the MIT License. Bundled fonts: DejaVu (Bitstream
 Vera license) and Noto Sans Symbols 2 (SIL OFL); their licenses are in `assets/fonts/`. The carol arrangements are of
 public-domain tunes.
+
+## 🤖 LLM notice
+
+A Large Language Model was used to assist in the development of this project.
